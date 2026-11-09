@@ -32,7 +32,7 @@ from sqlalchemy import select
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
 from app.db.models import RuntimeInstall, utcnow
-from app.domain import compatibility, hardware, media_probe, model_catalog, model_files
+from app.domain import compatibility, hardware, media_probe, model_catalog, model_files, proc_guard
 from app.domain.model_catalog import ModelSpec
 from app.domain.backup import ProgressReporter
 
@@ -65,6 +65,35 @@ def _device_env(flavor: str, gpu_index: int | None) -> dict[str, str]:
         return {"CUDA_VISIBLE_DEVICES": idx}
     # Vulkan + default: GGML_VULKAN_DEVICE selects the physical device.
     return {"GGML_VULKAN_DEVICE": idx, "GGML_VK_VISIBLE_DEVICES": idx}
+
+
+def _check_worker_pressure(proc: asyncio.subprocess.Process, started: float) -> str:
+    """Safety watchdog: returns an abort reason when system pressure is
+    critical or the worker exceeded its runtime cap; '' otherwise.
+    High CPU alone never triggers — legitimate inference saturates cores."""
+    from app.domain import resources  # local import — avoids adapter<->domain cycle
+    if resources.pressure_state() == "critical":
+        snap = resources.system_memory()
+        return (f"system memory pressure critical (avail RAM "
+                f"{snap['avail_phys_bytes'] / resources.GIB:.1f} GiB, commit "
+                f"headroom {snap['commit_headroom_bytes'] / resources.GIB:.1f} GiB)")
+    cap = resources.safety_margins()["max_worker_seconds"]
+    if cap and time.time() - started > cap:
+        return f"worker exceeded runtime cap ({cap}s)"
+    return ""
+
+
+async def _verify_worker_dead(proc: asyncio.subprocess.Process) -> None:
+    """Post-job cleanup verification: the process must actually be gone."""
+    if proc.returncode is not None and not proc_guard.process_alive(proc.pid):
+        return
+    for _ in range(10):
+        if proc.returncode is not None or not proc_guard.process_alive(proc.pid):
+            return
+        await asyncio.sleep(0.3)
+    if proc_guard.process_alive(proc.pid):
+        log.error("worker pid %d survived cleanup — forcing tree kill", proc.pid)
+        proc_guard.terminate_tree(proc.pid, grace_s=2.0)
 
 
 class SdCppAdapter:
@@ -311,8 +340,11 @@ class SdCppAdapter:
             stderr=asyncio.subprocess.STDOUT,
             env=env, cwd=str(work),
         )
+        proc_guard.supervise(proc.pid)
         log_tail: list[str] = []
         cancelled = False
+        pressure_abort = ""
+        last_mem_check = 0.0
         try:
             while True:
                 if handle.cancel_event is not None and handle.cancel_event.is_set():
@@ -322,6 +354,14 @@ class SdCppAdapter:
                     except ProcessLookupError:
                         pass
                     break
+                now = time.time()
+                if now - last_mem_check >= 5.0:
+                    last_mem_check = now
+                    pressure_abort = _check_worker_pressure(proc, started)
+                    if pressure_abort:
+                        log.error("worker abort: %s", pressure_abort)
+                        proc_guard.terminate_tree(proc.pid)
+                        break
                 try:
                     line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.25)
                 except asyncio.TimeoutError:
@@ -350,6 +390,11 @@ class SdCppAdapter:
                     proc.kill()
                 except ProcessLookupError:
                     pass
+            await _verify_worker_dead(proc)
+            proc_guard.unsupervise(proc.pid)
+
+        if pressure_abort:
+            raise ValueError(f"worker aborted for system safety: {pressure_abort}")
 
         if cancelled:
             for f in work.glob(f"{handle.job_id}*.png"):
@@ -562,8 +607,11 @@ class SdCppVideoAdapter(SdCppAdapter):
             stderr=asyncio.subprocess.STDOUT,
             env=env, cwd=str(work),
         )
+        proc_guard.supervise(proc.pid)
         log_tail: list[str] = []
         cancelled = False
+        pressure_abort = ""
+        last_mem_check = 0.0
         try:
             while True:
                 if handle.cancel_event is not None and handle.cancel_event.is_set():
@@ -573,6 +621,14 @@ class SdCppVideoAdapter(SdCppAdapter):
                     except ProcessLookupError:
                         pass
                     break
+                now = time.time()
+                if now - last_mem_check >= 5.0:
+                    last_mem_check = now
+                    pressure_abort = _check_worker_pressure(proc, started)
+                    if pressure_abort:
+                        log.error("worker abort: %s", pressure_abort)
+                        proc_guard.terminate_tree(proc.pid)
+                        break
                 try:
                     line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.25)
                 except asyncio.TimeoutError:
@@ -601,6 +657,12 @@ class SdCppVideoAdapter(SdCppAdapter):
                     proc.kill()
                 except ProcessLookupError:
                     pass
+            # post-job verification: process must be dead before we report
+            await _verify_worker_dead(proc)
+            proc_guard.unsupervise(proc.pid)
+
+        if pressure_abort:
+            raise ValueError(f"worker aborted for system safety: {pressure_abort}")
 
         if cancelled:
             for f in work.glob(f"{handle.job_id}*"):

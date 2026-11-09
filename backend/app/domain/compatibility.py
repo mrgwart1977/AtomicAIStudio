@@ -210,6 +210,30 @@ def classify_model(spec: ModelSpec, hw: dict, install: dict | None = None) -> di
             status = "limited"
         warnings.append(f"system RAM {_fmt_gb(ram)} is below the recommended {_fmt_gb(min_ram)}")
 
+    # RAM-aware gate (issue #28): VRAM fit is not sufficient — CPU-offloaded
+    # weights and runtime overhead live in physical RAM. Check against
+    # *available* RAM, not just the total.
+    avail_ram = (hw.get("memory") or {}).get("available_bytes")
+    if avail_ram and spec.files:
+        from app.domain import resources
+        weights = sum(f.size_bytes for f in spec.files)
+        caps = spec.capabilities or {}
+        est_ram = (weights if caps.get("weight_offload_cpu")
+                   else int(weights * 0.30)) + int(2 * resources.GIB)
+        after = avail_ram - est_ram
+        margins = resources.safety_margins()
+        if after < margins["critical_avail_phys_bytes"]:
+            status = "unsupported"
+            reasons.append(
+                f"insufficient available system RAM: ~{_fmt_gb(est_ram)} "
+                f"needed at runtime, {_fmt_gb(avail_ram)} free")
+        elif after < margins["os_headroom_bytes"]:
+            if status == "compatible":
+                status = "limited"
+            warnings.append(
+                f"would leave ~{_fmt_gb(max(after, 0))} system RAM free — "
+                "close other apps or use smaller settings")
+
     disk_hint = None
     install_disk = (install or {}).get("disk_free_bytes")
     need = req.get("min_disk_bytes") or spec.total_bytes

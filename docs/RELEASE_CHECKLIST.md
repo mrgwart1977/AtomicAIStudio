@@ -257,3 +257,10 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   CUDA ~2.6 min/clip. ffprobe still absent — PyAV used as documented
   alternative; bundling ffmpeg/ffprobe remains a separate license/sourcing
   decision. Same open blockers (#22 EULA, #23 M4.1, #24 stderr, etc.).
+
+### P0 Resource-safety incident (issue #28 — M4.0 merge blocker)
+- Orphaned sd-cli after backend death identified as primary vector;
+  fixed via kill-on-close Job Objects + atexit reaper + post-job dead-check.
+- RAM-aware preflight/compatibility, runtime pressure watchdog (never CPU%),
+  and configurable headroom thresholds added; see docs/plans/M4_0_RESOURCE_SAFETY.md.
+- Controlled real-hardware reproduction still requires owner approval.

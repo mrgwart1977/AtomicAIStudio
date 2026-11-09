@@ -281,6 +281,25 @@ class JobEngine:
                 await self._publish(job)
                 return
 
+            # System-RAM preflight (issue #28): VRAM checks alone are not
+            # enough — CPU-offloaded weights live in physical RAM. Block
+            # when the estimate can't fit with OS headroom; flag unknowns.
+            profile = getattr(adapter, "profile", None)
+            if profile is not None and getattr(profile, "lane", "") == "gen":
+                mem_gate = _memory_preflight(job.request_json, profile)
+                if mem_gate["decision"] == "block":
+                    job.status = "failed"
+                    job.error = f"preflight memory check failed: {mem_gate['reason']}"
+                    job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                    job.completed_at = utcnow()
+                    s.commit()
+                    await self._publish(job)
+                    return
+                if mem_gate["decision"] == "warn":
+                    job.message = f"memory warning: {mem_gate['reason']}"
+                    job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                    s.commit()
+
             work_dir = self._data_dir / "jobs" / (job.project_id or "_app")
             cancel_ev = threading.Event()
             self._cancel_events[job.id] = cancel_ev
@@ -475,3 +494,21 @@ class JobEngine:
                 "model_key": job.model_key,
             },
         )
+
+
+def _memory_preflight(request: dict[str, Any], profile: Any) -> dict[str, Any]:
+    """Estimate a gen job's system-RAM need and gate on available headroom.
+
+    Estimate = offloaded weights (full component bytes when the model
+    declares weight_offload_cpu, else 30% for runtime paging) + fixed
+    runtime overhead. Returns resources.preflight_memory_check's verdict.
+    """
+    from app.domain import model_catalog, resources
+    spec = model_catalog.get(request.get("model_key") or "")
+    if spec is None or not spec.files:
+        return resources.preflight_memory_check(0, known=False)
+    weights = sum(f.size_bytes for f in spec.files)
+    caps = spec.capabilities or {}
+    offloaded = weights if caps.get("weight_offload_cpu") else int(weights * 0.30)
+    runtime_overhead = int(2 * resources.GIB)
+    return resources.preflight_memory_check(offloaded + runtime_overhead, known=True)
