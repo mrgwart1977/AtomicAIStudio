@@ -1,0 +1,30 @@
+# OS
+Thumbs.db
+nul
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.venv*/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+*.log
+
+# Rust / Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# App data (local dev)
+data/
+*.local.json
+
+# Editors
+.vscode/
+.idea/
