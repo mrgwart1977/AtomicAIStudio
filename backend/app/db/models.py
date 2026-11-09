@@ -372,6 +372,11 @@ class ShotCharacter(Base):
     model_ref: Mapped[str] = mapped_column(String(200), default="")  # model association override
     lora_json: Mapped[list] = mapped_column(JSON, default=list)      # LoRA associations
     continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Identity/reference asset IDs used for this shot's look (M2.1 schema v1).
+    reference_ids_json: Mapped[list] = mapped_column(JSON, default=list)
+    # Forward-compatible extension bag — schema fields we don't model yet and
+    # legacy keys from older writers survive here instead of being dropped.
+    ext_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     __table_args__ = (UniqueConstraint("shot_id", "character_id", name="uq_shot_character"),)

@@ -146,6 +146,10 @@ export interface CastMember {
   model_ref?: string | null;
   lora_json?: unknown[] | null;
   continuity_json?: Record<string, unknown> | null;
+  reference_ids_json?: unknown[] | null;
+  ext_json?: Record<string, unknown> | null;
+  /** "shot" = own row (per-shot override) · "scene" = inherited from scene cast */
+  source?: "shot" | "scene" | null;
 }
 
 export interface Shot {
@@ -172,6 +176,8 @@ export interface StoryboardShot {
   shot: Shot;
   location_name: string;
   cast: CastMember[];
+  /** Scene-cast members without an own row in this shot — inherited state. */
+  inherited: CastMember[];
 }
 
 export interface Scene {

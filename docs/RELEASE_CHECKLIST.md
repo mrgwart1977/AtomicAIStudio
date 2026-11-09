@@ -20,6 +20,20 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 | 9 | First verified local AI adapter | High | M3 | open | **yes** | #13 |
 | 10 | Usability testing with target users | Medium | M9 | open | **yes** | #14 |
 | 11 | FAT32 >4 GiB guard — edge coverage | Low | v1.0 | open | **yes** (defensible as-is; margin improvement) | #15 |
+| 12 | Shot-level reference-ID picker UI | Low | M3+ | open | no (API+schema delivered M2.1; UI deferred) | — |
+
+---
+
+## 12. Shot-level reference-ID picker UI — (no issue yet)
+
+- **What:** `shot_characters.reference_ids_json` is schema-validated,
+  project-scope-checked, persisted, backup-remapped, and round-trips through
+  the storyboard API — but the shot editor has no picker for it. Shot-level
+  identity refs can only be set via API.
+- **Why open:** deliberate deferral — the field exists for generation adapters
+  (M3+); building a picker before anything consumes it would be dead UI.
+- **Acceptance:** shot editor offers a reference-asset picker once a
+  generation adapter reads `reference_ids_json` end-to-end.
 
 ---
 
@@ -126,3 +140,8 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 - **M2 →** all items re-validated; nothing closed (no new evidence). No new
   issues discovered during M2 beyond those listed. M2 storyboard queries are
   in scope of #10 (scalability validation).
+- **M2.1 →** all items re-validated; nothing closed. One new tracked item
+  (#12 above): `reference_asset_ids` is validated + persisted at the command
+  boundary but has no shot-editor picker yet — deliberately deferred to M3+
+  when generation consumes it. Migration chain now runs through `0005_m21`;
+  upgrade matrix (#7) must cover `0004_m2 → 0005_m21`.

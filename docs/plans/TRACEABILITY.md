@@ -245,3 +245,61 @@ Status as of the `feat/m2-storyboard` branch (builds on M1.1).
 ## Tracked outstanding items
 
 See `docs/RELEASE_CHECKLIST.md` (items #5–#15 on GitHub). No M2 requirement is left open; tracked items concern install/VM verification, signing, UNC soak, FAT32 edge coverage, import resume, security review, scalability soak, installer/DB matrix, model approval workflow, first real adapter, and usability testing.
+
+---
+
+# Milestone 2.1 — Character State & Casting UX Hardening
+
+Status as of the `feat/m2.1-casting` branch (builds on M2).
+
+## A. Structured character-state validation
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Versioned schema for shot-state fields | `app/domain/cast_state.py` — `CAST_STATE_VERSION = 1`; typed fields map to `shot_characters` columns; `ShotCastState` pydantic model documents the wire contract in OpenAPI | `test_state_defaults_when_missing`, schema in `/openapi.json` |
+| Identity & reference IDs | `reference_asset_ids` list → `reference_ids_json` column (migration `0005`); every ID validated as a project asset | `test_reference_asset_ids_validated` |
+| Wardrobe / expression / emotion / blocking / action / dialogue / voice | `TEXT_FIELDS` type-checked per field — non-strings rejected with `cast.state.<field>: expected a string, got <type>` | `test_state_rejects_wrong_types` |
+| Model & LoRA refs | `model_ref` (str) + `loras` (list[str]); aliases `lora_refs`/`lora_json` normalised | `test_state_legacy_aliases_and_ext` |
+| Continuity notes | `continuity` object + `continuity_notes`/`continuity_changes` legacy shorthands → `continuity.notes`/`changes` | `test_state_legacy_aliases_and_ext` |
+| API + command boundary validation | `_check_cast_state` runs parse in `_validate` before any write; domain functions re-parse defensively; scene cast `role`/`notes` type-checked | `test_state_rejects_wrong_types`, `test_scene_cast_field_validation` |
+| Forward-compatible extension fields | Unknown keys → `ext_json` column (preserved, remapped through backups, copied on duplicate/restore) | `test_state_legacy_aliases_and_ext`, `test_shot_duplicate_copies_state_columns` |
+| Reject invalid cross-project refs | `reference_asset_ids` scoped per project in `_check_cast_state`; cast rows already scoped | `test_reference_asset_ids_validated`, `test_cross_project_cast_still_rejected` |
+| Safe defaults + clear messages | Missing state → typed defaults; errors name the field + expected type | `test_state_defaults_when_missing` |
+| Legacy data preserved | No `schema_version` ⇒ legacy v0, normalised the same; newer int versions parse tolerantly; M2-era keys (`action`, `voice`, `continuity_notes`) map onto canonical fields instead of being dropped | `test_state_legacy_aliases_and_ext`, `test_state_newer_schema_version_tolerated` |
+| Schema evolution preserved | `schema_version` stamped on writes; partial updates only touch provided keys; explicit `""` clears | `test_state_partial_update_preserves_unset` |
+
+## B. Scene-level casting interface
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Assign/remove characters at scene level | `SceneCast` panel in scene dialog — add picker, role + scene-continuity fields, remove | `03-scene-dialog-cast.png` |
+| Visual cast panel | Per-member card: chip, name, `→ N shots` heir badge, role + notes inputs | `03-scene-dialog-cast.png` |
+| Shots inherit scene assignments | `storyboard()` read model emits per-shot `inherited` (scene members without an own row) + `source: "scene"/"shot"` markers | `test_scene_cast_inherited_by_shots` |
+| Independent per-shot overrides | An own `shot_characters` row replaces inheritance for that character in that shot only | `test_scene_cast_inherited_by_shots` |
+| Inherited vs overridden clearly visible | Shot cards: solid chips = own, dashed dimmed chips = inherited; shot dialog: "Inherited from scene cast" section with "Customize for this shot" + "override" badge on pending rows | `01-storyboard-inherited.png`, `02-shot-dialog-override.png` |
+| Prevent accidental changes to other shots | Override writes an own row for THIS shot only; scene-remove confirm states heir count + that overrides stay | `test_scene_cast_remove_drops_inheritance_not_overrides`, ConfirmDialog in `SceneCast` |
+| Identity + continuity preserved | Removing an override returns the member to `inherited` (scene row untouched); scene continuity notes field on cast rows | `test_scene_cast_inherited_by_shots`, `03-scene-dialog-cast.png` |
+| Commands/audit/undo | All mutations via `scene.cast.*`/`shot.cast.*` commands; undo restores scene cast + downstream inheritance | `test_scene_cast_undo_restores_inheritance` |
+
+## C. M3 preparation
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Documented thumbnail pipeline | `docs/plans/M3_GENERATION_THUMBNAILS.md` — storage model, generation→asset→thumbnail flow, provenance fields, manual selection, auto-refresh via WS | doc file |
+| No generation implemented | None — doc only, per scope | — |
+
+## D. Testing & delivery
+
+| Requirement | Evidence |
+|---|---|
+| Schema validation, legacy compat, inheritance, overrides, undo, isolation, migration, backup round-trip | `backend/tests/test_m21.py` — **17 tests**; full suite **89/89 pass** |
+| Migration evidence | `0005_m21` guarded; `test_alembic_0005_upgrades_0004_db` builds a real 0004-shaped DB; packaged reinstall ran real `0004→0005` on the installed DB |
+| Packaged Windows verification | NSIS reinstall over M2 build → `0004→0005` → scene cast + override + legacy-state normalisation + typed rejection all verified via installed backend |
+| Screenshots | `docs/m2.1-evidence/` — storyboard with inherited chips, shot dialog cast section, scene dialog cast panel |
+| Outstanding items | `docs/RELEASE_CHECKLIST.md` — all prior items retained; new Low item tracked (shot-level ref-ID picker UI, deferred to M3+) |
+
+## Design notes
+
+- **New columns:** `shot_characters.reference_ids_json`, `shot_characters.ext_json` — both flow through `_cols` serialization, duplication, revert-restore, backup v2 remap, and the storyboard API automatically.
+- **Inheritance is computed, not copied:** scene cast never writes shot rows, so new shots inherit automatically and scene edits propagate without touching per-shot overrides.
+- **Honest limitation:** `reference_asset_ids` has no shot-editor picker (tracked in checklist item 12) — it exists for generation adapters; the validation+storage+provenance path is proven via API tests.
