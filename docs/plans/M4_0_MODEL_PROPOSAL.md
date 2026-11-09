@@ -107,3 +107,60 @@ account/gate required, zero cost) to:
 3. Produce real generated clips as evidence.
 
 **Awaiting explicit approval before any download.**
+
+---
+
+## Phase 2 — Real-Weight Validation Results (2026-11-09)
+
+Preflight: all checks passed against `wan.md` @ `991f82558366` — Wan 2.1
+T2V 1.3B documented, `-M vid_gen`, flags `--diffusion-model` / `--vae` /
+`--t5xxl` / `--video-frames` / `--flow-shift`, `.webm` output (webm.dll),
+`--offload-to-cpu` + `--backend vae=cpu` documented for 8 GiB Vulkan.
+Preflight corrections applied: flag names, `--flow-shift 3.0`, `--vae-tiling`.
+
+Downloaded ONLY the three approved artifacts; each sha256-verified by the
+install path before `installed` was marked:
+
+| file | bytes | sha256 (verified) |
+|---|---|---|
+| wan2.1_t2v_1.3B_fp16.safetensors | 2,838,303,560 | be531024…f924dc5 |
+| wan_2.1_vae.safetensors | 253,815,318 | 2fc39d31…148976b |
+| umt5-xxl-encoder-Q4_K_M.gguf | 3,655,145,312 | 17cf97a5…c67584a40 |
+
+Installed total 6,747,264,190 B = exact sum of the three artifacts.
+
+### Real generation — both approved runtimes
+
+| | Vulkan (`sdcpp-vulkan`) | CUDA (`sdcpp-cuda`) |
+|---|---|---|
+| job | 196a8e88 (attempt 1, local) | 7c2f6859 (attempt 1, local) |
+| params | 832×480, 17 f, 24 fps, 30 steps, cfg 6.0, euler, seed 42 | identical |
+| wall time | **~33.7 min** | **~2.6 min** |
+| peak VRAM observed | ~2.0 GiB (offload) | succeeded, no OOM |
+| worker peak RAM | ~5.5 GiB | — |
+| flags added | `--offload-to-cpu`, `--backend vae=cpu`, `--vae-tiling` | `--offload-to-cpu`, `--vae-tiling` |
+| output | WebM/VP8 832×480@24, 0.667 s, 17/17 frames decode-clean | same, 17/17 clean |
+
+CUDA is ~13× faster than Vulkan for Wan — the opposite of SD 1.5 ordering
+(VAE on GPU + different offload path). Measured, not assumed.
+
+Validation (PyAV — documented ffprobe alternative; ffprobe absent):
+container `matroska,webm`, codec `vp8`, 832×480, 24.0 fps, 17/17 frames
+decoded error-free. Visual check: generated frames match prompt; 42.8 %
+of pixels change f0→f16 (real motion). Asset registered in CAS with full
+provenance; exactly one asset per successful job; cancelled job registered
+nothing and left no temp files.
+
+Cancellation: job 9be261e8 → `cancelling` → `cancelled`, sd-cli.exe
+terminated, work dir clean, no asset.
+
+Restart recovery (real): a mid-flight job survived a backend kill and was
+reconciled to `failed | interrupted by application stop; not resumable` —
+no duplicate asset, no silent retry.
+
+Model support tier: `experimental` → **`tested`** (real validated clips on
+both runtimes).
+
+Limitations: Wan on 8 GiB REQUIRES `--offload-to-cpu` (+ CPU VAE on
+Vulkan); Vulkan path is CPU-bound and slow; I2V requires the 14B variant
+(not viable at 8 GiB); 17-frame minimum clip ~0.7 s.

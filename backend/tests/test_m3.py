@@ -129,20 +129,18 @@ def test_catalog_video_candidates_are_planned_not_supported():
     for required in ("ltx.2.5", "wan.2.2.ti2v", "hunyuan.video"):
         assert required in video, f"{required} missing from catalog"
     for key, spec in video.items():
-        # M4.0: wan21.t2v.1_3b is the install candidate — 'experimental' with
-        # real files pending the approved download + end-to-end validation.
-        # Every other entry stays 'planned' with no files. NOTHING video may
-        # be generatable (production/tested) before real-weight validation.
-        assert spec.support not in ("production", "tested")
+        # M4.0 Phase 2: wan21.t2v.1_3b ran a real validated clip end-to-end
+        # (Vulkan + CPU offload, RTX 3060 Ti) → 'tested' with 3 real files.
+        # Every other video entry stays 'planned' with no files — nothing
+        # else video may be generatable.
         if key == "wan21.t2v.1_3b":
-            assert spec.support == "experimental" and len(spec.files) == 3
+            assert spec.support == "tested" and len(spec.files) == 3
         else:
             assert spec.support == "planned"
             assert spec.files == ()
         c = compatibility.classify_model(spec, _hw(vram_gib=8))
-        # 'planned' entries classify as planned; the experimental Wan
-        # candidate can classify 'compatible' (real requirements, fits 8 GB)
-        # — its support tier still blocks generation until validated.
+        # 'planned' entries classify as planned; the tested Wan candidate
+        # classifies 'compatible' (real requirements, fits 8 GB).
         assert c["status"] == ("planned" if spec.support == "planned" else "compatible")
         assert c["modality"] == "video"
         assert set(c["modes"]) & {"text2video", "image2video", "audio2video"}
@@ -492,11 +490,11 @@ def test_models_endpoint_lists_catalog(client):
         assert m["modes"]
     keys = {m["key"] for m in models}
     assert {"ltx.2.5", "wan.2.2.ti2v", "hunyuan.video", "qwen.image"} <= keys
-    # no video entry may be generatable — support tier stays below 'tested'
-    # until real-weight validation (compatibility status varies with hw)
+    # only the validated Wan entry may be generatable — every other video
+    # model stays below 'tested' until real-weight validation
     assert models and all(
         m["support"] in ("planned", "experimental")
-        for m in models if m["modality"] == "video"
+        for m in models if m["modality"] == "video" and m["key"] != "wan21.t2v.1_3b"
     )
 
 

@@ -16,6 +16,9 @@ dependencies = [
     "pydantic-settings>=2.3",
     "psutil>=6.0",
     "pillow>=10.3",
+    # Optional-but-bundled: PyAV provides video validation/metadata when no
+    # ffprobe binary is installed (BSD-licensed; wheels bundle LGPL ffmpeg).
+    "av>=13",
 ]
 
 [project.optional-dependencies]

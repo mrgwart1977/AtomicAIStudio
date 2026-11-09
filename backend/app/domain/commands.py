@@ -440,6 +440,15 @@ def _check_generation(session: Session, project: Project, payload: dict) -> None
         raise CommandError(404, "scene not found in this project")
 
 
+def _experimental_ok() -> bool:
+    """Dev/validation escape hatch: ATOMIC_ALLOW_EXPERIMENTAL_GEN=1 lets
+    'experimental' catalog entries generate so a candidate can be validated
+    end-to-end before its support tier is raised. Off by default; never a
+    shipped default — the UI shows the honest tier regardless."""
+    import os
+    return os.environ.get("ATOMIC_ALLOW_EXPERIMENTAL_GEN") == "1"
+
+
 def _check_video_generation(session: Session, project: Project, payload: dict) -> None:
     """generate.video: multi-component video model installed, prompt or a
     project image asset for i2v, sane frames/fps/device."""
@@ -455,7 +464,7 @@ def _check_video_generation(session: Session, project: Project, payload: dict) -
     if spec.modality != "video":
         raise CommandError(
             422, f"{spec.display_name} is a {spec.modality} model — generate.video requires a video model")
-    if spec.support not in ("production", "tested"):
+    if spec.support not in ("production", "tested") and not _experimental_ok():
         raise CommandError(
             422, f"{spec.display_name} is {spec.support} — catalog-visible but not usable for generation yet")
     if not spec.license.get("commercial_ok", True):
@@ -1290,7 +1299,7 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "model_key": payload["model_key"],
             "prompt": payload.get("prompt") or "",
             "negative_prompt": payload.get("negative_prompt") or "",
-            "width": int(payload.get("width", 480)),
+            "width": int(payload.get("width", 832)),
             "height": int(payload.get("height", 480)),
             "frames": int(payload.get("frames", 33)),
             "fps": int(payload.get("fps", 24)),
@@ -1304,7 +1313,7 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "shot_id": payload.get("shot_id"),
             "scene_id": payload.get("scene_id"),
             "est_vram_bytes": compatibility.estimate_vram(
-                spec, int(payload.get("width", 480)), int(payload.get("height", 480)), 1
+                spec, int(payload.get("width", 832)), int(payload.get("height", 480)), 1
             ) if spec else None,
             "allow_cpu": False,  # Wan-class video on CPU is days, not minutes
         }

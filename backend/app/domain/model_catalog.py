@@ -543,20 +543,30 @@ MODELS: dict[str, ModelSpec] = {
             "tasks": ["text2video"],
             "negative_prompt": True,
             "seed": True,
-            "resolutions": ["832x480"],
-            "aspect_ratios": ["16:9"],
-            "frame_counts": [17, 33, 49, 81],  # 4k+1 temporal constraint
-            "durations_s": {"min": 1, "max": 5},
-            "fps": [16, 24],
+            # Doc-verified (wan.md @ 991f825): 832×480 landscape, euler,
+            # cfg 6.0, --flow-shift 3.0, 33 frames @ 24 fps.
+            "sizes": {"presets": [{"w": 832, "h": 480}, {"w": 480, "h": 832}]},
+            "aspect_ratios": ["16:9", "9:16"],
+            "frames": {"min": 1, "max": 129, "default": 33,
+                       "presets": [17, 33, 49, 81]},  # 4k+1 temporal stride
+            "fps": {"options": [16, 24], "default": 24},
+            "steps": {"min": 1, "max": 50, "default": 30},
+            "cfg": {"min": 1.0, "max": 15.0, "default": 6.0},
+            "samplers": ["euler"],
             "audio": False,
             "ref_images": False,  # I2V needs the separate 14B model
             "lora": False,
             "precision": ["fp16"],
             "cpu_fallback": True,
             "vae_on_cpu": True,   # required on Vulkan; slow but works
+            "vae_tiling": True,   # Wan VAE decode is VRAM-hungry (wan.md)
+            "weight_offload_cpu": True,  # --offload-to-cpu: the 8 GiB path
             "flow_shift": 3.0,
         },
-        support="experimental",  # real artifacts verified; not yet run end-to-end here
+        # Validated end-to-end 2026-11-09: Vulkan + --offload-to-cpu +
+        # --backend vae=cpu on RTX 3060 Ti 8 GiB → 17f @ 832×480/24fps
+        # WebM/VP8, all frames decode-clean (~34 min wall, CPU-bound).
+        support="tested",
         runtime_key="sdcpp",
         modality="video",
         modes=("text2video",),

@@ -40,13 +40,45 @@ def ffmpeg_path() -> str | None:
     return find_binary("ffmpeg")
 
 
+def _probe_pyav(path: Path) -> dict[str, Any] | None:
+    """ffprobe alternative: PyAV (bundled ffmpeg libs, optional dep).
+    Returns None when PyAV is not importable."""
+    try:
+        import av  # noqa: PLC0415 — optional dependency, imported lazily
+    except ImportError:
+        return None
+    try:
+        with av.open(str(path)) as c:
+            v = next((s for s in c.streams if s.type == "video"), None)
+            if v is None:
+                return {"ok": False, "reason": "no video stream in container"}
+            fps = float(v.average_rate or 0)
+            dur = float(c.duration or 0) / 1_000_000
+            return {
+                "ok": True,
+                "duration_s": round(dur, 3),
+                "width": int(v.width or 0),
+                "height": int(v.height or 0),
+                "fps": round(fps, 3),
+                "codec": v.codec_context.name or "",
+                "container": c.format.name or "",
+                "frames": int(v.frames or 0),
+                "probe_backend": "pyav",
+            }
+    except Exception as exc:  # av.AVError + file errors
+        return {"ok": False, "reason": f"pyav probe failed: {exc}"}
+
+
 def probe_video(path: Path) -> dict[str, Any]:
-    """Extract duration/resolution/fps/codec via ffprobe. Returns a dict
-    with ok=False + reason when probing fails or ffprobe is missing —
-    callers decide whether that's fatal."""
+    """Extract duration/resolution/fps/codec. Probe order: ffprobe binary →
+    PyAV → unavailable. Returns ok=False + reason on failure; callers decide
+    whether that's fatal."""
     ffprobe = ffprobe_path()
     if ffprobe is None:
-        return {"ok": False, "reason": "ffprobe not found on PATH", "probe_unavailable": True}
+        out = _probe_pyav(path)
+        if out is not None:
+            return out
+        return {"ok": False, "reason": "no ffprobe/PyAV available", "probe_unavailable": True}
     try:
         out = subprocess.run(
             [ffprobe, "-v", "error", "-print_format", "json",

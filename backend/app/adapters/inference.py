@@ -455,7 +455,10 @@ class SdCppVideoAdapter(SdCppAdapter):
         spec = model_catalog.get(key or "")
         if spec is None:
             raise ValueError(f"unknown model '{key}'")
-        if spec.modality != "video" or spec.support not in ("production", "tested"):
+        allowed = ("production", "tested")
+        if os.environ.get("ATOMIC_ALLOW_EXPERIMENTAL_GEN") == "1":
+            allowed = allowed + ("experimental",)  # validation runs only; never shipped default
+        if spec.modality != "video" or spec.support not in allowed:
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for video generation")
         with self._sf() as s:
@@ -474,7 +477,7 @@ class SdCppVideoAdapter(SdCppAdapter):
         exe = self._exe_path(request)
         return spec, weight, exe
 
-    def validate(self, request: dict) -> list[str]:
+    async def validate(self, request: dict) -> list[str]:
         errors = []
         if not (request.get("prompt") or "").strip() and not request.get("image_asset_id"):
             errors.append("a prompt or a source image is required")
@@ -496,7 +499,7 @@ class SdCppVideoAdapter(SdCppAdapter):
         if seed in (-1, "random", None):
             seed = random.randint(0, 2**31 - 1)
         steps = int(req.get("steps", spec.capabilities.get("steps", {}).get("default", 30)))
-        width = int(req.get("width", 480))
+        width = int(req.get("width", 832))
         height = int(req.get("height", 480))
         frames = int(req.get("frames", spec.capabilities.get("frames", {}).get("default", 33)))
         fps = int(req.get("fps", spec.capabilities.get("fps", {}).get("default", 24)))
@@ -508,35 +511,43 @@ class SdCppVideoAdapter(SdCppAdapter):
 
         argv = self._argv_prefix(req) + [
             "-M", "vid_gen",
-            "-m", str(weight),
+            "--diffusion-model", str(weight),
             "--vae", str(comp["vae"]),
             "--t5xxl", str(comp["text_encoder"]),
             "-p", req.get("prompt") or "",
             "-o", str(out_base) + ".webm",
             "-W", str(width), "-H", str(height),
             "--steps", str(steps),
-            "--cfg-scale", str(req.get("cfg", 7.0)),
+            "--cfg-scale", str(req.get("cfg", spec.capabilities.get("cfg", {}).get("default", 6.0))),
             "--seed", str(seed),
             "--video-frames", str(frames),
             "--fps", str(fps),
+            # sd.cpp wan.md: all Wan examples pass --flow-shift 3.0
+            "--flow-shift", str(req.get("flow_shift", 3.0)),
+            # Wan VAE decode is memory-hungry (wan.md VAE caveat) — spatial
+            # tiling keeps it inside an 8 GB budget.
+            "--vae-tiling",
             "-v",
         ]
         if comp.get("image_encoder"):
             argv += ["--clip_vision", str(comp["image_encoder"])]
         if req.get("image_path"):
-            argv += ["--init-image", req["image_path"]]
+            argv += ["-i", req["image_path"]]
             if req.get("end_image_path"):
-                argv += ["--end-image", req["end_image_path"]]
+                argv += ["--end-img", req["end_image_path"]]
         if req.get("negative_prompt"):
             argv += ["-n", req["negative_prompt"]]
-        if req.get("sampler"):
-            argv += ["--sampling-method", req["sampler"]]
+        argv += ["--sampling-method", req.get("sampler") or "euler"]
         rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
         flavor, flavor_reason = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
         # Wan VAE is only reliable on CUDA/CPU per sd.cpp wan.md — on other
         # backends (Vulkan) decode must run on CPU or the clip corrupts.
-        if flavor not in ("cuda", "cpu") and "--vae-on-cpu" not in argv:
-            argv += ["--vae-on-cpu"]
+        if flavor not in ("cuda", "cpu"):
+            argv += ["--backend", "vae=cpu"]
+        # Catalog-declared 8 GiB strategy: weights live in RAM and stream to
+        # the GPU per layer (wan.md offload guidance for big models).
+        if spec.capabilities.get("weight_offload_cpu"):
+            argv += ["--offload-to-cpu"]
         gpu = req.get("assigned_gpu")
         if gpu in (None, "auto"):
             gpu = None if flavor == "cpu" else 0
@@ -763,7 +774,7 @@ class ModelDownloadAdapter:
             if rt_spec is not None and not req.get("skip_runtime"):
                 with self._sf() as s:
                     rt = model_files.runtime_row(s, f"{rt_key}-{flavor}")
-                if rt is None or rt.get("status") != "installed":
+                if rt is None or rt.status != "installed":
                     yield {"progress": 0.02, "message": f"installing runtime {rt_spec.display_name} ({flavor})"}
                     asset = req.get("release_asset") or model_files.resolve_release_asset(rt_spec, flavor)
                     with self._sf() as s:

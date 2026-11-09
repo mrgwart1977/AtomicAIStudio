@@ -402,3 +402,17 @@ Architecture + contracts only; the model download gate is
 | Video validation | `media_probe` — ffprobe discovery, container-signature fallback, `probe_unavailable` honesty in provenance | `app/domain/media_probe.py` |
 | Beginner UI | Generate page Image/Video tabs; `VideoGeneratePanel` (model/prompt/i2v picker/frames/shot attach, progress, `<video>` preview) | `apps/desktop/src/features/workspace/` |
 | No unapproved downloads | `support` tiers gate generation; Wan stays `experimental` until real-weight validation | tests `test_m4.py`, `test_m3.py` |
+
+## M4.0 Phase 2 — real Wan 2.1 video validation (2026-11-09)
+
+| Requirement | Evidence | Where |
+|---|---|---|
+| Approval-gated download | only the 3 approved artifacts; per-file sha256 verify before `installed` | `model_files.verify_component`, install job |
+| Real T2V on Vulkan + CUDA | 17 f @ 832×480/24 fps WebM/VP8, 17/17 frames decode-clean (PyAV); Vulkan 33.7 min, CUDA 2.6 min | jobs `196a8e88`, `7c2f6859`; `docs/evidence/m4/` |
+| Output commit boundary | asset registered only after probe-validate; cancelled job → no asset, temp purged | `adapters/inference.py`, jobs `9be261e8` |
+| Cancellation | job → `cancelling` → `cancelled`; sd-cli terminated; no asset | live test 9be261e8 |
+| Restart recovery | mid-flight job reconciled `failed | interrupted…not resumable`; no duplicate asset | live restart, job `d7beacb9` |
+| Support tier gating | `experimental`→`tested` only after real decode-validated clips | `model_catalog.py` wan21.t2v.1_3b |
+| Retry-hardened downloads | bounded in-stream resume on flaky connections | `model_files.download_to` |
+
+Suite: **144/144**.

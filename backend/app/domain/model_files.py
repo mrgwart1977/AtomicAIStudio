@@ -131,38 +131,50 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
 
     have = part.stat().st_size if part.exists() else 0
     headers = {"User-Agent": "atomic-ai-studio"}
-    if have:
-        headers["Range"] = f"bytes={have}-"
-    req = urllib.request.Request(url, headers=headers)
     total = expected
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if have and resp.status == 200:
-                # Server ignored Range — restart cleanly rather than corrupt.
-                have = 0
-            elif have and resp.status != 206:
-                have = 0
-            cr = resp.headers.get("Content-Range")
-            if cr and "/" in cr:
-                total = int(cr.split("/")[-1])
-            elif resp.headers.get("Content-Length"):
-                total = have + int(resp.headers["Content-Length"])
-            mode = "ab" if have else "wb"
-            with open(part, mode) as fh:
-                while True:
-                    if cancel_check is not None:
-                        cancel_check()
-                    chunk = resp.read(_CHUNK)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    have += len(chunk)
-                    if progress:
-                        progress(have, total or 0)
-    except Exception:
-        # .part + sidecar stay on disk — next attempt resumes from `have`.
-        sidecar.write_text(json.dumps(meta))
-        raise
+    # Bounded in-stream retry: multi-GB downloads on flaky connections drop
+    # mid-stream; each attempt resumes via Range instead of restarting.
+    attempt, max_attempts = 0, 8
+    while True:
+        attempt += 1
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if have and resp.status == 200:
+                    # Server ignored Range — restart cleanly rather than corrupt.
+                    have = 0
+                elif have and resp.status != 206:
+                    have = 0
+                cr = resp.headers.get("Content-Range")
+                if cr and "/" in cr:
+                    total = int(cr.split("/")[-1])
+                elif resp.headers.get("Content-Length"):
+                    total = have + int(resp.headers["Content-Length"])
+                mode = "ab" if have else "wb"
+                with open(part, mode) as fh:
+                    while True:
+                        if cancel_check is not None:
+                            cancel_check()
+                        chunk = resp.read(_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        have += len(chunk)
+                        if progress:
+                            progress(have, total or 0)
+            break  # stream complete
+        except Exception as exc:
+            # Cancellation (JobCancelled — imported lazily by name to avoid an
+            # adapters→domain import cycle) must never be retried.
+            if exc.__class__.__name__ in ("JobCancelled", "ModelError"):
+                raise
+            # .part + sidecar stay on disk — next attempt resumes from `have`.
+            sidecar.write_text(json.dumps(meta))
+            if attempt >= max_attempts:
+                raise
+            time.sleep(min(2 ** attempt, 30))
 
     if expected and have != expected:
         sidecar.write_text(json.dumps(meta))

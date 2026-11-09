@@ -77,6 +77,10 @@ def estimate_vram(spec: ModelSpec, width: int = 512, height: int = 512,
     act_base = spec.vram_baseline_bytes - spec.vram_weight_bytes
     px_ratio = (width * height) / native_px
     act = act_base * (px_ratio ** 0.5) * max(1, batch)
+    if spec.capabilities.get("weight_offload_cpu"):
+        # --offload-to-cpu streams weights from RAM; peak VRAM ≈ activations
+        # + a streaming layer buffer (~30% of weights, conservative).
+        return int(act + spec.vram_weight_bytes * 0.3)
     return int(spec.vram_weight_bytes + act)
 
 

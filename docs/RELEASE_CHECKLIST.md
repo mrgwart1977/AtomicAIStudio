@@ -250,3 +250,10 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   back to container signatures; bundling a verified ffmpeg is a Phase-2
   proposal item.
 - Same tracked blockers: #22 CUDA EULA, #23 M4.1, #24-#27, #5-#11/#14/#15.
+
+### M4.0 Phase 2 (Wan 2.1 validation)
+- Real T2V clips validated on Vulkan AND CUDA (17/17 decode-clean frames).
+- Wan requires `--offload-to-cpu` at 8 GiB; Vulkan VAE on CPU (~34 min/clip),
+  CUDA ~2.6 min/clip. ffprobe still absent — PyAV used as documented
+  alternative; bundling ffmpeg/ffprobe remains a separate license/sourcing
+  decision. Same open blockers (#22 EULA, #23 M4.1, #24 stderr, etc.).

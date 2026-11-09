@@ -167,7 +167,7 @@ export function VideoGeneratePanel() {
               {[33, 49, 81, 129]
                 .filter((f) => !frameCaps || (f >= (frameCaps.min ?? 1) && f <= (frameCaps.max ?? 129)))
                 .map((f) => (
-                  <option key={f} value={f}>{f} ≈ {(f / (model?.capabilities?.fps?.[0] ?? 24)).toFixed(1)}s</option>
+                  <option key={f} value={f}>{f} ≈ {(f / ((model?.capabilities as any)?.fps?.default ?? 24)).toFixed(1)}s</option>
                 ))}
             </select>
           </div>

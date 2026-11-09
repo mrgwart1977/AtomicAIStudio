@@ -125,11 +125,13 @@ def test_video_adapter_validate_requires_prompt_or_image():
     from app.adapters.registry import AdapterRegistry
     from app.config import get_settings
 
+    import asyncio
+
     reg = AdapterRegistry(session_factory=lambda: None, settings=get_settings())
     ad = reg.get("gen.video.sdcpp")
-    assert ad.validate({"prompt": "", "model_key": "wan21.t2v.1_3b"})
-    assert not ad.validate({"prompt": "a river at night", "model_key": "wan21.t2v.1_3b"})
-    assert ad.validate({"prompt": "x", "model_key": "wan21.t2v.1_3b", "frames": 999})
+    assert asyncio.run(ad.validate({"prompt": "", "model_key": "wan21.t2v.1_3b"}))
+    assert not asyncio.run(ad.validate({"prompt": "a river at night", "model_key": "wan21.t2v.1_3b"}))
+    assert asyncio.run(ad.validate({"prompt": "x", "model_key": "wan21.t2v.1_3b", "frames": 999}))
 
 
 # -------------------------------------------------------------- commands
@@ -324,5 +326,6 @@ def test_media_probe_graceful_without_ffprobe(tmp_path, monkeypatch):
     from app.domain import media_probe
 
     monkeypatch.setattr(media_probe, "ffprobe_path", lambda: None)
+    monkeypatch.setattr(media_probe, "_probe_pyav", lambda p: None)  # simulate no PyAV
     out = media_probe.probe_video(tmp_path / "x.webm")
     assert out["ok"] is False and out["probe_unavailable"] is True
