@@ -173,3 +173,23 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   demonstrated on the RTX 3060 Ti.
 - All other tracked items remain open as recorded.
 
+
+### Milestone notes (M3 Phase 2)
+
+- **M3 Phase 2 →** first real local inference verified on the installed
+  packaged build: SD 1.5 fp16 GGUF (sha256-verified) + sd.cpp Vulkan
+  (`master-1073-991f825`). Three prompts generated (~8 s warm, ~2.25 GiB
+  VRAM delta), cancellation + restart persistence + thumbnail integration +
+  provenance all verified. Evidence: `docs/m3-evidence/`.
+- **#8 (approval surface)** — real download exercised through it; closes.
+- **#13 (first verified real local adapter)** — `SdCppAdapter` produced real
+  images on the RTX 3060 Ti; closes.
+- **New items to track:**
+  - Jobs exceeding VRAM stay `queued` with no surfaced reason — add a
+    queued-reason field.
+  - Asset list endpoint doesn't expose `media_json` provenance (stored on
+    `AssetVersion`; list view only).
+  - sd.cpp `latest` tag floats — pin a release URL for reproducible installs.
+  - CUDA-vs-Vulkan benchmark + auto backend selection pending (B.2/B.3).
+- Suite **119/119** after live-bug fixes (sd-cli rename, img_gen mode,
+  --seed flag, install-row refresh, installed-flavor preference).

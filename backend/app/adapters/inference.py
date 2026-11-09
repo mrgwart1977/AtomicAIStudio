@@ -28,8 +28,10 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from sqlalchemy import select
+
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
-from app.db.models import utcnow
+from app.db.models import RuntimeInstall, utcnow
 from app.domain import compatibility, hardware, model_catalog, model_files
 from app.domain.model_catalog import ModelSpec
 from app.domain.backup import ProgressReporter
@@ -120,9 +122,26 @@ class SdCppAdapter:
         if override:
             return None  # command prefix handled in _argv_prefix
         rt_spec = model_catalog.get_runtime(request.get("runtime_key") or "sdcpp")
-        flavor = request.get("runtime_flavor") or self._default_flavor()
+        flavor = self._pick_flavor(request.get("runtime_flavor"), rt_spec)
         exe = model_files.runtime_exe(self._settings, rt_spec, flavor)
         return exe
+
+    def _pick_flavor(self, requested: str | None, rt_spec) -> str:
+        """Backend-flavor resolution that prefers *installed* runtimes over
+        probe-order guesses: an explicit request wins, then any installed
+        flavor, then the probe order. B.3 — validated state over assumptions."""
+        if requested:
+            return requested
+        if rt_spec is not None:
+            with self._sf() as s:
+                installed = [row.runtime_key for row in s.execute(
+                    select(RuntimeInstall).where(RuntimeInstall.status == "installed")
+                ).scalars().all()]
+            prefix = f"{rt_spec.key}-"
+            for flavor in rt_spec.backends:  # catalog order = preference order
+                if prefix + flavor in installed:
+                    return flavor
+        return self._default_flavor()
 
     @staticmethod
     def _split_cmd(override: str) -> list[str]:
@@ -196,7 +215,7 @@ class SdCppAdapter:
         out_base = work / f"{handle.job_id}"
 
         argv = self._argv_prefix(req) + [
-            "-M", "txt2img",
+            "-M", "img_gen",  # valid modes: img_gen, adetailer, vid_gen, convert, upscale, metadata, vid_upscale
             "-m", str(weight),
             "-p", req["prompt"],
             "-o", str(out_base) + ".png",
@@ -211,7 +230,8 @@ class SdCppAdapter:
             argv += ["-n", req["negative_prompt"]]
         if req.get("sampler"):
             argv += ["--sampling-method", req["sampler"]]
-        flavor = req.get("runtime_flavor") or self._default_flavor()
+        rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
+        flavor = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
         gpu = req.get("assigned_gpu")
         if gpu in (None, "auto"):
             gpu = None if flavor == "cpu" else 0

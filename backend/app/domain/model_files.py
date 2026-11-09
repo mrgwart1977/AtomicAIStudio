@@ -220,6 +220,14 @@ def install_row(session: Session, spec: ModelSpec, root: Path) -> ModelInstall:
         row.status = "downloading"
         row.error = None
         row.install_root = str(root)
+        # a stale row may predate catalog changes (renamed artifact, new
+        # version) — always refresh spec-derived fields on reuse
+        row.rel_dir = spec.key
+        row.file_name = spec.files[0].name if spec.files else ""
+        row.version = spec.version
+        row.adapter_id = spec.adapter_id
+        row.license = (spec.license or {}).get("name", "")
+        row.meta_json = {"source": spec.source}
     session.flush()
     return row
 

@@ -133,3 +133,68 @@ metadata only; **zero video weights or inference code in M3**.
    and feed measurements back into the catalog.
 
 No paid services. No video-model downloads. No Milestone 4 work.
+
+---
+
+# Phase 2 — executed 2026-11-09 (SD 1.5 fp16 GGUF + sd.cpp Vulkan)
+
+User approved Option A. Downloads ran through the Model Manager approval flow
+on the installed packaged build (NSIS, `%LocalAppData%` data dir).
+
+## Downloaded artifacts (measured, not catalog values)
+
+| Artifact | Resolved version | Bytes | Integrity |
+|---|---|---|---|
+| `stable-diffusion-v1-5-pruned-emaonly-f16.gguf` | — | 2,132,586,944 | sha256 `da017009…4d8b` verified at install |
+| `sd-master-008b9a2-bin-win-vulkan-x64.zip` | release `master-1073-991f825` | ~30 MB | GitHub-hosted release asset; `sd-cli.exe` presence verified post-extract |
+
+Note: `latest` resolved to `991f825` at install time (newer than the
+`cfdf3cf` referenced in Phase 1 verification) — the resolver records the exact
+commit per install; reproducibility would require a pinned release URL.
+
+## Real generation measurements — RTX 3060 Ti, Vulkan backend
+
+| Run | Prompt | Steps | Seed | Duration | VRAM |
+|---|---|---|---|---|---|
+| cold (model load + gen) | cabin at dusk | 25 | 424242 | **69.2 s** | — |
+| warm #1 | red dragon on mountain | 20 | 42 | **7.65 s** | — |
+| warm #2 | fishing boat, fog | 25 | 7777 | **8.86 s** | **2,306 MiB delta** (2,061→4,367 MiB total) |
+| warm #3 | ancient library | 20 | 31415 | ~8 s (succeeded) | — |
+
+Measured model+inference footprint: **~2.25 GiB** over baseline — catalog
+estimate 3.6 GiB was conservative. Prior "2–4 s" estimate was ~2× optimistic;
+real warm time ≈ **8 s** at 512×512, 20–25 steps, euler_a.
+
+## Verification results
+
+| Check | Result |
+|---|---|
+| sha256 of weights | verified at install, `install.verified=True` |
+| Runtime provenance | release zip from GitHub, `sd-cli.exe` confirmed inside |
+| Real t2i inference | ✅ 3 distinct prompts, coherent PNGs (see `docs/m3-evidence/gen1-dragon.png`) |
+| Cancellation | job cancelled at 24 % — worker process killed, VRAM back to baseline |
+| CAS asset storage | 4 generation assets persisted, `origin=generation` |
+| Provenance | full `media_json` on `AssetVersion`: model/flavor/prompt/params/seed/duration/GPU/timestamp |
+| Storyboard thumbnail | ✅ shot `62c3acfb` shows generated image on the board |
+| Restart persistence | model + runtime rows + assets survive app restart |
+| Missing model | `sd15.q8` generation → honest "not installed" 422 |
+| Restricted/planned gates | SDXL Turbo 422, video models 422 — verified |
+
+## Bugs found by live Phase 2 testing (all fixed)
+
+- `sd.exe` → `sd-cli.exe` rename in current sd.cpp releases (exe_name + test fake)
+- `-M txt2img` → `-M img_gen` (mode renamed upstream); `-s` is strength, not seed → `--seed`
+- `install_row()` reuse path left stale `file_name`/`install_root`/`version` — refresh on reuse
+- Default runtime-flavor resolution picked an uninstalled flavor when the
+  hardware probe result differed from install state → `_pick_flavor` now
+  prefers **installed** runtime flavors over probe-order guesses (B.3)
+
+## Known limitations (Phase 2, honest)
+
+- Jobs that exceed VRAM stay `queued` indefinitely with no surfaced reason —
+  needs a queued-reason field in a later milestone.
+- Asset **list** API doesn't join `AssetVersion.media_json`; provenance is
+  stored but only visible via DB/detail endpoints.
+- Release tag floats (`latest`) — pin a release for reproducible installs.
+- CUDA comparison + auto-benchmark selection NOT done — tracked for later.
+- `2–4 s` estimate retired: real ≈ 8 s warm, ~70 s cold.

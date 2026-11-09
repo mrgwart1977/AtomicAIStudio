@@ -372,6 +372,10 @@ for i, a in enumerate(sys.argv):
         out = sys.argv[i + 1]
 if sleep:
     time.sleep(sleep)
+# dump argv for the real-CLI contract assertions
+argv_file = os.environ.get("FAKE_SD_ARGV_FILE")
+if argv_file:
+    open(argv_file, "w").write("\n".join(sys.argv[1:]))
 # minimal valid PNG (1x1)
 png = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -400,12 +404,19 @@ def test_sdcpp_e2e_fake_worker(client, tmp_path, monkeypatch):
     board = client.get(f"/api/projects/{p['id']}/storyboard").json()
     shot_id = board[0]["shots"][0]["shot"]["id"]
 
+    argv_file = tmp_path / "worker_argv.txt"
+    monkeypatch.setenv("FAKE_SD_ARGV_FILE", str(argv_file))
     out = _commit(client, p["id"], "generate.image", {
         "model_key": "sd15.fp16", "prompt": "a lighthouse", "seed": 42,
         "shot_id": shot_id, "set_thumbnail": True, "device": "cpu",
     }, "gen-e2e")
     job = wait_for_job(client, p["id"], out["job_id"])
     assert job["status"] == "succeeded", job
+    # real-CLI contract: mode name + seed flag must match current sd-cli
+    args = argv_file.read_text().splitlines()
+    assert "-M" in args and args[args.index("-M") + 1] == "img_gen"
+    assert "--seed" in args and "-s" not in args
+    assert "-m" in args and "-p" in args and "-W" in args and "-H" in args
     assert job["output_asset_id"]
     assert job["model_key"] == "sd15.fp16"
     assets = client.get(f"/api/projects/{p['id']}/assets?origin=generation").json()["items"]
@@ -499,10 +510,10 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
     def fake_rt_install(session, settings, spec, flavor, asset, cancel_check=None):
         d = settings.data_dir / "runtimes" / f"{spec.key}-{flavor}"
         d.mkdir(parents=True, exist_ok=True)
-        (d / "sd.exe").write_bytes(b"MZ")
+        (d / "sd-cli.exe").write_bytes(b"MZ")
         row = RuntimeInstall(
             id=new_id(), runtime_key=f"{spec.key}-{flavor}", version=spec.version,
-            status="installed", install_dir=str(d), exe_path=str(d / "sd.exe"),
+            status="installed", install_dir=str(d), exe_path=str(d / "sd-cli.exe"),
             byte_size=2, verified=True, meta_json={}, created_at=utcnow(), updated_at=utcnow())
         session.add(row)
         return row
