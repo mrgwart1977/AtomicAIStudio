@@ -95,11 +95,20 @@ def preflight_memory_check(estimated_ram_bytes: int, *, known: bool) -> dict[str
     decides whether 'warn' needs user confirmation."""
     m, margins = system_memory(), safety_margins()
     headroom_after = m["avail_phys_bytes"] - estimated_ram_bytes
+    commit_after = m["commit_headroom_bytes"] - estimated_ram_bytes
     snap = {**m, "estimated_ram_bytes": estimated_ram_bytes,
-            "headroom_after_bytes": headroom_after, "estimate_known": known}
+            "headroom_after_bytes": headroom_after,
+            "commit_after_bytes": commit_after, "estimate_known": known}
     if not known:
         return {"decision": "warn", "reason": "memory requirement unknown — "
                 "conservative monitoring applies", "snapshot": snap}
+    if commit_after < margins["critical_commit_headroom_bytes"]:
+        return {"decision": "block",
+                "reason": f"insufficient commit headroom: job needs ~"
+                          f"{estimated_ram_bytes / GIB:.1f} GiB committed, only "
+                          f"{m['commit_headroom_bytes'] / GIB:.1f} GiB of "
+                          "commit limit free",
+                "snapshot": snap}
     if headroom_after < margins["critical_avail_phys_bytes"]:
         return {"decision": "block",
                 "reason": f"insufficient system RAM: job needs ~"

@@ -48,3 +48,17 @@ def wait_for_job(client, project_id: str, job_id: str, timeout: float = 15.0) ->
             return job
         time.sleep(0.15)
     raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
+
+
+@pytest.fixture(autouse=True)
+def _roomy_memory(monkeypatch):
+    """Deterministic memory headroom for every test: the safety preflight
+    measures the REAL host — on a loaded 16 GB dev box that would make
+    gen-job tests flaky. Tests that exercise the gate itself override
+    this with their own monkeypatch."""
+    from app.domain import resources
+    monkeypatch.setattr(resources, "system_memory", lambda: {
+        "total_phys_bytes": 64 * resources.GIB, "avail_phys_bytes": 48 * resources.GIB,
+        "phys_load_pct": 25, "commit_limit_bytes": 128 * resources.GIB,
+        "commit_charge_bytes": 16 * resources.GIB,
+        "commit_headroom_bytes": 112 * resources.GIB})

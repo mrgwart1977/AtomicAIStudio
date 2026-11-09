@@ -351,7 +351,7 @@ def test_generate_requires_prompt_422(client):
     assert "prompt" in r.json()["detail"]
 
 
-def test_generate_installed_enqueues_job(client, tmp_path):
+def test_generate_installed_enqueues_job(client, tmp_path, monkeypatch):
     """Committing generate.image on an installed model enqueues a GPU-lane
     job carrying model_key; the job then fails cleanly because no runtime
     binary exists — proving failure isolation, not data corruption."""

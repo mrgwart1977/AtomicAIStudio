@@ -286,7 +286,8 @@ class JobEngine:
             # enough — CPU-offloaded weights live in physical RAM. Block
             # when the estimate can't fit with OS headroom; flag unknowns.
             profile = getattr(adapter, "profile", None)
-            if profile is not None and getattr(profile, "lane", "") == "gen":
+            if (profile is not None and getattr(profile, "lane", "") == "gen"
+                    and getattr(profile, "adapter_kind", "") != "mock"):
                 mem_gate = _memory_preflight(job.request_json, profile, job.id)
                 if mem_gate["decision"] == "block":
                     job.status = "failed"
@@ -297,7 +298,17 @@ class JobEngine:
                     await self._publish(job)
                     return
                 if mem_gate["decision"] == "warn":
-                    job.message = f"memory warning: {mem_gate['reason']}"
+                    if not job.request_json.get("memory_risk_acknowledged"):
+                        job.status = "failed"
+                        job.error = ("memory warning requires explicit confirmation: "
+                                     f"{mem_gate['reason']} — resubmit acknowledging "
+                                     "the risk (memory_risk_acknowledged)")
+                        job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                        job.completed_at = utcnow()
+                        s.commit()
+                        await self._publish(job)
+                        return
+                    job.message = f"memory warning acknowledged: {mem_gate['reason']}"
                     job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
                     s.commit()
 

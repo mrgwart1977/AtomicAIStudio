@@ -250,3 +250,29 @@ def test_ram_measurements_around_worker():
     # a tiny python sleeper: RSS measurable, machine-level drift small
     assert rss is None or rss > 1_000_000
     assert abs(after - before) < 2 * resources.GIB
+
+
+def test_preflight_blocks_on_commit_headroom():
+    """Plenty of physical RAM but a tiny commit limit → block. Commit is
+    not RAM — both must gate independently."""
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(resources, "system_memory", lambda: {
+        "total_phys_bytes": 16 * resources.GIB,
+        "avail_phys_bytes": int(14 * resources.GIB),
+        "phys_load_pct": 12, "commit_limit_bytes": 18 * resources.GIB,
+        "commit_charge_bytes": 17 * resources.GIB,
+        "commit_headroom_bytes": int(1 * resources.GIB)})  # < 8.3 GiB est
+    out = resources.preflight_memory_check(int(8.3 * resources.GIB), known=True)
+    assert out["decision"] == "block"
+    assert "commit" in out["reason"]
+    monkeypatch.undo()
+
+
+def test_wan_estimate_breakdown_is_conservative():
+    """Wan's estimate must count FULL component bytes under
+    weight_offload_cpu plus the 2 GiB runtime overhead."""
+    from app.domain.jobs import _estimate_ram_bytes
+    est, known = _estimate_ram_bytes({"model_key": "wan21.t2v.1_3b"})
+    assert known
+    weights = 2838303560 + 253815318 + 3655145312  # 6,747,264,190
+    assert est == weights + int(2 * resources.GIB)

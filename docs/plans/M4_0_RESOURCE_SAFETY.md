@@ -114,3 +114,57 @@ earlier successful run only escaped because it predated the gate.
 NOTE: 5.5 GiB observed worker RSS is NOT assumed to be peak CUDA need —
 the estimate uses full component bytes plus overhead, deliberately
 conservative.
+
+## Memory-residency analysis (corrected)
+
+The 6.28 GiB = downloaded FILE bytes. Residency during inference differs
+by component and runtime behavior — measured vs estimated vs unknown:
+
+| Component | File bytes | Residency under `--offload-to-cpu` | Basis |
+|---|---|---|---|
+| diffusion fp16 | 2.64 GiB | host-RAM resident (malloc) or file-mmap'd; streamed to GPU layer-wise | sd.cpp docs describe the flag as "keep weights in RAM"; ggml safetensors loaders may mmap — **not verified which** |
+| UMT5 Q4_K_M gguf | 3.40 GiB | ggml typically mmaps GGUF → file-backed pages resident once touched | **estimate** (standard ggml behavior, unverified for this path) |
+| Wan VAE | 0.24 GiB | CPU under Vulkan (`--backend vae=cpu`); GPU-resident under CUDA | measured: CUDA VAE on GPU |
+| Activations/buffers | — | malloc'd host+device, transient | unknown — not yet measured on CUDA |
+| encode/decode buffers | — | small vs weights | estimate |
+
+Measured: Vulkan worker RSS peaked ≥ ~5.5 GiB (cancelled run); CUDA
+run completed but RSS peak was NOT sampled. Honest position:
+
+- **Physical-RAM need: measured ≈ 5.5 GiB, estimate ceiling 8.28 GiB.**
+  The gate uses the ceiling — conservative, may block jobs that would
+  fit. Over-blocking is the safe failure direction.
+- **Commit impact is probably lower than the file sum** — file-mmap'd
+  pages are file-backed (no commit charge) though they still consume
+  physical RAM when resident. Both metrics now gate independently;
+  avail-phys is the binding one for Wan.
+- Unknowns retained: exact mmap usage per component, CUDA-path peak RSS,
+  activation size vs frame count. Issue #26 (calibration) stays open.
+
+## Validation options (no new downloads)
+
+**Option A — sufficient measured free RAM (RECOMMENDED).**
+- Need: ≥ 9.28 GiB free physical (est. + 1 GiB critical floor);
+  ≥12.28 GiB to run without a warning.
+- Achievable by closing browsers/IDE before the run — no downloads.
+- Procedure: check `/api/hardware` memory → preflight decides (ok → run;
+  warn → requires `memory_risk_acknowledged`; block → refuse).
+- Settings: CUDA, 832×480, 17 f, ≤300 s cap, watchdog armed.
+- Risk: honest gate; still the heaviest workload this machine can do.
+
+**Option B — lower-memory settings, same installed components.**
+- Drop `--offload-to-cpu` on CUDA: weights on GPU instead of RAM
+  (~2.9 GiB diffusion + ~0.5 VAE on-GPU; UMT5 still host-side ~3.4 GiB).
+  Estimated job RAM ~4–5 GiB — fits typical free RAM; VRAM ~4–6 GiB at
+  480p/17f — plausible on 8 GB but UNVERIFIED; OOM would surface as a
+  clean worker error, not system exhaustion (weights off host RAM).
+- Not a new download — same 3 files, different residency flags.
+- Risk: possible OOM abort mid-run (safe failure) or sd.cpp may still
+  page weights through RAM.
+
+**Option C — defer to a machine with ≥ 24–32 GB RAM.**
+- Zero risk; full validation on adequate hardware; #28 stays open
+  meanwhile with the safety system already landed.
+
+**Recommendation: A with B as fallback** — B first attempts may actually
+be the LOWER-risk run (less host RAM) and uses only approved artifacts.
