@@ -19,6 +19,7 @@ model is marked installed.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import hashlib
 import logging
 import os
@@ -67,33 +68,60 @@ def _device_env(flavor: str, gpu_index: int | None) -> dict[str, str]:
     return {"GGML_VULKAN_DEVICE": idx, "GGML_VK_VISIBLE_DEVICES": idx}
 
 
-def _check_worker_pressure(proc: asyncio.subprocess.Process, started: float) -> str:
+def _pipe_to_queue(pipe, queue: "asyncio.Queue", loop: asyncio.AbstractEventLoop) -> None:
+    """Pump worker stdout lines into an asyncio queue from a daemon thread
+    (synchronous Popen → async consumer bridge)."""
+    try:
+        for raw in iter(pipe.readline, b""):
+            loop.call_soon_threadsafe(queue.put_nowait, raw)
+    except Exception:
+        pass
+    finally:
+        loop.call_soon_threadsafe(queue.put_nowait, None)
+
+
+def _check_worker_pressure(proc, started: float) -> str:
     """Safety watchdog: returns an abort reason when system pressure is
     critical or the worker exceeded its runtime cap; '' otherwise.
     High CPU alone never triggers — legitimate inference saturates cores."""
     from app.domain import resources  # local import — avoids adapter<->domain cycle
-    if resources.pressure_state() == "critical":
-        snap = resources.system_memory()
+    try:
+        state = resources.pressure_state()
+        snap = resources.system_memory() if state == "critical" else {}
+        cap = resources.safety_margins()["max_worker_seconds"]
+    except Exception as exc:
+        # fail closed: a broken watchdog must never silently disable safety
+        return f"resource watchdog failed ({exc}) — aborting worker"
+    if state == "critical":
         return (f"system memory pressure critical (avail RAM "
                 f"{snap['avail_phys_bytes'] / resources.GIB:.1f} GiB, commit "
                 f"headroom {snap['commit_headroom_bytes'] / resources.GIB:.1f} GiB)")
-    cap = resources.safety_margins()["max_worker_seconds"]
     if cap and time.time() - started > cap:
         return f"worker exceeded runtime cap ({cap}s)"
     return ""
 
 
-async def _verify_worker_dead(proc: asyncio.subprocess.Process) -> None:
+async def _verify_worker_dead(proc) -> None:
     """Post-job cleanup verification: the process must actually be gone."""
-    if proc.returncode is not None and not proc_guard.process_alive(proc.pid):
-        return
     for _ in range(10):
-        if proc.returncode is not None or not proc_guard.process_alive(proc.pid):
+        if proc.poll() is not None and not proc_guard.process_alive(proc.pid):
             return
         await asyncio.sleep(0.3)
     if proc_guard.process_alive(proc.pid):
         log.error("worker pid %d survived cleanup — forcing tree kill", proc.pid)
         proc_guard.terminate_tree(proc.pid, grace_s=2.0)
+
+
+def _spawn_supervised_async(argv, *, env, cwd):
+    """Spawn via proc_guard (suspended→assign→resume, fail-closed) and
+    bridge stdout into an asyncio.Queue. Returns (proc, queue)."""
+    import threading
+    proc = proc_guard.spawn_supervised(list(argv), env=env, cwd=cwd)
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    threading.Thread(target=_pipe_to_queue, args=(proc.stdout, queue, loop),
+                     daemon=True).start()
+    return proc, queue
 
 
 class SdCppAdapter:
@@ -334,13 +362,7 @@ class SdCppAdapter:
 
         yield {"progress": 0.02, "message": "starting inference worker"}
         started = time.time()
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env, cwd=str(work),
-        )
-        proc_guard.supervise(proc.pid)
+        proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
         log_tail: list[str] = []
         cancelled = False
         pressure_abort = ""
@@ -363,10 +385,10 @@ class SdCppAdapter:
                         proc_guard.terminate_tree(proc.pid)
                         break
                 try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.25)
+                    line = await asyncio.wait_for(lines.get(), timeout=0.25)
                 except asyncio.TimeoutError:
                     continue
-                if not line:
+                if line is None:
                     break
                 text = line.decode("utf-8", "replace").rstrip()
                 if text:
@@ -380,12 +402,12 @@ class SdCppAdapter:
                                "message": f"sampling {cur}/{tot}",
                                "detail": {"phase": "sampling", "step": cur, "steps_total": tot}}
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait, 5)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-                await proc.wait()
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait)
         finally:
-            if proc.returncode is None:
+            if proc.poll() is None:
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -601,13 +623,7 @@ class SdCppVideoAdapter(SdCppAdapter):
 
         yield {"progress": 0.02, "message": "starting video inference worker"}
         started = time.time()
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env, cwd=str(work),
-        )
-        proc_guard.supervise(proc.pid)
+        proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
         log_tail: list[str] = []
         cancelled = False
         pressure_abort = ""
@@ -630,10 +646,10 @@ class SdCppVideoAdapter(SdCppAdapter):
                         proc_guard.terminate_tree(proc.pid)
                         break
                 try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.25)
+                    line = await asyncio.wait_for(lines.get(), timeout=0.25)
                 except asyncio.TimeoutError:
                     continue
-                if not line:
+                if line is None:
                     break
                 text = line.decode("utf-8", "replace").rstrip()
                 if text:
@@ -647,12 +663,12 @@ class SdCppVideoAdapter(SdCppAdapter):
                                "message": f"sampling {cur}/{tot}",
                                "detail": {"phase": "sampling", "step": cur, "steps_total": tot}}
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait, 5)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-                await proc.wait()
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait)
         finally:
-            if proc.returncode is None:
+            if proc.poll() is None:
                 try:
                     proc.kill()
                 except ProcessLookupError:

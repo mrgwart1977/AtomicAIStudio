@@ -81,3 +81,36 @@ bounded (sleeps, monkeypatched memory). Suite: **157/157**.
 - Emergency stop: cancel endpoint; the Job Object reaps on parent death.
 
 Do NOT repeat the 34-min Vulkan run as the first reproduction.
+
+## Stage 3A — non-inference hardware validation (2026-11-09, 163/163 tests)
+
+| Check | Result |
+|---|---|
+| Spawn race | ELIMINATED — workers spawn `CREATE_SUSPENDED`, assigned to the job object, THEN resumed (`spawn_supervised`); fails closed: no assignment → process never runs (`SupervisionError`) |
+| Backend force-kill | `test_backend_death_reaps_worker`: helper process hard-killed via `taskkill /F`; supervised child died with it — kernel reaped on last handle close |
+| Normal exit | worker exits cleanly, handle released, registry empty |
+| Forced termination | `terminate_tree` kills stubborn sleeper, pid dead <10 s |
+| Fail-closed supervision | job-object failure raises before the worker resumes |
+| Repeated cycles | 8× spawn/exit/unsupervise — zero handle/registry leak |
+| RAM measurement | RSS + avail-RAM snapshots bound tiny worker cost (<2 GiB drift) |
+| Watchdog fail-closed | exception inside the watchdog now aborts the worker, never silently disables |
+| Concurrent reservations | `_reserved_ram`: each gen job's estimate subtracts from others' headroom; released on every finalize path |
+
+### Memory budget — 16 GB machine, Wan 2.1 T2V, defaults
+
+| Item | GiB |
+|---|---|
+| Offloaded components (diffusion+VAE+UMT5, `weight_offload_cpu`) | 6.28 |
+| Runtime overhead (activations, buffers, encoder scratch) | 2.00 |
+| **Job estimate** | **8.28** |
+| OS headroom (warn below) | 4.00 |
+| Critical floor (block below) | 1.00 |
+| **Free RAM required to launch without warning** | **12.28** |
+| Absolute minimum to launch (est. + critical) | 9.28 |
+
+Honest implication: on a normally loaded desktop (~4–6 GiB free) the
+preflight now BLOCKS Wan rather than launching into exhaustion. The
+earlier successful run only escaped because it predated the gate.
+NOTE: 5.5 GiB observed worker RSS is NOT assumed to be peak CUDA need —
+the estimate uses full component bytes plus overhead, deliberately
+conservative.

@@ -154,3 +154,99 @@ def test_compatibility_gates_on_available_ram():
     c = compatibility.classify_model(spec, hw)
     assert c["status"] == "unsupported"
     assert any("available system RAM" in r for r in c["reasons"])
+
+
+# ---------- Stage 3A: real supervised-process validation (bounded) ----------
+
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(300)"]
+
+HELPER_SRC = (
+    "import sys; sys.path.insert(0, {backend!r});"
+    "from app.domain import proc_guard;"
+    "p = proc_guard.spawn_supervised({sleeper!r});"
+    "open({pidfile!r}, 'w').write(str(p.pid));"
+    "import time; time.sleep(3600)")
+
+
+def test_spawn_supervised_normal_exit():
+    p = proc_guard.spawn_supervised([sys.executable, "-c", "print('hi')"])
+    assert p.wait(timeout=15) == 0
+    proc_guard.unsupervise(p.pid)
+    assert p.pid not in proc_guard._live_workers
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only supervision")
+def test_spawn_supervised_forced_termination():
+    p = proc_guard.spawn_supervised(SLEEPER)
+    assert proc_guard.process_alive(p.pid)
+    proc_guard.terminate_tree(p.pid, grace_s=2.0)
+    proc_guard.unsupervise(p.pid)
+    deadline = time.time() + 10
+    while time.time() < deadline and proc_guard.process_alive(p.pid):
+        time.sleep(0.2)
+    assert not proc_guard.process_alive(p.pid)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only supervision")
+def test_backend_death_reaps_worker(tmp_path):
+    """Simulate `taskkill /F` on the backend: the worker must die because
+    the kernel closes the last job-object handle — the orphan fix."""
+    pidfile = tmp_path / "worker.pid"
+    helper = subprocess.Popen(
+        [sys.executable, "-c",
+         HELPER_SRC.format(backend=str(os.getcwd()).replace("\\", "/"),
+                          sleeper=SLEEPER, pidfile=str(pidfile).replace("\\", "/"))],
+        cwd=os.getcwd())
+    try:
+        # wait for the helper to spawn + supervise the worker
+        worker_pid = None
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                worker_pid = int(pidfile.read_text().strip()); break
+            time.sleep(0.1)
+        assert worker_pid, "helper never reported a worker pid"
+        assert proc_guard.process_alive(worker_pid)
+        # hard-kill the 'backend' — no graceful shutdown, like taskkill /F
+        subprocess.run(["taskkill", "/F", "/PID", str(helper.pid)],
+                       capture_output=True)
+        deadline = time.time() + 15
+        while time.time() < deadline and proc_guard.process_alive(worker_pid):
+            time.sleep(0.25)
+        assert not proc_guard.process_alive(worker_pid), \
+            "worker survived backend force-kill — kill-on-close failed"
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only supervision")
+def test_supervised_spawn_fail_closed(monkeypatch):
+    """If the job object can't be created, the worker must NEVER run."""
+    monkeypatch.setattr(proc_guard, "_create_kill_on_close_job", lambda: None)
+    with pytest.raises(proc_guard.SupervisionError):
+        proc_guard.spawn_supervised(SLEEPER)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only supervision")
+def test_repeated_cycles_no_handle_leak():
+    base = len(proc_guard._job_handles)
+    for _ in range(8):
+        p = proc_guard.spawn_supervised([sys.executable, "-c", "pass"])
+        p.wait(timeout=15)
+        proc_guard.unsupervise(p.pid)
+    assert len(proc_guard._job_handles) == base
+    assert not proc_guard._live_workers
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only supervision")
+def test_ram_measurements_around_worker():
+    before = resources.system_memory()["avail_phys_bytes"]
+    p = proc_guard.spawn_supervised(SLEEPER)
+    time.sleep(0.5)
+    rss = proc_guard.process_rss_bytes(p.pid)
+    proc_guard.terminate_tree(p.pid, grace_s=2.0)
+    proc_guard.unsupervise(p.pid)
+    after = resources.system_memory()["avail_phys_bytes"]
+    # a tiny python sleeper: RSS measurable, machine-level drift small
+    assert rss is None or rss > 1_000_000
+    assert abs(after - before) < 2 * resources.GIB

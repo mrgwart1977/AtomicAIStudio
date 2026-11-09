@@ -81,6 +81,87 @@ def _create_kill_on_close_job() -> int | None:
     return int(handle)
 
 
+class SupervisionError(RuntimeError):
+    """Worker could not be placed under supervision — fail closed."""
+
+
+def _resume_main_thread(pid: int) -> None:
+    """Resume the (single, suspended) main thread of a freshly spawned
+    CREATE_SUSPENDED process."""
+    TH32CS_SNAPTHREAD = 0x4
+    THREAD_SUSPEND_RESUME = 0x0002
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32),
+            ("th32ThreadID", ctypes.c_uint32), ("th32OwnerProcessID", ctypes.c_uint32),
+            ("tpBasePri", ctypes.c_long), ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32)]
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snap == -1:
+        raise SupervisionError("CreateToolhelp32Snapshot failed")
+    try:
+        te = THREADENTRY32()
+        te.dwSize = ctypes.sizeof(te)
+        resumed = 0
+        if _k32.Thread32First(snap, ctypes.byref(te)):
+            while True:
+                if te.th32OwnerProcessID == pid:
+                    h = _k32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                    if h:
+                        while _k32.ResumeThread(h) > 1:
+                            pass  # fully drop the suspend count
+                        _k32.CloseHandle(h)
+                        resumed += 1
+                if not _k32.Thread32Next(snap, ctypes.byref(te)):
+                    break
+        if not resumed:
+            raise SupervisionError(f"no threads found to resume for pid {pid}")
+    finally:
+        _k32.CloseHandle(snap)
+
+
+def spawn_supervised(argv: list[str], *, env: dict | None = None,
+                     cwd: str | None = None,
+                     stdout=subprocess.PIPE) -> subprocess.Popen:
+    """Spawn a worker suspended → assign to a kill-on-close Job Object →
+    resume. Eliminates the spawn-to-assignment race entirely and FAILS
+    CLOSED: if supervision can't be established the worker never runs.
+    Returns a ready subprocess.Popen."""
+    CREATE_SUSPENDED = 0x00000004
+    if not _IS_WINDOWS:
+        proc = subprocess.Popen(argv, env=env, cwd=cwd,
+                                stdout=stdout, stderr=subprocess.STDOUT)
+        _live_workers.add(proc.pid)
+        return proc
+    proc = subprocess.Popen(argv, env=env, cwd=cwd,
+                            stdout=stdout, stderr=subprocess.STDOUT,
+                            creationflags=CREATE_SUSPENDED)
+    try:
+        job = _create_kill_on_close_job()
+        if job is None:
+            raise SupervisionError("job object creation failed")
+        proc_handle = _k32.OpenProcess(_PROCESS_ALL_ACCESS, False, proc.pid)
+        if not proc_handle or not _k32.AssignProcessToJobObject(job, proc_handle):
+            if proc_handle:
+                _k32.CloseHandle(proc_handle)
+            _k32.CloseHandle(job)
+            raise SupervisionError(
+                f"AssignProcessToJobObject({proc.pid}) failed "
+                f"(err {ctypes.get_last_error()})")
+        _k32.CloseHandle(proc_handle)
+        _job_handles[proc.pid] = job
+        _live_workers.add(proc.pid)
+        _resume_main_thread(proc.pid)
+        log.info("worker pid %d spawned suspended, supervised, resumed", proc.pid)
+        return proc
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        raise
+
+
 def supervise(pid: int) -> None:
     """Assign a spawned worker pid to a kill-on-close Job Object and register
     it for the atexit reaper. Must be called right after spawn (there is an

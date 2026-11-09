@@ -217,6 +217,7 @@ class JobEngine:
         try:
             await self._execute(job_id)
         finally:
+            _release_memory_reservation(job_id)
             self._lane_busy[lane] = max(0, self._lane_busy.get(lane, 1) - 1)
             if self._sched is not None:
                 self._sched.release(job_id)
@@ -286,7 +287,7 @@ class JobEngine:
             # when the estimate can't fit with OS headroom; flag unknowns.
             profile = getattr(adapter, "profile", None)
             if profile is not None and getattr(profile, "lane", "") == "gen":
-                mem_gate = _memory_preflight(job.request_json, profile)
+                mem_gate = _memory_preflight(job.request_json, profile, job.id)
                 if mem_gate["decision"] == "block":
                     job.status = "failed"
                     job.error = f"preflight memory check failed: {mem_gate['reason']}"
@@ -496,19 +497,38 @@ class JobEngine:
         )
 
 
-def _memory_preflight(request: dict[str, Any], profile: Any) -> dict[str, Any]:
-    """Estimate a gen job's system-RAM need and gate on available headroom.
+# RAM reservations held by gen jobs currently in flight (job_id → bytes).
+# Concurrent workers must subtract each other's estimates — one job's
+# preflight must account for the other.
+_reserved_ram: dict[str, int] = {}
 
-    Estimate = offloaded weights (full component bytes when the model
-    declares weight_offload_cpu, else 30% for runtime paging) + fixed
-    runtime overhead. Returns resources.preflight_memory_check's verdict.
-    """
+
+def _estimate_ram_bytes(request: dict[str, Any]) -> tuple[int, bool]:
+    """(bytes, known): offloaded weights (full size when weight_offload_cpu,
+    else 30% paging share) + 2 GiB runtime overhead."""
     from app.domain import model_catalog, resources
     spec = model_catalog.get(request.get("model_key") or "")
     if spec is None or not spec.files:
-        return resources.preflight_memory_check(0, known=False)
+        return 0, False
     weights = sum(f.size_bytes for f in spec.files)
-    caps = spec.capabilities or {}
-    offloaded = weights if caps.get("weight_offload_cpu") else int(weights * 0.30)
-    runtime_overhead = int(2 * resources.GIB)
-    return resources.preflight_memory_check(offloaded + runtime_overhead, known=True)
+    offloaded = (weights if (spec.capabilities or {}).get("weight_offload_cpu")
+                 else int(weights * 0.30))
+    return offloaded + int(2 * resources.GIB), True
+
+
+def _memory_preflight(request: dict[str, Any], profile: Any,
+                      job_id: str = "") -> dict[str, Any]:
+    """Gate a gen job on available RAM INCLUDING other workers' live
+    reservations. Reserves the estimate for the job's lifetime."""
+    from app.domain import resources
+    est, known = _estimate_ram_bytes(request)
+    reserved_by_others = sum(v for k, v in _reserved_ram.items() if k != job_id)
+    out = resources.preflight_memory_check(est + reserved_by_others, known=known)
+    out["snapshot"]["reserved_by_others_bytes"] = reserved_by_others
+    if out["decision"] != "block" and job_id:
+        _reserved_ram[job_id] = est
+    return out
+
+
+def _release_memory_reservation(job_id: str) -> None:
+    _reserved_ram.pop(job_id, None)
