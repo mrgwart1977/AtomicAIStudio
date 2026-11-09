@@ -152,3 +152,24 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   `tauri-check` never staged the sidecar resource dir, so it failed on every
   PR; the job now stubs the directory (bundling still uses the real sidecar
   via the `package` job). All tracked items above remain open as recorded.
+
+---
+
+### Milestone notes (M3 Phase 1)
+
+- **M3 Phase 1 →** inference foundation landed on `feat/m3-generation`:
+  model catalog, compatibility engine, GPU detection + scheduler, Model
+  Manager rewrite, Generate workspace, `SdCppAdapter` + `generate.image`,
+  migration `0006_m3`. **No model weights or runtime binaries downloaded —
+  `docs/plans/M3_MODEL_PROPOSAL.md` is the approval gate for Phase 2.**
+- Suite now **115/115** (26 new M3 tests). Multi-GPU parallelism is proven on
+  simulated probes only; clearly labelled as such — the physical
+  single-GPU path needs real weights (Phase 2).
+- Item **#8 (approval surface)** now has an implemented enforcement path
+  (install endpoint + confirm dialog stating size/destination/license) —
+  keep open until exercised with a real download.
+- Item **#13 (first verified real local adapter)** — the `SdCppAdapter`
+  exists and is fake-worker-verified; stays open until real inference is
+  demonstrated on the RTX 3060 Ti.
+- All other tracked items remain open as recorded.
+

@@ -56,7 +56,7 @@ export interface CommitResult {
 
 export interface Job {
   id: string;
-  project_id: string;
+  project_id: string | null; // null = app-level job (model downloads)
   adapter_id: string;
   kind: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -66,6 +66,8 @@ export interface Job {
   resumable: boolean;
   output_asset_id: string | null;
   command_id: string | null;
+  gpu_index?: number | null;
+  model_key?: string | null;
   result_json?: Record<string, unknown> | null;
   progress_json?: JobProgressDetail | null;
   cancel_requested?: boolean;
@@ -280,14 +282,18 @@ export interface HardwareReport {
   cpu: { name: string; physical_cores: number | null; logical_cores: number | null };
   memory: { total_bytes: number; available_bytes: number };
   gpus: Array<{
+    index: number;
     name: string | null;
     vendor: string;
     vram_bytes: number | null;
+    vram_source?: string;
+    vram_free_bytes?: number | null;
     vram_capped_at_4gb: boolean;
     driver_version: string | null;
     inference_capable: boolean | null;
   }>;
   disks: Array<{ mount: string; fstype: string; total_bytes: number; free_bytes: number }>;
+  backends?: Record<string, { available: boolean; measured?: boolean; icd_count?: number }>;
   runtimes: {
     python: string;
     ffmpeg: { available: boolean; version: string | null; path: string | null };
@@ -295,6 +301,88 @@ export interface HardwareReport {
     cuda_detected: boolean | null;
   };
   hardware_profile: string | null;
+}
+
+// ---------- models & generation (M3) ----------
+
+export type CompatStatus =
+  | "compatible" | "limited" | "unsupported" | "unknown"
+  | "restricted" | "unavailable";
+
+export interface Compatibility {
+  status: CompatStatus;
+  reasons: string[];
+  warnings: string[];
+  suggested: Record<string, unknown>;
+  estimate: { vram_bytes: number | null; basis: string };
+}
+
+export interface ModelInstall {
+  id?: string;
+  status: string; // not_installed | downloading | verifying | installed | failed | removed
+  install_root?: string;
+  rel_dir?: string;
+  file_name?: string;
+  byte_size?: number;
+  verified?: boolean;
+  version?: string;
+  error?: string | null;
+  created_at?: string | null;
+}
+
+export interface ModelCatalogEntry {
+  key: string;
+  display_name: string;
+  family: string;
+  version: string;
+  adapter_id: string;
+  format: string;
+  source: Record<string, unknown>;
+  license: { name: string; url: string; commercial_ok: boolean; notes: string };
+  files: Array<{ name: string; size_bytes: number; sha256: string | null }>;
+  download_bytes: number;
+  requirements: {
+    min_vram_bytes?: number; rec_vram_bytes?: number;
+    min_ram_bytes?: number; min_disk_bytes?: number; backends?: string[];
+  };
+  capabilities: {
+    tasks?: string[];
+    negative_prompt?: boolean;
+    seed?: boolean;
+    sizes?: { min?: number; max?: number; step?: number; presets?: Array<{ w: number; h: number; label: string }> };
+    steps?: { min?: number; max?: number; default?: number };
+    cfg?: { min?: number; max?: number; default?: number };
+    samplers?: string[];
+    schedulers?: string[];
+    batch?: { min?: number; max?: number; default?: number };
+    ref_images?: boolean;
+    lora?: boolean;
+    precision?: string[];
+    gpu_selection?: boolean;
+    cpu_fallback?: boolean;
+  };
+  runtime_key: string;
+  status_hint: string;
+  notes: string;
+  install: ModelInstall | null;
+  compatibility: Compatibility;
+}
+
+export interface ModelsDir {
+  dir: string;
+  source: string;
+  builtin_dir: string;
+  exists: boolean;
+  writable: boolean;
+  free_bytes: number | null;
+  used_bytes: number;
+}
+
+export interface GpuSchedulerState {
+  gpu_count: number;
+  free: number;
+  slots: Array<{ index: number; name: string | null; vendor: string; vram_bytes: number | null; busy_job_id: string | null }>;
+  prefs: { mode?: string; preferred_gpu?: number | null };
 }
 
 export interface AdapterProfile {
@@ -306,6 +394,8 @@ export interface AdapterProfile {
   limits: Record<string, unknown>;
   requires_cloud: boolean;
   cost_model: string;
+  lane?: string;
+  needs_gpu?: boolean;
   notes: string;
 }
 

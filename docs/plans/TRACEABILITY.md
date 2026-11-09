@@ -332,3 +332,33 @@ Post-integration verification **on `main`** (`449ce0a`):
   `cast.state.expression: expected a string, got int (42)`.
 - CI: `tauri-check` gap fixed (sidecar resource dir stubbed — real binary is
   only needed at bundle time, which the `package` job already performs).
+
+---
+
+# M3 Phase 1 — real-inference foundation (no weights downloaded)
+
+Implemented on branch `feat/m3-generation` after maintainer authorization
+against integrated `main` (`44da44f`). Covers M3 sections A/E.1/E.2/B/C/D/F/G
+**architecture and code paths only** — per the approval gate, **no model
+weights or runtime binaries have been downloaded**; the proposed first model
+is documented in `docs/plans/M3_MODEL_PROPOSAL.md`.
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| Real local inference adapter (isolated, cancellable, capability-declared) | `app/adapters/inference.py` — `SdCppAdapter`: subprocess `sd` worker, stream-parse progress, terminate/kill on cancel, friendly OOM/backend errors | `test_sdcpp_e2e_fake_worker` (real subprocess → PNG → asset → thumbnail); `test_sdcpp_cancel_kills_worker` |
+| Model catalog (name/version/source/license/requirements/capabilities) | `app/domain/model_catalog.py` — 5 model specs + sd.cpp runtime spec | `test_catalog_integrity`; `/api/models` |
+| Compatibility engine (compatible/limited/unsupported/unknown/restricted/unavailable + estimates) | `app/domain/compatibility.py` — usable-VRAM policy, headroom, suggestions | 5 classify tests |
+| Hardware detection (per-GPU VRAM incl. >4 GB registry fix, free VRAM, Vulkan/CUDA/DirectML, refresh) | `app/domain/hardware.py` | `/api/hardware?refresh=true` on the packaged build |
+| GPU scheduler (auto/manual, per-GPU slots, VRAM fit, multi-GPU lanes) | `app/domain/gpu_sched.py`; engine lanes in `app/domain/jobs.py` | 6 scheduler tests incl. simulated dual-GPU; **simulated, not physically verified** |
+| Model install/remove (resumable, verified, approval-gated, separate storage root) | `app/domain/model_files.py`, `ops.model.download` adapter, `POST /api/models/{key}/install|remove` | `test_model_install_download_job` (faked network, real job+row+files) |
+| Generation workspace (capability-driven UI, GPU select, shot assign, history) | `apps/desktop/.../GeneratePage.tsx`, Model Manager rewrite | `tsc -b && vite build` clean; screenshots TBD in Phase 2/3 |
+| Storyboard thumbnails via audited command | adapter `apply_command` → engine commits `shot.update` (origin `generation_job`) | e2e test asserts `thumbnail_asset_id` set |
+| Provenance | `Asset.provenance_json` (adapter/job/model/request) + version `media_json` (prompt, seed, params, is_mock) | e2e test asserts both |
+| Migration 0006 | `model_installs`, `runtime_installs`, `generation_jobs.gpu_index/model_key`, `project_id` nullable for app-level jobs | fresh DB → `0006_m3`; real `0005→0006` upgrade on the installed-app DB copy (NOT NULL→NULL, data preserved); `test_alembic_0006_tables_exist` |
+
+**Suite:** 115/115 pass (89 carried + 26 new). **Simulated-vs-verified ledger:**
+single-GPU e2e pipeline proven with a fake `sd` worker (`ATOMIC_SDCPP_CMD`
+override); multi-GPU scheduling proven only on fabricated probes — this
+machine has one GPU; all VRAM numbers are labelled estimates in the API/UI.
+Real weights + real runtime verification is Phase 2, gated on approval.
+

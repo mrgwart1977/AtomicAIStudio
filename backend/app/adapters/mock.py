@@ -27,6 +27,8 @@ class MockImageAdapter:
         limits={"width": 512, "height": 512},
         requires_cloud=False,
         cost_model="free",
+        lane="gen",
+        needs_gpu=False,
         notes="Placeholder adapter for M0 orchestration testing. Not AI inference.",
     )
 
@@ -62,8 +64,23 @@ class MockImageAdapter:
         img.save(out_path, format="PNG")
         sha = hashlib.sha256(out_path.read_bytes()).hexdigest()
 
-        yield {
+        out: dict[str, Any] = {
             "done": True,
             "progress": 1.0,
-            "output": {"path": str(out_path), "sha256": sha, "kind": "image", "size": [512, 512]},
+            "output": {
+                "path": str(out_path), "sha256": sha, "kind": "image", "size": [512, 512],
+                "name": f"mock-{handle.job_id[:8]}.png", "origin": "generation",
+                "media": {
+                    "source": "mock", "generated": False, "is_mock": True,
+                    "adapter_id": self.profile.adapter_id,
+                    "prompt": prompt, "seed": seed,
+                },
+            },
         }
+        if handle.request.get("shot_id") and handle.request.get("set_thumbnail"):
+            out["output"]["apply_command"] = {
+                "command_type": "shot.update",
+                "payload": {"shot_id": handle.request["shot_id"],
+                            "thumbnail_asset_id": "__asset__"},
+            }
+        yield out

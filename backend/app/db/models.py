@@ -114,7 +114,9 @@ class GenerationJob(Base):
     __tablename__ = "generation_jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    # NULL for app-level jobs (model downloads/runtime installs) — those are
+    # not project-scoped and broadcast WS events with project_id=null.
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
     adapter_id: Mapped[str] = mapped_column(String(80))
     kind: Mapped[str] = mapped_column(String(40), default="image")
     request_json: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -125,6 +127,10 @@ class GenerationJob(Base):
     resumable: Mapped[bool] = mapped_column(Boolean, default=True)
     output_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
     command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
+    # M3: GPU the job was scheduled onto (None = CPU/not GPU-bound).
+    gpu_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # M3: catalog key of the model this job used/downloaded (provenance).
+    model_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # non-asset op outputs
     progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # bytes/ETA detail
@@ -451,6 +457,54 @@ class RenderCacheEntry(Base):
     asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (UniqueConstraint("project_id", "cache_key", name="uq_cache_project_key"),)
+
+
+class ModelInstall(Base):
+    """An installed model on local storage. App-level (not project-scoped):
+    models live under the configured models root, separate from project
+    assets, and may be shared by every project. Status lifecycle:
+    downloading → verifying → installed | failed; removal deletes the row's
+    files and marks status='removed' (row kept for audit)."""
+
+    __tablename__ = "model_installs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_key: Mapped[str] = mapped_column(String(80), index=True)  # catalog key, e.g. "sd15.fp16"
+    adapter_id: Mapped[str] = mapped_column(String(80))             # inference adapter that serves it
+    version: Mapped[str] = mapped_column(String(60), default="")
+    status: Mapped[str] = mapped_column(String(20), default="downloading", index=True)
+    install_root: Mapped[str] = mapped_column(Text, default="")     # absolute models root used at install time
+    rel_dir: Mapped[str] = mapped_column(Text, default="")          # model_key-relative dir under root
+    file_name: Mapped[str] = mapped_column(String(240), default="") # primary weight file
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), default="")     # verified checksum when available
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)  # passed integrity check
+    license: Mapped[str] = mapped_column(String(120), default="")
+    meta_json: Mapped[dict] = mapped_column(JSON, default=dict)     # source url, etag, extra files
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class RuntimeInstall(Base):
+    """An installed inference runtime binary (e.g. stable-diffusion.cpp).
+    Kept separate from models: runtimes are small executables, models are
+    large weights; they download and version independently."""
+
+    __tablename__ = "runtime_installs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    runtime_key: Mapped[str] = mapped_column(String(80), index=True)  # e.g. "sdcpp"
+    version: Mapped[str] = mapped_column(String(60), default="")
+    status: Mapped[str] = mapped_column(String(20), default="downloading", index=True)
+    install_dir: Mapped[str] = mapped_column(Text, default="")        # absolute dir containing binaries
+    exe_path: Mapped[str] = mapped_column(Text, default="")           # main executable
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    meta_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class AppSetting(Base):

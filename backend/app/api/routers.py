@@ -4,6 +4,7 @@ All project data is scoped through get_project — no unscoped reads."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from app.db.models import (
     new_id,
     utcnow,
 )
-from app.domain import bibles, commands as cmd, hardware
+from app.domain import bibles, commands as cmd, hardware, model_catalog, model_files
 from app.domain.backup import PackageError, read_manifest
 from app.schemas.api import (
     AdapterProfileOut,
@@ -50,7 +51,12 @@ from app.schemas.api import (
     EntityAssetLinkOut,
     EntityOut,
     EntityRevisionOut,
+    GpuSettingsOut,
+    GpuSettingsUpdate,
     JobOut,
+    ModelCatalogEntryOut,
+    ModelInstallRequest,
+    ModelsDirOut,
     PackageImportRequest,
     PackagePreviewOut,
     ProjectCardOut,
@@ -58,6 +64,7 @@ from app.schemas.api import (
     ProjectOut,
     ProjectRevisionOut,
     PromptDraftOut,
+    RuntimeOut,
     SharedAssetOut,
     StorageLocationCreate,
     StorageLocationOut,
@@ -91,13 +98,182 @@ def health() -> dict:
 
 
 @api_router.get("/api/hardware")
-def get_hardware() -> dict:
-    return hardware.probe()
+def get_hardware(refresh: bool = False) -> dict:
+    return hardware.probe(force=refresh)
 
 
 @api_router.get("/api/adapters", response_model=list[AdapterProfileOut])
 def list_adapters(request: Request) -> list[dict]:
     return request.app.state.adapter_registry.list_profiles()
+
+
+# ---------- models & runtimes (M3) ----------
+
+def _model_view(request: Request, db: Session, spec) -> dict:
+    from app.domain import compatibility, model_files
+    installs = model_files.installs_by_key(db)
+    root = model_files.models_root(db, request.app.state.settings)
+    install = installs.get(spec.key)
+    if install:
+        install["disk_free_bytes"] = model_files.disk_free_bytes(Path(install["install_root"]))
+    else:
+        install = {"status": "not_installed", "disk_free_bytes": model_files.disk_free_bytes(root)}
+    compat = compatibility.classify_model(spec, hardware.probe(), install)
+    return {
+        **model_catalog.spec_to_dict(spec),
+        "install": {k: v for k, v in (install or {}).items() if k != "disk_free_bytes"},
+        "compatibility": compat,
+    }
+
+
+@api_router.get("/api/models", response_model=list[ModelCatalogEntryOut])
+def list_models(request: Request, db: Session = Depends(get_db)):
+    """The full catalog: available/installed/compatible/limited/
+    unsupported/restricted/unavailable — each with install state,
+    license, requirements, and a compatibility verdict."""
+    return [_model_view(request, db, spec) for spec in model_catalog.catalog()]
+
+
+@api_router.get("/api/models/{model_key}", response_model=ModelCatalogEntryOut)
+def get_model(model_key: str, request: Request, db: Session = Depends(get_db)):
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    return _model_view(request, db, spec)
+
+
+@api_router.post("/api/models/{model_key}/install")
+def install_model(model_key: str, request: Request,
+                  body: ModelInstallRequest | None = None,
+                  db: Session = Depends(get_db)):
+    """Queue a user-approved model download as an app-level job.
+    Refuses restricted-license models and models already installed or
+    mid-download."""
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    if not spec.license.get("commercial_ok", True):
+        raise HTTPException(422, f"{spec.display_name} is license-restricted and cannot be installed")
+    if not spec.files:
+        raise HTTPException(422, f"{spec.display_name} has no downloadable artifact")
+    installs = model_files.installs_by_key(db)
+    cur = installs.get(model_key) or {}
+    if cur.get("status") == "installed":
+        raise HTTPException(409, "model is already installed")
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.download",
+            GenerationJob.model_key == model_key,
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().first()
+    if in_flight is not None:
+        raise HTTPException(409, "a download for this model is already in progress")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.download", kind="model_download",
+        request={"model_key": model_key,
+                 "runtime_flavor": (body or ModelInstallRequest()).runtime_flavor},
+        idempotency_key=f"modeldl:{model_key}:{new_id()[:8]}",
+        model_key=model_key,
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.post("/api/models/{model_key}/remove")
+def remove_model(model_key: str, request: Request, db: Session = Depends(get_db)):
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    busy = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.model_key == model_key,
+            GenerationJob.status == "running",
+        )
+    ).scalars().first()
+    if busy is not None:
+        raise HTTPException(409, "a job is using this model right now — wait for it or cancel it")
+    try:
+        result = model_files.remove_model(db, spec)
+    except model_files.ModelError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.commit()
+    return result
+
+
+@api_router.get("/api/models/dir", response_model=ModelsDirOut)
+def get_models_dir(request: Request, db: Session = Depends(get_db)):
+    root = model_files.models_root(db, request.app.state.settings)
+    builtin = request.app.state.settings.data_dir / "models"
+    custom = model_files._get_setting(db, "models_dir")
+    used = 0
+    if root.is_dir():
+        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return {
+        "dir": str(root),
+        "source": "app setting" if custom else "built-in default",
+        "builtin_dir": str(builtin),
+        "exists": root.is_dir(),
+        "writable": os.access(root if root.is_dir() else root.parent, os.W_OK),
+        "free_bytes": model_files.disk_free_bytes(root),
+        "used_bytes": used,
+    }
+
+
+@api_router.put("/api/settings/models-dir", response_model=ModelsDirOut)
+def set_models_dir(body: AppBackupDirUpdate, request: Request, db: Session = Depends(get_db)):
+    if body.dir:
+        try:
+            model_files.set_models_root(db, body.dir)
+        except model_files.ModelError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    else:
+        model_files.unset_models_root(db)
+    db.commit()
+    return get_models_dir(request, db)
+
+
+@api_router.get("/api/runtimes", response_model=list[RuntimeOut])
+def list_runtimes(request: Request, db: Session = Depends(get_db)):
+    rows = model_files.runtime_rows(db)
+    out = []
+    for spec in model_catalog.RUNTIMES.values():
+        d = model_catalog.runtime_to_dict(spec)
+        d["install"] = next((v for k, v in rows.items() if k.startswith(spec.key)), None)
+        out.append(d)
+    return out
+
+
+@api_router.get("/api/gpu/scheduler")
+def gpu_scheduler_state(request: Request):
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    if sched is None:
+        return {"gpu_count": 0, "free": 0, "slots": [], "prefs": {}}
+    return sched.state()
+
+
+@api_router.put("/api/settings/gpu", response_model=GpuSettingsOut)
+def set_gpu_settings(body: GpuSettingsUpdate, request: Request, db: Session = Depends(get_db)):
+    if body.mode is not None and body.mode not in ("auto", "manual"):
+        raise HTTPException(422, "mode must be 'auto' or 'manual'")
+    if body.preferred_gpu is not None:
+        idx = body.preferred_gpu
+        gpus = hardware.probe().get("gpus") or []
+        if idx < 0 or not any(g.get("index") == idx for g in gpus):
+            raise HTTPException(422, f"no detected GPU with index {idx}")
+    if body.mode is not None:
+        model_files._set_setting(db, "gpu_mode", body.mode)
+    if body.preferred_gpu is not None:
+        model_files._set_setting(db, "preferred_gpu", body.preferred_gpu)
+    db.commit()
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    st = sched.state() if sched else {"slots": [], "free": 0, "gpu_count": 0}
+    return {
+        "mode": model_files._get_setting(db, "gpu_mode") or "auto",
+        "preferred_gpu": model_files._get_setting(db, "preferred_gpu"),
+        **st,
+    }
 
 
 # ---------- projects ----------
@@ -327,6 +503,7 @@ def list_assets(
     project: Project = Depends(get_project), db: Session = Depends(get_db),
     offset: int = 0, limit: int = Query(default=100, le=500),
     kind: str | None = None, q: str | None = None, status: str | None = None,
+    origin: str | None = None,
 ):
     base = select(Asset).where(Asset.project_id == project.id, Asset.status != "deleted")
     if kind:
@@ -335,6 +512,8 @@ def list_assets(
         base = base.where(Asset.name.like(f"%{q}%"))
     if status:
         base = base.where(Asset.status == status)
+    if origin:
+        base = base.where(Asset.origin == origin)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
     items = db.execute(
         base.order_by(Asset.created_at.desc()).offset(offset).limit(limit)

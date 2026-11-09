@@ -78,6 +78,8 @@ export function StoryboardPage() {
   const worlds = useApp((s) => s.entities.world ?? []);
   const assets = useApp((s) => s.assetsPage?.items ?? []);
   const refreshAssets = useApp((s) => s.refreshAssets);
+  const setGenerateShotId = useApp((s) => s.setGenerateShotId);
+  const setWorkspaceTab = useApp((s) => s.setWorkspaceTab);
 
   const [info, setInfo] = useState<BackendInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +244,10 @@ export function StoryboardPage() {
                     onDragEnd={() => { drag.current = null; setDropAt(null); }}
                     onClick={() => setShotDlg({ scene: row, entry })}
                     onDuplicate={() => void run("shot.duplicate", { shot_id: entry.shot.id })}
+                    onGenerate={() => {
+                      setGenerateShotId(entry.shot.id);
+                      setWorkspaceTab("generate");
+                    }}
                   />
                 </div>
               ))}
@@ -324,11 +330,12 @@ function DropZone({ active, tail, onDragOver, onLeave, onDrop }: {
   );
 }
 
-function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onDuplicate }: {
+function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate }: {
   entry: StoryboardScene["shots"][number];
   info: BackendInfo | null;
   projectId: string;
   onDragStart: () => void; onDragEnd: () => void; onClick: () => void; onDuplicate: () => void;
+  onGenerate: () => void;
 }) {
   const s = entry.shot;
   const thumb = info && s.thumbnail_asset_id ? assetFileUrl(projectId, s.thumbnail_asset_id, info) : null;
@@ -363,6 +370,13 @@ function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onD
           className="absolute bottom-1 right-1 hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block"
         >
           ⧉
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onGenerate(); }}
+          title="Generate an image for this shot"
+          className="absolute bottom-1 left-1 hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block"
+        >
+          ✦
         </button>
       </div>
       <div className="p-2">
