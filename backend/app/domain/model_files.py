@@ -311,17 +311,29 @@ def runtime_rows(session: Session) -> dict[str, dict]:
 def resolve_release_asset(spec: RuntimeSpec, flavor: str, *,
                           fetch: Callable[[str], dict] | None = None) -> dict:
     """Pick the release asset for a backend flavor from the GitHub releases
-    API. `fetch` injectable for tests (no network in CI)."""
+    API. `fetch` injectable for tests (no network in CI).
+
+    When the runtime spec pins `release_tag`, the pinned-tag endpoint is
+    queried so every install resolves the SAME artifacts; otherwise the
+    floating `latest` endpoint is used and whatever it resolves to is
+    recorded on the install row."""
+    api = spec.release_api
+    pinned = bool(getattr(spec, "release_tag", None))
+    if pinned:
+        api = api.rsplit("/", 1)[0] + f"/tags/{spec.release_tag}" \
+            if api.endswith("/latest") else api
     fetch = fetch or (lambda url: json.loads(urllib.request.urlopen(
         urllib.request.Request(url, headers={"User-Agent": "atomic-ai-studio"}),
         timeout=30).read()))
-    rel = fetch(spec.release_api)
+    rel = fetch(api)
     needle = spec.asset_patterns.get(flavor, flavor).lower()
     for asset in rel.get("assets", []):
         name = (asset.get("name") or "").lower()
         if needle in name and "win" in name and name.endswith(".zip"):
             return {"url": asset["browser_download_url"], "name": asset["name"],
-                    "size": asset.get("size") or 0, "tag": rel.get("tag_name", "")}
+                    "size": asset.get("size") or 0, "tag": rel.get("tag_name", ""),
+                    "pinned": pinned, "resolved_from": api,
+                    "resolved_at": utcnow().isoformat()}
     raise ModelError(f"no Windows '{flavor}' asset found in {spec.key} release")
 
 
@@ -339,7 +351,12 @@ def install_runtime_zip(session: Session, settings, spec: RuntimeSpec, flavor: s
         version=asset.get("tag") or spec.version,
         status="downloading", install_dir=str(dest_dir),
         exe_path=str(dest_dir / spec.exe_name),
-        meta_json={"flavor": flavor, "asset": asset.get("name"), "url": asset.get("url")},
+        meta_json={"flavor": flavor, "resolved": {
+            "name": asset.get("name"), "url": asset.get("url"),
+            "size": asset.get("size"), "tag": asset.get("tag"),
+            "pinned": asset.get("pinned", False),
+            "resolved_from": asset.get("resolved_from"),
+            "resolved_at": asset.get("resolved_at")}},
     )
     session.add(row)
     session.flush()
@@ -365,6 +382,9 @@ def install_runtime_zip(session: Session, settings, spec: RuntimeSpec, flavor: s
         row.byte_size = res["bytes"]
         row.verified = True
         row.error = None
+        meta = dict(row.meta_json or {})
+        meta.setdefault("resolved", {})["zip_sha256"] = res.get("sha256")
+        row.meta_json = meta
     except Exception as exc:
         row.status = "failed"
         row.error = str(exc)

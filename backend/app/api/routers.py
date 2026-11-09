@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -27,6 +28,7 @@ from app.db.models import (
     Project,
     ProjectRevision,
     PromptDraft,
+    RuntimeInstall,
     SharedAssetLink,
     StorageLocation,
     World,
@@ -134,6 +136,26 @@ def list_models(request: Request, db: Session = Depends(get_db)):
     return [_model_view(request, db, spec) for spec in model_catalog.catalog()]
 
 
+@api_router.get("/api/models/dir", response_model=ModelsDirOut)
+def get_models_dir(request: Request, db: Session = Depends(get_db)):
+    # NOTE: must precede /api/models/{model_key} or "dir" is parsed as a key.
+    root = model_files.models_root(db, request.app.state.settings)
+    builtin = request.app.state.settings.data_dir / "models"
+    custom = model_files._get_setting(db, "models_dir")
+    used = 0
+    if root.is_dir():
+        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return {
+        "dir": str(root),
+        "source": "app setting" if custom else "built-in default",
+        "builtin_dir": str(builtin),
+        "exists": root.is_dir(),
+        "writable": os.access(root if root.is_dir() else root.parent, os.W_OK),
+        "free_bytes": model_files.disk_free_bytes(root),
+        "used_bytes": used,
+    }
+
+
 @api_router.get("/api/models/{model_key}", response_model=ModelCatalogEntryOut)
 def get_model(model_key: str, request: Request, db: Session = Depends(get_db)):
     spec = model_catalog.get(model_key)
@@ -205,25 +227,6 @@ def remove_model(model_key: str, request: Request, db: Session = Depends(get_db)
     return result
 
 
-@api_router.get("/api/models/dir", response_model=ModelsDirOut)
-def get_models_dir(request: Request, db: Session = Depends(get_db)):
-    root = model_files.models_root(db, request.app.state.settings)
-    builtin = request.app.state.settings.data_dir / "models"
-    custom = model_files._get_setting(db, "models_dir")
-    used = 0
-    if root.is_dir():
-        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
-    return {
-        "dir": str(root),
-        "source": "app setting" if custom else "built-in default",
-        "builtin_dir": str(builtin),
-        "exists": root.is_dir(),
-        "writable": os.access(root if root.is_dir() else root.parent, os.W_OK),
-        "free_bytes": model_files.disk_free_bytes(root),
-        "used_bytes": used,
-    }
-
-
 @api_router.put("/api/settings/models-dir", response_model=ModelsDirOut)
 def set_models_dir(body: AppBackupDirUpdate, request: Request, db: Session = Depends(get_db)):
     if body.dir:
@@ -243,9 +246,85 @@ def list_runtimes(request: Request, db: Session = Depends(get_db)):
     out = []
     for spec in model_catalog.RUNTIMES.values():
         d = model_catalog.runtime_to_dict(spec)
-        d["install"] = next((v for k, v in rows.items() if k.startswith(spec.key)), None)
+        flavors = {k: v for k, v in rows.items() if k.startswith(f"{spec.key}-")}
+        d["installs"] = flavors
+        d["install"] = next(iter(flavors.values()), None)
         out.append(d)
     return out
+
+
+class RuntimeInstallRequest(BaseModel):
+    flavor: str = "vulkan"
+
+
+class RuntimeBenchmarkRequest(BaseModel):
+    flavor: str
+    median_total_ms: float
+    runs: int
+    gpu: str | None = None
+    params: dict | None = None
+
+
+@api_router.post("/api/runtimes/{runtime_key}/install")
+def install_runtime(runtime_key: str, request: Request,
+                    body: RuntimeInstallRequest | None = None,
+                    db: Session = Depends(get_db)):
+    """User-approved runtime-flavor download (e.g. the CUDA build after the
+    Vulkan build). Queues an app-level ops.model.download job that installs
+    ONLY the runtime — no model weights are touched."""
+    rt_spec = model_catalog.get_runtime(runtime_key)
+    if rt_spec is None:
+        raise HTTPException(404, "unknown runtime")
+    flavor = (body or RuntimeInstallRequest()).flavor
+    if flavor not in rt_spec.backends:
+        raise HTTPException(422, f"runtime '{runtime_key}' has no '{flavor}' backend")
+    rows = model_files.runtime_rows(db)
+    cur = rows.get(f"{runtime_key}-{flavor}") or {}
+    if cur.get("status") == "installed":
+        raise HTTPException(409, f"runtime {runtime_key}-{flavor} is already installed")
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.download",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().first()
+    if in_flight is not None:
+        raise HTTPException(409, "a download is already in progress — ops lane is serialized")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.download", kind="model_download",
+        request={"runtime_only": True, "runtime_key": runtime_key,
+                 "runtime_flavor": flavor},
+        idempotency_key=f"rtdl:{runtime_key}:{flavor}:{new_id()[:8]}",
+        model_key=None,
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.post("/api/runtimes/{runtime_key}/benchmark")
+def record_benchmark(runtime_key: str, body: RuntimeBenchmarkRequest,
+                     db: Session = Depends(get_db)):
+    """Record a measured benchmark result for an installed runtime flavor.
+    Automatic backend selection prefers the fastest measured installed
+    backend (B.3 — measured over assumed)."""
+    row_key = f"{runtime_key}-{body.flavor}"
+    row = db.execute(
+        select(RuntimeInstall).where(RuntimeInstall.runtime_key == row_key)
+    ).scalar_one_or_none()
+    if row is None or row.status != "installed":
+        raise HTTPException(404, f"runtime {row_key} is not installed")
+    meta = dict(row.meta_json or {})
+    meta["benchmark"] = {
+        "median_total_ms": body.median_total_ms,
+        "runs": body.runs,
+        "gpu": body.gpu,
+        "params": body.params or {},
+        "measured_at": utcnow().isoformat(),
+    }
+    row.meta_json = meta
+    db.commit()
+    return {"runtime_key": row_key, "benchmark": meta["benchmark"]}
 
 
 @api_router.get("/api/gpu/scheduler")
@@ -521,7 +600,27 @@ def list_assets(
     items = db.execute(
         base.order_by(Asset.created_at.desc()).offset(offset).limit(limit)
     ).scalars().all()
-    return {"items": items, "total": total, "offset": offset, "limit": limit}
+    # Provenance surface: generation metadata lives on the current
+    # AssetVersion — join it so the list API exposes it (issue #20).
+    ver_ids = [a.current_version_id for a in items if a.current_version_id]
+    media_by_ver = {}
+    if ver_ids:
+        for v in db.execute(
+            select(AssetVersion).where(AssetVersion.id.in_(ver_ids))
+        ).scalars():
+            media_by_ver[v.id] = v.media_json
+    out_items = []
+    for a in items:
+        out_items.append({
+            "id": a.id, "project_id": a.project_id, "name": a.name,
+            "kind": a.kind, "origin": a.origin, "scope": a.scope,
+            "status": a.status, "uri": a.uri, "sha256": a.sha256,
+            "byte_size": a.byte_size, "current_version_id": a.current_version_id,
+            "created_at": a.created_at,
+            "provenance_json": a.provenance_json or {},
+            "media_json": media_by_ver.get(a.current_version_id) or {},
+        })
+    return {"items": out_items, "total": total, "offset": offset, "limit": limit}
 
 
 @api_router.get("/api/projects/{project_id}/assets/{asset_id}/versions", response_model=list[AssetVersionOut])

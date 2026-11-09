@@ -171,6 +171,8 @@ class AssetOut(BaseModel):
     byte_size: int
     current_version_id: str | None
     created_at: datetime
+    provenance_json: dict[str, Any] = {}
+    media_json: dict[str, Any] = {}
 
 
 class AssetPageOut(BaseModel):
@@ -501,6 +503,7 @@ class RuntimeOut(BaseModel):
     est_bytes: int
     notes: str
     install: dict[str, Any] | None = None
+    installs: dict[str, Any] = {}  # per-flavor rows, keyed e.g. "sdcpp-vulkan"
 
 
 class ModelsDirOut(BaseModel):

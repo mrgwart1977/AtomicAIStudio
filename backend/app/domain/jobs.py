@@ -245,7 +245,7 @@ class JobEngine:
                     gpu_idx = self._sched.acquire(job.id, dict(job.request_json or {}),
                                                   est_vram=est)
                     if gpu_idx is None:
-                        job.message = "waiting for a free GPU"
+                        job.message = f"waiting for GPU — {self._sched.last_reason or 'no slot free'}"
                         s.commit()
                         continue
                     job.gpu_index = gpu_idx if gpu_idx >= 0 else None
@@ -309,6 +309,7 @@ class JobEngine:
                 job.completed_at = utcnow()
                 s.commit()
                 await self._publish(job)
+                self._purge_work_dir(work_dir, job.id)
                 return
             except asyncio.CancelledError:
                 job.status = "failed"
@@ -321,6 +322,7 @@ class JobEngine:
                 job.completed_at = utcnow()
                 s.commit()
                 await self._publish(job)
+                self._purge_work_dir(work_dir, job.id)
                 return
             finally:
                 self._cancel_events.pop(job.id, None)
@@ -328,6 +330,7 @@ class JobEngine:
             if final_output is None:
                 job.status = "failed"
                 job.error = "adapter finished without an output record"
+                self._purge_work_dir(work_dir, job.id)
             elif final_output.get("no_asset"):
                 job.result_json = final_output.get("result")
                 job.status = "succeeded"
@@ -428,6 +431,17 @@ class JobEngine:
         s.flush()
         asset.current_version_id = version.id
         return asset
+
+    def _purge_work_dir(self, work_dir: Path, job_id: str) -> None:
+        """Failed/cancelled jobs must not leave orphan output files that
+        could masquerade as results. Assets only materialize on success, so
+        anything left in the work dir at this point is a partial artifact."""
+        try:
+            for f in work_dir.glob(f"{job_id}*"):
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not purge work-dir outputs for %s", job_id)
 
     def _finalize_crash(self, job_id: str) -> None:
         try:

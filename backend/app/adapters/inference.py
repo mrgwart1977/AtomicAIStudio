@@ -120,28 +120,48 @@ class SdCppAdapter:
     def _exe_path(self, request: dict) -> Path | None:
         override = getattr(self._settings, "sdcpp_cmd", None) or os.environ.get("ATOMIC_SDCPP_CMD")
         if override:
+            self._flavor_reason = "test/override command"
             return None  # command prefix handled in _argv_prefix
         rt_spec = model_catalog.get_runtime(request.get("runtime_key") or "sdcpp")
-        flavor = self._pick_flavor(request.get("runtime_flavor"), rt_spec)
+        flavor, reason = self._pick_flavor(request.get("runtime_flavor"), rt_spec)
+        self._flavor_reason = reason
         exe = model_files.runtime_exe(self._settings, rt_spec, flavor)
         return exe
 
-    def _pick_flavor(self, requested: str | None, rt_spec) -> str:
-        """Backend-flavor resolution that prefers *installed* runtimes over
-        probe-order guesses: an explicit request wins, then any installed
-        flavor, then the probe order. B.3 — validated state over assumptions."""
+    def _pick_flavor(self, requested: str | None, rt_spec) -> tuple[str, str]:
+        """Backend-flavor resolution. Order (B.3 — validated state over
+        assumptions): an explicit request wins; then installed flavors
+        ranked by measured benchmark medians when recorded; then installed
+        flavors in catalog order; then probe order. Returns (flavor,
+        reason) — the reason is recorded in job provenance."""
         if requested:
-            return requested
+            return requested, "manually selected backend"
         if rt_spec is not None:
             with self._sf() as s:
-                installed = [row.runtime_key for row in s.execute(
+                rows = {row.runtime_key: row for row in s.execute(
                     select(RuntimeInstall).where(RuntimeInstall.status == "installed")
-                ).scalars().all()]
+                ).scalars().all()}
             prefix = f"{rt_spec.key}-"
-            for flavor in rt_spec.backends:  # catalog order = preference order
-                if prefix + flavor in installed:
-                    return flavor
-        return self._default_flavor()
+            installed = [f for f in rt_spec.backends if prefix + f in rows]
+            if not installed:
+                return self._default_flavor(), \
+                    "no runtime flavor installed — defaulting to detected backend"
+            if len(installed) > 1:
+                measured = []
+                for f in installed:
+                    bench = ((rows[prefix + f].meta_json or {}).get("benchmark") or {})
+                    med = bench.get("median_total_ms")
+                    if med:
+                        measured.append((float(med), f))
+                if measured:
+                    measured.sort()
+                    best = measured[0]
+                    return best[1], (
+                        f"fastest measured backend (median {best[0] / 1000:.1f}s "
+                        f"over {int(((rows[prefix + best[1]].meta_json or {}).get('benchmark') or {}).get('runs') or 0)} runs)")
+            return installed[0], "only installed backend" if len(installed) == 1 \
+                else "installed backend (no benchmark data yet)"
+        return self._default_flavor(), "detected backend"
 
     @staticmethod
     def _split_cmd(override: str) -> list[str]:
@@ -231,7 +251,7 @@ class SdCppAdapter:
         if req.get("sampler"):
             argv += ["--sampling-method", req["sampler"]]
         rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
-        flavor = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
+        flavor, flavor_reason = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
         gpu = req.get("assigned_gpu")
         if gpu in (None, "auto"):
             gpu = None if flavor == "cpu" else 0
@@ -317,7 +337,7 @@ class SdCppAdapter:
             "model_version": spec.version,
             "model_family": spec.family,
             "adapter_id": self.profile.adapter_id,
-            "runtime": {"key": "sdcpp", "flavor": flavor},
+            "runtime": {"key": "sdcpp", "flavor": flavor, "selection_reason": flavor_reason},
             "prompt": req["prompt"],
             "negative_prompt": req.get("negative_prompt") or "",
             "width": width, "height": height,
@@ -374,6 +394,14 @@ class ModelDownloadAdapter:
         self._settings = settings
 
     async def validate(self, request: dict[str, Any]) -> list[str]:
+        if request.get("runtime_only"):
+            rt_spec = model_catalog.get_runtime(request.get("runtime_key") or "sdcpp")
+            flavor = request.get("runtime_flavor") or "vulkan"
+            if rt_spec is None:
+                return ["unknown runtime_key"]
+            if flavor not in rt_spec.backends:
+                return [f"runtime '{rt_spec.key}' has no '{flavor}' backend"]
+            return []
         spec = model_catalog.get(request.get("model_key") or "")
         if spec is None:
             return ["unknown model_key"]
@@ -397,27 +425,28 @@ class ModelDownloadAdapter:
                 s.commit()
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
-        spec = model_catalog.get(handle.request["model_key"])
         req = handle.request
+        spec = None if req.get("runtime_only") else model_catalog.get(req["model_key"])
 
         with self._sf() as s:
             root = model_files.models_root(s, self._settings)
-            install = model_files.install_row(s, spec, root)
+            install = model_files.install_row(s, spec, root) if spec else None
             s.commit()
-            install_id = install.id
+            install_id = install.id if install else None
             disk_free = model_files.disk_free_bytes(root)
-        need = spec.requirements.get("min_disk_bytes") or spec.total_bytes
-        if disk_free is not None and disk_free < need:
+        need = (spec.requirements.get("min_disk_bytes") or spec.total_bytes) if spec else 0
+        if spec and disk_free is not None and disk_free < need:
             self._mark(spec.key, status="failed",
                        error=f"insufficient disk: {disk_free / 1e9:.1f} GB free, need ~{need / 1e9:.1f} GB")
             raise ValueError(
                 f"not enough disk space: {disk_free / 1e9:.1f} GB free on the models drive, "
                 f"~{need / 1e9:.1f} GB needed")
 
-        total = spec.files[0].size_bytes or 0
+        total = spec.files[0].size_bytes or 0 if spec else 0
         state = {"p": 0.0, "m": "preparing", "d": None}
         reporter = ProgressReporter(total or 1, lambda d: state.__setitem__("d", d))
-        reporter.set_file(spec.files[0].name)
+        if spec:
+            reporter.set_file(spec.files[0].name)
 
         def on_bytes(done: int, tot: int) -> None:
             if tot:
@@ -429,7 +458,7 @@ class ModelDownloadAdapter:
 
         try:
             # Phase 1: runtime (small) when the model needs it and none is installed.
-            rt_key = req.get("runtime_key") or spec.runtime_key
+            rt_key = req.get("runtime_key") or (spec.runtime_key if spec else None)
             rt_spec = model_catalog.get_runtime(rt_key) if rt_key else None
             flavor = req.get("runtime_flavor") or "vulkan"
             if rt_spec is not None and not req.get("skip_runtime"):
@@ -443,6 +472,15 @@ class ModelDownloadAdapter:
                             s, self._settings, rt_spec, flavor, asset,
                             cancel_check=handle.check_cancel)
                         s.commit()
+                else:
+                    yield {"progress": 0.5, "message": f"runtime {rt_spec.display_name} ({flavor}) already installed"}
+
+            if req.get("runtime_only"):
+                yield {"done": True, "progress": 1.0,
+                       "output": {"no_asset": True,
+                                  "result": {"runtime_key": f"{rt_key}-{flavor}",
+                                             "flavor": flavor}}}
+                return
 
             # Phase 2: model weights — poll the thread so byte-level
             # progress streams to the UI while it runs.
@@ -468,10 +506,12 @@ class ModelDownloadAdapter:
             self._mark(spec.key, status="installed", byte_size=res["bytes"],
                        sha256=res["sha256"], verified=True, error=None)
         except JobCancelled:
-            self._mark(spec.key, status="failed", error="cancelled by user (partial download kept for resume)")
+            if spec:
+                self._mark(spec.key, status="failed", error="cancelled by user (partial download kept for resume)")
             raise
         except Exception as exc:
-            self._mark(spec.key, status="failed", error=str(exc))
+            if spec:
+                self._mark(spec.key, status="failed", error=str(exc))
             raise
 
         yield {

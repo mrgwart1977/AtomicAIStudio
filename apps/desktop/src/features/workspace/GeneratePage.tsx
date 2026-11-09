@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
 import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
-import type { Asset, AssetPage, BackendInfo, ModelCatalogEntry } from "../../api/types";
+import type { Asset, AssetPage, BackendInfo, ModelCatalogEntry, RuntimeInfo } from "../../api/types";
 
 const inputCls =
   "w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg placeholder:text-faint";
@@ -20,6 +20,7 @@ interface GenForm {
   sampler: string;
   batch: number;
   device: string; // "auto" | "cpu" | gpu index as string
+  flavor: string; // "auto" | installed runtime flavor (vulkan/cuda/cpu)
   shot_id: string;
   set_thumbnail: boolean;
 }
@@ -39,6 +40,7 @@ function defaults(model: ModelCatalogEntry | undefined): GenForm {
     sampler: caps?.samplers?.[0] ?? "euler_a",
     batch: caps?.batch?.default ?? 1,
     device: "auto",
+    flavor: "auto",
     shot_id: "",
     set_thumbnail: true,
   };
@@ -66,6 +68,7 @@ export function GeneratePage() {
   const [info, setInfo] = useState<BackendInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
 
   const installed = useMemo(
     () => models.filter((m) => m.install?.status === "installed"),
@@ -99,6 +102,14 @@ export function GeneratePage() {
     (j) => j.status === "running" || j.status === "queued",
   );
 
+  // Installed sd.cpp backend flavors — the "Automatic" pick resolves on the
+  // backend (measured-fastest installed flavor, falling back to catalog order).
+  const installedFlavors = useMemo(() => {
+    const sd = runtimes.find((r) => r.key === "sdcpp");
+    const rows = sd?.installs ?? {};
+    return (sd?.backends ?? []).filter((f) => rows[`sdcpp-${f}`]?.status === "installed");
+  }, [runtimes]);
+
   async function loadGenerated() {
     if (!pid) return;
     const page = await apiFetch<AssetPage>(
@@ -113,6 +124,7 @@ export function GeneratePage() {
     void refreshModels();
     void refreshStoryboard();
     void loadGenerated();
+    void apiFetch<RuntimeInfo[]>("/api/runtimes").then(setRuntimes).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid]);
 
@@ -162,7 +174,7 @@ export function GeneratePage() {
         device: form.device,
         shot_id: form.shot_id || undefined,
         set_thumbnail: form.set_thumbnail && !!form.shot_id,
-        runtime_flavor: undefined,
+        runtime_flavor: form.flavor === "auto" ? undefined : form.flavor,
       });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -311,6 +323,19 @@ export function GeneratePage() {
               ))}
               {caps?.cpu_fallback && <option value="cpu">CPU only (slow)</option>}
             </select>
+            {installedFlavors.length > 0 && (
+              <div className="mt-3">
+                <label className={labelCls} title="Which installed inference backend runs the job. Automatic prefers the fastest measured installed backend.">
+                  Backend
+                </label>
+                <select className={inputCls} value={form.flavor} onChange={(e) => set("flavor", e.target.value)}>
+                  <option value="auto">Automatic — fastest installed{installedFlavors.length === 1 ? ` (${installedFlavors[0]})` : ""}</option>
+                  {installedFlavors.map((f) => (
+                    <option key={f} value={f}>{f} (installed)</option>
+                  ))}
+                </select>
+              </div>
+            )}
             {memWarn && (
               <p className="mt-1 text-xs text-amber">
                 Estimated {gb(estVram)} needed may exceed this GPU's {gb(chosenGpu?.vram_bytes)} VRAM.

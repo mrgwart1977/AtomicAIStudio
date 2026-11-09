@@ -198,3 +198,62 @@ real warm time ≈ **8 s** at 512×512, 20–25 steps, euler_a.
 - Release tag floats (`latest`) — pin a release for reproducible installs.
 - CUDA comparison + auto-benchmark selection NOT done — tracked for later.
 - `2–4 s` estimate retired: real ≈ 8 s warm, ~70 s cold.
+
+# Phase 3 — backend benchmark + selection hardening (2026-11-09)
+
+## Vulkan benchmark — repeated measured runs (not estimates)
+
+Identical params for every run: SD 1.5 fp16 GGUF, 512×512, 20 steps, euler_a,
+cfg 7.0, seed 42, batch 1. Each run spawns a fresh `sd-cli.exe` worker —
+"warm" runs benefit from **OS file cache only**; no persistent model-loaded
+worker exists. 5 measured warm runs after 1 prime:
+
+| Backend | Prime (load+gen) | Warm median | Min–max | Peak VRAM | GPU util |
+|---|---|---|---|---|---|
+| Vulkan | 24.2 s | **7.75 s** | 7.73–8.26 | ~4.0–5.6 GiB total (Δ≈2.3 GiB) | 100 % |
+
+Recorded via `POST /api/runtimes/sdcpp/benchmark` → `meta_json.benchmark`
+on the `sdcpp-vulkan` row. Raw data: `docs/m3-evidence/bench.json`.
+
+## CUDA comparison — BLOCKED on unapproved dependency
+
+Downloaded and verified `sd-master-991f825-bin-win-cuda12-x64.zip`
+(366,981,878 B, release `master-1073-991f825`, same pinned release as Vulkan).
+Result: **worker exits instantly on every run** — `stable-diffusion.dll`
+imports `cudart64_12.dll` + `cublas64_12.dll`, absent from the zip and from
+this machine. The separate `cudart-sd-bin-win-cu12-x64.zip` (563,452,046 B,
+same release) carries them — **not downloaded**: per approval terms, extra
+dependencies require separate approval first.
+
+## Hardware-aware backend selection — implemented + verified live
+
+- Selection order: manual pick → fastest **measured** installed flavor →
+  installed flavor → probe/detected. Selection reason recorded per job.
+- Verified end-to-end: default request picked `vulkan` with provenance
+  `"selection_reason": "fastest measured backend (median 7.8s over 5 runs)"`.
+- Generate page exposes a Backend dropdown (installed flavors + Automatic);
+  queued GPU jobs now carry a `message` like
+  "waiting for GPU — no device fits — job needs ~360.6 GiB VRAM; best free
+  device offers ~6.0 GiB" (observed live on an 8192×8192 job).
+- Release pinning: runtime install resolves `releases/tags/<tag>` metadata
+  (not `latest`) and records `{asset, url, size, tag, pinned, resolved_from,
+  resolved_at}` in `meta_json.resolved`.
+
+## Phase 3 fixes
+
+- `RuntimeOut` schema stripped `installs` → Backend dropdown data was lost
+- `/api/models/dir` was shadowed by `/{model_key}` → static route moved first
+- Benchmark endpoint is flavor-keyed (`sdcpp-vulkan`), not bare runtime key
+- `/api/runtimes/{key}/install` installs a flavor without touching weights
+- Asset list joins current-version `media_json` (+ `provenance_json`) — the
+  Generate page can now surface backend/seed/duration per asset
+
+## Still open
+
+- CUDA benchmark pending cudart approval (563 MB redistributable zip)
+- No persistent worker — every job pays ~15–20 s model-load; warm ≈7.8 s is
+  OS-cache luck, not loaded-model reuse. Persistent worker is a later
+  milestone (would cut warm to ~2–4 s plausibly — unmeasured).
+- 6 CUDA-fail jobs left `failed` rows with no assets — by design; job log
+  carries "worker exited with an error" only. Surfacing worker stderr tail
+  in job detail would aid diagnosis — small UX gap.

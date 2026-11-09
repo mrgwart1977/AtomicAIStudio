@@ -97,6 +97,24 @@ export interface Asset {
   byte_size: number;
   current_version_id: string | null;
   created_at: string;
+  provenance_json?: Record<string, unknown>;
+  media_json?: Record<string, unknown>;
+}
+
+export interface RuntimeInstallInfo {
+  status: string;
+  version?: string;
+  install_dir?: string;
+  exe_path?: string;
+  verified?: boolean;
+}
+
+export interface RuntimeInfo {
+  key: string;
+  display_name: string;
+  backends: string[];
+  install?: RuntimeInstallInfo | null;
+  installs?: Record<string, RuntimeInstallInfo>;
 }
 
 export interface AssetPage {

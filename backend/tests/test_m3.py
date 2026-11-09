@@ -573,3 +573,142 @@ def test_alembic_0006_tables_exist(settings):
     with eng.connect() as c:
         v = c.execute(sa.text("select version_num from alembic_version")).scalar()
     assert v == "0006_m3"
+
+
+# ------------------------------------------------ 9. Phase-2 follow-ups
+
+def test_pinned_release_resolution():
+    """release_tag pins the release: the tag endpoint is queried and the
+    result is marked pinned for reproducible installs."""
+    from app.domain import model_catalog, model_files
+    spec = model_catalog.get_runtime("sdcpp")
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return {"tag_name": "master-1073-991f825", "assets": [
+            {"name": "sd-master-991f825-bin-win-cuda12-x64.zip",
+             "browser_download_url": "https://example.com/cuda.zip", "size": 367000000},
+            {"name": "sd-master-991f825-bin-win-vulkan-x64.zip",
+             "browser_download_url": "https://example.com/vk.zip", "size": 30000000}]}
+
+    assert spec.release_tag == "master-1073-991f825"
+    a = model_files.resolve_release_asset(spec, "cuda", fetch=fake_fetch)
+    assert calls[0].endswith("/tags/master-1073-991f825")
+    assert a["name"] == "sd-master-991f825-bin-win-cuda12-x64.zip"
+    assert a["pinned"] is True and a["tag"] == "master-1073-991f825"
+
+
+def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_path):
+    """Selection order: manual request > fastest measured installed >
+    installed (catalog order) > probe default."""
+    from app.adapters.inference import SdCppAdapter
+    from app.db.models import RuntimeInstall, new_id, utcnow
+    from app.domain import model_catalog
+    import sqlalchemy as sa
+
+    app = client.app
+    spec = model_catalog.get_runtime("sdcpp")
+    with app.state.session_factory() as s:
+        for fl, med in (("vulkan", 9000.0), ("cuda", 5000.0)):
+            s.add(RuntimeInstall(
+                id=new_id(), runtime_key=f"sdcpp-{fl}", version="t",
+                status="installed", install_dir=str(tmp_path / fl),
+                exe_path=str(tmp_path / fl / "sd-cli.exe"),
+                meta_json={"benchmark": {"median_total_ms": med, "runs": 5}},
+                created_at=utcnow(), updated_at=utcnow()))
+        s.commit()
+
+    ad = SdCppAdapter(app.state.session_factory, app.state.settings)
+    # manual wins even when slower
+    assert ad._pick_flavor("vulkan", spec) == ("vulkan", "manually selected backend")
+    # measured-fastest installed wins on auto
+    fl, reason = ad._pick_flavor(None, spec)
+    assert fl == "cuda" and "measured" in reason
+    # no benchmark data -> catalog order
+    with app.state.session_factory() as s:
+        for row in s.execute(sa.select(RuntimeInstall)).scalars():
+            row.meta_json = {}
+        s.commit()
+    fl, reason = ad._pick_flavor(None, spec)
+    assert fl == spec.backends[0] and "benchmark" in reason.lower()
+
+
+def test_runtime_only_install_endpoint(client):
+    r = client.post("/api/runtimes/sdcpp/install", json={"flavor": "cuda"})
+    assert r.status_code in (200, 409), r.text
+    if r.status_code == 200:
+        assert r.json()["job_id"]
+    r2 = client.post("/api/runtimes/sdcpp/install", json={"flavor": "bogus"})
+    assert r2.status_code == 422
+    r3 = client.post("/api/runtimes/nope/install", json={"flavor": "vulkan"})
+    assert r3.status_code == 404
+
+
+def test_queued_reason_strings():
+    from app.domain.gpu_sched import GpuScheduler
+    gpus = [{"index": 0, "name": "G", "vram_bytes": 8 * 2**30, "vram_free_bytes": 8 * 2**30}]
+    sched = GpuScheduler({"gpus": gpus})
+    assert sched.acquire("j1", {}, est_vram=None) == 0
+    # all busy
+    assert sched.acquire("j2", {}) is None and "busy" in sched.last_reason
+    sched.release("j1")
+    # doesn't fit
+    assert sched.acquire("j3", {}, est_vram=64 * 2**30) is None
+    assert "no device fits" in sched.last_reason
+    # no CPU path allowed
+    sched0 = GpuScheduler({"gpus": []})
+    assert sched0.acquire("j4", {"allow_cpu": False}) is None
+    assert "no GPU" in sched0.last_reason
+
+
+def test_asset_list_exposes_provenance(client, tmp_path):
+    """Current-version media_json lands in the asset list response."""
+    pid = make_project(client)["id"]
+    from app.db.models import Asset, AssetFile, AssetVersion, StorageLocation, new_id, utcnow
+    app = client.app
+    with app.state.session_factory() as s:
+        loc = s.execute(__import__("sqlalchemy").select(StorageLocation)).scalars().first() \
+            or StorageLocation(id=new_id(), label="t", root_path=str(tmp_path))
+        if loc.id is None:
+            s.add(loc); s.flush()
+        s.add(AssetFile(sha256="0" * 64, storage_location_id=loc.id,
+                        rel_path="jobs/x.png", byte_size=1, status="ready"))
+        a = Asset(id=new_id(), project_id=pid, name="g.png", kind="image",
+                  origin="generation", scope="project", status="ready",
+                  uri="jobs/x.png", sha256="0" * 64, byte_size=1,
+                  provenance_json={"adapter_id": "gen.image.sdcpp"})
+        s.add(a); s.flush()
+        v = AssetVersion(id=new_id(), asset_id=a.id, version_no=1,
+                         sha256="0" * 64,
+                         media_json={"seed": 42, "runtime": {"flavor": "vulkan"}})
+        s.add(v); s.flush()
+        a.current_version_id = v.id
+        s.commit()
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    row = next(i for i in items if i["id"] == a.id)
+    assert row["media_json"]["seed"] == 42
+    assert row["media_json"]["runtime"]["flavor"] == "vulkan"
+    assert row["provenance_json"]["adapter_id"] == "gen.image.sdcpp"
+
+
+def test_runtime_benchmark_endpoint(client, tmp_path):
+    """Benchmark records land on the flavor-keyed install row."""
+    from app.db.models import RuntimeInstall, new_id, utcnow
+    app = client.app
+    with app.state.session_factory() as s:
+        s.add(RuntimeInstall(
+            id=new_id(), runtime_key="sdcpp-vulkan", version="t",
+            status="installed", install_dir=str(tmp_path),
+            exe_path=str(tmp_path / "sd-cli.exe"), meta_json={},
+            created_at=utcnow(), updated_at=utcnow()))
+        s.commit()
+    r = client.post("/api/runtimes/sdcpp/benchmark",
+                    json={"flavor": "vulkan", "median_total_ms": 7750,
+                          "runs": 5, "gpu": "G"})
+    assert r.status_code == 200, r.text
+    assert r.json()["runtime_key"] == "sdcpp-vulkan"
+    assert r.json()["benchmark"]["median_total_ms"] == 7750
+    r2 = client.post("/api/runtimes/sdcpp/benchmark",
+                     json={"flavor": "cpu", "median_total_ms": 1, "runs": 1})
+    assert r2.status_code == 404

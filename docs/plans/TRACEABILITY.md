@@ -362,3 +362,15 @@ override); multi-GPU scheduling proven only on fabricated probes — this
 machine has one GPU; all VRAM numbers are labelled estimates in the API/UI.
 Real weights + real runtime verification is Phase 2, gated on approval.
 
+
+## M3 Phase 3 — measured backend selection (2026-11-09)
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| B.2 CUDA comparison | blocked — `cudart` dep needs separate approval (563 MB) | `docs/m3-evidence/bench.json`; 6 fail-fast jobs, no assets leaked |
+| B.3 measured-over-assumed selection | `SdCppAdapter._pick_flavor`: manual → measured → installed → detected; reason in provenance | live: `"selection_reason": "fastest measured backend (median 7.8s over 5 runs)"` on default request |
+| Manual backend override (advanced UI) | Generate page Backend dropdown (installed flavors) | `docs/m3-evidence/generate-backend-selector.png` |
+| Queued-job reason | `job.message` = scheduler `last_reason` ("no device fits — needs ~X GiB…") | live 8192² job message observed |
+| Provenance in asset list | `GET /api/projects/{id}/assets` joins version `media_json` + `provenance_json` | live response + `test_asset_list_exposes_provenance` |
+| Pinned runtime release | `meta_json.resolved` = `{asset,url,size,tag,pinned,resolved_from,resolved_at}` | `sdcpp-cuda` row: tag `master-1073-991f825`, `pinned: true` |
+| Runtime-only install | `POST /api/runtimes/{key}/install` (no model weights) | CUDA flavor installed via endpoint, Vulkan preserved |

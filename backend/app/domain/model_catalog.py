@@ -69,12 +69,15 @@ class RuntimeSpec:
     version: str
     license: dict[str, Any]
     # GitHub releases resolution — queried at install time (explicit action),
-    # asset chosen by name pattern per backend flavor.
+    # asset chosen by name pattern per backend flavor. release_api is the
+    # *latest* endpoint; when release_tag is set the pinned tag endpoint is
+    # used instead so installs are reproducible (see RELEASE_CHECKLIST).
     release_api: str
-    asset_patterns: dict[str, str]  # flavor -> filename substring, e.g. "vulkan" -> "vulkan-x64"
     exe_name: str
     backends: tuple[str, ...]
     est_bytes: int
+    release_tag: str | None = None
+    asset_patterns: dict[str, str] = field(default_factory=dict)  # flavor -> filename substring
     notes: str = ""
 
 
@@ -82,7 +85,7 @@ RUNTIMES: dict[str, RuntimeSpec] = {
     "sdcpp": RuntimeSpec(
         key="sdcpp",
         display_name="stable-diffusion.cpp",
-        version="latest",
+        version="master-1073-991f825",
         license={
             "name": "MIT",
             "url": "https://github.com/leejet/stable-diffusion.cpp/blob/master/LICENSE.txt",
@@ -90,6 +93,9 @@ RUNTIMES: dict[str, RuntimeSpec] = {
             "notes": "Open-source inference engine (ggml). Vendor-agnostic via Vulkan; CUDA and CPU builds exist.",
         },
         release_api="https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest",
+        # Pinned for reproducible installs — this is the release the Vulkan
+        # and CUDA flavors were verified against on the RTX 3060 Ti.
+        release_tag="master-1073-991f825",
         asset_patterns={
             # must include the platform tag — bare "vulkan"/"cuda" would also
             # match Linux zips and the optional "cudart-" CUDA-runtime bundle.

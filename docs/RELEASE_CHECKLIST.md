@@ -193,3 +193,23 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   - CUDA-vs-Vulkan benchmark + auto backend selection pending (B.2/B.3).
 - Suite **119/119** after live-bug fixes (sd-cli rename, img_gen mode,
   --seed flag, install-row refresh, installed-flavor preference).
+
+### Milestone notes (M3 Phase 3)
+
+- **Benchmark + selection hardening →** Vulkan measured 5× warm median
+  **7.75 s** (prime 24.2 s incl. model load; OS-cache warm — no persistent
+  worker). Recorded via `POST /api/runtimes/{key}/benchmark` on the
+  flavor-keyed row. Auto-selection verified live: default request resolved
+  `vulkan` — `"fastest measured backend (median 7.8s over 5 runs)"`.
+- **CUDA comparison blocked:** `cuda12` build installs + verifies, but
+  `stable-diffusion.dll` needs `cudart64_12.dll`/`cublas64_12.dll` from the
+  separate 563 MB `cudart-sd-bin-win-cu12-x64.zip` — not downloaded,
+  awaiting separate approval per download terms.
+- **Closed-by-evidence:** queued-jobs now carry a reason message (verified
+  live: "no device fits — job needs ~360.6 GiB VRAM…"); asset list exposes
+  `media_json`+`provenance_json`; runtime releases resolve pinned tag
+  metadata (`meta_json.resolved`); Backend selector shipped in the
+  Generate page (`docs/m3-evidence/generate-backend-selector.png`).
+- **Bug caught this round:** `RuntimeOut` response model silently stripped
+  the `installs` map — the selector had no data. Fixed in schema.
+- Suite **125/125** (36 M3 + 89 carried).

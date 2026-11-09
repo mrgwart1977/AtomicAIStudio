@@ -32,6 +32,9 @@ class GpuScheduler:
         self._probe = hw_probe
         self._prefs_src = prefs or {}
         self._busy: dict[int, str] = {}  # gpu_index -> job_id
+        # Why the most recent acquire() refused — the engine surfaces this
+        # on the queued job so a stuck job always explains itself.
+        self.last_reason: str | None = None
 
     # ----------------------------------------------------------- hardware
 
@@ -84,23 +87,31 @@ class GpuScheduler:
         if device in (None, ""):
             device = "auto"
         gpus = self.gpus()
+        est_gib = f"{est_vram / 2**30:.1f} GiB" if est_vram else None
+        self.last_reason = None
 
         if isinstance(device, str) and device == "cpu":
             return -1
         if isinstance(device, int) and not isinstance(device, bool):
             g = next((x for x in gpus if x.get("index") == device), None)
             if g is None:
-                return None  # device vanished — caller explains honestly
+                self.last_reason = f"requested GPU {device} is not present"
+                return None
             if device in self._busy:
+                self.last_reason = f"requested GPU {device} is busy"
                 return None
             self._busy[device] = job_id
             return device
 
         # auto: free GPUs that plausibly fit, best usable VRAM first.
         if not gpus:
-            return -1 if request.get("allow_cpu", True) else None
+            if request.get("allow_cpu", True):
+                return -1
+            self.last_reason = "no GPU detected and this model has no CPU path"
+            return None
         free = [g for g in gpus if g.get("index") not in self._busy]
         if not free:
+            self.last_reason = "all GPU slots are busy"
             return None
         scored = []
         for g in free:
@@ -110,11 +121,16 @@ class GpuScheduler:
         # every GPU is measurable, refuse rather than risk a hard OOM.
         fits = [(u, g) for u, g in scored if est_vram is None or u >= est_vram]
         if not fits and est_vram and all(g.get("vram_bytes") for _, g in scored):
+            best = max((u for u, _ in scored), default=0) / 2**30
+            self.last_reason = (
+                f"no device fits — job needs ~{est_gib} VRAM; "
+                f"best free device offers ~{best:.1f} GiB")
             return None
         pool = fits or scored
         pool.sort(key=lambda t: t[0], reverse=True)
         idx = pool[0][1].get("index")
         if idx is None:
+            self.last_reason = "no usable GPU index found"
             return None
         self._busy[idx] = job_id
         return idx
