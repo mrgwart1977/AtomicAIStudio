@@ -599,13 +599,14 @@ def test_pinned_release_resolution():
     assert a["pinned"] is True and a["tag"] == "master-1073-991f825"
 
 
-def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_path):
+def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_path, monkeypatch):
     """Selection order: manual request > fastest measured installed >
     installed (catalog order) > probe default."""
     from app.adapters.inference import SdCppAdapter
     from app.db.models import RuntimeInstall, new_id, utcnow
-    from app.domain import model_catalog
+    from app.domain import model_catalog, model_files
     import sqlalchemy as sa
+    monkeypatch.setattr(model_files, "smoke_check_runtime", lambda *_a, **_k: (True, "ok"))
 
     app = client.app
     spec = model_catalog.get_runtime("sdcpp")
@@ -614,7 +615,7 @@ def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_pat
             s.add(RuntimeInstall(
                 id=new_id(), runtime_key=f"sdcpp-{fl}", version="t",
                 status="installed", install_dir=str(tmp_path / fl),
-                exe_path=str(tmp_path / fl / "sd-cli.exe"),
+                exe_path=str(tmp_path / fl / "sd-cli.exe"), verified=True,
                 meta_json={"benchmark": {"median_total_ms": med, "runs": 5}},
                 created_at=utcnow(), updated_at=utcnow()))
         s.commit()
@@ -712,3 +713,82 @@ def test_runtime_benchmark_endpoint(client, tmp_path):
     r2 = client.post("/api/runtimes/sdcpp/benchmark",
                      json={"flavor": "cpu", "median_total_ms": 1, "runs": 1})
     assert r2.status_code == 404
+
+
+def test_estimate_vram_realistic_scaling():
+    """512² ≈ catalog baseline; extreme jobs get large-but-sane estimates."""
+    from app.domain import compatibility, model_catalog
+    spec = model_catalog.get("sd15.fp16")
+    base = compatibility.estimate_vram(spec, 512, 512, 1)
+    assert abs(base - spec.vram_baseline_bytes) < 2**28  # within 256 MiB
+    # 8192² (ratio 256) was a deliberate stress test: sqrt scaling → ~16x act,
+    # not the 256x a linear model produced (360 GiB was absurd messaging).
+    huge = compatibility.estimate_vram(spec, 8192, 8192, 1)
+    assert base < huge < 64 * 2**30
+    assert huge > 6 * 2**30  # still honestly queued on a 6-GiB-usable card
+
+
+def test_pick_flavor_excludes_broken_installs(client, tmp_path, monkeypatch):
+    """An installed-but-broken flavor (missing DLLs) is not auto-picked and
+    produces an actionable error when manually requested."""
+    import pytest
+    from app.adapters.inference import SdCppAdapter
+    from app.db.models import RuntimeInstall, new_id, utcnow
+    from app.domain import model_catalog, model_files
+
+    def fake_smoke(exe, **_):
+        return (False, "exit 1: no output") if "cuda" in str(exe) else (True, "ok")
+    monkeypatch.setattr(model_files, "smoke_check_runtime", fake_smoke)
+
+    app = client.app
+    spec = model_catalog.get_runtime("sdcpp")
+    with app.state.session_factory() as s:
+        for fl in ("vulkan", "cuda"):
+            s.add(RuntimeInstall(
+                id=new_id(), runtime_key=f"sdcpp-{fl}", version="t",
+                status="installed", install_dir=str(tmp_path / fl),
+                exe_path=str(tmp_path / fl / "sd-cli.exe"), verified=True,
+                meta_json={}, created_at=utcnow(), updated_at=utcnow()))
+        s.commit()
+    ad = SdCppAdapter(app.state.session_factory, app.state.settings)
+    # auto: broken cuda excluded; vulkan is the only operational pick
+    fl, reason = ad._pick_flavor(None, spec)
+    assert fl == "vulkan" and "operational" in reason
+    # the failed smoke demoted the row to error with an actionable message
+    with app.state.session_factory() as s:
+        row = s.execute(__import__("sqlalchemy").select(RuntimeInstall).where(
+            RuntimeInstall.runtime_key == "sdcpp-cuda")).scalar_one()
+        assert row.status == "error" and "launch check" in row.error
+    # manual pick of the broken flavor -> actionable ModelError, not a failed job
+    with pytest.raises(model_files.ModelError, match="not operational"):
+        ad._pick_flavor("cuda", spec)
+
+
+def test_benchmark_scoped_to_recording_gpu(client, tmp_path, monkeypatch):
+    """A benchmark recorded on a different GPU must not drive selection."""
+    from app.adapters.inference import SdCppAdapter
+    from app.db.models import RuntimeInstall, new_id, utcnow
+    from app.domain import hardware, model_catalog, model_files
+    monkeypatch.setattr(model_files, "smoke_check_runtime", lambda *_a, **_k: (True, "ok"))
+    monkeypatch.setattr(hardware, "probe",
+                        lambda *a, **k: {"gpus": [{"name": "GPU-A"}], "backends": {}})
+    app = client.app
+    spec = model_catalog.get_runtime("sdcpp")
+    with app.state.session_factory() as s:
+        s.add(RuntimeInstall(id=new_id(), runtime_key="sdcpp-vulkan", version="t",
+                             status="installed", install_dir=str(tmp_path / "v"),
+                             exe_path=str(tmp_path / "v" / "sd-cli.exe"), verified=True,
+                             meta_json={"benchmark": {"median_total_ms": 9000,
+                                                      "runs": 5, "gpu": "OTHER-GPU"}},
+                             created_at=utcnow(), updated_at=utcnow()))
+        s.add(RuntimeInstall(id=new_id(), runtime_key="sdcpp-cuda", version="t",
+                             status="installed", install_dir=str(tmp_path / "c"),
+                             exe_path=str(tmp_path / "c" / "sd-cli.exe"), verified=True,
+                             meta_json={"benchmark": {"median_total_ms": 5000,
+                                                      "runs": 5, "gpu": "OTHER-GPU"}},
+                             created_at=utcnow(), updated_at=utcnow()))
+        s.commit()
+    ad = SdCppAdapter(app.state.session_factory, app.state.settings)
+    fl, reason = ad._pick_flavor(None, spec)
+    # neither benchmark applies on GPU-A -> catalog-order installed pick
+    assert fl == spec.backends[0] and "benchmark" in reason.lower()

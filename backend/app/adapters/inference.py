@@ -130,37 +130,82 @@ class SdCppAdapter:
 
     def _pick_flavor(self, requested: str | None, rt_spec) -> tuple[str, str]:
         """Backend-flavor resolution. Order (B.3 — validated state over
-        assumptions): an explicit request wins; then installed flavors
-        ranked by measured benchmark medians when recorded; then installed
-        flavors in catalog order; then probe order. Returns (flavor,
-        reason) — the reason is recorded in job provenance."""
-        if requested:
-            return requested, "manually selected backend"
+        assumptions): an explicit request wins (with an actionable error when
+        the pick isn't operational); then *operational* installed flavors
+        ranked by measured benchmark medians on THIS GPU; then operational
+        installed flavors in catalog order; then probe order. A flavor is
+        operational when its install row is installed+verified and its
+        launch smoke check passes (re-checked lazily until it does, so a
+        repaired install recovers automatically)."""
         if rt_spec is not None:
+            prefix = f"{rt_spec.key}-"
             with self._sf() as s:
                 rows = {row.runtime_key: row for row in s.execute(
-                    select(RuntimeInstall).where(RuntimeInstall.status == "installed")
+                    select(RuntimeInstall).where(RuntimeInstall.status.in_(["installed", "error"]))
                 ).scalars().all()}
-            prefix = f"{rt_spec.key}-"
-            installed = [f for f in rt_spec.backends if prefix + f in rows]
-            if not installed:
+                if requested:
+                    row = rows.get(prefix + requested)
+                    if row and row.status == "installed":
+                        ok, detail = model_files.smoke_check_runtime(row.exe_path)
+                        meta = dict(row.meta_json or {})
+                        meta["smoke"] = {"ok": ok, "detail": detail[-400:],
+                                         "checked_at": utcnow().isoformat()}
+                        row.meta_json = meta
+                        if not ok:
+                            row.status = "error"
+                            row.error = ("runtime installed but failed its launch check — "
+                                         f"missing dependencies? {detail[:160]}")
+                            s.commit()
+                    if row and row.status == "error":
+                        raise model_files.ModelError(
+                            f"runtime {prefix + requested} is installed but not operational — "
+                            f"{row.error or 'launch check failed'}")
+                operational = []
+                for f in rt_spec.backends:
+                    row = rows.get(prefix + f)
+                    if not row or row.status != "installed" or not row.verified:
+                        continue
+                    meta = dict(row.meta_json or {})
+                    smoke = meta.get("smoke") or {}
+                    if not smoke.get("ok"):
+                        ok, detail = model_files.smoke_check_runtime(row.exe_path)
+                        meta["smoke"] = {"ok": ok, "detail": detail[-400:],
+                                         "checked_at": utcnow().isoformat()}
+                        row.meta_json = meta
+                        if not ok:
+                            row.status = "error"
+                            row.error = ("runtime installed but failed its launch check — "
+                                         f"missing dependencies? {detail[:160]}")
+                            continue
+                        row.error = None
+                    operational.append((f, row))
+                s.commit()
+            if requested:
+                return requested, "manually selected backend"
+            if not operational:
                 return self._default_flavor(), \
-                    "no runtime flavor installed — defaulting to detected backend"
-            if len(installed) > 1:
+                    "no operational runtime installed — defaulting to detected backend"
+            if len(operational) > 1:
+                gpu_names = {g.get("name") for g in (hardware.probe().get("gpus") or [])}
                 measured = []
-                for f in installed:
-                    bench = ((rows[prefix + f].meta_json or {}).get("benchmark") or {})
+                for f, row in operational:
+                    bench = ((row.meta_json or {}).get("benchmark") or {})
                     med = bench.get("median_total_ms")
-                    if med:
+                    # measured data only applies to the GPU it was recorded on
+                    if med and (not bench.get("gpu") or bench.get("gpu") in gpu_names):
                         measured.append((float(med), f))
                 if measured:
                     measured.sort()
                     best = measured[0]
+                    best_bench = ((next(r for f2, r in operational if f2 == best[1]).meta_json or {})
+                                  .get("benchmark") or {})
                     return best[1], (
                         f"fastest measured backend (median {best[0] / 1000:.1f}s "
-                        f"over {int(((rows[prefix + best[1]].meta_json or {}).get('benchmark') or {}).get('runs') or 0)} runs)")
-            return installed[0], "only installed backend" if len(installed) == 1 \
+                        f"over {int(best_bench.get('runs') or 0)} runs)")
+            return operational[0][0], "only operational backend" if len(operational) == 1 \
                 else "installed backend (no benchmark data yet)"
+        if requested:
+            return requested, "manually selected backend"
         return self._default_flavor(), "detected backend"
 
     @staticmethod

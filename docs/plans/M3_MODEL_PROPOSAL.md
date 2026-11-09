@@ -257,3 +257,60 @@ dependencies require separate approval first.
 - 6 CUDA-fail jobs left `failed` rows with no assets — by design; job log
   carries "worker exited with an error" only. Surfacing worker stderr tail
   in job detail would aid diagnosis — small UX gap.
+
+# Phase 4 — CUDA comparison completed + reliability hardening (2026-11-09)
+
+## A. cudart supplement — verified + recorded
+
+`cudart-sd-bin-win-cu12-x64.zip` from release `master-1073-991f825`:
+- size **563,452,046 B** (matches release metadata), sha256
+  `fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d`
+- contents: **3 NVIDIA CUDA-12 redistributable DLLs** — `cudart64_12.dll`
+  (574 KB), `cublas64_12.dll` (114 MB), `cublasLt64_12.dll` (675 MB). No
+  other binaries, no toolkit components.
+- License: these are NVIDIA CUDA-12 runtime redistributables, distinct from
+  sd.cpp's MIT license. The CUDA Toolkit EULA permits app-local
+  redistribution of these specific runtime libraries alongside applications;
+  **bundling them in a public installer additionally requires shipping the
+  NVIDIA EULA notice — flagged, not done.** App-local install is compliant.
+- Provenance recorded on the `sdcpp-cuda` row (`meta_json.supplements`).
+
+## B. Controlled benchmark — Vulkan vs CUDA (same weights/settings)
+
+SD 1.5 fp16 GGUF, 512×512, 20 steps, euler_a, cfg 7.0, seed 42, batch 1,
+same prompt rotation; fresh `sd-cli.exe` process per job (no persistent
+loaded model — "warm" = OS file cache only). RTX 3060 Ti.
+
+| Backend | Prime | Warm median | Min–max | Peak VRAM | GPU util | Cancel |
+|---|---|---|---|---|---|---|
+| **Vulkan** | 8.8 s | **7.24 s** | 7.22–7.78 | ~4.1–4.6 GiB | 100 % | ✓ (Phase 2) |
+| **CUDA** | 9.9 s | **8.83 s** | 8.79–9.04 | ~4.2–4.9 GiB | 99–100 % | ✓ @25 %, VRAM released |
+
+**Vulkan is ~18 % faster on this machine** — CUDA is NOT universally faster,
+which is exactly why selection is measured, not assumed. Raw data:
+`docs/m3-evidence/bench2.json`. Benchmarks persisted per flavor via
+`POST /api/runtimes/sdcpp/benchmark` (GPU + runtime version + params).
+
+## C. VRAM estimate root cause — fixed
+
+The `360.6 GiB` figure came from a deliberate 8192×8192 stress job, but the
+formula itself was wrong: activation scaled **linearly with pixel count**
+(256× → 384 GiB). sd.cpp streams VAE decode in tiles and reuses UNet
+activations, so growth is sub-linear. Changed to `sqrt(px_ratio)`:
+512²=3.6 GiB, 1024²=5.0, 2048²=7.8, 8192²=24.6 GiB — realistic and still
+honestly queued on a 6-GiB-usable card. Regression test added
+(`test_estimate_vram_realistic_scaling`).
+
+## D. Backend reliability hardening
+
+- `smoke_check_runtime`: runs `sd-cli --help` at install finalize + lazily
+  at selection — a missing-DLL build exits silently, which now demotes the
+  row to `status=error` with an actionable message instead of failing jobs.
+- Auto-selection considers only **installed + verified + smoke-passing**
+  flavors; negative smoke re-checks lazily so a repaired runtime recovers.
+- Manual pick of a broken flavor → immediate `ModelError` naming the cause
+  ("installed but not operational — missing dependencies?"), not a job.
+- Benchmarks record GPU + runtime version + params; measured data only
+  counts when it was recorded on a GPU present now.
+- Verified live: default request → vulkan `"fastest measured backend
+  (median 7.8s over 5 runs)"`; manual `runtime_flavor:"cuda"` → succeeded.

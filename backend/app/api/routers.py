@@ -319,6 +319,7 @@ def record_benchmark(runtime_key: str, body: RuntimeBenchmarkRequest,
         "median_total_ms": body.median_total_ms,
         "runs": body.runs,
         "gpu": body.gpu,
+        "runtime_version": row.version,
         "params": body.params or {},
         "measured_at": utcnow().isoformat(),
     }

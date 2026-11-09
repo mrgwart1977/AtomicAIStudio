@@ -374,3 +374,14 @@ Real weights + real runtime verification is Phase 2, gated on approval.
 | Provenance in asset list | `GET /api/projects/{id}/assets` joins version `media_json` + `provenance_json` | live response + `test_asset_list_exposes_provenance` |
 | Pinned runtime release | `meta_json.resolved` = `{asset,url,size,tag,pinned,resolved_from,resolved_at}` | `sdcpp-cuda` row: tag `master-1073-991f825`, `pinned: true` |
 | Runtime-only install | `POST /api/runtimes/{key}/install` (no model weights) | CUDA flavor installed via endpoint, Vulkan preserved |
+
+## M3 Phase 4 — CUDA comparison + hardening (2026-11-09, final)
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| B.2 controlled CUDA-vs-Vulkan benchmark | identical params both backends, 5 warm runs + prime, VRAM/util via nvidia-smi | `docs/m3-evidence/bench2.json`: Vulkan 7.24s median vs CUDA 8.83s |
+| cudart dependency (approved) | app-local extract into `sdcpp-cuda/`; provenance in `meta_json.supplements` | sha256 `fe203668…0f38d`; `sd-cli --help` OK |
+| B.3 measured auto-selection | `_pick_flavor`: manual > operational+measured(this GPU) > operational > detected | live: `"fastest measured backend (median 7.8s over 5 runs)"` → vulkan; manual cuda → succeeded |
+| Only-verified-backends eligible | `smoke_check_runtime` at install + lazy; status→`error` + actionable message | `test_pick_flavor_excludes_broken_installs` |
+| Realistic VRAM estimates | `sqrt(px_ratio)` activation scaling | `test_estimate_vram_realistic_scaling`; 8192²→24.6 GiB |
+| Benchmark scope | `benchmark.{gpu,runtime_version,params}`; GPU-name match required | `test_benchmark_scoped_to_recording_gpu` |

@@ -337,6 +337,22 @@ def resolve_release_asset(spec: RuntimeSpec, flavor: str, *,
     raise ModelError(f"no Windows '{flavor}' asset found in {spec.key} release")
 
 
+def smoke_check_runtime(exe_path: str | Path, timeout: int = 20) -> tuple[bool, str]:
+    """Launch the runtime CLI with --help: ok = exits 0 with output.
+    Catches installed-but-broken runtimes (e.g. the CUDA build missing
+    cudart64_12.dll exits instantly, silently)."""
+    import subprocess
+    try:
+        r = subprocess.run([str(exe_path), "--help"], capture_output=True,
+                           text=True, timeout=timeout)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and out.strip():
+            return True, out.strip()[:200]
+        return False, f"exit {r.returncode}: {out.strip()[:200] or 'no output'}"
+    except Exception as exc:  # timeout, OSError (missing loader deps)
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def install_runtime_zip(session: Session, settings, spec: RuntimeSpec, flavor: str,
                         asset: dict, *, progress=None, cancel_check=None) -> RuntimeInstall:
     """Download + extract a runtime zip into runtimes/<key>-<flavor>/."""
@@ -378,13 +394,22 @@ def install_runtime_zip(session: Session, settings, spec: RuntimeSpec, flavor: s
                 with zf.open(n) as src, open(out, "wb") as dst:
                     shutil.copyfileobj(src, dst, length=_CHUNK)
         tmp_zip.unlink(missing_ok=True)
-        row.status = "installed"
         row.byte_size = res["bytes"]
         row.verified = True
-        row.error = None
         meta = dict(row.meta_json or {})
         meta.setdefault("resolved", {})["zip_sha256"] = res.get("sha256")
         row.meta_json = meta
+        ok, detail = smoke_check_runtime(row.exe_path)
+        meta["smoke"] = {"ok": ok, "detail": detail[-400:],
+                         "checked_at": utcnow().isoformat()}
+        row.meta_json = meta
+        if ok:
+            row.status = "installed"
+            row.error = None
+        else:
+            row.status = "error"
+            row.error = ("runtime installed but failed its launch check — "
+                         f"missing dependencies? {detail[:160]}")
     except Exception as exc:
         row.status = "failed"
         row.error = str(exc)

@@ -212,4 +212,21 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   Generate page (`docs/m3-evidence/generate-backend-selector.png`).
 - **Bug caught this round:** `RuntimeOut` response model silently stripped
   the `installs` map — the selector had no data. Fixed in schema.
-- Suite **125/125** (36 M3 + 89 carried).
+- Suite **128/128** (39 M3 + 89 carried).
+
+### Milestone notes (M3 Phase 4)
+
+- **CUDA comparison done:** `cudart-sd-bin-win-cu12-x64.zip` (563,452,046 B,
+  sha256 `fe203668…0f38d`, 3 NVIDIA CUDA-12 runtime DLLs) installed
+  app-local after approval. Benchmark: **Vulkan 7.24 s median vs CUDA
+  8.83 s** — Vulkan ~18 % faster on the RTX 3060 Ti; CUDA cancel verified.
+  NVIDIA EULA: app-local use compliant; bundling in a public installer
+  needs the EULA notice — deferred.
+- **VRAM estimate fixed:** linear pixel scaling produced an absurd 360 GiB
+  on a stress job → `sqrt(px_ratio)` heuristic + regression test.
+- **Reliability:** runtime smoke check (`sd-cli --help`) at install + lazy
+  at pick; broken installs demoted to `error` with actionable message;
+  manual pick of a broken flavor errors immediately; benchmarks are
+  GPU-scoped + record runtime version.
+- **New tracked gap:** no persistent loaded-model worker (each job pays
+  model load); surfacing worker stderr tail in job detail is a UX gap.

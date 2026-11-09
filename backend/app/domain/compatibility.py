@@ -66,15 +66,17 @@ def estimate_vram(spec: ModelSpec, width: int = 512, height: int = 512,
                   batch: int = 1) -> int | None:
     """Estimated peak VRAM for one generation — ESTIMATE, not a guarantee.
 
-    Model: resident weights (catalog anchor) + activation that scales with
-    pixel count relative to each model's native baseline. Batch scales
-    activation further (weights load once)."""
+    Model: resident weights (catalog anchor) + activation that scales
+    sub-linearly with pixel count relative to each model's native baseline —
+    sd.cpp streams VAE decode in tiles and most UNet activations are
+    reused, so sqrt(px_ratio) is a conservative-but-realistic heuristic.
+    Batch scales activation further (weights load once)."""
     if not spec.vram_baseline_bytes or not spec.vram_weight_bytes:
         return None
     native_px = 1024 * 1024 if spec.family == "sdxl" else 512 * 512
     act_base = spec.vram_baseline_bytes - spec.vram_weight_bytes
     px_ratio = (width * height) / native_px
-    act = act_base * px_ratio * max(1, batch)
+    act = act_base * (px_ratio ** 0.5) * max(1, batch)
     return int(spec.vram_weight_bytes + act)
 
 
