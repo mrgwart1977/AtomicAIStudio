@@ -43,6 +43,7 @@ class Project(Base):
     storage_location_id: Mapped[str | None] = mapped_column(
         ForeignKey("storage_locations.id", ondelete="SET NULL"), nullable=True
     )
+    backup_dir: Mapped[str | None] = mapped_column(Text, nullable=True)  # M1.1 project override
     settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -126,6 +127,8 @@ class GenerationJob(Base):
     command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # non-asset op outputs
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # bytes/ETA detail
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -294,10 +297,12 @@ class BackupRun(Base):
     )
     project_name: Mapped[str] = mapped_column(String(200), default="")  # survives project deletion
     kind: Mapped[str] = mapped_column(String(20))  # backup | export | import | restore
-    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # running | succeeded | failed
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # running | succeeded | failed | cancelled
     package_path: Mapped[str] = mapped_column(Text, default="")  # absolute path of .atomicpkg
     package_sha256: Mapped[str] = mapped_column(String(64), default="")
     byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    destination_dir: Mapped[str] = mapped_column(Text, default="")  # dir the package was written to
+    bytes_total: Mapped[int] = mapped_column(Integer, default=0)  # expected payload size
     stats_json: Mapped[dict] = mapped_column(JSON, default=dict)  # entity/file counts, verified hashes
     job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -328,6 +333,17 @@ class RenderCacheEntry(Base):
     asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (UniqueConstraint("project_id", "cache_key", name="uq_cache_project_key"),)
+
+
+class AppSetting(Base):
+    """Durable app-level key/value settings (backup default dir, etc.).
+    Not project-scoped — survives restarts and migrations."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class AuditEvent(Base):

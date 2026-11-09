@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -52,6 +54,54 @@ ENTITY_TABLES = {
 
 class PackageError(Exception):
     """Raised for invalid/corrupt/incomplete packages."""
+
+
+class ProgressReporter:
+    """Byte-level progress for a streaming file operation.
+
+    The adapter calls `tick(n)` after every chunk; the reporter emits a
+    throttled detail dict (bytes_done, bytes_total, current_file,
+    rate_bps, eta_seconds, elapsed_seconds) at most every `interval`
+    seconds — plus a final forced emit at 100%. ETA is only reported
+    once enough bytes have flowed to make the rate meaningful."""
+
+    def __init__(self, total_bytes: int, cb: Callable[[dict], None] | None = None,
+                 interval: float = 0.25):
+        self.total = max(int(total_bytes), 1)
+        self.done = 0
+        self.current_file = ""
+        self._cb = cb
+        self._interval = interval
+        self._start = time.monotonic()
+        self._last_emit = 0.0
+
+    def set_file(self, name: str) -> None:
+        self.current_file = name
+
+    def snapshot(self) -> dict:
+        """Current progress detail — safe to call from any thread."""
+        elapsed = max(time.monotonic() - self._start, 1e-6)
+        rate = self.done / elapsed
+        remaining = max(self.total - self.done, 0)
+        eta = remaining / rate if (rate > 0 and self.done > 1_000_000) else None
+        return {
+            "bytes_done": self.done,
+            "bytes_total": self.total,
+            "current_file": self.current_file,
+            "rate_bps": round(rate),
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+            "elapsed_seconds": round(elapsed, 1),
+        }
+
+    def tick(self, n: int = 0, *, force: bool = False) -> None:
+        self.done += n
+        if self._cb is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_emit < self._interval:
+            return
+        self._last_emit = now
+        self._cb(self.snapshot())
 
 
 # ---------- serialization ----------
@@ -115,9 +165,12 @@ def project_manifest(session: Session, project) -> tuple[dict, list[AssetFile]]:
 def export_package(
     session_factory, project_id: str, dest: Path, storage,
     progress: Callable[[float, str], None] | None = None,
+    cancel_check: Callable[[], None] | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> tuple[dict, str, int]:
     """Stream a .atomicpkg to `dest` atomically (tmp → replace).
-    Returns (manifest, package_sha256, byte_size)."""
+    Returns (manifest, package_sha256, byte_size).
+    cancel_check() is invoked between chunks — raising aborts cleanly."""
     with session_factory() as session:
         project = session.get(Project, project_id)
         manifest, files = project_manifest(session, project)
@@ -143,15 +196,29 @@ def export_package(
             with zipfile.ZipFile(_Tee(), "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 zf.writestr("manifest.json", json.dumps(manifest, indent=1, default=str))
                 for af in files:
+                    if cancel_check:
+                        cancel_check()
                     src = file_paths[af.sha256]
                     if progress:
                         progress(done / total, f"Packing {af.sha256[:8]}…")
+                    if reporter:
+                        reporter.set_file(af.sha256[:12])
                     with zf.open(f"files/{af.sha256}", "w") as out, open(src, "rb") as srcf:
                         for chunk in iter_chunks(srcf):
+                            if cancel_check:
+                                cancel_check()
                             out.write(chunk)
                             done += len(chunk)
+                            if reporter:
+                                reporter.tick(len(chunk))
             raw.flush()
+            try:
+                os.fsync(raw.fileno())
+            except OSError:
+                pass
         tmp.replace(dest)
+        if reporter:
+            reporter.tick(0, force=True)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -193,9 +260,13 @@ def import_package(
     project_id_override: str | None = None,
     name_suffix: str = "",
     progress: Callable[[float, str], None] | None = None,
+    cancel_check: Callable[[], None] | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> dict:
     """Import a package into a NEW project (or into `project_id_override`
-    for restore). Returns stats + new project id."""
+    for restore). Returns stats + new project id.
+    cancel_check() between chunks — a cancel leaves the staging dir
+    removed and no partial project committed."""
     manifest = read_manifest(pkg)
     files_meta = {f["sha256"]: f for f in manifest.get("files", [])}
 
@@ -213,17 +284,25 @@ def import_package(
                 if ".." in Path(entry).parts or Path(entry).is_absolute():
                     raise PackageError(f"unsafe archive member: {entry}")
             for sha, meta in files_meta.items():
+                if cancel_check:
+                    cancel_check()
                 arc = meta["arcname"]
                 if arc not in names:
                     raise PackageError(f"package is missing blob {sha[:8]}")
                 out_path = staging / sha
                 h = hashlib.sha256()
                 size = 0
+                if reporter:
+                    reporter.set_file(sha[:12])
                 with zf.open(arc) as src, open(out_path, "wb") as out:
                     for chunk in iter_chunks(src):
+                        if cancel_check:
+                            cancel_check()
                         h.update(chunk)
                         size += len(chunk)
                         out.write(chunk)
+                        if reporter:
+                            reporter.tick(len(chunk))
                 if h.hexdigest() != sha:
                     raise PackageError(f"hash mismatch on blob {sha[:8]} (corrupt package)")
                 extracted[sha] = out_path
@@ -320,6 +399,8 @@ def import_package(
                 session.flush()
                 if cur and cur in version_id_map:
                     session.get(Asset, a["id"]).current_version_id = version_id_map[cur]
+            if cancel_check:
+                cancel_check()
             session.commit()
             stats = {
                 "project_id": new_project.id,
@@ -334,9 +415,25 @@ def import_package(
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def sweep_staging(base: Path) -> int:
-    """Remove *.staging / *.partial leftovers under `base` (crash recovery)."""
+def _sweep_dir(base: Path) -> int:
+    """Remove *.staging / *.partial leftovers directly inside `base`."""
     removed = 0
+    for pattern in ("*.staging", "*.partial"):
+        for p in base.glob(pattern):
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def sweep_staging(base: Path) -> int:
+    """Remove *.staging / *.partial leftovers anywhere under `base`."""
+    removed = _sweep_dir(base)
     for pattern in ("*.staging", "*.partial"):
         for p in base.rglob(pattern):
             try:
@@ -347,4 +444,28 @@ def sweep_staging(base: Path) -> int:
                 removed += 1
             except OSError:
                 pass
+    return removed
+
+
+def sweep_backup_destinations(session, settings) -> int:
+    """Crash-recovery sweep over every directory a backup op could have
+    left temp artifacts in: the built-in dir, the app-default override,
+    every per-project override, and the data dir. Never touches files
+    that don't match the *.staging / *.partial patterns."""
+    from app.domain.backup_dest import _app_default
+    dirs: set[Path] = {Path(settings.backups_dir), Path(settings.data_dir)}
+    app_dir = _app_default(session)
+    if app_dir:
+        dirs.add(Path(app_dir))
+    for (bd,) in session.execute(
+        select(Project.backup_dir).where(Project.backup_dir.is_not(None))
+    ).all():
+        dirs.add(Path(bd))
+    removed = 0
+    for d in dirs:
+        try:
+            if d.is_dir():
+                removed += _sweep_dir(d)
+        except OSError:
+            continue
     return removed

@@ -55,6 +55,8 @@ export default function App() {
               message: String(e.payload.message ?? ""),
               error: (e.payload.error as string | null) ?? null,
               output_asset_id: (e.payload.output_asset_id as string | null) ?? null,
+              progress_json: (e.payload.progress_json as Job["progress_json"]) ?? null,
+              cancel_requested: Boolean(e.payload.cancel_requested ?? false),
             });
             if (e.payload.status === "succeeded") void st.refreshProjectData();
           }

@@ -19,6 +19,7 @@ export interface Project {
   fps_den: number;
   style: string;
   storage_location_id: string | null;
+  backup_dir: string | null;
   revision: number;
   settings_json: Record<string, unknown>;
   created_at: string;
@@ -66,8 +67,19 @@ export interface Job {
   output_asset_id: string | null;
   command_id: string | null;
   result_json?: Record<string, unknown> | null;
+  progress_json?: JobProgressDetail | null;
+  cancel_requested?: boolean;
   created_at: string;
   completed_at: string | null;
+}
+
+export interface JobProgressDetail {
+  bytes_done: number;
+  bytes_total: number;
+  current_file: string;
+  rate_bps: number;
+  eta_seconds: number | null;
+  elapsed_seconds: number;
 }
 
 export interface Asset {
@@ -134,11 +146,29 @@ export interface BackupRun {
   package_path: string;
   package_sha256: string;
   byte_size: number;
+  destination_dir: string;
+  bytes_total: number;
   stats_json: Record<string, unknown>;
   job_id: string | null;
   error: string | null;
   created_at: string;
   completed_at: string | null;
+}
+
+export interface BackupDestination {
+  dir: string;
+  source: string;
+  app_default_dir: string;
+  builtin_dir: string;
+  project_override: string;
+  estimated_bytes: number;
+  path: string;
+  exists: boolean;
+  writable: boolean;
+  free_bytes: number;
+  needed_bytes: number;
+  errors: string[];
+  warnings: string[];
 }
 
 export interface PackagePreview {
