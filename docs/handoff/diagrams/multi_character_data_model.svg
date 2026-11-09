@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="850" viewBox="0 0 1500 850">
+<defs><style>.bg{fill:#101722}.box{fill:#202b3b;stroke:#7ca8d8;stroke-width:2;rx:16}.t{font:bold 25px Arial;fill:#f4f6fb}.h{font:bold 19px Arial;fill:#f4f6fb}.p{font:16px Arial;fill:#d8deea}.line{stroke:#a8bdd7;stroke-width:3;fill:none;marker-end:url(#m)}</style><marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 L0 6 L9 3z" fill="#a8bdd7"/></marker></defs>
+<rect width="1500" height="850" class="bg"/><text x="750" y="55" text-anchor="middle" class="t">Multi-character data model — many characters per scene and shot</text>
+<rect x="80" y="110" width="300" height="100" class="box"/><text x="230" y="150" text-anchor="middle" class="h">PROJECT</text><text x="230" y="182" text-anchor="middle" class="p">project_id • name</text>
+<rect x="600" y="110" width="300" height="100" class="box"/><text x="750" y="150" text-anchor="middle" class="h">CHARACTER</text><text x="750" y="182" text-anchor="middle" class="p">character_id • project_id</text>
+<path d="M380 160 H600" class="line"/>
+<rect x="1120" y="110" width="300" height="100" class="box"/><text x="1270" y="150" text-anchor="middle" class="h">CHARACTER PROFILE</text><text x="1270" y="182" text-anchor="middle" class="p">Refs • Wardrobes • Voice • LoRAs</text>
+<path d="M900 160 H1120" class="line"/>
+<rect x="80" y="340" width="300" height="100" class="box"/><text x="230" y="380" text-anchor="middle" class="h">SCENE</text><text x="230" y="412" text-anchor="middle" class="p">scene_id • episode_id</text>
+<rect x="600" y="340" width="300" height="100" class="box"/><text x="750" y="380" text-anchor="middle" class="h">SCENE_CHARACTER</text><text x="750" y="412" text-anchor="middle" class="p">scene_id • character_id</text>
+<path d="M380 390 H600" class="line"/><path d="M750 210 V340" class="line"/>
+<rect x="1120" y="340" width="300" height="100" class="box"/><text x="1270" y="380" text-anchor="middle" class="h">SHOT</text><text x="1270" y="412" text-anchor="middle" class="p">shot_id • scene_id</text>
+<path d="M900 390 H1120" class="line"/>
+<rect x="600" y="585" width="300" height="120" class="box"/><text x="750" y="625" text-anchor="middle" class="h">SHOT_CHARACTER</text><text x="750" y="660" text-anchor="middle" class="p">shot_id • character_id</text><text x="750" y="686" text-anchor="middle" class="p">wardrobe • pose • voice • LoRA</text>
+<path d="M750 440 V585" class="line"/><path d="M1270 440 V520 H900 V645" class="line"/>
+<text x="230" y="535" text-anchor="middle" class="p">A scene may contain A, B, C, D…</text>
+<text x="1270" y="535" text-anchor="middle" class="p">A shot may contain A + B + C…</text>
+<text x="750" y="780" text-anchor="middle" class="p">Join entities preserve independent per-character settings and prevent identity / voice / wardrobe mix-ups.</text>
+</svg>

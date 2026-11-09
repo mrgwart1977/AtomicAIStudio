@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="920" viewBox="0 0 1500 920">
+<defs><style>
+.t{font: bold 30px Arial;fill:#f4f6fb}.h{font:bold 21px Arial;fill:#f4f6fb}.p{font:16px Arial;fill:#d8deea}
+.box{fill:#202b3b;stroke:#6b85a8;stroke-width:2;rx:18}.accent{fill:#263b52;stroke:#7ca8d8;stroke-width:2;rx:18}
+.line{stroke:#9bb2cf;stroke-width:3;fill:none;marker-end:url(#a)}
+</style><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#9bb2cf"/></marker></defs>
+<rect width="1500" height="920" fill="#101722"/>
+<text x="750" y="55" text-anchor="middle" class="t">Atomic AI Studio — Application Architecture</text>
+<rect x="70" y="100" width="1360" height="115" class="accent"/>
+<text x="750" y="140" text-anchor="middle" class="h">Windows Desktop Application — Tauri 2 + React + TypeScript</text>
+<text x="750" y="177" text-anchor="middle" class="p">Dashboard • Projects • Character Library • Storyboard • Scene Designer • Image / Video / Audio Studios • Editor</text>
+<path d="M750 215 V270" class="line"/>
+<rect x="70" y="275" width="1360" height="120" class="box"/>
+<text x="750" y="315" text-anchor="middle" class="h">Python Backend — FastAPI + Pydantic</text>
+<text x="750" y="350" text-anchor="middle" class="p">Project services • Character / scene / shot APIs • Orchestration • Job queue • WebSocket events • Security</text>
+<path d="M750 395 V450" class="line"/>
+<rect x="70" y="455" width="420" height="180" class="box"/>
+<text x="280" y="495" text-anchor="middle" class="h">Project Database</text>
+<text x="280" y="535" text-anchor="middle" class="p">SQLite + SQLAlchemy + Alembic</text>
+<text x="280" y="570" text-anchor="middle" class="p">Projects • Characters • Scenes • Shots</text>
+<text x="280" y="600" text-anchor="middle" class="p">SceneCharacter / ShotCharacter</text>
+<rect x="540" y="455" width="420" height="180" class="box"/>
+<text x="750" y="495" text-anchor="middle" class="h">AI Runtime + GPU Scheduler</text>
+<text x="750" y="535" text-anchor="middle" class="p">Provider adapters • Model registry</text>
+<text x="750" y="570" text-anchor="middle" class="p">Image / Video / Audio / LoRA workers</text>
+<text x="750" y="600" text-anchor="middle" class="p">VRAM management • Persistent jobs</text>
+<rect x="1010" y="455" width="420" height="180" class="box"/>
+<text x="1220" y="495" text-anchor="middle" class="h">Media Engine</text>
+<text x="1220" y="535" text-anchor="middle" class="p">FFmpeg / FFprobe • Proxies</text>
+<text x="1220" y="570" text-anchor="middle" class="p">Audio mixing • Transcoding</text>
+<text x="1220" y="600" text-anchor="middle" class="p">Timeline render • Export</text>
+<path d="M750 635 V690" class="line"/>
+<rect x="70" y="695" width="1360" height="150" class="accent"/>
+<text x="750" y="738" text-anchor="middle" class="h">Local Storage + Optional Authorized Cloud Providers</text>
+<text x="750" y="777" text-anchor="middle" class="p">Projects / Assets / Character references / LoRA versions / Generated media / Cache / Backups</text>
+<text x="750" y="810" text-anchor="middle" class="p">Local models: image, video, audio, training • Cloud: approved APIs with explicit cost and consent controls</text>
+</svg>
