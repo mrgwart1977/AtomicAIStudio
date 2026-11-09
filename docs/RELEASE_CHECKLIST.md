@@ -230,3 +230,11 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   GPU-scoped + record runtime version.
 - **New tracked gap:** no persistent loaded-model worker (each job pays
   model load); surfacing worker stderr tail in job detail is a UX gap.
+
+### Pre-merge state (M3 final)
+
+- All M3 deliverables verified on the packaged build; suite **128/128**.
+- Tracked ahead: #22 CUDA-redistribution release blocker, #23 M4.1
+  persistent workers (docs/plans/M4_1_PERSISTENT_WORKERS.md), #24 worker
+  stderr in job detail, #25 multi-GPU hardware validation, #26 VRAM
+  calibration, #27 catalog expansion; plus pre-existing #5-#11, #14, #15.
