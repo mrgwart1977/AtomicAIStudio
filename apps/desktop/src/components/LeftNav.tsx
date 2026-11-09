@@ -18,7 +18,7 @@ const NAV: NavItem[] = [
   { id: "projects", label: "Projects", page: "projects" },
   { id: "cast", label: "Cast", tab: "cast" },
   { id: "worlds", label: "Worlds", tab: "worlds" },
-  { id: "storyboard", label: "Storyboard", milestone: "M2" },
+  { id: "storyboard", label: "Storyboard", tab: "storyboard" },
   { id: "scene", label: "Scene Builder", milestone: "M5" },
   { id: "image", label: "Image Studio", milestone: "M3" },
   { id: "video", label: "Video Studio", milestone: "M4" },

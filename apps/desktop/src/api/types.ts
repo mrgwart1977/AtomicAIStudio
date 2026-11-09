@@ -127,6 +127,88 @@ export interface EntityRevision {
   created_at: string;
 }
 
+// ---------- storyboard (M2) ----------
+
+export interface CastMember {
+  id: string;
+  character_id: string;
+  position: number;
+  character: { id: string; name: string; status: string };
+  role?: string | null;
+  notes_json?: Record<string, unknown> | null;
+  wardrobe_variant?: string | null;
+  blocking?: string | null;
+  expression?: string | null;
+  emotion?: string | null;
+  action_instructions?: string | null;
+  dialogue?: string | null;
+  voice_override?: string | null;
+  model_ref?: string | null;
+  lora_json?: unknown[] | null;
+  continuity_json?: Record<string, unknown> | null;
+}
+
+export interface Shot {
+  id: string;
+  project_id: string;
+  scene_id: string;
+  title: string;
+  description: string;
+  intent: string;
+  prompt: string;
+  shot_type: string;
+  duration_sec: number;
+  position: number;
+  status: string;
+  location_id: string | null;
+  thumbnail_asset_id: string | null;
+  continuity_json: Record<string, unknown>;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryboardShot {
+  shot: Shot;
+  location_name: string;
+  cast: CastMember[];
+}
+
+export interface Scene {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string;
+  intent: string;
+  position: number;
+  status: string;
+  world_id: string | null;
+  location_id: string | null;
+  continuity_json: Record<string, unknown>;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryboardScene {
+  scene: Scene;
+  location_name: string;
+  cast: CastMember[];
+  shots: StoryboardShot[];
+}
+
+export interface EntityAssetLink {
+  id: string;
+  project_id: string;
+  entity_type: string;
+  entity_id: string;
+  asset_id: string;
+  role: string;
+  label: string;
+  position: number;
+  created_at: string;
+}
+
 export interface StorageLocation {
   id: string;
   label: string;

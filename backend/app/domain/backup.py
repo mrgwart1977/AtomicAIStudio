@@ -35,20 +35,35 @@ from app.db.models import (
     AssetFile,
     AssetVersion,
     Character,
+    EntityAssetLink,
     Location,
     Project,
     PromptDraft,
+    Scene,
+    SceneCharacter,
+    Shot,
+    ShotCharacter,
     World,
     new_id,
     utcnow,
 )
 from app.domain.storage import iter_chunks
 
-FORMAT_VERSION = 1
+# v2 adds scenes/shots/cast/entity-asset sections. v1 packages still import —
+# missing sections restore as empty.
+FORMAT_VERSION = 2
+# Iteration order is the restore order — dependencies come first
+# (assets are restored separately BEFORE this loop because
+# shots.thumbnail_asset_id and entity_assets.asset_id point at them).
 ENTITY_TABLES = {
     "characters": Character,
     "worlds": World,
     "locations": Location,
+    "scenes": Scene,
+    "scene_characters": SceneCharacter,
+    "shots": Shot,
+    "shot_characters": ShotCharacter,
+    "entity_assets": EntityAssetLink,
 }
 
 
@@ -237,7 +252,8 @@ def read_manifest(pkg: Path) -> dict:
         raise PackageError("not a zip package") from None
     except (KeyError, json.JSONDecodeError):
         raise PackageError("corrupt manifest.json") from None
-    if data.get("format_version") != FORMAT_VERSION:
+    fv = data.get("format_version")
+    if not isinstance(fv, int) or fv < 1 or fv > FORMAT_VERSION:
         raise PackageError(f"unsupported format_version {data.get('format_version')}")
     if not data.get("project"):
         raise PackageError("manifest has no project section")
@@ -347,26 +363,9 @@ def import_package(
                 session.add(new_project)
             session.flush()
 
-            # Entity rows — remap every id, then rewrite embedded refs.
-            for key, model in ENTITY_TABLES.items():
-                for row in manifest["entities"].get(key, []):
-                    row = dict(row)
-                    old_id = row.pop("id")
-                    row["id"] = map_id(old_id)
-                    row["project_id"] = new_project.id
-                    for col in ("created_at", "updated_at"):
-                        row.pop(col, None)
-                    row = _remap_ids(row, id_map)
-                    session.add(model(**row))
-
-            if manifest.get("prompt_draft") and not project_id_override:
-                d = dict(manifest["prompt_draft"])
-                session.add(PromptDraft(
-                    id=new_id(), project_id=new_project.id,
-                    text=d.get("text", ""), scope=d.get("scope", "this_take"),
-                ))
-
-            # Files → CAS (dedupe: existing shas are reused without copy).
+            # Files → CAS FIRST (dedupe: existing shas are reused without
+            # copy), then asset rows/versions — entity tables restored later
+            # reference them (shots.thumbnail_asset_id, entity_assets).
             default_loc = storage.get_location(session, None)
             asset_id_map: dict[str, str] = {}
             version_id_map: dict[str, str] = {}
@@ -399,6 +398,29 @@ def import_package(
                 session.flush()
                 if cur and cur in version_id_map:
                     session.get(Asset, a["id"]).current_version_id = version_id_map[cur]
+
+            # Entity rows — remap every id, then rewrite embedded refs.
+            # ENTITY_TABLES order is FK-dependency order; flush per table
+            # so parents exist before children insert.
+            for key, model in ENTITY_TABLES.items():
+                for row in manifest["entities"].get(key, []):
+                    row = dict(row)
+                    old_id = row.pop("id")
+                    row["id"] = map_id(old_id)
+                    row["project_id"] = new_project.id
+                    for col in ("created_at", "updated_at"):
+                        row.pop(col, None)
+                    row = _remap_ids(row, id_map)
+                    session.add(model(**row))
+                session.flush()
+
+            if manifest.get("prompt_draft") and not project_id_override:
+                d = dict(manifest["prompt_draft"])
+                session.add(PromptDraft(
+                    id=new_id(), project_id=new_project.id,
+                    text=d.get("text", ""), scope=d.get("scope", "this_take"),
+                ))
+
             if cancel_check:
                 cancel_check()
             session.commit()
@@ -407,6 +429,8 @@ def import_package(
                 "characters": len(manifest["entities"].get("characters", [])),
                 "worlds": len(manifest["entities"].get("worlds", [])),
                 "locations": len(manifest["entities"].get("locations", [])),
+                "scenes": len(manifest["entities"].get("scenes", [])),
+                "shots": len(manifest["entities"].get("shots", [])),
                 "assets": len(manifest.get("assets", [])),
                 "files_verified": len(extracted),
             }

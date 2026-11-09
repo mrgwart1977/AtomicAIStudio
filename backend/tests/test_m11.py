@@ -409,7 +409,7 @@ def test_corrupt_package_rejected_before_commit(client, tmp_path):
 
 def test_format_v1_compat_roundtrip(client, tmp_path):
     """A package produced by the v1 exporter still imports — forward
-    compatibility for pre-M1.1 backups."""
+    compatibility for pre-M2 backups (M2 writes format v2)."""
     src = make_project(client, "CompatSrc")
     media = tmp_path / "v1.bin"
     media.write_bytes(b"\x55" * 512 * 1024)
@@ -418,12 +418,28 @@ def test_format_v1_compat_roundtrip(client, tmp_path):
     pkg = Path(wait_for_job(client, src["id"], res["job_id"])["result_json"]["package_path"])
     with zipfile.ZipFile(pkg) as zf:
         manifest = json.loads(zf.read("manifest.json"))
-    assert manifest["format_version"] == 1
+    assert manifest["format_version"] == 2
 
-    r = client.post("/api/packages/import", json={"package_path": str(pkg)})
+    # Synthesize a true v1 manifest: drop the M2 entity sections and stamp
+    # version 1 — exactly what an M1.1 exporter produced.
+    v1 = tmp_path / "v1-pkg.atomicpkg"
+    manifest["format_version"] = 1
+    manifest["entities"] = {
+        k: v for k, v in manifest["entities"].items()
+        if k in ("characters", "worlds", "locations")
+    }
+    with zipfile.ZipFile(pkg) as zin, zipfile.ZipFile(v1, "w", zipfile.ZIP_DEFLATED) as zout:
+        zout.writestr("manifest.json", json.dumps(manifest))
+        for n in zin.namelist():
+            if n.startswith("files/"):
+                zout.writestr(n, zin.read(n))
+
+    r = client.post("/api/packages/import", json={"package_path": str(v1)})
     assert r.status_code == 200
     job = wait_for_job(client, r.json()["project_id"], r.json()["job_id"])
     assert job["status"] == "succeeded", job
+    restored = client.get(f"/api/projects/{job['result_json']['project_id']}").json()
+    assert restored["name"].startswith("CompatSrc")
 
 
 # ---------- restore still creates new project ----------

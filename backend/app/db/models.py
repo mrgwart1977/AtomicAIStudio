@@ -286,6 +286,119 @@ class EntityRevision(Base):
     __table_args__ = (UniqueConstraint("entity_type", "entity_id", "revision", name="uq_entity_rev"),)
 
 
+class Scene(Base):
+    """Ordered scene within a project. position is a dense int per project;
+    reorder renumbers. Version history rides entity_revisions (entity_type
+    'scene'); snapshots also embed the scene cast so revert restores it."""
+
+    __tablename__ = "scenes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    intent: Mapped[str] = mapped_column(Text, default="")  # cinematic intent
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
+    world_id: Mapped[str | None] = mapped_column(ForeignKey("worlds.id", ondelete="SET NULL"), nullable=True)
+    location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id", ondelete="SET NULL"), nullable=True)
+    continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)  # structured continuity metadata
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SceneCharacter(Base):
+    """Scene-level cast membership — which characters the scene involves."""
+
+    __tablename__ = "scene_characters"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scenes.id", ondelete="CASCADE"), index=True)
+    character_id: Mapped[str] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    role: Mapped[str] = mapped_column(String(120), default="")  # lead|supporting|background|...
+    notes_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint("scene_id", "character_id", name="uq_scene_character"),)
+
+
+class Shot(Base):
+    """One storyboard shot inside a scene. position is dense per scene.
+    prompt stays user-editable at all times — generation reads it later;
+    editing it never requires regeneration."""
+
+    __tablename__ = "shots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scenes.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(240), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    intent: Mapped[str] = mapped_column(Text, default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    shot_type: Mapped[str] = mapped_column(String(30), default="medium")
+    duration_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id", ondelete="SET NULL"), nullable=True)
+    thumbnail_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ShotCharacter(Base):
+    """One character's per-shot assignment — every field is independent
+    of the character bible and of other cast rows (identity/appearance
+    come from the linked character; everything else is shot-local)."""
+
+    __tablename__ = "shot_characters"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    character_id: Mapped[str] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    wardrobe_variant: Mapped[str] = mapped_column(String(200), default="")
+    blocking: Mapped[str] = mapped_column(Text, default="")          # position & movement
+    expression: Mapped[str] = mapped_column(String(200), default="") # facial expression
+    emotion: Mapped[str] = mapped_column(String(120), default="")    # emotional state
+    action_instructions: Mapped[str] = mapped_column(Text, default="")
+    dialogue: Mapped[str] = mapped_column(Text, default="")
+    voice_override: Mapped[str] = mapped_column(String(200), default="")
+    model_ref: Mapped[str] = mapped_column(String(200), default="")  # model association override
+    lora_json: Mapped[list] = mapped_column(JSON, default=list)      # LoRA associations
+    continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __table_args__ = (UniqueConstraint("shot_id", "character_id", name="uq_shot_character"),)
+
+
+class EntityAssetLink(Base):
+    """Explicit link between a bible entity and a project asset —
+    character reference images, identity plates, wardrobe refs, world
+    style frames. This is the sanctioned entity↔asset channel; role
+    says what the asset is FOR."""
+
+    __tablename__ = "entity_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(30), index=True)  # character | world | location
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(30), default="reference")  # reference|identity|wardrobe|voice|style
+    label: Mapped[str] = mapped_column(String(200), default="")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_id", "asset_id", "role", name="uq_entity_asset"),
+    )
+
+
 class BackupRun(Base):
     """One backup/export/restore/import operation against a project."""
 

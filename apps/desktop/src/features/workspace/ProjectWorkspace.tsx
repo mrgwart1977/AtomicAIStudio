@@ -5,9 +5,11 @@ import { BackupsPage } from "./BackupsPage";
 import { EntityPage } from "./EntityPage";
 import { OverviewPage } from "./OverviewPage";
 import { SettingsPage } from "./SettingsPage";
+import { StoryboardPage } from "./StoryboardPage";
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "storyboard", label: "Storyboard" },
   { id: "cast", label: "Cast" },
   { id: "worlds", label: "Worlds" },
   { id: "locations", label: "Locations" },
@@ -70,6 +72,7 @@ export function ProjectWorkspace() {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "overview" && <OverviewPage />}
+        {tab === "storyboard" && <StoryboardPage />}
         {tab === "cast" && <EntityPage etype="character" title="Cast" />}
         {tab === "worlds" && <EntityPage etype="world" title="Worlds" />}
         {tab === "locations" && <EntityPage etype="location" title="Locations" />}

@@ -1,15 +1,11 @@
 // Capture a series of app screens via CDP on :9222.
 // Usage: node scripts/cdp-shots.cjs [outdir]
 const fs = require("fs");
-const OUT = process.argv[2] || "docs/m1.1-evidence";
+const OUT = process.argv[2] || "docs/m2-evidence";
 const SHOTS = [
-  ["#projects", `${OUT}/01-projects.png`],
-  ["#project/overview", `${OUT}/02-overview.png`],
-  ["#project/cast", `${OUT}/03-cast.png`],
-  ["#project/assets", `${OUT}/04-assets.png`],
-  ["#project/backups", `${OUT}/05-backups.png`],
-  ["#project/settings", `${OUT}/06-settings.png`],
-  ["#models", `${OUT}/07-models.png`],
+  ["#project/storyboard", `${OUT}/01-storyboard.png`],
+  ["#project/cast", `${OUT}/02-character-library.png`],
+  ["#project/overview", `${OUT}/03-overview.png`],
 ];
 
 async function main() {

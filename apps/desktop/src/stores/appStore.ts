@@ -5,16 +5,20 @@ import type {
   AssetPage,
   BackupRun,
   Entity,
+  EntityAssetLink,
   EntityRevision,
   HardwareReport,
   Job,
   Project,
   ProjectCard,
   StorageLocation,
+  StoryboardScene,
 } from "../api/types";
 
 export type Page = "home" | "projects" | "models" | "project";
-export type WorkspaceTab = "overview" | "cast" | "worlds" | "locations" | "assets" | "backups" | "settings";
+export type WorkspaceTab =
+  | "overview" | "storyboard" | "cast" | "worlds" | "locations"
+  | "assets" | "backups" | "settings";
 export type WorkspaceMode = "guided" | "standard" | "advanced";
 
 interface AppState {
@@ -31,6 +35,8 @@ interface AppState {
   entities: Record<string, Entity[]>;
   entityRevisions: Record<string, EntityRevision[]>;
   backups: BackupRun[];
+  storyboard: StoryboardScene[];
+  entityAssets: EntityAssetLink[];
   locations: StorageLocation[];
   hardware: HardwareReport | null;
   adapters: AdapterProfile[];
@@ -51,6 +57,8 @@ interface AppState {
   refreshRevisions: (etype: string, entityId: string) => Promise<void>;
   refreshAssets: () => Promise<void>;
   refreshBackups: () => Promise<void>;
+  refreshStoryboard: () => Promise<void>;
+  refreshEntityAssets: (entityId?: string) => Promise<void>;
   refreshLocations: () => Promise<void>;
   refreshHardware: () => Promise<void>;
   currentProject: () => ProjectCard | undefined;
@@ -70,6 +78,8 @@ export const useApp = create<AppState>((set, get) => ({
   entities: { character: [], world: [], location: [] },
   entityRevisions: {},
   backups: [],
+  storyboard: [],
+  entityAssets: [],
   locations: [],
   hardware: null,
   adapters: [],
@@ -105,6 +115,8 @@ export const useApp = create<AppState>((set, get) => ({
       entities: { character: [], world: [], location: [] },
       entityRevisions: {},
       backups: [],
+      storyboard: [],
+      entityAssets: [],
       promptDraft: "",
     });
     if (id) {
@@ -114,6 +126,8 @@ export const useApp = create<AppState>((set, get) => ({
       void get().refreshProjectData();
       void get().refreshAssets();
       void get().refreshBackups();
+      void get().refreshStoryboard();
+      void get().refreshEntityAssets();
       for (const t of ["character", "world", "location"]) void get().refreshEntities(t);
     }
   },
@@ -162,6 +176,20 @@ export const useApp = create<AppState>((set, get) => ({
     if (!pid) return;
     const backups = await apiFetch<BackupRun[]>(`/api/projects/${pid}/backups`);
     set({ backups });
+  },
+  refreshStoryboard: async () => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const storyboard = await apiFetch<StoryboardScene[]>(`/api/projects/${pid}/storyboard`);
+    set({ storyboard });
+  },
+  refreshEntityAssets: async (entityId) => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const entityAssets = await apiFetch<EntityAssetLink[]>(
+      `/api/projects/${pid}/entity-assets${entityId ? `?entity_id=${entityId}` : ""}`,
+    );
+    set({ entityAssets });
   },
   refreshLocations: async () => {
     const locations = await apiFetch<StorageLocation[]>("/api/storage/locations");
