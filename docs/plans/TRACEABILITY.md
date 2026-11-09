@@ -83,3 +83,73 @@ implementation and test evidence. Status as of the `feat/m1-projects` branch.
 ## 9. Outstanding release requirements (tracked, not blocking)
 
 See `docs/RELEASE_CHECKLIST.md`.
+
+---
+
+# Milestone 1.1 — Storage, Backup & Recovery Improvements
+
+Status as of the `feat/m1.1-storage` branch (builds on M1).
+
+## A. Configurable backup destinations
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Default backup dir via native folder picker | `PUT /api/settings/backup-dir` + `pickDirectory` (Tauri dialog); Settings → Backups card | `test_app_default_backup_dir_set_reset`; `06-settings.png` |
+| Internal/secondary/external/network paths | Absolute-path validation; drive-letter + UNC reachability checks in `backup_dest._root_reachable` | `test_validate_endpoint_catches_missing_drive` |
+| Per-project override | `projects.backup_dir` via `project.update_settings`; resolution order project → app → built-in | `test_project_override_beats_app_default` |
+| Free space + estimated size before start | `GET …/backup-destination` snapshot: free_bytes + estimated_bytes (sum of deduped blobs + overhead) | `test_destination_snapshot_reports_estimate_and_space` |
+| Exists/writable/sufficient-space validation | `validate_destination` probes: real tempfile write+fsync, `disk_usage` headroom | `test_m11.py` destination tests |
+| Disconnected drive / dead share / insufficient space | Friendly `DestinationError` messages per cause | `test_validate_endpoint_*`, `test_insufficient_space_fails_clean` |
+| No silent fallback | `resolve_dir` returns the configured dir verbatim; failure surfaces as job error, never reroutes | `test_project_override_beats_app_default` |
+| Preferences persist across restarts | `app_settings` table (`backup_dir` key) — SQLite, survives restart+reinstall | `test_backup_dir_persists_across_settings_reads` |
+| Reset to default | `PUT /api/settings/backup-dir {"dir": null}` + "Use app default" per-project | tests + Settings/Backups UI |
+| Compatibility with pre-M1.1 backups | Built-in dir unchanged as default; `backup_runs` history includes legacy paths; v1 manifest format untouched | `test_format_v1_compat_roundtrip` |
+
+## B. Large-project performance & recovery
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Background ops, unblocked UI/API | All ops run in the durable job engine via `asyncio.to_thread`; API returns job id immediately | all job tests |
+| Bounded-chunk streaming | 8 MiB `iter_chunks` for export + import staging; hash+write interleaved | `test_large_file_export_streams_bounded`; **400 MiB blob → 17 MiB peak RSS delta** (measurement, PR body) |
+| Real-time bytes/%/file/elapsed/ETA | `ProgressReporter` → `generation_jobs.progress_json` → WS `job.progress` payload + polling endpoints | `08/09-backup-running.png`; packaged job progress_json output |
+| Safe cancellation | `cancel_requested` column + `threading.Event` checkpoints between chunks; queued cancels instantly, running cancels at next chunk | `test_cancel_export_mid_run`, `test_cancel_queued_job`, `test_cancel_terminal_job_conflict`; packaged cancel evidence |
+| Cancel never corrupts originals | `.partial` unlinked on any abort; staging dir removed in `finally`; original project untouched | packaged: `ls` of dest dir shows no `.partial`; `test_cancel_export_mid_run` re-exports fine |
+| Temp files + atomic finalization | `name.atomicpkg.partial` → fsync → `os.replace` | `backup.py::export_package` |
+| Incomplete-op detection after crash | `backup_runs` row created 'running' at job start; startup reconcile → 'failed (interrupted)'; `sweep_backup_destinations` removes `.partial`/`.staging` across all configured dirs | `test_interrupted_run_row_reconciled`, `test_partial_package_swept_on_startup` |
+| Manifest + sha256 validation before accept | Same v1 rules; all-or-nothing single-commit import | `test_corrupt_package_rejected_before_commit` (deterministic blob tamper) |
+| Restore creates new project | Unchanged: `project_id_override=None` path only | `test_restore_creates_new_project_not_overwrite` |
+| Missing/disk/permission/corrupt errors | `DestinationError` (friendly), `PackageError`, run rows marked failed with message | `test_insufficient_space_fails_clean` |
+| Concurrency protection | Per-(project, op-family) lock in `JobEngine.enqueue` → 409; families: backup, asset | `test_second_backup_op_rejected_while_running` |
+| Beginner-friendly errors | Messages like "Drive D: is not connected…", "Not enough space — need about 48.0 MB…" | snapshot/UI error display |
+| Safe temp cleanup | `_sweep_dir`/`sweep_staging` only touch `*.partial`/`*.staging` patterns | sweep tests |
+| `.atomicpkg` + CAS compatibility | FORMAT_VERSION stays 1; new run/manifest fields additive only | `test_format_v1_compat_roundtrip` |
+
+## C. Performance & scalability
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Tens of thousands of assets / TB media | Manifest streams rows out of a short read txn; file streaming outside DB txn; dedupe by sha keeps package ≤ unique bytes | design + tests |
+| No whole-archive reads | Export/import both chunked; zip container never materialized | 400 MiB → 17 MiB RSS measurement |
+| Short DB txns during transfers | Manifest read commits before streaming; import commits once after staging | `export_package`/`import_package` session scope |
+| Responsive cancel/progress at scale | Checkpoints every 8 MiB; progress throttled to 0.25 s emits; WS publishes per update | live screenshot ~14–17 s ETA |
+| Documented limits | ZIP64 enabled (per-entry >4 GiB OK, zip64 central dir); FAT32 destinations blocked for >4 GiB estimates (warned otherwise) via `psutil` fstype probe | `test_fat32_limit_blocks_large_backup` |
+
+## D. UI
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Destination selection | Backups page "Backup destination" card (choose for this project / use app default); Settings "Backups" card (app-wide) | `05-backups.png`, `06-settings.png` |
+| Available storage info | Free space + estimated backup size in destination card | `05-backups.png` |
+| Progress indicators | Live card: %, bytes done/total, rate, ETA, current file; JobsPanel same detail for any op | `08/09-backup-running.png` |
+| Cancel control | Cancel button on active backup card + every running job in Activity | `08/09`, `10-installed-app.png` (cancelled job) |
+| History + status | Table adds destination dir; failed/interrupted/cancelled states with error text | `05-backups.png`, packaged `GET /backups` |
+| Clear errors | Errors/warnings rendered from snapshot + job errors | UI code |
+| Restore/recovery actions | Restore-as-new-project; interrupted runs labeled | `05-backups.png` |
+| Beginner simple / advanced available | One-click "Back up this project"; overrides + app default tucked behind buttons/Settings | layout |
+
+## E. Testing
+
+| Requirement | Evidence |
+|---|---|
+| Custom destinations, persistence, overrides, missing/disconnected, insufficient space, streaming, cancel, crash recovery, corruption, concurrency, v1 compat, isolation | `backend/tests/test_m11.py` — **19 tests**, plus 34 M1/M0 regression = **53/53 pass** |
+| Packaged Windows verification | NSIS reinstall over M1 DB → real `0002→0003` migration → custom dir set → export → **live cancel at 117/981 MB** → no `.partial` left → cancelled run row; screenshots `10-installed-app.png` |

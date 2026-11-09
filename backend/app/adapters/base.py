@@ -9,8 +9,14 @@ before they are enabled — mock adapters prove orchestration only.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Callable, Protocol
+
+
+class JobCancelled(Exception):
+    """Raised inside an adapter when the user cancels the job. The engine
+    converts it to status='cancelled' — never 'failed'."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,17 @@ class JobHandle:
     project_id: str
     request: dict[str, Any]
     work_dir: str
+    cancel_event: threading.Event | None = None
+
+    def check_cancel(self) -> None:
+        """Adapters call this at safe checkpoints (file boundaries, chunk
+        loops). Cheap — just an Event.is_set()."""
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise JobCancelled()
+
+    def cancel_check_callable(self) -> Callable[[], None]:
+        """Same check as a no-arg callable for threaded library code."""
+        return self.check_cancel
 
 
 class ProviderAdapter(Protocol):

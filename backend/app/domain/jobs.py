@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.adapters.base import JobHandle
+from app.adapters.base import JobCancelled, JobHandle
 from app.adapters.registry import AdapterRegistry
 from app.db.models import Asset, GenerationJob, new_id, utcnow
 from app.domain.events import EventBus
@@ -24,6 +25,21 @@ from app.domain.events import EventBus
 log = logging.getLogger(__name__)
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+# Op families that must not run concurrently against the same project —
+# two exports to the same destination or an import during a restore
+# could interleave writes to the same files.
+LOCKED_FAMILIES = ("backup", "asset")
+
+
+class OpBusyError(Exception):
+    """A same-family operation is already queued/running for the project."""
+
+
+def _op_family(adapter_id: str) -> str | None:
+    parts = adapter_id.split(".")
+    if len(parts) >= 2 and parts[0] == "ops" and parts[1] in LOCKED_FAMILIES:
+        return parts[1]
+    return None
 
 
 class JobEngine:
@@ -35,6 +51,7 @@ class JobEngine:
         self._wake = asyncio.Event()
         self._runner_task: asyncio.Task | None = None
         self._stopping = False
+        self._cancel_events: dict[str, threading.Event] = {}
 
     # ---------- submission ----------
 
@@ -55,6 +72,20 @@ class JobEngine:
         ).scalar_one_or_none()
         if existing:
             return existing
+        family = _op_family(adapter_id)
+        if family:
+            busy = session.execute(
+                select(GenerationJob).where(
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.adapter_id.like(f"ops.{family}.%"),
+                    GenerationJob.status.in_(("queued", "running")),
+                )
+            ).scalars().first()
+            if busy is not None:
+                raise OpBusyError(
+                    f"a {family} operation is already {busy.status} for this project — "
+                    "wait for it to finish or cancel it first"
+                )
         job = GenerationJob(
             id=new_id(),
             project_id=project_id,
@@ -99,6 +130,35 @@ class JobEngine:
 
     def wake(self) -> None:
         self._wake.set()
+
+    # ---------- cancellation ----------
+
+    def request_cancel(self, job_id: str) -> str:
+        """Mark a job for cancellation. Queued jobs cancel at claim time;
+        running jobs cancel at the adapter's next checkpoint. Returns the
+        resulting status hint ('cancelling' | 'cancelled' | 'terminal')."""
+        ev = self._cancel_events.get(job_id)
+        if ev is not None:
+            ev.set()
+        with self._sf() as s:
+            job = s.get(GenerationJob, job_id)
+            if job is None:
+                return "not_found"
+            if job.status in TERMINAL:
+                return "terminal"
+            job.cancel_requested = True
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.message = "cancelled before it started"
+                job.completed_at = utcnow()
+                s.commit()
+                return "cancelled"
+            s.commit()
+            return "cancelling"
+
+    def _check_cancelled(self, job: GenerationJob) -> bool:
+        """Honor a cancel flag persisted before the job starts running."""
+        return bool(job.cancel_requested)
 
     # ---------- execution ----------
 
@@ -151,7 +211,15 @@ class JobEngine:
                 return
 
             work_dir = self._data_dir / "jobs" / job.project_id
-            handle = JobHandle(job_id=job.id, project_id=job.project_id, request=dict(job.request_json), work_dir=str(work_dir))
+            cancel_ev = threading.Event()
+            self._cancel_events[job.id] = cancel_ev
+            if job.cancel_requested:
+                cancel_ev.set()
+            handle = JobHandle(
+                job_id=job.id, project_id=job.project_id,
+                request=dict(job.request_json), work_dir=str(work_dir),
+                cancel_event=cancel_ev,
+            )
             await self._publish(job)
 
             final_output: dict[str, Any] | None = None
@@ -159,10 +227,20 @@ class JobEngine:
                 async for update in adapter.run(handle):
                     job.progress = float(update.get("progress", job.progress))
                     job.message = update.get("message", job.message)
+                    detail = update.get("detail")
+                    if detail is not None:
+                        job.progress_json = detail
                     if update.get("done"):
                         final_output = update.get("output")
                     s.commit()
                     await self._publish(job)
+            except JobCancelled:
+                job.status = "cancelled"
+                job.message = "cancelled"
+                job.completed_at = utcnow()
+                s.commit()
+                await self._publish(job)
+                return
             except asyncio.CancelledError:
                 job.status = "failed"
                 job.error = "cancelled by shutdown"
@@ -175,6 +253,8 @@ class JobEngine:
                 s.commit()
                 await self._publish(job)
                 return
+            finally:
+                self._cancel_events.pop(job.id, None)
 
             if final_output is None:
                 job.status = "failed"
@@ -266,5 +346,7 @@ class JobEngine:
                 "adapter_id": job.adapter_id,
                 "output_asset_id": job.output_asset_id,
                 "error": job.error,
+                "progress_json": job.progress_json,
+                "cancel_requested": job.cancel_requested,
             },
         )

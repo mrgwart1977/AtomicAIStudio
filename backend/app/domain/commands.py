@@ -28,6 +28,7 @@ from app.db.models import (
     ProjectRevision,
     PromptDraft,
     SharedAssetLink,
+    StorageLocation,
     new_id,
     utcnow,
 )
@@ -79,7 +80,7 @@ UNDOABLE = {
 
 PROJECT_FORMAT_FIELDS = ("kind", "aspect_ratio", "width", "height", "fps_num", "fps_den", "style")
 # Direct project columns writable via project.update_settings (beyond formats).
-PROJECT_SETTING_FIELDS = PROJECT_FORMAT_FIELDS + ("storage_location_id",)
+PROJECT_SETTING_FIELDS = PROJECT_FORMAT_FIELDS + ("storage_location_id", "backup_dir")
 ENTITY_OPS = ("create", "update", "archive", "unarchive", "revert")
 
 
@@ -161,6 +162,14 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         if "storage_location_id" in payload and payload["storage_location_id"]:
             if session.get(StorageLocation, payload["storage_location_id"]) is None:
                 raise CommandError(404, "storage location not found")
+        if "backup_dir" in payload and payload["backup_dir"]:
+            from pathlib import Path as _P
+            if not _P(payload["backup_dir"]).is_absolute():
+                raise CommandError(422, "backup_dir must be an absolute path")
+            from app.domain import backup_dest as _bd
+            res = _bd.validate_destination(payload["backup_dir"])
+            for e in res["errors"]:
+                warnings.append(f"backup_dir: {e}")
     if command_type == "asset.import":
         if not (payload.get("source_path") or "").strip():
             raise CommandError(422, "source_path is required")
@@ -519,15 +528,21 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         if job_engine is None:
             raise CommandError(500, "job engine unavailable")
         request = _job_request(session, project, command_type, payload)
-        job = job_engine.enqueue(
-            session,
-            project_id=project.id,
-            adapter_id=JOB_COMMANDS[command_type],
-            kind=_job_kind(command_type),
-            request=request,
-            idempotency_key=f"job:{idempotency_key}",
-            command_id=command.id,
-        )
+        try:
+            job = job_engine.enqueue(
+                session,
+                project_id=project.id,
+                adapter_id=JOB_COMMANDS[command_type],
+                kind=_job_kind(command_type),
+                request=request,
+                idempotency_key=f"job:{idempotency_key}",
+                command_id=command.id,
+            )
+        except Exception as exc:
+            from app.domain.jobs import OpBusyError
+            if isinstance(exc, OpBusyError):
+                raise CommandError(409, str(exc)) from exc
+            raise
         audit["after"]["job_id"] = job.id
 
     else:
@@ -638,7 +653,7 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
     elif command.command_type == "project.rename":
         project.name = before.get("name", project.name)
     elif command.command_type == "project.update_settings":
-        for f in PROJECT_FORMAT_FIELDS:
+        for f in PROJECT_SETTING_FIELDS:
             if f in before:
                 setattr(project, f, before[f])
         if "settings" in before:

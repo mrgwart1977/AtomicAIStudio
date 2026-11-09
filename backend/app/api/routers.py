@@ -36,9 +36,12 @@ from app.domain import bibles, commands as cmd, hardware
 from app.domain.backup import PackageError, read_manifest
 from app.schemas.api import (
     AdapterProfileOut,
+    AppBackupDirUpdate,
     AssetOut,
     AssetPageOut,
     AssetVersionOut,
+    BackupDestinationOut,
+    BackupDestinationValidate,
     BackupRunOut,
     CommandCommitRequest,
     CommandOut,
@@ -302,6 +305,19 @@ def list_all_jobs(db: Session = Depends(get_db)):
     ).scalars().all()
 
 
+@api_router.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, request: Request, db: Session = Depends(get_db)):
+    job = db.get(GenerationJob, job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    result = request.app.state.job_engine.request_cancel(job_id)
+    if result == "not_found":
+        raise HTTPException(404, "job not found")
+    if result == "terminal":
+        raise HTTPException(409, f"job already {job.status}")
+    return {"status": result}
+
+
 # ---------- assets ----------
 
 @api_router.get("/api/projects/{project_id}/assets", response_model=AssetPageOut)
@@ -412,6 +428,67 @@ def update_location(
 
 
 # ---------- backups ----------
+
+@api_router.get("/api/settings/backup-dir", response_model=BackupDestinationOut)
+def get_backup_destination(request: Request, db: Session = Depends(get_db)):
+    """App-level effective backup directory + validation snapshot."""
+    from app.domain import backup_dest
+    return backup_dest.destination_snapshot(db, request.app.state.settings, None)
+
+
+@api_router.put("/api/settings/backup-dir", response_model=BackupDestinationOut)
+def set_backup_destination(body: AppBackupDirUpdate, request: Request, db: Session = Depends(get_db)):
+    """Set (or reset, dir=null) the app-wide default backup directory.
+    The dir is validated — errors are returned as warnings in the
+    snapshot so the UI can surface them, but an unusable dir is NOT
+    saved."""
+    from app.domain import backup_dest
+    if body.dir:
+        p = Path(body.dir)
+        if not p.is_absolute():
+            raise HTTPException(422, "backup dir must be an absolute path")
+        result = backup_dest.validate_destination(p)
+        if result["errors"]:
+            raise HTTPException(422, result["errors"][0])
+        backup_dest.set_app_default(db, str(p))
+    else:
+        backup_dest.set_app_default(db, None)  # reset → built-in
+    db.commit()
+    return backup_dest.destination_snapshot(db, request.app.state.settings, None)
+
+
+@api_router.get(
+    "/api/projects/{project_id}/backup-destination",
+    response_model=BackupDestinationOut,
+)
+def get_project_backup_destination(
+    request: Request,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+):
+    """Effective destination for this project — resolves the override
+    chain and validates live (free space, writability, size estimate)."""
+    from app.domain import backup_dest
+    return backup_dest.destination_snapshot(db, request.app.state.settings, project)
+
+
+@api_router.post("/api/backups/validate-destination", response_model=BackupDestinationOut)
+def validate_backup_destination(body: BackupDestinationValidate, request: Request, db: Session = Depends(get_db)):
+    """Probe an arbitrary candidate directory without changing anything."""
+    from app.domain import backup_dest
+    project = db.get(Project, body.project_id) if body.project_id else None
+    needed = backup_dest.estimate_package_bytes(db, project.id) if project else 0
+    result = backup_dest.validate_destination(body.path, needed_bytes=needed)
+    return {
+        "dir": result["path"],
+        "source": "candidate",
+        "app_default_dir": "",
+        "builtin_dir": str(request.app.state.settings.backups_dir),
+        "project_override": "",
+        "estimated_bytes": needed,
+        **result,
+    }
+
 
 @api_router.get("/api/projects/{project_id}/backups", response_model=list[BackupRunOut])
 def list_backups(project: Project = Depends(get_project), db: Session = Depends(get_db)):

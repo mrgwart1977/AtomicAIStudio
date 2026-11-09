@@ -33,6 +33,11 @@ and requirement-to-code mapping in [`docs/plans/TRACEABILITY.md`](docs/plans/TRA
   via the shared library (link or copy).
 - Whole-project `.atomicpkg` backups are hash-verified and always restore
   into a **new** project — the live one is never mutated.
+- **M1.1:** backup destinations are configurable app-wide or per-project
+  (native folder picker, free-space + FAT32/4 GiB checks, no silent
+  fallback); exports/imports stream in 8 MiB chunks with live
+  bytes/rate/ETA progress, safe cancellation, per-project op locking, and
+  crash recovery that sweeps `.partial`/`.staging` artifacts on startup.
 
 - `apps/desktop` — Tauri shell (`src-tauri/`) + React UI (`src/`)
 - `backend` — FastAPI sidecar: `app/` (api, domain, db, adapters) + `tests/`

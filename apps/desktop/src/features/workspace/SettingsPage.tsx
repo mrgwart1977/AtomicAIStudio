@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { commitCommand } from "../../api/commands";
+import { useCallback, useEffect, useState } from "react";
+import { commitCommand, pickDirectory } from "../../api/commands";
 import { apiFetch } from "../../api/client";
-import type { StorageLocation } from "../../api/types";
+import type { BackupDestination, StorageLocation } from "../../api/types";
 import { useApp } from "../../stores/appStore";
+import { fmtBytes } from "./BackupsPage";
 
 const FORMATS = [
   { label: "16:9 — 1920×1080", ratio: "16:9", w: 1920, h: 1080 },
@@ -28,10 +29,20 @@ export function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [backupDest, setBackupDest] = useState<BackupDestination | null>(null);
+
+  const refreshBackupDest = useCallback(async () => {
+    try {
+      setBackupDest(await apiFetch<BackupDestination>("/api/settings/backup-dir"));
+    } catch {
+      setBackupDest(null);
+    }
+  }, []);
 
   useEffect(() => {
     void refreshLocations();
-  }, [refreshLocations]);
+    void refreshBackupDest();
+  }, [refreshLocations, refreshBackupDest]);
 
   useEffect(() => {
     if (!project) return;
@@ -71,6 +82,38 @@ export function SettingsPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function setAppBackupDir() {
+    const dir = await pickDirectory("Choose the default backup folder for all projects");
+    if (!dir) return;
+    setError(null);
+    setMsg(null);
+    try {
+      await apiFetch("/api/settings/backup-dir", {
+        method: "PUT",
+        body: JSON.stringify({ dir }),
+      });
+      await refreshBackupDest();
+      setMsg("Default backup folder updated for all projects.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function resetAppBackupDir() {
+    setError(null);
+    setMsg(null);
+    try {
+      await apiFetch("/api/settings/backup-dir", {
+        method: "PUT",
+        body: JSON.stringify({ dir: null }),
+      });
+      await refreshBackupDest();
+      setMsg("Backup folder reset to the built-in location.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -165,6 +208,53 @@ export function SettingsPage() {
           >
             Add
           </button>
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-line bg-card p-5">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">Backups</h3>
+        <p className="mt-1 text-xs text-faint">
+          Where <code>.atomicpkg</code> project backups are saved by default. Individual projects can
+          override this on their Backups page — they never silently fall back.
+        </p>
+        <div className="mt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="truncate font-mono text-sm" title={backupDest?.dir}>
+              {backupDest?.dir ?? "…"}
+            </p>
+            <p className="mt-1 text-xs text-faint">
+              {backupDest?.source === "app setting"
+                ? "Custom app-wide folder"
+                : "Built-in app-data folder"}
+              {backupDest ? ` · ${fmtBytes(backupDest.free_bytes)} free` : ""}
+            </p>
+            {backupDest?.errors.map((e) => (
+              <p key={e} className="mt-2 rounded border border-danger/40 bg-danger/10 p-2 text-xs text-danger">
+                {e}
+              </p>
+            ))}
+            {backupDest?.warnings.map((w) => (
+              <p key={w} className="mt-2 rounded border border-amber/40 bg-amber/10 p-2 text-xs text-amber">
+                {w}
+              </p>
+            ))}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button
+              onClick={() => void setAppBackupDir()}
+              className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg"
+            >
+              Choose folder…
+            </button>
+            {backupDest?.source === "app setting" && (
+              <button
+                onClick={() => void resetAppBackupDir()}
+                className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg"
+              >
+                Reset to default
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

@@ -1,6 +1,7 @@
-import { getBackendInfo, assetFileUrl } from "../api/client";
+import { getBackendInfo, assetFileUrl, apiFetch } from "../api/client";
 import { useEffect, useState } from "react";
 import { useApp } from "../stores/appStore";
+import { fmtBytes } from "../features/workspace/BackupsPage";
 
 const STATUS_STYLE: Record<string, string> = {
   queued: "text-muted",
@@ -9,6 +10,15 @@ const STATUS_STYLE: Record<string, string> = {
   failed: "text-danger",
   cancelled: "text-amber",
 };
+
+function fmtEta(sec: number | null | undefined): string {
+  if (sec == null) return "estimating…";
+  if (sec < 60) return `~${Math.max(1, Math.round(sec))}s left`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return `~${m}m ${s}s left`;
+  return `~${Math.floor(m / 60)}h ${m % 60}m left`;
+}
 
 export function JobsPanel() {
   const jobs = useApp((s) => s.jobs);
@@ -30,11 +40,15 @@ export function JobsPanel() {
       <ul className="mt-3 space-y-3">
         {list.map((j) => {
           const asset = j.output_asset_id ? assets.find((a) => a.id === j.output_asset_id) : null;
+          const running = j.status === "running" || j.status === "queued";
+          const d = j.progress_json;
           return (
             <li key={j.id} className="rounded-md border border-line bg-card p-3">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted">{j.adapter_id}</span>
-                <span className={STATUS_STYLE[j.status] ?? "text-muted"}>{j.status}</span>
+                <span className={STATUS_STYLE[j.status] ?? "text-muted"}>
+                  {j.cancel_requested && running ? "cancelling" : j.status}
+                </span>
               </div>
               <div className="mt-2 h-1.5 rounded-full bg-line">
                 <div
@@ -43,6 +57,24 @@ export function JobsPanel() {
                 />
               </div>
               <p className="mt-1.5 text-xs text-muted">{j.message || j.error || "queued"}</p>
+              {running && d && (
+                <p className="mt-1 text-xs text-faint">
+                  {fmtBytes(d.bytes_done)} / {fmtBytes(d.bytes_total)}
+                  {d.rate_bps ? ` · ${fmtBytes(d.rate_bps)}/s` : ""}
+                  {` · ${fmtEta(d.eta_seconds)}`}
+                </p>
+              )}
+              {running && (
+                <button
+                  onClick={() =>
+                    void apiFetch(`/api/jobs/${j.id}/cancel`, { method: "POST" }).catch(() => {})
+                  }
+                  disabled={j.cancel_requested}
+                  className="mt-2 rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-danger disabled:opacity-40"
+                >
+                  {j.cancel_requested ? "Cancelling…" : "Cancel"}
+                </button>
+              )}
               {asset && base && pid && (
                 <img
                   src={assetFileUrl(pid, asset.id, base)}

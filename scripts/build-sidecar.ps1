@@ -8,7 +8,7 @@ $dest = Join-Path $root "apps\desktop\src-tauri\backend-dist\atomic-backend"
 
 $pyinstaller = Join-Path $backend ".venv\Scripts\pyinstaller.exe"
 if (-not (Test-Path $pyinstaller)) {
-    Write-Error "pyinstaller not found — run: backend\.venv\Scripts\pip install pyinstaller"
+    Write-Error "pyinstaller not found - run: backend\.venv\Scripts\pip install pyinstaller"
 }
 
 Push-Location $backend

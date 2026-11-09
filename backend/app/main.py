@@ -67,7 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.event_bus = EventBus()
 
         from app.domain.storage import StorageRegistry
-        from app.domain.backup import sweep_staging
+        from app.domain.backup import sweep_backup_destinations, sweep_staging
         storage = StorageRegistry(sf, settings.data_dir)
         app.state.storage = storage
         with sf() as s:
@@ -75,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             storage.probe_locations(s)
             swept = storage.sweep(s)
             staging_removed = sweep_staging(settings.data_dir)
+            staging_removed += sweep_backup_destinations(s, settings)
             if swept["tmp_removed"] or staging_removed:
                 log.info("storage sweep: %d tmp blobs, %d staging dirs removed",
                          swept["tmp_removed"], staging_removed)

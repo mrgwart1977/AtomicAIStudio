@@ -42,6 +42,7 @@ class ProjectOut(BaseModel):
     fps_den: int
     style: str
     storage_location_id: str | None
+    backup_dir: str | None
     revision: int
     settings_json: dict[str, Any]
     created_at: datetime
@@ -141,6 +142,8 @@ class JobOut(BaseModel):
     output_asset_id: str | None
     command_id: str | None
     result_json: dict[str, Any] | None = None
+    progress_json: dict[str, Any] | None = None
+    cancel_requested: bool = False
     created_at: datetime
     completed_at: datetime | None
 
@@ -241,6 +244,8 @@ class BackupRunOut(BaseModel):
     package_path: str
     package_sha256: str
     byte_size: int
+    destination_dir: str = ""
+    bytes_total: int = 0
     stats_json: dict[str, Any]
     job_id: str | None
     error: str | None
@@ -259,6 +264,35 @@ class PackagePreviewOut(BaseModel):
 
 class PackageImportRequest(BaseModel):
     package_path: str = Field(min_length=1)
+
+
+# ---------- backup destinations (M1.1) ----------
+
+class BackupDestinationOut(BaseModel):
+    """Effective destination for one project (or app default)."""
+    dir: str
+    source: str  # "project override" | "app setting" | "built-in default"
+    app_default_dir: str
+    builtin_dir: str
+    project_override: str
+    estimated_bytes: int
+    path: str
+    exists: bool
+    writable: bool
+    free_bytes: int
+    needed_bytes: int
+    errors: list[str]
+    warnings: list[str]
+
+
+class BackupDestinationValidate(BaseModel):
+    path: str = Field(min_length=1)
+    project_id: str | None = None
+
+
+class AppBackupDirUpdate(BaseModel):
+    # Absolute dir, or null to reset to the built-in location.
+    dir: str | None = None
 
 
 # ---------- adapters / hardware ----------

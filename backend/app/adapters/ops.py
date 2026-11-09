@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
-from app.adapters.base import CapabilityProfile, JobHandle
+from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
 from app.db.models import Asset, AssetVersion, BackupRun, Project, new_id, utcnow
 from app.domain import backup as backup_mod
+from app.domain import backup_dest
 
 
 class _OpsBase:
@@ -26,6 +27,18 @@ class _OpsBase:
 
     async def validate(self, request: dict[str, Any]) -> list[str]:
         return []
+
+    def _mark_run(self, run_id: str, status: str, **fields) -> None:
+        """Update a BackupRun created at job start (its own short txn)."""
+        with self._sf() as session:
+            run = session.get(BackupRun, run_id)
+            if run is not None:
+                run.status = status
+                for k, v in fields.items():
+                    setattr(run, k, v)
+                if status in ("succeeded", "failed", "cancelled"):
+                    run.completed_at = utcnow()
+                session.commit()
 
 
 class AssetImportAdapter(_OpsBase):
@@ -179,46 +192,93 @@ class BackupExportAdapter(_OpsBase):
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         kind = handle.request.get("kind", "backup")
-        dest = handle.request.get("dest_path")
-        if not dest:
-            stamp = utcnow().strftime("%Y%m%d-%H%M%S")
-            dest = self._settings.backups_dir / handle.project_id / f"{kind}-{stamp}.atomicpkg"
-        dest = Path(dest)
 
-        progress_state = {"p": 0.0, "m": "starting"}
-
-        def progress(p, m):
-            progress_state["p"] = p
-            progress_state["m"] = m
-
-        yield {"progress": 0.02, "message": "Serializing project"}
-        manifest, sha, size = await asyncio.to_thread(
-            backup_mod.export_package,
-            self._sf, handle.project_id, dest, self._storage, progress,
-        )
-        yield {"progress": 0.95, "message": progress_state["m"]}
+        # Resolve destination NOW (project override → app default → built-in)
+        # — never fall back silently when a configured dir is unreachable.
         with self._sf() as session:
+            project = session.get(Project, handle.project_id)
+            dest_dir = Path(handle.request["dest_path"]).parent \
+                if handle.request.get("dest_path") \
+                else backup_dest.resolve_dir(session, self._settings, project)
+            needed = backup_dest.estimate_package_bytes(session, handle.project_id)
+
+        stamp = utcnow().strftime("%Y%m%d-%H%M%S")
+        dest = Path(handle.request["dest_path"]) if handle.request.get("dest_path") \
+            else dest_dir / f"{kind}-{stamp}.atomicpkg"
+
+        # Run row exists from the START (even before preflight): a crash
+        # leaves it 'running' and startup reconciliation marks it honestly
+        # interrupted; a rejected destination is recorded as a failed run
+        # so the history shows the attempt.
+        with self._sf() as session:
+            project = session.get(Project, handle.project_id)
             run = BackupRun(
                 id=new_id(), project_id=handle.project_id,
-                project_name=(session.get(Project, handle.project_id) or Project(name="")).name,
-                kind=kind, status="succeeded", package_path=str(dest),
-                package_sha256=sha, byte_size=size,
-                stats_json={
-                    "assets": len(manifest.get("assets", [])),
-                    "files": len(manifest.get("files", [])),
-                    "characters": len(manifest["entities"].get("characters", [])),
-                    "worlds": len(manifest["entities"].get("worlds", [])),
-                    "locations": len(manifest["entities"].get("locations", [])),
-                },
-                job_id=handle.job_id, completed_at=utcnow(),
+                project_name=project.name if project else "",
+                kind=kind, status="running", package_path=str(dest),
+                destination_dir=str(dest.parent), bytes_total=needed,
+                stats_json={}, job_id=handle.job_id,
             )
             session.add(run)
             session.commit()
-            yield {
-                "done": True,
-                "output": {"no_asset": True,
-                           "result": {"backup_run_id": run.id, "package_path": str(dest), "byte_size": size}},
+            run_id = run.id
+
+        try:
+            backup_dest.require_writable_destination(dest_dir, needed_bytes=needed)
+        except Exception as exc:
+            self._mark_run(run_id, "failed", error=str(exc))
+            raise
+
+        state = {"p": 0.0, "m": "starting"}
+        detail_box: dict[str, Any] = {"d": None}
+
+        def progress(p, m):
+            state["p"], state["m"] = p, m
+
+        def on_detail(d):
+            detail_box["d"] = d
+
+        try:
+            reporter = backup_mod.ProgressReporter(needed, on_detail)
+            task = asyncio.create_task(asyncio.to_thread(
+                backup_mod.export_package,
+                self._sf, handle.project_id, dest, self._storage,
+                progress=progress, cancel_check=handle.check_cancel,
+                reporter=reporter,
+            ))
+            while not task.done():
+                yield {"progress": state["p"], "message": state["m"], "detail": detail_box["d"]}
+                await asyncio.sleep(0.3)
+            manifest, sha, size = await task
+            # Guaranteed final detail — even for exports too fast to emit.
+            yield {"progress": 0.95, "message": "Finalizing",
+                   "detail": detail_box["d"] or reporter.snapshot()}
+        except JobCancelled:
+            self._mark_run(run_id, "cancelled", error="cancelled by user")
+            raise
+        except Exception as exc:
+            self._mark_run(run_id, "failed", error=str(exc))
+            raise
+
+        with self._sf() as session:
+            run = session.get(BackupRun, run_id)
+            run.status = "succeeded"
+            run.package_sha256 = sha
+            run.byte_size = size
+            run.stats_json = {
+                "assets": len(manifest.get("assets", [])),
+                "files": len(manifest.get("files", [])),
+                "characters": len(manifest["entities"].get("characters", [])),
+                "worlds": len(manifest["entities"].get("worlds", [])),
+                "locations": len(manifest["entities"].get("locations", [])),
             }
+            run.completed_at = utcnow()
+            session.commit()
+        yield {
+            "done": True,
+            "output": {"no_asset": True,
+                       "result": {"backup_run_id": run_id, "package_path": str(dest), "byte_size": size}},
+        }
 
 
 class BackupImportAdapter(_OpsBase):
@@ -247,27 +307,67 @@ class BackupImportAdapter(_OpsBase):
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         pkg = Path(handle.request["package_path"])
-        yield {"progress": 0.05, "message": "Reading manifest"}
-        await asyncio.sleep(0)
-        stats = await asyncio.to_thread(
-            backup_mod.import_package,
-            self._sf, pkg, self._storage,
-            project_id_override=handle.project_id, name_suffix="",
-        )
+        total_bytes = 0
+        try:
+            manifest = backup_mod.read_manifest(pkg)
+            total_bytes = sum(f["byte_size"] for f in manifest.get("files", []))
+        except backup_mod.PackageError:
+            pass  # validate() already checked; re-raised in the worker
+
+        with self._sf() as session:
+            stub = session.get(Project, handle.project_id)
+            run = BackupRun(
+                id=new_id(), project_id=handle.project_id,
+                project_name=stub.name if stub else "",
+                kind="import", status="running", package_path=str(pkg),
+                bytes_total=total_bytes, stats_json={}, job_id=handle.job_id,
+            )
+            session.add(run)
+            session.commit()
+            run_id = run.id
+
+        state = {"p": 0.05, "m": "Reading manifest"}
+        detail_box: dict[str, Any] = {"d": None}
+
+        def progress(p, m):
+            state["p"], state["m"] = p, m
+
+        def on_detail(d):
+            detail_box["d"] = d
+
+        try:
+            reporter = backup_mod.ProgressReporter(total_bytes or 1, on_detail)
+            task = asyncio.create_task(asyncio.to_thread(
+                backup_mod.import_package,
+                self._sf, pkg, self._storage,
+                project_id_override=handle.project_id, name_suffix="",
+                progress=progress, cancel_check=handle.check_cancel,
+                reporter=reporter,
+            ))
+            while not task.done():
+                yield {"progress": state["p"], "message": state["m"], "detail": detail_box["d"]}
+                await asyncio.sleep(0.3)
+            stats = await task
+            yield {"progress": 0.95, "message": "Committing project",
+                   "detail": detail_box["d"] or reporter.snapshot()}
+        except JobCancelled:
+            self._mark_run(run_id, "cancelled", error="cancelled by user")
+            raise
+        except Exception as exc:
+            self._mark_run(run_id, "failed", error=str(exc))
+            raise
+
         # import_package fills the stub project this job is scoped to.
         with self._sf() as session:
             stub = session.get(Project, handle.project_id)
             if stub is not None and stub.status == "importing":
                 stub.status = "active"
-            run = BackupRun(
-                id=new_id(), project_id=handle.project_id,
-                project_name=stub.name if stub else "",
-                kind="import", status="succeeded", package_path=str(pkg),
-                stats_json=stats, job_id=handle.job_id, completed_at=utcnow(),
-            )
-            session.add(run)
+            run = session.get(BackupRun, run_id)
+            run.status = "succeeded"
+            run.stats_json = stats
+            run.completed_at = utcnow()
             session.commit()
-            yield {"done": True, "output": {"no_asset": True, "result": {**stats, "backup_run_id": run.id}}}
+            yield {"done": True, "output": {"no_asset": True, "result": {**stats, "backup_run_id": run_id}}}
 
 
 class BackupRestoreAdapter(_OpsBase):
@@ -289,30 +389,65 @@ class BackupRestoreAdapter(_OpsBase):
         return []
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
-        run_id = handle.request["backup_run_id"]
-        yield {"progress": 0.05, "message": "Loading backup record"}
-        await asyncio.sleep(0)
+        src_run_id = handle.request["backup_run_id"]
         with self._sf() as session:
-            run = session.get(BackupRun, run_id)
-            if run is None or run.status != "succeeded":
+            src_run = session.get(BackupRun, src_run_id)
+            if src_run is None or src_run.status != "succeeded":
                 raise ValueError("successful backup run not found")
-            pkg = Path(run.package_path)
-        stats = await asyncio.to_thread(
-            backup_mod.import_package,
-            self._sf, pkg, self._storage,
-            project_id_override=None, name_suffix=" (restored)",
-        )
+            pkg = Path(src_run.package_path)
+            project_name = src_run.project_name
+            bytes_total = src_run.bytes_total or 0
+        if not pkg.is_file():
+            raise ValueError(
+                f"backup package is missing: {pkg} — it may have been moved "
+                "or the drive disconnected. Restore from another backup."
+            )
+
         with self._sf() as session:
             new_run = BackupRun(
                 id=new_id(), project_id=handle.project_id,
-                project_name=run.project_name, kind="restore", status="succeeded",
-                package_path=str(pkg), stats_json=stats,
-                job_id=handle.job_id, completed_at=utcnow(),
+                project_name=project_name, kind="restore", status="running",
+                package_path=str(pkg), bytes_total=bytes_total,
+                stats_json={}, job_id=handle.job_id,
             )
             session.add(new_run)
             session.commit()
-            yield {
-                "done": True,
-                "output": {"no_asset": True,
-                           "result": {**stats, "restored_project_id": stats["project_id"]}},
-            }
+            new_run_id = new_run.id
+
+        state = {"p": 0.05, "m": "Loading backup"}
+        detail_box: dict[str, Any] = {"d": None}
+
+        def progress(p, m):
+            state["p"], state["m"] = p, m
+
+        def on_detail(d):
+            detail_box["d"] = d
+
+        try:
+            reporter = backup_mod.ProgressReporter(bytes_total or 1, on_detail)
+            task = asyncio.create_task(asyncio.to_thread(
+                backup_mod.import_package,
+                self._sf, pkg, self._storage,
+                project_id_override=None, name_suffix=" (restored)",
+                progress=progress, cancel_check=handle.check_cancel,
+                reporter=reporter,
+            ))
+            while not task.done():
+                yield {"progress": state["p"], "message": state["m"], "detail": detail_box["d"]}
+                await asyncio.sleep(0.3)
+            stats = await task
+            yield {"progress": 0.95, "message": "Committing project",
+                   "detail": detail_box["d"] or reporter.snapshot()}
+        except JobCancelled:
+            self._mark_run(new_run_id, "cancelled", error="cancelled by user")
+            raise
+        except Exception as exc:
+            self._mark_run(new_run_id, "failed", error=str(exc))
+            raise
+
+        self._mark_run(new_run_id, "succeeded", stats_json=stats)
+        yield {
+            "done": True,
+            "output": {"no_asset": True,
+                       "result": {**stats, "restored_project_id": stats["project_id"]}},
+        }
