@@ -29,6 +29,12 @@ class CapabilityProfile:
     limits: dict[str, Any] = field(default_factory=dict)  # max_size, max_duration_s, ...
     requires_cloud: bool = False
     cost_model: str = "free"  # free | per_call | subscription
+    # Scheduling lane: "ops" jobs serialize through a single lane (M1.1
+    # semantics); "gen" jobs run in parallel up to the GPU-slot count.
+    lane: str = "ops"
+    # GPU-bound adapters acquire a scheduler slot (or the CPU lane marker)
+    # before the engine claims them — a busy GPU leaves the job queued.
+    needs_gpu: bool = False
     notes: str = ""
 
 

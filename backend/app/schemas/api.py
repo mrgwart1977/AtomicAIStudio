@@ -79,7 +79,7 @@ CommandType = Literal[
     "prompt.set_text",
     "project.rename", "project.archive", "project.restore",
     "project.update_settings", "project.duplicate", "project.delete",
-    "generate.image.mock",
+    "generate.image.mock", "generate.image",
     "character.create", "character.update", "character.archive",
     "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive",
@@ -139,7 +139,7 @@ class CommandOut(BaseModel):
 
 class JobOut(BaseModel):
     id: str
-    project_id: str
+    project_id: str | None  # NULL for app-level jobs (model downloads)
     adapter_id: str
     kind: str
     status: str
@@ -149,6 +149,8 @@ class JobOut(BaseModel):
     resumable: bool
     output_asset_id: str | None
     command_id: str | None
+    gpu_index: int | None = None
+    model_key: str | None = None
     result_json: dict[str, Any] | None = None
     progress_json: dict[str, Any] | None = None
     cancel_requested: bool = False
@@ -169,6 +171,8 @@ class AssetOut(BaseModel):
     byte_size: int
     current_version_id: str | None
     created_at: datetime
+    provenance_json: dict[str, Any] = {}
+    media_json: dict[str, Any] = {}
 
 
 class AssetPageOut(BaseModel):
@@ -427,4 +431,99 @@ class AdapterProfileOut(BaseModel):
     limits: dict[str, Any]
     requires_cloud: bool
     cost_model: str
+    lane: str = "ops"
+    needs_gpu: bool = False
+
+
+# ---------- models & runtimes (M3) ----------
+
+class ModelFileOut(BaseModel):
+    name: str
+    size_bytes: int
+    sha256: str | None = None
+
+
+class ModelInstallOut(BaseModel):
+    id: str
+    status: str
+    install_root: str
+    rel_dir: str
+    file_name: str
+    byte_size: int
+    verified: bool
+    version: str
+    error: str | None = None
+    created_at: str | None = None
+
+
+class CompatibilityOut(BaseModel):
+    status: str  # compatible | limited | unsupported | unknown | restricted | unavailable | planned
+    support: str | None = None  # production | tested | experimental | planned
+    modality: str | None = None  # image | video | audio | multimodal
+    modes: list[str] = []
+    reasons: list[str]
+    warnings: list[str]
+    suggested: dict[str, Any]
+    estimate: dict[str, Any]
+
+
+class ModelCatalogEntryOut(BaseModel):
+    key: str
+    display_name: str
+    family: str
+    version: str
+    adapter_id: str
+    format: str
+    source: dict[str, Any]
+    license: dict[str, Any]
+    files: list[ModelFileOut]
+    download_bytes: int
+    requirements: dict[str, Any]
+    capabilities: dict[str, Any]
+    runtime_key: str
+    support: str
+    modality: str
+    modes: list[str]
     notes: str
+    install: dict[str, Any] | None = None
+    compatibility: CompatibilityOut | None = None
+
+
+class ModelInstallRequest(BaseModel):
+    # Which runtime backend flavor to install (auto-chosen when omitted).
+    runtime_flavor: str | None = None
+
+
+class RuntimeOut(BaseModel):
+    key: str
+    display_name: str
+    version: str
+    license: dict[str, Any]
+    backends: list[str]
+    est_bytes: int
+    notes: str
+    install: dict[str, Any] | None = None
+    installs: dict[str, Any] = {}  # per-flavor rows, keyed e.g. "sdcpp-vulkan"
+
+
+class ModelsDirOut(BaseModel):
+    dir: str
+    source: str  # "app setting" | "built-in default"
+    builtin_dir: str
+    exists: bool
+    writable: bool
+    free_bytes: int | None
+    used_bytes: int
+
+
+class GpuSettingsOut(BaseModel):
+    mode: str  # auto | manual
+    preferred_gpu: int | None
+    slots: list[dict[str, Any]]
+    free: int
+    gpu_count: int
+
+
+class GpuSettingsUpdate(BaseModel):
+    mode: str | None = None
+    preferred_gpu: int | None = None

@@ -10,6 +10,7 @@ import/export/verify — registered with backend services injected).
 from __future__ import annotations
 
 from app.adapters.base import ProviderAdapter
+from app.adapters.inference import ModelDownloadAdapter, SdCppAdapter
 from app.adapters.mock import MockImageAdapter
 from app.adapters.ops import (
     AssetImportAdapter,
@@ -35,6 +36,8 @@ class AdapterRegistry:
                 BackupRestoreAdapter,
             ):
                 self.register(cls(session_factory, storage, settings))
+            self.register(SdCppAdapter(session_factory, settings))
+            self.register(ModelDownloadAdapter(session_factory, settings))
 
     def register(self, adapter: ProviderAdapter) -> None:
         self._adapters[adapter.profile.adapter_id] = adapter
@@ -53,6 +56,8 @@ class AdapterRegistry:
                 "limits": a.profile.limits,
                 "requires_cloud": a.profile.requires_cloud,
                 "cost_model": a.profile.cost_model,
+                "lane": getattr(a.profile, "lane", "ops"),
+                "needs_gpu": getattr(a.profile, "needs_gpu", False),
                 "notes": a.profile.notes,
             }
             for a in self._adapters.values()

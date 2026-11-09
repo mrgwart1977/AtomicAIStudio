@@ -7,8 +7,10 @@ import type {
   Entity,
   EntityAssetLink,
   EntityRevision,
+  GpuSchedulerState,
   HardwareReport,
   Job,
+  ModelCatalogEntry,
   Project,
   ProjectCard,
   StorageLocation,
@@ -18,7 +20,7 @@ import type {
 export type Page = "home" | "projects" | "models" | "project";
 export type WorkspaceTab =
   | "overview" | "storyboard" | "cast" | "worlds" | "locations"
-  | "assets" | "backups" | "settings";
+  | "generate" | "assets" | "backups" | "settings";
 export type WorkspaceMode = "guided" | "standard" | "advanced";
 
 interface AppState {
@@ -40,6 +42,9 @@ interface AppState {
   locations: StorageLocation[];
   hardware: HardwareReport | null;
   adapters: AdapterProfile[];
+  models: ModelCatalogEntry[];
+  gpuState: GpuSchedulerState | null;
+  generateShotId: string | null;
   promptDraft: string;
   setReady: (v: boolean) => void;
   setWsConnected: (v: boolean) => void;
@@ -61,6 +66,8 @@ interface AppState {
   refreshEntityAssets: (entityId?: string) => Promise<void>;
   refreshLocations: () => Promise<void>;
   refreshHardware: () => Promise<void>;
+  refreshModels: () => Promise<void>;
+  setGenerateShotId: (id: string | null) => void;
   currentProject: () => ProjectCard | undefined;
 }
 
@@ -83,6 +90,9 @@ export const useApp = create<AppState>((set, get) => ({
   locations: [],
   hardware: null,
   adapters: [],
+  models: [],
+  gpuState: null,
+  generateShotId: null,
   promptDraft: "",
   setReady: (ready) => set({ ready }),
   setWsConnected: (wsConnected) => set({ wsConnected }),
@@ -202,5 +212,13 @@ export const useApp = create<AppState>((set, get) => ({
     ]);
     set({ hardware, adapters });
   },
+  refreshModels: async () => {
+    const [models, gpuState] = await Promise.all([
+      apiFetch<ModelCatalogEntry[]>("/api/models"),
+      apiFetch<GpuSchedulerState>("/api/gpu/scheduler"),
+    ]);
+    set({ models, gpuState });
+  },
+  setGenerateShotId: (generateShotId) => set({ generateShotId }),
   currentProject: () => get().projects.find((p) => p.id === get().currentProjectId),
 }));

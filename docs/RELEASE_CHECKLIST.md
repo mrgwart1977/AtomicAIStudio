@@ -152,3 +152,89 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   `tauri-check` never staged the sidecar resource dir, so it failed on every
   PR; the job now stubs the directory (bundling still uses the real sidecar
   via the `package` job). All tracked items above remain open as recorded.
+
+---
+
+### Milestone notes (M3 Phase 1)
+
+- **M3 Phase 1 →** inference foundation landed on `feat/m3-generation`:
+  model catalog, compatibility engine, GPU detection + scheduler, Model
+  Manager rewrite, Generate workspace, `SdCppAdapter` + `generate.image`,
+  migration `0006_m3`. **No model weights or runtime binaries downloaded —
+  `docs/plans/M3_MODEL_PROPOSAL.md` is the approval gate for Phase 2.**
+- Suite now **115/115** (26 new M3 tests). Multi-GPU parallelism is proven on
+  simulated probes only; clearly labelled as such — the physical
+  single-GPU path needs real weights (Phase 2).
+- Item **#8 (approval surface)** now has an implemented enforcement path
+  (install endpoint + confirm dialog stating size/destination/license) —
+  keep open until exercised with a real download.
+- Item **#13 (first verified real local adapter)** — the `SdCppAdapter`
+  exists and is fake-worker-verified; stays open until real inference is
+  demonstrated on the RTX 3060 Ti.
+- All other tracked items remain open as recorded.
+
+
+### Milestone notes (M3 Phase 2)
+
+- **M3 Phase 2 →** first real local inference verified on the installed
+  packaged build: SD 1.5 fp16 GGUF (sha256-verified) + sd.cpp Vulkan
+  (`master-1073-991f825`). Three prompts generated (~8 s warm, ~2.25 GiB
+  VRAM delta), cancellation + restart persistence + thumbnail integration +
+  provenance all verified. Evidence: `docs/m3-evidence/`.
+- **#8 (approval surface)** — real download exercised through it; closes.
+- **#13 (first verified real local adapter)** — `SdCppAdapter` produced real
+  images on the RTX 3060 Ti; closes.
+- **New items to track:**
+  - Jobs exceeding VRAM stay `queued` with no surfaced reason — add a
+    queued-reason field.
+  - Asset list endpoint doesn't expose `media_json` provenance (stored on
+    `AssetVersion`; list view only).
+  - sd.cpp `latest` tag floats — pin a release URL for reproducible installs.
+  - CUDA-vs-Vulkan benchmark + auto backend selection pending (B.2/B.3).
+- Suite **119/119** after live-bug fixes (sd-cli rename, img_gen mode,
+  --seed flag, install-row refresh, installed-flavor preference).
+
+### Milestone notes (M3 Phase 3)
+
+- **Benchmark + selection hardening →** Vulkan measured 5× warm median
+  **7.75 s** (prime 24.2 s incl. model load; OS-cache warm — no persistent
+  worker). Recorded via `POST /api/runtimes/{key}/benchmark` on the
+  flavor-keyed row. Auto-selection verified live: default request resolved
+  `vulkan` — `"fastest measured backend (median 7.8s over 5 runs)"`.
+- **CUDA comparison blocked:** `cuda12` build installs + verifies, but
+  `stable-diffusion.dll` needs `cudart64_12.dll`/`cublas64_12.dll` from the
+  separate 563 MB `cudart-sd-bin-win-cu12-x64.zip` — not downloaded,
+  awaiting separate approval per download terms.
+- **Closed-by-evidence:** queued-jobs now carry a reason message (verified
+  live: "no device fits — job needs ~360.6 GiB VRAM…"); asset list exposes
+  `media_json`+`provenance_json`; runtime releases resolve pinned tag
+  metadata (`meta_json.resolved`); Backend selector shipped in the
+  Generate page (`docs/m3-evidence/generate-backend-selector.png`).
+- **Bug caught this round:** `RuntimeOut` response model silently stripped
+  the `installs` map — the selector had no data. Fixed in schema.
+- Suite **128/128** (39 M3 + 89 carried).
+
+### Milestone notes (M3 Phase 4)
+
+- **CUDA comparison done:** `cudart-sd-bin-win-cu12-x64.zip` (563,452,046 B,
+  sha256 `fe203668…0f38d`, 3 NVIDIA CUDA-12 runtime DLLs) installed
+  app-local after approval. Benchmark: **Vulkan 7.24 s median vs CUDA
+  8.83 s** — Vulkan ~18 % faster on the RTX 3060 Ti; CUDA cancel verified.
+  NVIDIA EULA: app-local use compliant; bundling in a public installer
+  needs the EULA notice — deferred.
+- **VRAM estimate fixed:** linear pixel scaling produced an absurd 360 GiB
+  on a stress job → `sqrt(px_ratio)` heuristic + regression test.
+- **Reliability:** runtime smoke check (`sd-cli --help`) at install + lazy
+  at pick; broken installs demoted to `error` with actionable message;
+  manual pick of a broken flavor errors immediately; benchmarks are
+  GPU-scoped + record runtime version.
+- **New tracked gap:** no persistent loaded-model worker (each job pays
+  model load); surfacing worker stderr tail in job detail is a UX gap.
+
+### Pre-merge state (M3 final)
+
+- All M3 deliverables verified on the packaged build; suite **128/128**.
+- Tracked ahead: #22 CUDA-redistribution release blocker, #23 M4.1
+  persistent workers (docs/plans/M4_1_PERSISTENT_WORKERS.md), #24 worker
+  stderr in job detail, #25 multi-GPU hardware validation, #26 VRAM
+  calibration, #27 catalog expansion; plus pre-existing #5-#11, #14, #15.

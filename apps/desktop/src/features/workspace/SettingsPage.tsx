@@ -258,6 +258,8 @@ export function SettingsPage() {
         </div>
       </div>
 
+      <GpuSection setMsg={setMsg} setError={setError} />
+
       {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
       {msg && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{msg}</p>}
       <div className="mt-5 flex justify-end">
@@ -269,6 +271,104 @@ export function SettingsPage() {
           {busy ? "Saving…" : "Save settings"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** App-level GPU preferences — auto is the default; manual pins every job to
+ * one device. Independent jobs still run in parallel across different GPUs
+ * in auto mode. */
+function GpuSection({ setMsg, setError }: {
+  setMsg: (m: string | null) => void;
+  setError: (e: string | null) => void;
+}) {
+  const gpuState = useApp((s) => s.gpuState);
+  const refreshModels = useApp((s) => s.refreshModels);
+  const [mode, setMode] = useState("auto");
+  const [gpu, setGpu] = useState<string>("");
+
+  useEffect(() => {
+    void refreshModels();
+  }, [refreshModels]);
+
+  useEffect(() => {
+    if (!gpuState) return;
+    setMode(String(gpuState.prefs.mode ?? "auto"));
+    setGpu(gpuState.prefs.preferred_gpu != null ? String(gpuState.prefs.preferred_gpu) : "");
+  }, [gpuState]);
+
+  async function save() {
+    setError(null);
+    try {
+      await apiFetch("/api/settings/gpu", {
+        method: "PUT",
+        body: JSON.stringify({
+          mode,
+          preferred_gpu: gpu === "" ? null : parseInt(gpu, 10),
+        }),
+      });
+      setMsg("GPU preferences saved.");
+      await refreshModels();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  if (!gpuState || gpuState.slots.length === 0) {
+    return (
+      <div className="mt-5 rounded-lg border border-line bg-card p-5">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">GPU</h3>
+        <p className="mt-2 text-xs text-muted">
+          No GPU detected — generation runs on the CPU lane where the model supports it.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-5 rounded-lg border border-line bg-card p-5">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">GPU</h3>
+      <p className="mt-1 text-xs text-faint">
+        Automatic mode picks a free, compatible GPU for each generation and spreads
+        independent jobs across multiple GPUs. Manual mode pins every job to one device.
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-4">
+        <label className="block text-sm text-muted">
+          Mode
+          <select value={mode} onChange={(e) => setMode(e.target.value)}
+            className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm text-fg">
+            <option value="auto">Automatic (recommended)</option>
+            <option value="manual">Manual — always use one GPU</option>
+          </select>
+        </label>
+        <label className="block text-sm text-muted">
+          Preferred GPU
+          <select value={gpu} onChange={(e) => setGpu(e.target.value)}
+            disabled={mode === "auto"}
+            className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm text-fg disabled:opacity-40">
+            <option value="">— pick one —</option>
+            {gpuState.slots.map((s) => (
+              <option key={s.index} value={s.index}>
+                GPU {s.index}: {s.name ?? "?"} ({fmtBytes(s.vram_bytes ?? 0)})
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <ul className="mt-3 space-y-1 text-xs text-muted">
+        {gpuState.slots.map((s) => (
+          <li key={s.index} className="flex justify-between rounded border border-line px-2 py-1">
+            <span>GPU {s.index}: {s.name ?? "?"}</span>
+            <span>{fmtBytes(s.vram_bytes ?? 0)} · {s.busy_job_id ? "busy" : "free"}</span>
+          </li>
+        ))}
+      </ul>
+      <button
+        onClick={() => void save()}
+        className="mt-3 rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg"
+      >
+        Save GPU preferences
+      </button>
     </div>
   );
 }

@@ -4,11 +4,13 @@ All project data is scoped through get_project — no unscoped reads."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -26,13 +28,14 @@ from app.db.models import (
     Project,
     ProjectRevision,
     PromptDraft,
+    RuntimeInstall,
     SharedAssetLink,
     StorageLocation,
     World,
     new_id,
     utcnow,
 )
-from app.domain import bibles, commands as cmd, hardware
+from app.domain import bibles, commands as cmd, hardware, model_catalog, model_files
 from app.domain.backup import PackageError, read_manifest
 from app.schemas.api import (
     AdapterProfileOut,
@@ -50,7 +53,12 @@ from app.schemas.api import (
     EntityAssetLinkOut,
     EntityOut,
     EntityRevisionOut,
+    GpuSettingsOut,
+    GpuSettingsUpdate,
     JobOut,
+    ModelCatalogEntryOut,
+    ModelInstallRequest,
+    ModelsDirOut,
     PackageImportRequest,
     PackagePreviewOut,
     ProjectCardOut,
@@ -58,6 +66,7 @@ from app.schemas.api import (
     ProjectOut,
     ProjectRevisionOut,
     PromptDraftOut,
+    RuntimeOut,
     SharedAssetOut,
     StorageLocationCreate,
     StorageLocationOut,
@@ -91,13 +100,263 @@ def health() -> dict:
 
 
 @api_router.get("/api/hardware")
-def get_hardware() -> dict:
-    return hardware.probe()
+def get_hardware(refresh: bool = False) -> dict:
+    return hardware.probe(force=refresh)
 
 
 @api_router.get("/api/adapters", response_model=list[AdapterProfileOut])
 def list_adapters(request: Request) -> list[dict]:
     return request.app.state.adapter_registry.list_profiles()
+
+
+# ---------- models & runtimes (M3) ----------
+
+def _model_view(request: Request, db: Session, spec) -> dict:
+    from app.domain import compatibility, model_files
+    installs = model_files.installs_by_key(db)
+    root = model_files.models_root(db, request.app.state.settings)
+    install = installs.get(spec.key)
+    if install:
+        install["disk_free_bytes"] = model_files.disk_free_bytes(Path(install["install_root"]))
+    else:
+        install = {"status": "not_installed", "disk_free_bytes": model_files.disk_free_bytes(root)}
+    compat = compatibility.classify_model(spec, hardware.probe(), install)
+    return {
+        **model_catalog.spec_to_dict(spec),
+        "install": {k: v for k, v in (install or {}).items() if k != "disk_free_bytes"},
+        "compatibility": compat,
+    }
+
+
+@api_router.get("/api/models", response_model=list[ModelCatalogEntryOut])
+def list_models(request: Request, db: Session = Depends(get_db)):
+    """The full catalog: available/installed/compatible/limited/
+    unsupported/restricted/unavailable — each with install state,
+    license, requirements, and a compatibility verdict."""
+    return [_model_view(request, db, spec) for spec in model_catalog.catalog()]
+
+
+@api_router.get("/api/models/dir", response_model=ModelsDirOut)
+def get_models_dir(request: Request, db: Session = Depends(get_db)):
+    # NOTE: must precede /api/models/{model_key} or "dir" is parsed as a key.
+    root = model_files.models_root(db, request.app.state.settings)
+    builtin = request.app.state.settings.data_dir / "models"
+    custom = model_files._get_setting(db, "models_dir")
+    used = 0
+    if root.is_dir():
+        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return {
+        "dir": str(root),
+        "source": "app setting" if custom else "built-in default",
+        "builtin_dir": str(builtin),
+        "exists": root.is_dir(),
+        "writable": os.access(root if root.is_dir() else root.parent, os.W_OK),
+        "free_bytes": model_files.disk_free_bytes(root),
+        "used_bytes": used,
+    }
+
+
+@api_router.get("/api/models/{model_key}", response_model=ModelCatalogEntryOut)
+def get_model(model_key: str, request: Request, db: Session = Depends(get_db)):
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    return _model_view(request, db, spec)
+
+
+@api_router.post("/api/models/{model_key}/install")
+def install_model(model_key: str, request: Request,
+                  body: ModelInstallRequest | None = None,
+                  db: Session = Depends(get_db)):
+    """Queue a user-approved model download as an app-level job.
+    Refuses restricted-license models and models already installed or
+    mid-download."""
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    if spec.support == "planned":
+        raise HTTPException(
+            422, f"{spec.display_name} is a planned {spec.modality} model — no local support in this build")
+    if not spec.license.get("commercial_ok", True):
+        raise HTTPException(422, f"{spec.display_name} is license-restricted and cannot be installed")
+    if not spec.files:
+        raise HTTPException(422, f"{spec.display_name} has no downloadable artifact on a supported runtime")
+    installs = model_files.installs_by_key(db)
+    cur = installs.get(model_key) or {}
+    if cur.get("status") == "installed":
+        raise HTTPException(409, "model is already installed")
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.download",
+            GenerationJob.model_key == model_key,
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().first()
+    if in_flight is not None:
+        raise HTTPException(409, "a download for this model is already in progress")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.download", kind="model_download",
+        request={"model_key": model_key,
+                 "runtime_flavor": (body or ModelInstallRequest()).runtime_flavor},
+        idempotency_key=f"modeldl:{model_key}:{new_id()[:8]}",
+        model_key=model_key,
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.post("/api/models/{model_key}/remove")
+def remove_model(model_key: str, request: Request, db: Session = Depends(get_db)):
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    busy = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.model_key == model_key,
+            GenerationJob.status == "running",
+        )
+    ).scalars().first()
+    if busy is not None:
+        raise HTTPException(409, "a job is using this model right now — wait for it or cancel it")
+    try:
+        result = model_files.remove_model(db, spec)
+    except model_files.ModelError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.commit()
+    return result
+
+
+@api_router.put("/api/settings/models-dir", response_model=ModelsDirOut)
+def set_models_dir(body: AppBackupDirUpdate, request: Request, db: Session = Depends(get_db)):
+    if body.dir:
+        try:
+            model_files.set_models_root(db, body.dir)
+        except model_files.ModelError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    else:
+        model_files.unset_models_root(db)
+    db.commit()
+    return get_models_dir(request, db)
+
+
+@api_router.get("/api/runtimes", response_model=list[RuntimeOut])
+def list_runtimes(request: Request, db: Session = Depends(get_db)):
+    rows = model_files.runtime_rows(db)
+    out = []
+    for spec in model_catalog.RUNTIMES.values():
+        d = model_catalog.runtime_to_dict(spec)
+        flavors = {k: v for k, v in rows.items() if k.startswith(f"{spec.key}-")}
+        d["installs"] = flavors
+        d["install"] = next(iter(flavors.values()), None)
+        out.append(d)
+    return out
+
+
+class RuntimeInstallRequest(BaseModel):
+    flavor: str = "vulkan"
+
+
+class RuntimeBenchmarkRequest(BaseModel):
+    flavor: str
+    median_total_ms: float
+    runs: int
+    gpu: str | None = None
+    params: dict | None = None
+
+
+@api_router.post("/api/runtimes/{runtime_key}/install")
+def install_runtime(runtime_key: str, request: Request,
+                    body: RuntimeInstallRequest | None = None,
+                    db: Session = Depends(get_db)):
+    """User-approved runtime-flavor download (e.g. the CUDA build after the
+    Vulkan build). Queues an app-level ops.model.download job that installs
+    ONLY the runtime — no model weights are touched."""
+    rt_spec = model_catalog.get_runtime(runtime_key)
+    if rt_spec is None:
+        raise HTTPException(404, "unknown runtime")
+    flavor = (body or RuntimeInstallRequest()).flavor
+    if flavor not in rt_spec.backends:
+        raise HTTPException(422, f"runtime '{runtime_key}' has no '{flavor}' backend")
+    rows = model_files.runtime_rows(db)
+    cur = rows.get(f"{runtime_key}-{flavor}") or {}
+    if cur.get("status") == "installed":
+        raise HTTPException(409, f"runtime {runtime_key}-{flavor} is already installed")
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.download",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().first()
+    if in_flight is not None:
+        raise HTTPException(409, "a download is already in progress — ops lane is serialized")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.download", kind="model_download",
+        request={"runtime_only": True, "runtime_key": runtime_key,
+                 "runtime_flavor": flavor},
+        idempotency_key=f"rtdl:{runtime_key}:{flavor}:{new_id()[:8]}",
+        model_key=None,
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.post("/api/runtimes/{runtime_key}/benchmark")
+def record_benchmark(runtime_key: str, body: RuntimeBenchmarkRequest,
+                     db: Session = Depends(get_db)):
+    """Record a measured benchmark result for an installed runtime flavor.
+    Automatic backend selection prefers the fastest measured installed
+    backend (B.3 — measured over assumed)."""
+    row_key = f"{runtime_key}-{body.flavor}"
+    row = db.execute(
+        select(RuntimeInstall).where(RuntimeInstall.runtime_key == row_key)
+    ).scalar_one_or_none()
+    if row is None or row.status != "installed":
+        raise HTTPException(404, f"runtime {row_key} is not installed")
+    meta = dict(row.meta_json or {})
+    meta["benchmark"] = {
+        "median_total_ms": body.median_total_ms,
+        "runs": body.runs,
+        "gpu": body.gpu,
+        "runtime_version": row.version,
+        "params": body.params or {},
+        "measured_at": utcnow().isoformat(),
+    }
+    row.meta_json = meta
+    db.commit()
+    return {"runtime_key": row_key, "benchmark": meta["benchmark"]}
+
+
+@api_router.get("/api/gpu/scheduler")
+def gpu_scheduler_state(request: Request):
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    if sched is None:
+        return {"gpu_count": 0, "free": 0, "slots": [], "prefs": {}}
+    return sched.state()
+
+
+@api_router.put("/api/settings/gpu", response_model=GpuSettingsOut)
+def set_gpu_settings(body: GpuSettingsUpdate, request: Request, db: Session = Depends(get_db)):
+    if body.mode is not None and body.mode not in ("auto", "manual"):
+        raise HTTPException(422, "mode must be 'auto' or 'manual'")
+    if body.preferred_gpu is not None:
+        idx = body.preferred_gpu
+        gpus = hardware.probe().get("gpus") or []
+        if idx < 0 or not any(g.get("index") == idx for g in gpus):
+            raise HTTPException(422, f"no detected GPU with index {idx}")
+    if body.mode is not None:
+        model_files._set_setting(db, "gpu_mode", body.mode)
+    if body.preferred_gpu is not None:
+        model_files._set_setting(db, "preferred_gpu", body.preferred_gpu)
+    db.commit()
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    st = sched.state() if sched else {"slots": [], "free": 0, "gpu_count": 0}
+    return {
+        "mode": model_files._get_setting(db, "gpu_mode") or "auto",
+        "preferred_gpu": model_files._get_setting(db, "preferred_gpu"),
+        **st,
+    }
 
 
 # ---------- projects ----------
@@ -327,6 +586,7 @@ def list_assets(
     project: Project = Depends(get_project), db: Session = Depends(get_db),
     offset: int = 0, limit: int = Query(default=100, le=500),
     kind: str | None = None, q: str | None = None, status: str | None = None,
+    origin: str | None = None,
 ):
     base = select(Asset).where(Asset.project_id == project.id, Asset.status != "deleted")
     if kind:
@@ -335,11 +595,33 @@ def list_assets(
         base = base.where(Asset.name.like(f"%{q}%"))
     if status:
         base = base.where(Asset.status == status)
+    if origin:
+        base = base.where(Asset.origin == origin)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
     items = db.execute(
         base.order_by(Asset.created_at.desc()).offset(offset).limit(limit)
     ).scalars().all()
-    return {"items": items, "total": total, "offset": offset, "limit": limit}
+    # Provenance surface: generation metadata lives on the current
+    # AssetVersion — join it so the list API exposes it (issue #20).
+    ver_ids = [a.current_version_id for a in items if a.current_version_id]
+    media_by_ver = {}
+    if ver_ids:
+        for v in db.execute(
+            select(AssetVersion).where(AssetVersion.id.in_(ver_ids))
+        ).scalars():
+            media_by_ver[v.id] = v.media_json
+    out_items = []
+    for a in items:
+        out_items.append({
+            "id": a.id, "project_id": a.project_id, "name": a.name,
+            "kind": a.kind, "origin": a.origin, "scope": a.scope,
+            "status": a.status, "uri": a.uri, "sha256": a.sha256,
+            "byte_size": a.byte_size, "current_version_id": a.current_version_id,
+            "created_at": a.created_at,
+            "provenance_json": a.provenance_json or {},
+            "media_json": media_by_ver.get(a.current_version_id) or {},
+        })
+    return {"items": out_items, "total": total, "offset": offset, "limit": limit}
 
 
 @api_router.get("/api/projects/{project_id}/assets/{asset_id}/versions", response_model=list[AssetVersionOut])

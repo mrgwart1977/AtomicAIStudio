@@ -44,8 +44,8 @@ SUPPORTED_COMMANDS = {
     "project.update_settings",
     "project.duplicate",
     "project.delete",
-    # generation (mock only in M1)
-    "generate.image.mock",
+    # generation (mock + real local inference since M3)
+    "generate.image.mock", "generate.image",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -66,11 +66,12 @@ SUPPORTED_COMMANDS = {
 }
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
-GENERATION_COMMANDS = {"generate.image.mock"}
+GENERATION_COMMANDS = {"generate.image.mock", "generate.image"}
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
     "generate.image.mock": "mock.image",
+    "generate.image": "gen.image.sdcpp",
     "asset.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
     "assets.verify": "ops.assets.verify",
@@ -132,6 +133,8 @@ def _summary(command_type: str, payload: dict) -> str:
         return "Delete project permanently"
     if command_type == "generate.image.mock":
         return f"Generate image via mock adapter — '{(payload.get('prompt') or '')[:60]}'"
+    if command_type == "generate.image":
+        return f"Generate image ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
     if command_type == "asset.share":
@@ -197,6 +200,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         if not (payload.get("prompt") or "").strip():
             raise CommandError(422, "prompt is required for image generation")
         warnings.append("Uses the mock adapter — output is a placeholder, not AI inference")
+    if command_type == "generate.image":
+        _check_generation(session, project, payload)
     if command_type in {"project.archive", "project.restore", "project.duplicate"}:
         warnings.append("Applies to the whole project")
     if command_type == "project.delete":
@@ -384,6 +389,50 @@ def _check_cast_state(session: Session, project: Project, payload: dict, *, part
         a = session.get(Asset, aid)
         if a is None or a.project_id != project.id:
             raise CommandError(404, "reference asset not found in this project")
+
+
+def _check_generation(session: Session, project: Project, payload: dict) -> None:
+    """generate.image: model must be known, licensed, and actually
+    installed; referenced shot/scene must belong to the project; device
+    selection must be a sane value."""
+    from app.domain import model_catalog, model_files
+
+    from app.db.models import Scene, Shot
+
+    if not (payload.get("prompt") or "").strip():
+        raise CommandError(422, "prompt is required for image generation")
+    spec = model_catalog.get(payload.get("model_key") or "")
+    if spec is None:
+        raise CommandError(422, f"unknown model '{payload.get('model_key')}' — pick an installed model")
+    if spec.modality != "image" or "text2image" not in spec.modes:
+        raise CommandError(
+            422, f"{spec.display_name} is a {spec.modality} model — generate.image requires a text2image model")
+    if spec.support not in ("production", "tested"):
+        raise CommandError(
+            422, f"{spec.display_name} is {spec.support} — catalog-visible but not usable for generation yet")
+    if not spec.license.get("commercial_ok", True):
+        raise CommandError(422, f"{spec.display_name} has a restricted license and cannot generate")
+    with session.no_autoflush:
+        weight = model_files.installed_file(session, None, spec)
+    if weight is None:
+        raise CommandError(
+            422, f"{spec.display_name} is not installed — install it from the Model Manager first")
+
+    device = payload.get("device", "auto")
+    if isinstance(device, str) and device not in ("auto", "cpu"):
+        raise CommandError(422, f"invalid device '{device}' — use 'auto', 'cpu', or a GPU index")
+    if isinstance(device, bool) or (isinstance(device, (int, float)) and int(device) < 0):
+        raise CommandError(422, "invalid GPU index")
+
+    shot_id = payload.get("shot_id")
+    if shot_id:
+        shot = session.get(Shot, shot_id)
+        if shot is None or shot.project_id != project.id:
+            raise CommandError(404, "shot not found in this project")
+        if payload.get("scene_id") and shot.scene_id != payload["scene_id"]:
+            raise CommandError(422, "shot does not belong to the given scene")
+    if payload.get("scene_id") and session.get(Scene, payload["scene_id"]) is None:
+        raise CommandError(404, "scene not found in this project")
 
 
 def _check_storyboard_links(session: Session, project: Project, payload: dict) -> None:
@@ -1076,6 +1125,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 request=request,
                 idempotency_key=f"job:{idempotency_key}",
                 command_id=command.id,
+                model_key=payload.get("model_key"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1119,6 +1169,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
 def _job_kind(command_type: str) -> str:
     return {
         "generate.image.mock": "image",
+        "generate.image": "image",
         "asset.import": "import",
         "asset.relink": "relink",
         "assets.verify": "verify",
@@ -1132,6 +1183,35 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
     req: dict[str, Any] = {"command_type": command_type, **payload}
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
+        if payload.get("shot_id"):
+            req["shot_id"] = payload["shot_id"]
+        req["set_thumbnail"] = bool(payload.get("set_thumbnail"))
+    elif command_type == "generate.image":
+        from app.domain import compatibility, model_catalog
+        spec = model_catalog.get(payload.get("model_key") or "")
+        req = {
+            "command_type": command_type,
+            "model_key": payload["model_key"],
+            "prompt": payload["prompt"],
+            "negative_prompt": payload.get("negative_prompt") or "",
+            "width": int(payload.get("width", 512)),
+            "height": int(payload.get("height", 512)),
+            "steps": int(payload.get("steps", 25)),
+            "cfg": float(payload.get("cfg", 7.0)),
+            "seed": payload.get("seed", -1),
+            "sampler": payload.get("sampler"),
+            "batch": int(payload.get("batch", 1)),
+            "device": payload.get("device", "auto"),
+            "runtime_flavor": payload.get("runtime_flavor"),
+            "shot_id": payload.get("shot_id"),
+            "scene_id": payload.get("scene_id"),
+            "set_thumbnail": bool(payload.get("set_thumbnail")),
+            "est_vram_bytes": compatibility.estimate_vram(
+                spec, int(payload.get("width", 512)), int(payload.get("height", 512)),
+                int(payload.get("batch", 1))) if spec else None,
+            # models without a CPU path must stay queued (honest), not burn CPU
+            "allow_cpu": bool(spec.capabilities.get("cpu_fallback")) if spec else True,
+        }
     if command_type == "backup.export":
         req["kind"] = payload.get("kind", "backup")
     return req

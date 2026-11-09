@@ -84,7 +84,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.adapter_registry = AdapterRegistry(
             session_factory=sf, storage=storage, settings=settings
         )
-        job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus, settings.data_dir)
+
+        from app.domain import gpu_sched, hardware
+        from app.domain.model_files import _get_setting
+
+        def _gpu_prefs() -> dict:
+            with sf() as s:
+                return {
+                    "mode": _get_setting(s, "gpu_mode") or "auto",
+                    "preferred_gpu": _get_setting(s, "preferred_gpu"),
+                }
+
+        app.state.gpu_scheduler = gpu_sched.GpuScheduler(
+            hw_probe=hardware.probe, prefs=_gpu_prefs)
+        job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus,
+                               settings.data_dir, gpu_scheduler=app.state.gpu_scheduler)
         app.state.job_engine = job_engine
         with sf() as s:
             requeued = job_engine.reconcile_interrupted(s)

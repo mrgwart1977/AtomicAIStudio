@@ -33,6 +33,13 @@ class Settings(BaseSettings):
         "tauri://localhost",
     ]
     log_level: str = "INFO"
+    # Optional command prefix for the inference worker — tests inject a
+    # fake sd.cpp ("python tests/fake_sd.py"); production uses the
+    # installed runtime binary under <data_dir>/runtimes/.
+    sdcpp_cmd: str | None = None
+    # Optional fixed models root; normally resolved per-call from the
+    # app_settings row (models_dir) or data_dir/models.
+    models_dir: Path | None = None
 
     @property
     def db_path(self) -> Path:

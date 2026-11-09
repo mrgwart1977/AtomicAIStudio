@@ -332,3 +332,56 @@ Post-integration verification **on `main`** (`449ce0a`):
   `cast.state.expression: expected a string, got int (42)`.
 - CI: `tauri-check` gap fixed (sidecar resource dir stubbed — real binary is
   only needed at bundle time, which the `package` job already performs).
+
+---
+
+# M3 Phase 1 — real-inference foundation (no weights downloaded)
+
+Implemented on branch `feat/m3-generation` after maintainer authorization
+against integrated `main` (`44da44f`). Covers M3 sections A/E.1/E.2/B/C/D/F/G
+**architecture and code paths only** — per the approval gate, **no model
+weights or runtime binaries have been downloaded**; the proposed first model
+is documented in `docs/plans/M3_MODEL_PROPOSAL.md`.
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| Real local inference adapter (isolated, cancellable, capability-declared) | `app/adapters/inference.py` — `SdCppAdapter`: subprocess `sd` worker, stream-parse progress, terminate/kill on cancel, friendly OOM/backend errors | `test_sdcpp_e2e_fake_worker` (real subprocess → PNG → asset → thumbnail); `test_sdcpp_cancel_kills_worker` |
+| Model catalog (name/version/source/license/requirements/capabilities) | `app/domain/model_catalog.py` — 5 model specs + sd.cpp runtime spec | `test_catalog_integrity`; `/api/models` |
+| Compatibility engine (compatible/limited/unsupported/unknown/restricted/unavailable + estimates) | `app/domain/compatibility.py` — usable-VRAM policy, headroom, suggestions | 5 classify tests |
+| Hardware detection (per-GPU VRAM incl. >4 GB registry fix, free VRAM, Vulkan/CUDA/DirectML, refresh) | `app/domain/hardware.py` | `/api/hardware?refresh=true` on the packaged build |
+| GPU scheduler (auto/manual, per-GPU slots, VRAM fit, multi-GPU lanes) | `app/domain/gpu_sched.py`; engine lanes in `app/domain/jobs.py` | 6 scheduler tests incl. simulated dual-GPU; **simulated, not physically verified** |
+| Model install/remove (resumable, verified, approval-gated, separate storage root) | `app/domain/model_files.py`, `ops.model.download` adapter, `POST /api/models/{key}/install|remove` | `test_model_install_download_job` (faked network, real job+row+files) |
+| Generation workspace (capability-driven UI, GPU select, shot assign, history) | `apps/desktop/.../GeneratePage.tsx`, Model Manager rewrite | `tsc -b && vite build` clean; screenshots TBD in Phase 2/3 |
+| Storyboard thumbnails via audited command | adapter `apply_command` → engine commits `shot.update` (origin `generation_job`) | e2e test asserts `thumbnail_asset_id` set |
+| Provenance | `Asset.provenance_json` (adapter/job/model/request) + version `media_json` (prompt, seed, params, is_mock) | e2e test asserts both |
+| Migration 0006 | `model_installs`, `runtime_installs`, `generation_jobs.gpu_index/model_key`, `project_id` nullable for app-level jobs | fresh DB → `0006_m3`; real `0005→0006` upgrade on the installed-app DB copy (NOT NULL→NULL, data preserved); `test_alembic_0006_tables_exist` |
+
+**Suite:** 115/115 pass (89 carried + 26 new). **Simulated-vs-verified ledger:**
+single-GPU e2e pipeline proven with a fake `sd` worker (`ATOMIC_SDCPP_CMD`
+override); multi-GPU scheduling proven only on fabricated probes — this
+machine has one GPU; all VRAM numbers are labelled estimates in the API/UI.
+Real weights + real runtime verification is Phase 2, gated on approval.
+
+
+## M3 Phase 3 — measured backend selection (2026-11-09)
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| B.2 CUDA comparison | blocked — `cudart` dep needs separate approval (563 MB) | `docs/m3-evidence/bench.json`; 6 fail-fast jobs, no assets leaked |
+| B.3 measured-over-assumed selection | `SdCppAdapter._pick_flavor`: manual → measured → installed → detected; reason in provenance | live: `"selection_reason": "fastest measured backend (median 7.8s over 5 runs)"` on default request |
+| Manual backend override (advanced UI) | Generate page Backend dropdown (installed flavors) | `docs/m3-evidence/generate-backend-selector.png` |
+| Queued-job reason | `job.message` = scheduler `last_reason` ("no device fits — needs ~X GiB…") | live 8192² job message observed |
+| Provenance in asset list | `GET /api/projects/{id}/assets` joins version `media_json` + `provenance_json` | live response + `test_asset_list_exposes_provenance` |
+| Pinned runtime release | `meta_json.resolved` = `{asset,url,size,tag,pinned,resolved_from,resolved_at}` | `sdcpp-cuda` row: tag `master-1073-991f825`, `pinned: true` |
+| Runtime-only install | `POST /api/runtimes/{key}/install` (no model weights) | CUDA flavor installed via endpoint, Vulkan preserved |
+
+## M3 Phase 4 — CUDA comparison + hardening (2026-11-09, final)
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| B.2 controlled CUDA-vs-Vulkan benchmark | identical params both backends, 5 warm runs + prime, VRAM/util via nvidia-smi | `docs/m3-evidence/bench2.json`: Vulkan 7.24s median vs CUDA 8.83s |
+| cudart dependency (approved) | app-local extract into `sdcpp-cuda/`; provenance in `meta_json.supplements` | sha256 `fe203668…0f38d`; `sd-cli --help` OK |
+| B.3 measured auto-selection | `_pick_flavor`: manual > operational+measured(this GPU) > operational > detected | live: `"fastest measured backend (median 7.8s over 5 runs)"` → vulkan; manual cuda → succeeded |
+| Only-verified-backends eligible | `smoke_check_runtime` at install + lazy; status→`error` + actionable message | `test_pick_flavor_excludes_broken_installs` |
+| Realistic VRAM estimates | `sqrt(px_ratio)` activation scaling | `test_estimate_vram_realistic_scaling`; 8192²→24.6 GiB |
+| Benchmark scope | `benchmark.{gpu,runtime_version,params}`; GPU-name match required | `test_benchmark_scoped_to_recording_gpu` |

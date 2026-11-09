@@ -37,12 +37,13 @@ export default function App() {
           if (e.event === "job.progress" && e.resource_id) {
             const st = useApp.getState();
             const existing = st.jobs[e.resource_id];
+            const adapterId = String(e.payload.adapter_id ?? "");
             st.upsertJob({
               ...(existing ?? {
                 id: e.resource_id,
-                project_id: e.project_id ?? "",
-                adapter_id: String(e.payload.adapter_id ?? ""),
-                kind: "image",
+                project_id: e.project_id ?? null,
+                adapter_id: adapterId,
+                kind: adapterId === "ops.model.download" ? "model_download" : "image",
                 resumable: true,
                 output_asset_id: null,
                 command_id: null,
@@ -57,8 +58,10 @@ export default function App() {
               output_asset_id: (e.payload.output_asset_id as string | null) ?? null,
               progress_json: (e.payload.progress_json as Job["progress_json"]) ?? null,
               cancel_requested: Boolean(e.payload.cancel_requested ?? false),
+              gpu_index: (e.payload.gpu_index as number | null) ?? null,
+              model_key: (e.payload.model_key as string | null) ?? null,
             });
-            if (e.payload.status === "succeeded") void st.refreshProjectData();
+            if (e.payload.status === "succeeded" && e.project_id) void st.refreshProjectData();
           }
         },
         (open) => useApp.getState().setWsConnected(open),

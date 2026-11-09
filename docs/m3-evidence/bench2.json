@@ -1,0 +1,150 @@
+{
+ "params": {
+  "width": 512,
+  "height": 512,
+  "steps": 20,
+  "cfg": 7.0,
+  "seed": 42,
+  "batch": 1
+ },
+ "prompts": [
+  "a majestic red dragon perched on a mountain peak at sunset, epic fantasy art",
+  "a weathered fishing boat in a foggy harbor at dawn, muted colors, photorealistic",
+  "an ancient library with towering bookshelves and shafts of golden light"
+ ],
+ "gpu": "RTX 3060 Ti",
+ "runs": [
+  {
+   "flavor": "vulkan",
+   "job_id": "449c518b-a343-41af-93d5-1ce99b62b764",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 8.8,
+   "peak_vram_mib": 4077,
+   "delta_vram_mib": 2160,
+   "peak_util_pct": 100,
+   "kind": "prime"
+  },
+  {
+   "flavor": "vulkan",
+   "job_id": "2f544e36-d19e-4297-8a51-278151387b56",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 7.78,
+   "peak_vram_mib": 4618,
+   "delta_vram_mib": 2709,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "vulkan",
+   "job_id": "978ac30f-c743-4f94-b975-6eea26e68d6f",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 7.22,
+   "peak_vram_mib": 4076,
+   "delta_vram_mib": 2167,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "vulkan",
+   "job_id": "68c06789-35e6-4dca-a361-f0ba6a571396",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 7.32,
+   "peak_vram_mib": 4617,
+   "delta_vram_mib": 2706,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "vulkan",
+   "job_id": "c2f98062-9123-480a-b53a-a530881a3841",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 7.24,
+   "peak_vram_mib": 4106,
+   "delta_vram_mib": 2197,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "vulkan",
+   "job_id": "9a53d9f0-e0ed-46cd-935e-dbf7762fd182",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 7.23,
+   "peak_vram_mib": 4074,
+   "delta_vram_mib": 2165,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "86b825b3-94c9-4c59-9114-3e01dc5df304",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 9.9,
+   "peak_vram_mib": 4868,
+   "delta_vram_mib": 2949,
+   "peak_util_pct": 99,
+   "kind": "prime"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "f37782fa-2720-44c9-8b07-07d05ddad73e",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 8.83,
+   "peak_vram_mib": 4194,
+   "delta_vram_mib": 2270,
+   "peak_util_pct": 99,
+   "kind": "warm"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "fc685f91-53ae-46df-9ece-ca35bae35aad",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 8.79,
+   "peak_vram_mib": 4886,
+   "delta_vram_mib": 2962,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "698b59b5-ddc4-49fb-a46e-0d3c57718b6a",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 8.83,
+   "peak_vram_mib": 4915,
+   "delta_vram_mib": 2989,
+   "peak_util_pct": 99,
+   "kind": "warm"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "dbacdba9-6576-40f4-b959-6ed51460ec18",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 9.04,
+   "peak_vram_mib": 4217,
+   "delta_vram_mib": 2267,
+   "peak_util_pct": 99,
+   "kind": "warm"
+  },
+  {
+   "flavor": "cuda",
+   "job_id": "5f148528-60ba-4e90-a0c4-8232d40027c8",
+   "status": "succeeded",
+   "error": "",
+   "wall_s": 8.82,
+   "peak_vram_mib": 4861,
+   "delta_vram_mib": 2912,
+   "peak_util_pct": 100,
+   "kind": "warm"
+  }
+ ]
+}
