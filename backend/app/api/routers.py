@@ -152,10 +152,13 @@ def install_model(model_key: str, request: Request,
     spec = model_catalog.get(model_key)
     if spec is None:
         raise HTTPException(404, "unknown model")
+    if spec.support == "planned":
+        raise HTTPException(
+            422, f"{spec.display_name} is a planned {spec.modality} model — no local support in this build")
     if not spec.license.get("commercial_ok", True):
         raise HTTPException(422, f"{spec.display_name} is license-restricted and cannot be installed")
     if not spec.files:
-        raise HTTPException(422, f"{spec.display_name} has no downloadable artifact")
+        raise HTTPException(422, f"{spec.display_name} has no downloadable artifact on a supported runtime")
     installs = model_files.installs_by_key(db)
     cur = installs.get(model_key) or {}
     if cur.get("status") == "installed":

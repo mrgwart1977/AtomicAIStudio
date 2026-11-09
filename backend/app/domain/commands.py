@@ -404,6 +404,12 @@ def _check_generation(session: Session, project: Project, payload: dict) -> None
     spec = model_catalog.get(payload.get("model_key") or "")
     if spec is None:
         raise CommandError(422, f"unknown model '{payload.get('model_key')}' — pick an installed model")
+    if spec.modality != "image" or "text2image" not in spec.modes:
+        raise CommandError(
+            422, f"{spec.display_name} is a {spec.modality} model — generate.image requires a text2image model")
+    if spec.support not in ("production", "tested"):
+        raise CommandError(
+            422, f"{spec.display_name} is {spec.support} — catalog-visible but not usable for generation yet")
     if not spec.license.get("commercial_ok", True):
         raise CommandError(422, f"{spec.display_name} has a restricted license and cannot generate")
     with session.no_autoflush:

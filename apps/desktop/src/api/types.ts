@@ -307,10 +307,16 @@ export interface HardwareReport {
 
 export type CompatStatus =
   | "compatible" | "limited" | "unsupported" | "unknown"
-  | "restricted" | "unavailable";
+  | "restricted" | "unavailable" | "planned";
+
+export type SupportTier = "production" | "tested" | "experimental" | "planned";
+export type Modality = "image" | "video" | "audio" | "multimodal";
 
 export interface Compatibility {
   status: CompatStatus;
+  support?: SupportTier;
+  modality?: Modality;
+  modes?: string[];
   reasons: string[];
   warnings: string[];
   suggested: Record<string, unknown>;
@@ -360,9 +366,19 @@ export interface ModelCatalogEntry {
     precision?: string[];
     gpu_selection?: boolean;
     cpu_fallback?: boolean;
+    resolutions?: string[];
+    aspect_ratios?: string[];
+    durations_s?: { min?: number; max?: number };
+    fps?: number[];
+    audio?: boolean;
+    multi_shot?: boolean;
+    character_consistency?: boolean;
+    strengths?: string[];
   };
   runtime_key: string;
-  status_hint: string;
+  support: SupportTier;
+  modality: Modality;
+  modes: string[];
   notes: string;
   install: ModelInstall | null;
   compatibility: Compatibility;

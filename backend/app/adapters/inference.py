@@ -105,6 +105,9 @@ class SdCppAdapter:
         spec = model_catalog.get(key or "")
         if spec is None:
             raise ValueError(f"unknown model '{key}'")
+        if spec.modality != "image" or "text2image" not in spec.modes or spec.support not in ("production", "tested"):
+            raise ValueError(
+                f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for image generation")
         with self._sf() as s:
             weight = model_files.installed_file(s, self._settings, spec)
         if weight is None:

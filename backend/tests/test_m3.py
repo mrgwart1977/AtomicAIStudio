@@ -104,15 +104,68 @@ def _install_row(client, model_key: str, tmp_path: Path):
 def test_catalog_integrity():
     from app.domain import model_catalog
     keys = [m.key for m in model_catalog.catalog()]
-    assert len(keys) == len(set(keys)) >= 3
+    assert len(keys) == len(set(keys)) >= 8  # image + video + experimental entries
     for m in model_catalog.catalog():
         assert m.license["name"] and m.license["url"]
         assert m.requirements["min_vram_bytes"] > 0
-        assert "text2image" in m.capabilities.get("tasks", [])
+        assert m.support in ("production", "tested", "experimental", "planned")
+        assert m.modality in ("image", "video", "audio", "multimodal")
+        assert m.modes, "every entry declares at least one generation mode"
+        assert set(m.modes) & set(m.capabilities.get("tasks", [])) or not m.capabilities.get("tasks")
+        # a model can never be installable AND planned
+        assert not (m.support == "planned" and m.files)
         for f in m.files:
             assert f.size_bytes > 0 and f.url.startswith("https://")
     runtimes = model_catalog.RUNTIMES
     assert "sdcpp" in runtimes and "vulkan" in runtimes["sdcpp"].backends
+    assert "comfyui" in runtimes  # planned runtime for non-sd.cpp models
+
+
+def test_catalog_video_candidates_are_planned_not_supported():
+    """LTX/Wan/Hunyuan appear in the catalog but are never installable or
+    generatable — catalog presence must not imply local support."""
+    from app.domain import model_catalog, compatibility
+    video = {k: s for k, s in model_catalog.MODELS.items() if s.modality == "video"}
+    for required in ("ltx.2.5", "wan.2.2.ti2v", "hunyuan.video"):
+        assert required in video, f"{required} missing from catalog"
+    for key, spec in video.items():
+        assert spec.support == "planned"
+        assert spec.files == ()
+        c = compatibility.classify_model(spec, _hw(vram_gib=8))
+        assert c["status"] == "planned"
+        assert c["support"] == "planned" and c["modality"] == "video"
+        assert set(c["modes"]) & {"text2video", "image2video", "audio2video"}
+
+
+def test_catalog_image_candidates_metadata():
+    """Qwen-Image + FLUX.1-dev carry honest license/runtime metadata."""
+    from app.domain import model_catalog
+    qwen = model_catalog.get("qwen.image")
+    assert qwen is not None
+    assert qwen.license["commercial_ok"] is True  # Apache 2.0
+    assert qwen.support == "experimental"
+    assert qwen.runtime_key == "comfyui"  # not an sd.cpp architecture
+    assert qwen.modes == ("text2image",)
+    dev = model_catalog.get("flux.dev")
+    assert dev is not None
+    assert dev.license["commercial_ok"] is False  # non-commercial license
+
+
+def test_planned_model_install_rejected(client):
+    from app.domain import model_catalog
+    spec = model_catalog.get("ltx.2.5")
+    assert spec is not None
+    r = client.post(f"/api/models/{spec.key}/install", json={})
+    assert r.status_code == 422
+    assert "planned" in r.json()["detail"].lower()
+
+
+def test_planned_and_experimental_models_cannot_generate(client):
+    pid = make_project(client)["id"]
+    for key, needle in (("ltx.2.5", "video"), ("qwen.image", "experimental")):
+        r = _commit(client, pid, "generate.image",
+                    {"model_key": key, "prompt": "x"}, f"gen-{key}-0001", expect=422)
+        assert needle in r.json()["detail"]
 
 
 # ------------------------------------------------------- 2. compatibility
@@ -396,12 +449,18 @@ def test_models_endpoint_lists_catalog(client):
     r = client.get("/api/models")
     assert r.status_code == 200
     models = r.json()
-    assert len(models) >= 3
+    assert len(models) >= 8
     for m in models:
         assert m["compatibility"]["status"] in {
-            "compatible", "limited", "unsupported", "unknown", "restricted", "unavailable"}
+            "compatible", "limited", "unsupported", "unknown", "restricted", "unavailable", "planned"}
         assert m["license"]["name"]
         assert "download_bytes" in m
+        assert m["modality"] in ("image", "video", "audio", "multimodal")
+        assert m["support"] in ("production", "tested", "experimental", "planned")
+        assert m["modes"]
+    keys = {m["key"] for m in models}
+    assert {"ltx.2.5", "wan.2.2.ti2v", "hunyuan.video", "qwen.image"} <= keys
+    assert models and all(m["compatibility"]["status"] == "planned" for m in models if m["modality"] == "video")
 
 
 def test_install_restricted_or_unavailable_422(client):

@@ -16,6 +16,14 @@ const COMPAT: Record<CompatStatus, { label: string; cls: string }> = {
   unknown: { label: "Unknown", cls: "bg-line/40 text-muted" },
   restricted: { label: "Restricted license", cls: "bg-rose/15 text-rose" },
   unavailable: { label: "Unavailable", cls: "bg-line/40 text-muted" },
+  planned: { label: "Planned", cls: "bg-line/40 text-muted" },
+};
+
+const SUPPORT: Record<string, { label: string; cls: string } | null> = {
+  production: null,
+  tested: { label: "Tested", cls: "bg-sky/15 text-sky" },
+  experimental: { label: "Experimental", cls: "bg-amber/15 text-amber" },
+  planned: null, // covered by the compatibility badge
 };
 
 export function ModelManagerPage() {
@@ -113,12 +121,17 @@ export function ModelManagerPage() {
           const job = modelJob(m.key);
           const downloading = job && (job.status === "queued" || job.status === "running");
           const installed = inst?.status === "installed";
+          const s = SUPPORT[m.support];
           return (
             <div key={m.key} className="rounded-lg border border-line bg-card p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-base font-semibold">{m.display_name}</h2>
                 <span className="text-xs text-faint">v{m.version} · {m.family}</span>
+                {m.modality !== "image" && (
+                  <span className="rounded bg-sky/15 px-2 py-0.5 text-xs capitalize text-sky">{m.modality}</span>
+                )}
                 <span className={`rounded px-2 py-0.5 text-xs ${c.cls}`}>{c.label}</span>
+                {s && <span className={`rounded px-2 py-0.5 text-xs ${s.cls}`}>{s.label}</span>}
                 {installed && (
                   <span className="rounded bg-teal/15 px-2 py-0.5 text-xs text-teal">
                     Installed{inst?.verified ? " · verified" : ""}
@@ -135,6 +148,10 @@ export function ModelManagerPage() {
                 <div><dt className="inline text-faint">Download: </dt><dd className="inline">{gb(m.download_bytes)}</dd></div>
                 <div><dt className="inline text-faint">Min VRAM: </dt><dd className="inline">{gb(m.requirements.min_vram_bytes)}</dd></div>
                 <div><dt className="inline text-faint">Source: </dt><dd className="inline">{String(m.source.provider ?? "local")}</dd></div>
+                <div className="col-span-2"><dt className="inline text-faint">Modes: </dt><dd className="inline">{m.modes.join(", ")}</dd></div>
+                {m.capabilities.audio && (
+                  <div className="col-span-2"><dt className="inline text-faint">Audio: </dt><dd className="inline">synchronized audio+video</dd></div>
+                )}
                 {installed && (
                   <div className="col-span-2">
                     <dt className="inline text-faint">On disk: </dt>
@@ -146,7 +163,7 @@ export function ModelManagerPage() {
               {(m.compatibility.reasons.length > 0 || m.compatibility.warnings.length > 0) && (
                 <ul className="mt-2 space-y-0.5 text-xs">
                   {m.compatibility.reasons.map((r, i) => (
-                    <li key={`r${i}`} className="text-rose">· {r}</li>
+                    <li key={`r${i}`} className={m.compatibility.status === "planned" ? "text-muted" : "text-rose"}>· {r}</li>
                   ))}
                   {m.compatibility.warnings.map((w, i) => (
                     <li key={`w${i}`} className="text-amber">· {w}</li>
@@ -166,7 +183,7 @@ export function ModelManagerPage() {
               )}
 
               <div className="mt-3 flex gap-2">
-                {!installed && !downloading && m.license.commercial_ok && (
+                {!installed && !downloading && m.license.commercial_ok && m.files.length > 0 && m.support !== "planned" && (
                   <button
                     onClick={() => setInstallTarget(m)}
                     disabled={busy}

@@ -121,23 +121,32 @@ def classify_model(spec: ModelSpec, hw: dict, install: dict | None = None) -> di
     hw_backends = {k for k, v in (hw.get("backends") or {}).items() if v.get("available")}
     gpus = hw.get("gpus") or []
 
+    base = {"support": spec.support, "modality": spec.modality, "modes": list(spec.modes)}
+    if spec.support == "planned":
+        return {
+            **base, "status": "planned",
+            "reasons": [f"{spec.modality} model targeted for a future milestone — catalog-visible only, "
+                        "no local inference support yet"],
+            "warnings": [], "suggested": {},
+            "estimate": {"vram_bytes": estimate_vram(spec), "basis": "estimate"},
+        }
     if not lic.get("commercial_ok", True):
         return {
-            "status": "restricted",
+            **base, "status": "restricted",
             "reasons": [f"{lic.get('name', 'license')} does not allow production/commercial use."],
             "warnings": [], "suggested": {},
             "estimate": {"vram_bytes": estimate_vram(spec), "basis": "estimate"},
         }
     if not spec.files:
         return {
-            "status": "unavailable",
-            "reasons": ["no verified downloadable artifact in this build"],
+            **base, "status": "unavailable",
+            "reasons": ["no verified downloadable artifact on a supported runtime in this build"],
             "warnings": [], "suggested": {},
             "estimate": {"vram_bytes": estimate_vram(spec), "basis": "estimate"},
         }
     if not backends_needed & hw_backends:
         return {
-            "status": "unsupported",
+            **base, "status": "unsupported",
             "reasons": ["no usable inference backend detected "
                         f"(model needs one of: {', '.join(sorted(backends_needed))})"],
             "warnings": [], "suggested": _suggested(spec, gpus, cpu_ok=False),
@@ -207,6 +216,7 @@ def classify_model(spec: ModelSpec, hw: dict, install: dict | None = None) -> di
         reasons.append(f"fits within measured resources{f' on {gpu_names}' if gpu_names else ''}")
 
     return {
+        **base,
         "status": status,
         "reasons": reasons,
         "warnings": warnings,

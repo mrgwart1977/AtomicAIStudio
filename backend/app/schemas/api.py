@@ -455,7 +455,10 @@ class ModelInstallOut(BaseModel):
 
 
 class CompatibilityOut(BaseModel):
-    status: str  # compatible | limited | unsupported | unknown | restricted | unavailable
+    status: str  # compatible | limited | unsupported | unknown | restricted | unavailable | planned
+    support: str | None = None  # production | tested | experimental | planned
+    modality: str | None = None  # image | video | audio | multimodal
+    modes: list[str] = []
     reasons: list[str]
     warnings: list[str]
     suggested: dict[str, Any]
@@ -476,7 +479,9 @@ class ModelCatalogEntryOut(BaseModel):
     requirements: dict[str, Any]
     capabilities: dict[str, Any]
     runtime_key: str
-    status_hint: str
+    support: str
+    modality: str
+    modes: list[str]
     notes: str
     install: dict[str, Any] | None = None
     compatibility: CompatibilityOut | None = None
