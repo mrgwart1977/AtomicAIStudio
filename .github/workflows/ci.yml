@@ -62,3 +62,42 @@ jobs:
       - name: Build Tauri shell (no bundle)
         working-directory: apps/desktop/src-tauri
         run: cargo build --verbose
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build frozen backend sidecar
+        working-directory: backend
+        run: |
+          pip install -e . pyinstaller
+          pyinstaller atomic-backend.spec --noconfirm
+      - name: Stage sidecar into Tauri bundle dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force apps/desktop/src-tauri/backend-dist | Out-Null
+          Copy-Item -Recurse backend/dist/atomic-backend apps/desktop/src-tauri/backend-dist/atomic-backend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: apps/desktop/src-tauri/target
+          key: tauri-target-${{ runner.os }}-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+      - name: Build installer (bundles frozen sidecar)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run tauri build
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: atomic-ai-studio-nsis
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 14

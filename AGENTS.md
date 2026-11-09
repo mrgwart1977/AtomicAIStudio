@@ -5,6 +5,7 @@
 - Backend dev server: `scripts\dev-backend.ps1` (port 8788, token `dev`)
 - UI build: `cd apps\desktop && npm run build` (tsc + vite)
 - Full dev app: `cd apps\desktop && npm run tauri dev` (Rust at `%USERPROFILE%\.cargo\bin`)
+- Installer: `scripts\build-sidecar.ps1` then `npm run tauri build` → NSIS in `src-tauri\target\release\bundle\nsis\`
 - FFmpeg on this machine: `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-*\bin\` (not on PATH)
 
 ## Conventions
@@ -17,4 +18,4 @@
 - No model downloads, cloud calls, or paid work without explicit owner approval.
 
 ## Milestone state
-- M0 (foundation) implemented; M1 not started — requires owner approval.
+- M0 (foundation) + M0.1 (standalone PyInstaller sidecar installer) implemented; M1 not started — requires owner approval.

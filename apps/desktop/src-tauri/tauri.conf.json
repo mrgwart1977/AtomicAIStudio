@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "backend-dist/atomic-backend": "backend"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

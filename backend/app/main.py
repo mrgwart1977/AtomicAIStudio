@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,8 +36,17 @@ log = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
+def _alembic_script_location() -> Path:
+    """Migration scripts live in the source tree during development and are
+    bundled under backend_res/alembic inside the PyInstaller onedir."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "backend_res" / "alembic"
+    return BACKEND_DIR / "app" / "db" / "alembic"
+
+
 def run_migrations(db_url: str) -> None:
-    cfg = AlembicConfig(str(BACKEND_DIR / "alembic.ini"))
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", str(_alembic_script_location()))
     cfg.set_main_option("sqlalchemy.url", db_url)
     alembic_command.upgrade(cfg, "head")
 

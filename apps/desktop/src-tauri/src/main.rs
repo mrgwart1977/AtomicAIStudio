@@ -36,11 +36,11 @@ fn pick_free_port() -> u16 {
         .port()
 }
 
-/// Locate the Python interpreter + backend package for development.
-/// In a packaged build the backend will ship as a frozen binary under
-/// resources/backend/ — resolution checks that first.
+/// Locate the backend sidecar. The frozen PyInstaller binary bundled
+/// with the installer is authoritative; the dev venv / PATH Python are
+/// only fallbacks for `cargo run` without bundled resources.
 fn backend_command(port: u16, token: &str, data_dir: &Path) -> Option<Command> {
-    // 1. Packaged backend binary (produced by the installer pipeline, M9).
+    // 1. Frozen backend binary (PyInstaller onedir, bundled as a resource).
     if let Ok(exe) = std::env::current_exe() {
         let bundled = exe
             .parent()
@@ -132,7 +132,12 @@ fn get_backend_info(state: tauri::State<'_, SidecarState>) -> BackendInfo {
 }
 
 fn main() {
-    let token = uuid::Uuid::new_v4().to_string();
+    // ATOMIC_SIDECAR_TOKEN lets integration tests drive the API directly;
+    // production launches generate a fresh per-launch UUID.
+    let token = std::env::var("ATOMIC_SIDECAR_TOKEN")
+        .ok()
+        .filter(|t| t.len() >= 8)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let port = pick_free_port();
     let dir = data_dir();
     std::fs::create_dir_all(&dir).ok();

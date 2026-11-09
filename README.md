@@ -62,6 +62,50 @@ cd backend && .venv\Scripts\python -m pytest tests -q   # 19 tests
 cd apps\desktop && npm run build                        # typecheck + bundle
 ```
 
+## Standalone packaging (M0.1)
+
+The installer ships a **self-contained backend** — no Python, pip, Node.js,
+Rust, or virtualenv required on the user's machine. The backend is frozen
+with PyInstaller (onedir) and bundled by Tauri next to the shell exe:
+
+```
+backend\sidecar_entry.py      # PyInstaller entry
+backend\atomic-backend.spec   # freeze spec (hidden imports + alembic data)
+scripts\build-sidecar.ps1     # builds dist → syncs into src-tauri\backend-dist
+apps\desktop\src-tauri\
+  backend-dist\atomic-backend\atomic-backend.exe   # bundled resource
+```
+
+Installed layout (per-user, `%LOCALAPPDATA%\Atomic AI Studio\`):
+
+```
+atomic-ai-studio.exe
+backend\atomic-backend.exe + _internal\   (embedded Python runtime)
+uninstall.exe
+```
+
+Sidecar resolution order in the shell: bundled exe → dev `.venv` /
+`ATOMIC_PYTHON` override → PATH `python`. The packaged app always uses the
+bundled exe; the dev fallbacks only exist for `cargo run`/`tauri dev`
+without built resources. Same flags in every mode
+(`--port --token --data-dir`), same per-launch token + ephemeral loopback
+port + kill-on-exit.
+
+Build the installer:
+
+```powershell
+scripts\build-sidecar.ps1     # pyinstaller → src-tauri\backend-dist
+cd apps\desktop
+npm run tauri build           # → target\release\bundle\nsis\*-setup.exe
+```
+
+Validated on this machine (clean of Python/dev tools on PATH):
+silent install `/S` → app window opens → bundled `atomic-backend.exe`
+spawned → migrations run → health + authenticated API + full
+command→job→asset pipeline → restart keeps DB → `/S` uninstall removes
+files, registry entry, and leaves no processes. Evidence:
+`docs/m0.1-evidence/`."
+
 ## What M0 does (and does not do)
 
 **Works:** desktop shell with managed backend lifecycle; loopback API with
