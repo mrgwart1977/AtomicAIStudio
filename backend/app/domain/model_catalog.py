@@ -91,11 +91,13 @@ RUNTIMES: dict[str, RuntimeSpec] = {
         },
         release_api="https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest",
         asset_patterns={
-            "vulkan": "vulkan",  # e.g. sd-bin-win-vulkan-x64.zip
-            "cuda": "cuda",
-            "cpu": "cpu",
+            # must include the platform tag — bare "vulkan"/"cuda" would also
+            # match Linux zips and the optional "cudart-" CUDA-runtime bundle.
+            "vulkan": "win-vulkan",  # sd-master-…-bin-win-vulkan-x64.zip (~30 MiB)
+            "cuda": "win-cuda",      # sd-master-…-bin-win-cuda12-x64.zip (~367 MiB)
+            "cpu": "win-cpu",        # sd-master-…-bin-win-cpu-x64.zip (~18 MiB)
         },
-        exe_name="sd.exe",
+        exe_name="sd-cli.exe",  # renamed from sd.exe in current releases (README: ./bin/sd-cli)
         backends=("vulkan", "cuda", "cpu"),
         est_bytes=80 * MIB,
         notes="Subprocess worker — full isolation per generation job; kill = clean cancel.",
@@ -124,7 +126,12 @@ RUNTIMES: dict[str, RuntimeSpec] = {
 }
 
 
-_HF_SD15 = "https://huggingface.co/sd-legacy/stable-diffusion-v1-5/resolve/main"
+# Canonical SD 1.5 repo (sd-legacy/stable-diffusion-v1-5 redirects here).
+# The ONLY official weight file is the fp32 safetensors (~4.26 GB). fp16 and
+# quantized artifacts are community conversions — Second State's GGUF repo is
+# the standard source referenced by sd.cpp documentation.
+_HF_SD15 = "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main"
+_HF_SD15_GGUF = "https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main"
 
 _SD15_CAPS = {
     "tasks": ["text2image"],
@@ -151,28 +158,32 @@ _SD15_CAPS = {
 
 
 MODELS: dict[str, ModelSpec] = {
+    # fp16 weights as a GGUF — a Second State community conversion of the
+    # official fp32 checkpoint (same OpenRAIL-M terms). Verified size + sha256.
     "sd15.fp16": ModelSpec(
         key="sd15.fp16",
-        display_name="Stable Diffusion 1.5 (fp16)",
+        display_name="Stable Diffusion 1.5 (fp16, GGUF)",
         family="sd1.5",
-        version="1.5",
+        version="1.5-f16",
         adapter_id="gen.image.sdcpp",
-        fmt="safetensors",
+        fmt="gguf",
         source={
             "provider": "huggingface",
-            "repo": "sd-legacy/stable-diffusion-v1-5",
-            "url": f"{_HF_SD15}/v1-5-pruned-emaonly.safetensors",
+            "repo": "second-state/stable-diffusion-v1-5-GGUF",
+            "url": f"{_HF_SD15_GGUF}/stable-diffusion-v1-5-pruned-emaonly-f16.gguf",
         },
         license={
             "name": "CreativeML OpenRAIL-M",
-            "url": "https://huggingface.co/sd-legacy/stable-diffusion-v1-5/blob/main/LICENSE.md",
+            "url": "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
             "commercial_ok": True,
-            "notes": "Commercial use allowed with use restrictions (no illegal/harmful content).",
+            "notes": "Community fp16 conversion of the official OpenRAIL-M weights — "
+                     "commercial use allowed with use restrictions (no illegal/harmful content).",
         },
         files=(ModelFile(
-            name="v1-5-pruned-emaonly.safetensors",
-            size_bytes=2_138_000_000,  # ~2.0 GiB; size checked at download
-            url=f"{_HF_SD15}/v1-5-pruned-emaonly.safetensors",
+            name="stable-diffusion-v1-5-pruned-emaonly-f16.gguf",
+            size_bytes=2_132_586_944,  # verified via HF tree API
+            url=f"{_HF_SD15_GGUF}/stable-diffusion-v1-5-pruned-emaonly-f16.gguf",
+            sha256="da017009aa86a3f46468857d95833435fe55e4a2856afab76ba7722ef8ee4d8b",
         ),),
         requirements={
             "min_vram_bytes": 4 * GIB,
@@ -196,18 +207,19 @@ MODELS: dict[str, ModelSpec] = {
         source={
             "provider": "huggingface",
             "repo": "second-state/stable-diffusion-v1-5-GGUF",
-            "url": "https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main/stable-diffusion-v1-5-Q8_0.gguf",
+            "url": f"{_HF_SD15_GGUF}/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
         },
         license={
             "name": "CreativeML OpenRAIL-M",
-            "url": "https://huggingface.co/sd-legacy/stable-diffusion-v1-5/blob/main/LICENSE.md",
+            "url": "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
             "commercial_ok": True,
             "notes": "Community quantization of the same OpenRAIL-M weights.",
         },
         files=(ModelFile(
-            name="stable-diffusion-v1-5-Q8_0.gguf",
-            size_bytes=2_120_000_000,
-            url="https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main/stable-diffusion-v1-5-Q8_0.gguf",
+            name="stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+            size_bytes=1_763_578_176,  # verified via HF tree API
+            url=f"{_HF_SD15_GGUF}/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+            sha256="d0555243938c62faeefb4ac93f6c7a053ad373a4290c5256bce229aeb193bf94",
         ),),
         requirements={
             "min_vram_bytes": 3 * GIB,
@@ -218,8 +230,47 @@ MODELS: dict[str, ModelSpec] = {
         },
         capabilities={**_SD15_CAPS, "precision": ["q8_0"]},
         vram_baseline_bytes=int(3.0 * GIB),
-        vram_weight_bytes=int(2.3 * GIB),
-        notes="Smaller VRAM footprint, slightly reduced fidelity. Good first install on <8 GB GPUs.",
+        vram_weight_bytes=int(2.0 * GIB),
+        notes="Smallest footprint — the safest first install on <8 GB GPUs; slightly reduced fidelity.",
+    ),
+    # The ONLY official Stability artifact — fp32 safetensors. Larger, but the
+    # most provenance-pure option; sd.cpp loads it directly.
+    "sd15.fp32": ModelSpec(
+        key="sd15.fp32",
+        display_name="Stable Diffusion 1.5 (official fp32 safetensors)",
+        family="sd1.5",
+        version="1.5",
+        adapter_id="gen.image.sdcpp",
+        fmt="safetensors",
+        source={
+            "provider": "huggingface",
+            "repo": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+            "url": f"{_HF_SD15}/v1-5-pruned-emaonly.safetensors",
+        },
+        license={
+            "name": "CreativeML OpenRAIL-M",
+            "url": "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
+            "commercial_ok": True,
+            "notes": "The official Stability release — commercial use allowed with use restrictions.",
+        },
+        files=(ModelFile(
+            name="v1-5-pruned-emaonly.safetensors",
+            size_bytes=4_265_146_304,  # verified via HF tree API
+            url=f"{_HF_SD15}/v1-5-pruned-emaonly.safetensors",
+            sha256="6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa",
+        ),),
+        requirements={
+            "min_vram_bytes": 6 * GIB,
+            "rec_vram_bytes": 8 * GIB,
+            "min_ram_bytes": 8 * GIB,
+            "min_disk_bytes": 5 * GIB,
+            "backends": ["vulkan", "cuda", "cpu"],
+        },
+        capabilities={**_SD15_CAPS, "precision": ["fp32"]},
+        vram_baseline_bytes=int(6.5 * GIB),
+        vram_weight_bytes=int(4.4 * GIB),
+        notes="The official fp32 checkpoint — larger and heavier than fp16; choose this for "
+              "provenance purity, fp16 GGUF for everyday use.",
     ),
     "sdxl.base": ModelSpec(
         key="sdxl.base",

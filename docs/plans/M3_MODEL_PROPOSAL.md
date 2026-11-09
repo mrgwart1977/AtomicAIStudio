@@ -2,98 +2,103 @@
 
 **Status:** awaiting approval + candidate selection. This document is the
 Phase 1 → Phase 2 approval gate required by the M3 authorization. **Nothing is
-downloaded without explicit approval.** All information below is declarative
-catalog data; download sizes are from upstream repositories, VRAM figures are
-*estimates* (marked as such in the UI), not guarantees.
+downloaded without explicit approval.** All figures below were verified
+against live upstream metadata on 2026-11-09; VRAM figures remain *estimates*
+until Phase-2 measurement.
 
 ---
 
-## Extensible model catalog (implemented this PR)
+## Pre-download verification (user-requested checks)
 
-The catalog is now capability-aware and multi-modal — not built around one
-image model. Every entry declares:
+### 1. Exact model artifacts — verified live
 
-- exact model name, version, family, format, adapter
-- official source (provider + repo/URL) and license (name, URL, `commercial_ok`, notes)
-- **modality** — `image | video | audio | multimodal`
-- **modes** — `text2image | image2image | text2video | image2video | audio2video | …`
-- hardware requirements: min/recommended VRAM, RAM, disk, required GPU backends
-- download file set (size + URL + optional sha256) — **empty means not installable**
-- capabilities: resolutions, aspect ratios, durations, fps, samplers, steps/CFG
-  ranges, batch, seed, precision, reference-image, LoRA, character-consistency,
-  synchronized audio, multi-shot
-- **support tier** — `production | tested | experimental | planned`
-- local runtime key + install requirements
+| Entry | Repo | File | Verified size | SHA-256 | Exists/downloadable |
+|---|---|---|---|---|---|
+| `sd15.fp16` | `second-state/stable-diffusion-v1-5-GGUF` | `stable-diffusion-v1-5-pruned-emaonly-f16.gguf` | **2,132,586,944 B (1.99 GiB)** | `da017009aa86a3f46468857d95833435fe55e4a2856afab76ba7722ef8ee4d8b` | ✅ 200 |
+| `sd15.q8` | `second-state/stable-diffusion-v1-5-GGUF` | `stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf` | **1,763,578,176 B (1.64 GiB)** | `d0555243938c62faeefb4ac93f6c7a053ad373a4290c5256bce229aeb193bf94` | ✅ 200 |
+| `sd15.fp32` | `stable-diffusion-v1-5/stable-diffusion-v1-5` | `v1-5-pruned-emaonly.safetensors` | **4,265,146,304 B (3.97 GiB)** | `6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa` | ✅ 200 |
 
-**Catalog presence never implies local support.** A `planned` entry can never
-be installed (422), generate (422), or be offered to the user as usable — it
-exists so the schema, UI, and roadmap carry real per-model metadata now.
+**Corrections this review caught:**
+- The earlier `sd15.fp16` URL pointed at the **fp32** 4.26 GB file — no official
+  fp16 safetensors exists; the true fp16 artifact is Second State's `f16.gguf`.
+- The earlier `sd15.q8` filename (`stable-diffusion-v1-5-Q8_0.gguf`) **404'd**;
+  the real file is `stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf`.
+- `sd-legacy/stable-diffusion-v1-5` is a redirect alias; the canonical repo is
+  `stable-diffusion-v1-5/stable-diffusion-v1-5` (the one sd.cpp's README cites).
 
-### Current entries
+**Official vs conversion:** the fp32 safetensors is the **official** Stability
+artifact. The f16/Q8_0 GGUFs are **community conversions** by Second State
+(the de-facto GGUF source referenced by sd.cpp docs) of those same weights —
+same OpenRAIL-M terms. sd.cpp also supports convert-mode if a local conversion
+path is ever preferred.
 
-| Key | Modality | Modes | Support | License (commercial?) | Runtime | On RTX 3060 Ti |
-|---|---|---|---|---|---|---|
-| `sd15.fp16` | image | text2image | production | OpenRAIL-M (yes) | sdcpp | compatible |
-| `sd15.q8` | image | text2image | production | OpenRAIL-M (yes) | sdcpp | compatible |
-| `sdxl.base` | image | text2image | production | OpenRAIL++-M (yes) | sdcpp | limited |
-| `sdxl.turbo` | image | text2image | tested | Stability Non-Commercial (**no**) | sdcpp | restricted |
-| `flux.schnell` | image | text2image | experimental | Apache 2.0 (yes) | sdcpp | unavailable (≥12 GiB VRAM) |
-| `flux.dev` | image | text2image | experimental | FLUX-dev Non-Commercial (**no**) | sdcpp | restricted |
-| `qwen.image` | image | text2image | experimental | Apache 2.0 (yes) | comfyui *(planned)* | unavailable (needs ≥12 GiB + new runtime) |
-| `ltx.2.5` | video | text2video, image2video, audio2video | **planned** | LTX-2.x Community (yes, <$10M rev) | comfyui *(planned)* | — |
-| `wan.2.2.ti2v` | video | text2video, image2video | **planned** | Apache 2.0 (yes) | comfyui *(planned)* | — |
-| `hunyuan.video` | video | text2video | **planned** | Tencent Community (yes, regional limits) | comfyui *(planned)* | — |
-
-`ltx.2.5` was verified against the official Lightricks release (Aug 11, 2026;
-open weights on `Lightricks/LTX-2.5`, day-0 ComfyUI support, native multi-shot,
-synchronized audio, up to 4K50). It is the strongest candidate for the first
-video milestone because multi-shot + audio map directly onto Atomic's
-storyboard model. `wan.2.2.ti2v` (Apache 2.0, 5B) is the pragmatic fallback if
-LTX memory requirements prove too heavy on consumer cards.
-
-Video entries carry metadata only — **no files, no runtime, no inference
-code**. The ComfyUI runtime is registered as `planned`; the adapter registry
-can add `gen.video.*` adapters in a later milestone without schema changes.
-
----
-
-## Candidates for the first real model — pick one
-
-All three run through the already-implemented approval-gated download path.
-Recommendation follows the table.
-
-| | **A · SD 1.5 fp16** | **B · SDXL Base 1.0** | **C · Qwen-Image** |
-|---|---|---|---|
-| **Source** | HF `sd-legacy/stable-diffusion-v1-5` | HF `stabilityai/stable-diffusion-xl-base-1.0` | HF `Qwen/Qwen-Image` |
-| **License** | CreativeML OpenRAIL-M — commercial OK | OpenRAIL++-M — commercial OK | Apache 2.0 — commercial OK |
-| **Download** | ~2.0 GiB SafeTensors | ~6.5 GiB SafeTensors | ~40 GiB (bf16) / ~12–20 GiB GGUF |
-| **Runtime** | sd.cpp (ready) | sd.cpp (ready) | **ComfyUI — not built yet** |
-| **Min VRAM** | ~4 GiB → **compatible** | ~8 GiB → **limited** (little headroom) | ~12 GiB quant → **unavailable** on 3060 Ti |
-| **Speed (est.)** | seconds per 512px image | slower, 1024px native, may need offload | minutes-class, likely OOM at full quality |
-| **Quality** | Baseline — good for storyboard drafts | Noticeably better detail | Best prompt adherence + real embedded text (EN/ZH) |
-| **M3 risk** | Lowest — proven path end-to-end | Medium — fits, tight | High — new runtime + won't fit this GPU well |
-
-**Recommendation: A (`sd15.fp16`) now, B (`sdxl.base`) immediately after as the
-quality upgrade on bigger hardware, C (`qwen.image`) revisited once the planned
-ComfyUI runtime lands.** Option A proves the whole production path on this
-machine's measured 5.9 GiB free VRAM with headroom to spare; B stays installable
-today for users with ≥12 GiB cards; C is honest about needing both a new
-runtime and more VRAM.
-
-### Chosen-first details (if A is approved)
+### 2. Runtime compatibility
 
 | Field | Value |
 |---|---|
-| **File** | `v1-5-pruned-emaonly.safetensors` (SafeTensors — no pickle/code execution) |
-| **URL** | `https://huggingface.co/sd-legacy/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors` |
-| **Integrity** | no upstream sha256 → exact declared size + SafeTensors magic; resume via HTTP Range |
-| **Est. VRAM** | ~3.6 GiB @512×512 batch 1 (estimate — measured in Phase 2) |
-| **Runtime** | sd.cpp `vulkan` flavor (~80 MiB, MIT, GitHub release asset) |
+| **Release pinned** | `master-1071-cfdf3cf` (published 2026-11-09 — queried live) |
+| **Binary inside zip** | `sd-cli.exe` — **not** `sd.exe` (renamed; catalog fixed) |
+| **Format support** | `.safetensors` AND `.gguf` natively (README §Model Formats) |
+| **CLI flags verified** | `-m/--model`, `-p/--prompt`, `-n/--negative-prompt`, `-o/--output`, `-W/-H`, `--steps`, `--cfg-scale`, **`--seed`** (not `-s` — that is `--strength`; adapter fixed), `--batch-count`, `--sampling-method`, `-M/--mode` |
+| **Windows assets** | `sd-master-cfdf3cf-bin-win-vulkan-x64.zip` **30.0 MB** · `-win-cuda12-x64.zip` **367.0 MB** · `-win-cpu-x64.zip` **18.2 MB** |
+| **Asset matching fix** | patterns tightened to `win-vulkan`/`win-cuda`/`win-cpu` — bare `vulkan`/`cuda` also matched Linux zips and the 563 MB `cudart-` bundle |
+
+**Backend first: Vulkan.** 30 MB vs 367 MB, zero CUDA-runtime dependencies,
+vendor-agnostic (consistent with the no-NVIDIA-assumption mandate), and
+sd.cpp's Vulkan backend is mature for SD-class models. CUDA remains a
+one-click alternative in the Model Manager; CPU is the no-GPU fallback.
+
+### 3. Licensing
+
+- **License:** CreativeML OpenRAIL-M (repo metadata: `license:
+  creativeml-openrail-m`; canonical text:
+  `huggingface.co/spaces/CompVis/stable-diffusion-license`).
+- **Commercial use:** allowed — the license permits commercial use subject to
+  the use restrictions (no illegal/harmful content categories, documented in
+  the catalog + shown in the install dialog).
+- **Redistribution:** the license permits copying/sharing weights with the
+  license attached — but Atomic AI Studio **does not bundle weights** anyway
+  (requirement G.6). Each user downloads separately from Hugging Face — the
+  compliant-by-construction path.
+- **UI surface:** license name + notes + `commercial_ok` display on every
+  catalog card and in the install-approval dialog; license name recorded in
+  each `model_installs` row.
+
+### 4. Performance expectations — honest labeling
+
+- The "2–4 s per 512×512 image" figure was an **unverified estimate** — it is
+  labeled as such in the catalog/UI.
+- Phase 2 will record per job: actual duration, peak VRAM (nvidia-smi where
+  available), resolution, steps, sampler, GPU index, runtime flavor — stored
+  in job progress + asset provenance.
+
+### 5. Extensible catalog — delivered this PR
+
+Modalities (`image|video|audio|multimodal`), modes, support tiers
+(`production|tested|experimental|planned`), compat statuses
+(`compatible|limited|unsupported|unknown|restricted|unavailable|planned`),
+install states (`not_installed|downloading|verifying|installed|failed|removed`).
+Entries: SDXL, FLUX (schnell + dev), Qwen-Image, LTX-2.5 (official release
+verified Aug-2026), Wan 2.2 TI2V-5B, HunyuanVideo — video entries carry
+metadata only; **zero video weights or inference code in M3**.
+
+### 6. Final download proposal (pending your pick)
+
+| Field | Recommended (A) | Alternative (B) |
+|---|---|---|
+| **File** | `stable-diffusion-v1-5-pruned-emaonly-f16.gguf` | `stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf` |
+| **URL** | `huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main/…f16.gguf` | same repo, `…-Q8_0.gguf` |
+| **License** | CreativeML OpenRAIL-M (commercial OK w/ use restrictions) | same |
+| **Size** | 1.99 GiB, sha256-verified | 1.64 GiB, sha256-verified |
+| **Disk** | ~2 GiB + ~30 MiB runtime | ~1.7 GiB + ~30 MiB |
+| **VRAM (est.)** | ~3.6 GiB peak — fits 3060 Ti w/ headroom | ~3.0 GiB — fits everywhere |
+| **Runtime** | sd.cpp `master-1071-cfdf3cf`, `sd-cli.exe`, Vulkan x64 | same |
+| **Limitations** | community conversion (not Stability-official); SD1.5-era fidelity; no img2img/ControlNet in M3; est. figures unverified | same + slightly lower fidelity vs fp16 |
+| **Official alternative** | `sd15.fp32` (4.26 GB Stability artifact) if provenance purity outweighs size — classifies *limited* on 8 GiB | — |
 
 ## What landed before any download (Phase 1, this PR)
 
-- Extensible capability-aware catalog (above) + compatibility engine +
-  hardware profiles (E.1.1–E.1.5)
+- Extensible capability-aware catalog + compatibility engine + hardware profiles
 - Model Manager UI: modality/support badges, licenses, sizes, compat reasons,
   install/remove, per-download progress, storage-location config — **install
   gated behind an explicit approval dialog**; planned/experimental/unavailable
@@ -112,18 +117,19 @@ runtime and more VRAM.
 
 | Claim | Status |
 |---|---|
-| Single-GPU e2e pipeline | **Simulated** — fake worker proves the path; real sd.exe + weights pending approval |
-| Multi-GPU parallel scheduling | **Simulated** — scheduler tests use fabricated probes; no multi-GPU hardware available |
+| Single-GPU e2e pipeline | **Simulated** — fake worker proves the path; real sd-cli + weights pending approval |
+| Multi-GPU parallel scheduling | **Simulated** — fabricated probes only |
 | VRAM figures | **Estimates** — catalog anchors + activation scaling; labeled in UI |
-| Video model metadata | **Verified sources** (licenses/repos checked) but **zero inference validation** |
+| Artifact metadata | **Verified live** — sizes + sha256 from HF tree API, release assets from GitHub API |
+| Video model metadata | **Verified sources**; **zero inference validation** |
 
 ## Approval requested for Phase 2
 
-1. **Pick a first model** — A (`sd15.fp16`, recommended), B (`sdxl.base`), or
-   C (`qwen.image`, deferred-runtime).
+1. **Pick a first model** — A (`sd15.fp16` GGUF, recommended), B (`sd15.q8`,
+   smallest), or the official `sd15.fp32` safetensors.
 2. On approval: download the chosen weights + sd.cpp Vulkan runtime via the
    Model Manager (user-initiated, checksummed, resumable).
-3. Run real inference on the RTX 3060 Ti; record actual VRAM/duration and feed
-   measurements back into the catalog.
+3. Run real inference on the RTX 3060 Ti; record actual VRAM/duration/backend
+   and feed measurements back into the catalog.
 
 No paid services. No video-model downloads. No Milestone 4 work.

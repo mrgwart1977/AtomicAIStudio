@@ -289,17 +289,27 @@ def test_models_root_default_and_override(client, tmp_path):
 
 
 def test_verify_model_file_checks(tmp_path):
-    """Integrity verification: wrong size rejected before format checks —
-    a truncated/corrupt download can never look 'installed'."""
+    """Integrity verification: sha256 first (when the source publishes one),
+    then declared size, then format magic — a truncated/corrupt download can
+    never look 'installed'."""
     from app.domain import model_catalog, model_files
-    spec = model_catalog.get("sd15.fp16")  # safetensors, declared ~2.1 GB
-    short = tmp_path / "v1-5-pruned-emaonly.safetensors"
-    short.write_bytes(b"\x10\x00\x00\x00\x00\x00\x00\x00{}" + b"\x00" * 64)
+    # sha256-declared spec: any wrong bytes must fail the hash check
+    spec = model_catalog.get("sd15.fp16")  # gguf, verified sha256 in catalog
+    assert spec.files[0].sha256  # the fixture relies on a published hash
+    short = tmp_path / spec.files[0].name
+    short.write_bytes(b"GGUF" + b"\x00" * 64)
     ok, why = model_files.verify_model_file(short, spec)
-    assert not ok and "size" in why
+    assert not ok and "sha256" in why
+    # no-hash spec: falls back to size + magic
+    spec2 = model_catalog.get("sdxl.base")  # safetensors, no published sha256
+    assert not spec2.files[0].sha256
+    short2 = tmp_path / spec2.files[0].name
+    short2.write_bytes(b"\x10\x00\x00\x00\x00\x00\x00\x00{}" + b"\x00" * 64)
+    ok2, why2 = model_files.verify_model_file(short2, spec2)
+    assert not ok2 and "size" in why2
     # and the magic-bytes check exists for when sizes can't be trusted
-    assert not model_files._format_magic_ok(short, "gguf")
-    assert model_files._format_magic_ok(short, "safetensors")
+    assert not model_files._format_magic_ok(short2, "gguf")
+    assert model_files._format_magic_ok(short2, "safetensors")
 
 
 # ------------------------------------------------- 5. generate.image command

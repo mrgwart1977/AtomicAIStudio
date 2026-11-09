@@ -203,7 +203,7 @@ class SdCppAdapter:
             "-W", str(width), "-H", str(height),
             "--steps", str(steps),
             "--cfg-scale", str(req.get("cfg", 7.0)),
-            "-s", str(seed),
+            "--seed", str(seed),
             "--batch-count", str(batch),
             "-v",
         ]
