@@ -64,15 +64,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.session_factory = sf
         app.state.settings = settings
-        app.state.adapter_registry = AdapterRegistry()
         app.state.event_bus = EventBus()
 
+        from app.domain.storage import StorageRegistry
+        from app.domain.backup import sweep_staging
+        storage = StorageRegistry(sf, settings.data_dir)
+        app.state.storage = storage
+        with sf() as s:
+            storage.ensure_default_location(s)
+            storage.probe_locations(s)
+            swept = storage.sweep(s)
+            staging_removed = sweep_staging(settings.data_dir)
+            if swept["tmp_removed"] or staging_removed:
+                log.info("storage sweep: %d tmp blobs, %d staging dirs removed",
+                         swept["tmp_removed"], staging_removed)
+            s.commit()
+
+        app.state.adapter_registry = AdapterRegistry(
+            session_factory=sf, storage=storage, settings=settings
+        )
         job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus, settings.data_dir)
         app.state.job_engine = job_engine
         with sf() as s:
             requeued = job_engine.reconcile_interrupted(s)
             if requeued:
                 log.info("re-queued %d interrupted job(s)", requeued)
+            # Backup runs left 'running' by a crash are failed honestly.
+            from app.db.models import BackupRun
+            from sqlalchemy import select as _select
+            for run in s.execute(_select(BackupRun).where(BackupRun.status == "running")).scalars():
+                run.status = "failed"
+                run.error = "interrupted by application stop"
             s.commit()
         await job_engine.start()
         log.info("backend ready on %s:%s (data: %s)", settings.host, settings.port, settings.data_dir)

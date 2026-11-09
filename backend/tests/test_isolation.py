@@ -50,9 +50,9 @@ def test_commands_and_jobs_scoped_to_project(client):
     # B sees none of A's commands, jobs, or assets.
     assert client.get(f"/api/projects/{b['id']}/commands").json() == []
     assert client.get(f"/api/projects/{b['id']}/jobs").json() == []
-    assert client.get(f"/api/projects/{b['id']}/assets").json() == []
+    assert client.get(f"/api/projects/{b['id']}/assets").json()["total"] == 0
 
-    assets_a = client.get(f"/api/projects/{a['id']}/assets").json()
+    assets_a = client.get(f"/api/projects/{a['id']}/assets").json()["items"]
     assert len(assets_a) == 1
 
     # A's asset is not reachable through B's project scope.

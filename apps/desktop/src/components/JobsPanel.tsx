@@ -13,7 +13,8 @@ const STATUS_STYLE: Record<string, string> = {
 export function JobsPanel() {
   const jobs = useApp((s) => s.jobs);
   const pid = useApp((s) => s.currentProjectId);
-  const assets = useApp((s) => s.assets);
+  const assetsPage = useApp((s) => s.assetsPage);
+  const assets = assetsPage?.items ?? [];
   const [base, setBase] = useState<{ baseUrl: string; token: string } | null>(null);
 
   useEffect(() => {

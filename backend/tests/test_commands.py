@@ -44,11 +44,11 @@ def test_commit_generation_then_job_succeeds(client):
     assert job["output_asset_id"]
 
     assets = client.get(f"/api/projects/{p['id']}/assets").json()
-    assert len(assets) == 1
-    assert assets[0]["kind"] == "image"
+    assert assets["total"] == 1
+    assert assets["items"][0]["kind"] == "image"
 
     # The produced file is real and served back.
-    f = client.get(f"/api/projects/{p['id']}/assets/{assets[0]['id']}/file")
+    f = client.get(f"/api/projects/{p['id']}/assets/{assets['items'][0]['id']}/file")
     assert f.status_code == 200
     assert f.content[:8] == b"\x89PNG\r\n\x1a\n"
 

@@ -11,10 +11,24 @@ export interface Project {
   name: string;
   status: string;
   template: string;
+  kind: string;
+  aspect_ratio: string;
+  width: number;
+  height: number;
+  fps_num: number;
+  fps_den: number;
+  style: string;
+  storage_location_id: string | null;
   revision: number;
   settings_json: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProjectCard extends Project {
+  counts: { characters: number; worlds: number; locations: number; assets: number };
+  running_jobs: number;
+  thumbnail_asset_id: string | null;
 }
 
 export interface CommandProposal {
@@ -22,6 +36,7 @@ export interface CommandProposal {
   summary: string;
   affected: Array<Record<string, unknown>>;
   warnings: string[];
+  diff?: Record<string, unknown>;
   estimated_cost: { compute: string; currency_usd: number; requires_approval: boolean };
   current_revision: number;
   launches_generation: boolean;
@@ -33,6 +48,8 @@ export interface CommitResult {
   revision: number;
   idempotent_replay: boolean;
   job_id: string | null;
+  duplicate_project_id?: string | null;
+  deleted?: boolean;
   warnings: string[];
 }
 
@@ -48,6 +65,7 @@ export interface Job {
   resumable: boolean;
   output_asset_id: string | null;
   command_id: string | null;
+  result_json?: Record<string, unknown> | null;
   created_at: string;
   completed_at: string | null;
 }
@@ -55,11 +73,87 @@ export interface Job {
 export interface Asset {
   id: string;
   project_id: string;
+  name: string;
   kind: string;
   origin: string;
+  scope: string;
+  status: string;
   uri: string;
   sha256: string;
+  byte_size: number;
+  current_version_id: string | null;
   created_at: string;
+}
+
+export interface AssetPage {
+  items: Asset[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface Entity {
+  id: string;
+  project_id: string;
+  name: string;
+  summary: string;
+  status: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  world_id?: string | null;
+  data: Record<string, unknown>;
+}
+
+export interface EntityRevision {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  revision: number;
+  summary: string;
+  snapshot_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface StorageLocation {
+  id: string;
+  label: string;
+  root_path: string;
+  kind: string;
+  status: string;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface BackupRun {
+  id: string;
+  project_id: string | null;
+  project_name: string;
+  kind: string;
+  status: string;
+  package_path: string;
+  package_sha256: string;
+  byte_size: number;
+  stats_json: Record<string, unknown>;
+  job_id: string | null;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface PackagePreview {
+  project_name: string;
+  format_version: number;
+  created_at: string | null;
+  counts: Record<string, number>;
+  files: number;
+  byte_size: number;
+}
+
+export interface SharedAsset {
+  asset: Asset;
+  source_project_name: string;
+  linked_here: boolean;
 }
 
 export interface HardwareReport {

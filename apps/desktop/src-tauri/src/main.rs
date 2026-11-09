@@ -157,6 +157,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(SidecarState {
             info: BackendInfo {
                 port,
