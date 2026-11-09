@@ -276,3 +276,17 @@ def test_wan_estimate_breakdown_is_conservative():
     assert known
     weights = 2838303560 + 253815318 + 3655145312  # 6,747,264,190
     assert est == weights + int(2 * resources.GIB)
+
+
+def test_residency_modes_change_ram_estimate():
+    """Option B modeling: per-component residency must produce materially
+    different (and documented) estimates — not the offload-everything flat."""
+    from app.domain.jobs import _estimate_ram_bytes
+    wan = {"model_key": "wan21.t2v.1_3b"}
+    e_off, _ = _estimate_ram_bytes(wan)                                  # cpu_offload
+    e_gpu, _ = _estimate_ram_bytes({**wan, "residency_mode": "gpu"})
+    e_te, _ = _estimate_ram_bytes({**wan, "residency_mode": "te_cpu"})
+    e_disk, _ = _estimate_ram_bytes({**wan, "residency_mode": "disk"})
+    assert e_off > e_gpu > e_disk
+    assert e_te < e_off  # te on host (3.4G) + 15% of rest + 2G < full 6.28G + 2G
+    assert e_te > e_disk

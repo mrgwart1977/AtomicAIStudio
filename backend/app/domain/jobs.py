@@ -515,16 +515,33 @@ _reserved_ram: dict[str, int] = {}
 
 
 def _estimate_ram_bytes(request: dict[str, Any]) -> tuple[int, bool]:
-    """(bytes, known): offloaded weights (full size when weight_offload_cpu,
-    else 30% paging share) + 2 GiB runtime overhead."""
+    """(bytes, known): host-RAM estimate for the requested residency mode.
+
+    residency_mode (request): 'cpu_offload' (default when the model declares
+    weight_offload_cpu — all component bytes host-resident), 'gpu' (weights
+    on-device; host holds only paging share ~30%), 'te_cpu' (text encoder
+    host-resident, diffusion+VAE on GPU), 'disk' (params streamed from disk —
+    minimal host residency). +2 GiB runtime overhead in every mode."""
     from app.domain import model_catalog, resources
     spec = model_catalog.get(request.get("model_key") or "")
     if spec is None or not spec.files:
         return 0, False
-    weights = sum(f.size_bytes for f in spec.files)
-    offloaded = (weights if (spec.capabilities or {}).get("weight_offload_cpu")
-                 else int(weights * 0.30))
-    return offloaded + int(2 * resources.GIB), True
+    by_role: dict[str, int] = {}
+    for f in spec.files:
+        by_role[f.role or "diffusion"] = by_role.get(f.role or "diffusion", 0) + f.size_bytes
+    weights = sum(by_role.values())
+    mode = request.get("residency_mode") or (
+        "cpu_offload" if (spec.capabilities or {}).get("weight_offload_cpu") else "gpu")
+    if mode == "cpu_offload":
+        resident = weights
+    elif mode == "te_cpu":
+        resident = by_role.get("text_encoder", 0) + int(
+            (weights - by_role.get("text_encoder", 0)) * 0.15)
+    elif mode == "disk":
+        resident = int(weights * 0.15)          # mmap'd pages, streaming
+    else:  # gpu — host side only pages the runtime touches
+        resident = int(weights * 0.30)
+    return resident + int(2 * resources.GIB), True
 
 
 def _memory_preflight(request: dict[str, Any], profile: Any,

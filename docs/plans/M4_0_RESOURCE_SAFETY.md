@@ -168,3 +168,59 @@ run completed but RSS peak was NOT sampled. Honest position:
 
 **Recommendation: A with B as fallback** — B first attempts may actually
 be the LOWER-risk run (less host RAM) and uses only approved artifacts.
+
+## Option B feasibility — CUDA without `--offload-to-cpu` (investigation only)
+
+The installed build exposes per-module placement flags (verified on
+`sdcpp-cuda/sd-cli.exe --help` @ pinned release):
+
+| Flag | Effect |
+|---|---|
+| `--backend te=cpu,vae=cuda0,...` | per-module COMPUTE device |
+| `--params-backend disk\|cpu\|<mod>=...` | per-module parameter RESIDENCY — `disk` streams weights from mmap'd files |
+| `--max-vram <GiB>` | per-device budget; triggers automatic segmented graph execution |
+| `--offload-to-cpu` | weights host-RAM resident, stream to VRAM per need (current Wan path) |
+| `--mmap`, `--eager-load`, `--disable-prefetch`, `--split-mode` | residency/loading controls |
+
+### Configurations on 8 GB VRAM / typical 4–6 GiB free RAM
+
+| | weights→GPU | weights→RAM | est. VRAM | est. host RAM | verdict |
+|---|---|---|---|---|---|
+| B1 all-GPU | 6.28 GiB | ~0 | ~8–9 GiB (w/ activations) | ~2.3 GiB | **likely OOM** — exceeds usable VRAM |
+| B2 `te=cpu` | 2.88 GiB (diff+VAE) | 3.40 GiB (UMT5) + ~0.4 paging | ~4.5–5 GiB | ~5.4 GiB | **viable** — fits VRAM; RAM borderline at 4 GiB free, fine at 6 |
+| B3 `params-backend disk` | streams segments | ~1 GiB touched | ≤`--max-vram` budget | ~2.9 GiB | **safest** — fits everywhere; slowest |
+
+Basis: component sizes = measured file bytes; activation/attention
+~1.5–2.5 GiB at 832×480/17f = **estimate** (not measured on CUDA);
+`te=cpu`/`disk` support = documented on the installed binary's help —
+**unverified end-to-end** (no run authorized). OOM outcome under B1/B2:
+worker exits nonzero → clean failed job, no partial asset, supervision
+unchanged — a SAFE failure mode.
+
+### Preflight modeling (implemented, not yet run)
+
+`_estimate_ram_bytes` now takes `residency_mode`: `cpu_offload`
+(8.28 GiB est), `gpu` (~3.9), `te_cpu` (~5.8), `disk` (~2.9). Wan's
+current catalog default remains `cpu_offload` — conservative until a
+measured run proves otherwise. VRAM-side gating for residency modes is
+**not yet modeled** — documented gap; gpu_sched's estimate still uses
+the offload figure (over-estimates for B2/B3 = safe direction).
+
+### Remaining limitations (supervision)
+
+Job Objects kill the tree on parent death; the `taskkill /T /F` fallback
+in `terminate_tree` assumes Windows. No known gaps for the approved
+configurations.
+
+## Hardware comparison for local generation
+
+| RAM | Image (SD 1.5) | Wan T2V (current path) | Practical meaning |
+|---|---|---|---|
+| 16 GB | fine — 4 GB weights + small footprint | borderline: offload path needs ~9–12 GiB free; blocked on a loaded desktop; Option B (te=cpu/disk) is the workaround | daily-driver usable with care; video is the stretch case |
+| 32 GB | fine, headroom for parallel apps | comfortable: offload path fits without closing apps | recommended floor for video generation |
+| 64 GB | no meaningful gain over 32 for current catalog | enables bigger stacks (14B I2V components ≈ 30+ GiB host) | headroom for future larger models + multitasking |
+
+RAM ≠ VRAM: the 8 GB card still bounds model size, resolution, and
+frame count regardless of system memory. 32 GB is the sensible
+minimum-for-video recommendation; 64 GB is forward-headroom, not a fix
+for VRAM.
