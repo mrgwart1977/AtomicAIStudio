@@ -145,3 +145,10 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   boundary but has no shot-editor picker yet — deliberately deferred to M3+
   when generation consumes it. Migration chain now runs through `0005_m21`;
   upgrade matrix (#7) must cover `0004_m2 → 0005_m21`.
+- **Integration →** PRs #2/#3/#4/#16/#17 merged into `main` as merge commits
+  in dependency order (`9263024`, `e5c0294`, `00d42c7`, `0229e52`, `449ce0a`).
+  Verified on integrated `main`: 89/89 tests, frontend build, fresh migration
+  to `0005_m21`, packaged install + API smoke. One CI gap found and fixed:
+  `tauri-check` never staged the sidecar resource dir, so it failed on every
+  PR; the job now stubs the directory (bundling still uses the real sidecar
+  via the `package` job). All tracked items above remain open as recorded.

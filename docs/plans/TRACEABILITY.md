@@ -303,3 +303,32 @@ Status as of the `feat/m2.1-casting` branch (builds on M2).
 - **New columns:** `shot_characters.reference_ids_json`, `shot_characters.ext_json` — both flow through `_cols` serialization, duplication, revert-restore, backup v2 remap, and the storyboard API automatically.
 - **Inheritance is computed, not copied:** scene cast never writes shot rows, so new shots inherit automatically and scene edits propagate without touching per-shot overrides.
 - **Honest limitation:** `reference_asset_ids` has no shot-editor picker (tracked in checklist item 12) — it exists for generation adapters; the validation+storage+provenance path is proven via API tests.
+
+---
+
+# Integration — stacked milestones merged into `main` (M0 → M2.1)
+
+On maintainer approval, the stacked PR chain was integrated into `main` with
+merge commits in dependency order — no squash, no rebase; every milestone's
+history is preserved:
+
+| PR | Milestone | Merge commit | Contents verified |
+|---|---|---|---|
+| #2 | M0 / M0.1 | `9263024` | App shell, frozen sidecar, installer |
+| #3 | M1 | `e5c0294` | Projects, bibles, CAS, backups, jobs |
+| #4 | M1.1 | `00d42c7` | Backup destinations, progress, cancel, recovery |
+| #16 | M2 | `0229e52` | Scenes, shots, casting, storyboard, backup v2 |
+| #17 | M2.1 | `449ce0a` | Cast-state schema v1, scene cast UX, M3 doc |
+
+Post-integration verification **on `main`** (`449ce0a`):
+
+- Backend suite: **89/89 pass**.
+- `tsc -b && vite build`: clean.
+- Migration check: fresh DB → head `0005_m21`; `reference_ids_json` +
+  `ext_json` present on `shot_characters`.
+- Packaging: frozen sidecar + NSIS rebuilt from `main`, installed over the
+  existing install; installed DB intact (project rev 18, scene cast +
+  inherited rows served correctly); invalid typed state still rejected with
+  `cast.state.expression: expected a string, got int (42)`.
+- CI: `tauri-check` gap fixed (sidecar resource dir stubbed — real binary is
+  only needed at bundle time, which the `package` job already performs).
