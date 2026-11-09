@@ -3,23 +3,36 @@
 A modular, offline-first Windows desktop application for planning, generating,
 editing, and finishing AI-assisted films. Windows executable: `AtomicAIStudio.exe`.
 
-Status: **Milestone 0 — foundation**. The specification lives in
-[`docs/handoff/`](docs/handoff/README.md) (v0.9); the accepted roadmap is in
-[`docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md`](docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md).
+Status: **Milestone 1 — project management + production foundations**. The
+specification lives in [`docs/handoff/`](docs/handoff/README.md) (v0.9); the
+accepted roadmap is in
+[`docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md`](docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md)
+and requirement-to-code mapping in [`docs/plans/TRACEABILITY.md`](docs/plans/TRACEABILITY.md).
 
-## Architecture (M0)
+## Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ Tauri 2 shell (Rust)  ── spawns/stops sidecar ──┐      │
-│ React 19 + TS + Tailwind/Radix + Zustand        │      │
-│        │ HTTP + WS (loopback, session token)    ▼      │
-│        └──────────► FastAPI backend (Python 3.12+)     │
-│                     SQLAlchemy 2 + SQLite(WAL) + Alembic│
-│                     Job engine + adapter registry       │
-│                     (mock adapters only in M0)          │
-└────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ Tauri 2 shell (Rust)  ── spawns/stops sidecar ──┐           │
+│ React 19 + TS + Tailwind/Radix + Zustand        │           │
+│        │ HTTP + WS (loopback, session token)    ▼           │
+│        └──────────► FastAPI backend (frozen exe in prod,    │
+│                     .venv in dev)                           │
+│                     SQLAlchemy 2 + SQLite(WAL) + Alembic    │
+│                     Unified commands ─ jobs ─ adapters      │
+│                     CAS media store (files, never in DB)    │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+- All project mutations go through the **Unified Creative Command** system
+  (preview → commit → audit + undo); job-producing commands enqueue durable
+  ops (import/verify/backup/restore) that survive restarts.
+- Media lives in a **content-addressed store** under configurable storage
+  locations — SQLite only keeps references, so projects scale to TBs.
+- Projects are isolated by `project_id` FKs everywhere; sharing is explicit
+  via the shared library (link or copy).
+- Whole-project `.atomicpkg` backups are hash-verified and always restore
+  into a **new** project — the live one is never mutated.
 
 - `apps/desktop` — Tauri shell (`src-tauri/`) + React UI (`src/`)
 - `backend` — FastAPI sidecar: `app/` (api, domain, db, adapters) + `tests/`

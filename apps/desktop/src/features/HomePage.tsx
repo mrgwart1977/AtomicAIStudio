@@ -7,25 +7,25 @@ const CARDS = [
     id: "movie",
     title: "Create a Movie",
     desc: "Start with an idea or screenplay. Review the plan before generation.",
-    template: "short_film",
+    kind: "movie",
   },
   {
     id: "scene",
     title: "Create a Scene",
     desc: "Make a standalone cinematic sequence with prompts or reusable cast.",
-    template: "blank",
+    kind: "scene",
   },
   {
     id: "image",
     title: "Create an Image",
     desc: "Create artwork, characters, environments and keyframes.",
-    template: "blank",
+    kind: "image",
   },
 ] as const;
 
 export function HomePage() {
   const [dialog, setDialog] = useState(false);
-  const [template, setTemplate] = useState<string>("blank");
+  const [kind, setKind] = useState<string>("movie");
   const projects = useApp((s) => s.projects);
   const setProject = useApp((s) => s.setCurrentProject);
   const setPage = useApp((s) => s.setPage);
@@ -42,7 +42,7 @@ export function HomePage() {
           <button
             key={c.id}
             onClick={() => {
-              setTemplate(c.template);
+              setKind(c.kind);
               setDialog(true);
             }}
             className="rounded-lg border border-line bg-card p-5 text-left hover:border-teal/50 hover:bg-card-hi"
@@ -55,7 +55,7 @@ export function HomePage() {
           onClick={() => {
             if (latest) {
               setProject(latest.id);
-              setPage("projects");
+              setPage("project");
             } else {
               setDialog(true);
             }
@@ -69,7 +69,7 @@ export function HomePage() {
         </button>
       </div>
 
-      <NewProjectDialog open={dialog} onOpenChange={setDialog} defaultTemplate={template} />
+      <NewProjectDialog key={kind} open={dialog} onOpenChange={setDialog} initialKind={kind} />
     </div>
   );
 }

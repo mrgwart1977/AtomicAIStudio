@@ -32,6 +32,17 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
     template: Mapped[str] = mapped_column(String(40), default="blank")
+    # M1 format/production fields (columns, queryable for dashboard filters)
+    kind: Mapped[str] = mapped_column(String(40), default="movie")  # movie|short|scene|image
+    aspect_ratio: Mapped[str] = mapped_column(String(12), default="16:9")
+    width: Mapped[int] = mapped_column(Integer, default=1920)
+    height: Mapped[int] = mapped_column(Integer, default=1080)
+    fps_num: Mapped[int] = mapped_column(Integer, default=24)
+    fps_den: Mapped[int] = mapped_column(Integer, default=1)
+    style: Mapped[str] = mapped_column(String(80), default="none")
+    storage_location_id: Mapped[str | None] = mapped_column(
+        ForeignKey("storage_locations.id", ondelete="SET NULL"), nullable=True
+    )
     settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -114,24 +125,184 @@ class GenerationJob(Base):
     output_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
     command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # non-asset op outputs
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class StorageLocation(Base):
+    """A named filesystem root that can hold media blobs (CAS) and other
+    project files. Locations are app-level (not project-scoped); projects
+    choose one as their default ingest target. root_path may point at a
+    drive that is currently offline — status reflects the last probe."""
+
+    __tablename__ = "storage_locations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    label: Mapped[str] = mapped_column(String(120))
+    root_path: Mapped[str] = mapped_column(Text)  # absolute; location-relative rel_path lives on files
+    kind: Mapped[str] = mapped_column(String(20), default="local")  # local | removable
+    status: Mapped[str] = mapped_column(String(20), default="online")  # online | offline | missing
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AssetFile(Base):
+    """Content-addressed file blob registry. One row per unique blob per
+    storage location; bytes are immutable once status='ready'. Multiple
+    assets/versions (and duplicated projects) can reference the same blob —
+    that is what makes duplication and backup dedupe cheap."""
+
+    __tablename__ = "asset_files"
+
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    storage_location_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_locations.id", ondelete="RESTRICT"), index=True
+    )
+    rel_path: Mapped[str] = mapped_column(Text)  # relative to location root, e.g. blobs/ab/<sha>
+    byte_size: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="ready", index=True)  # pending | ready | missing
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Asset(Base):
-    """File-backed project asset. Bytes live on disk, never in SQLite."""
+    """File-backed project asset. Bytes live on disk, never in SQLite.
+    `uri`/`sha256` remain as a convenience mirror of the current version
+    (set on write); the CAS records below are authoritative."""
 
     __tablename__ = "assets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
-    kind: Mapped[str] = mapped_column(String(40), default="image")  # image|video|audio|other
-    origin: Mapped[str] = mapped_column(String(40), default="generated")  # generated|imported
-    uri: Mapped[str] = mapped_column(Text)  # path relative to data_dir
-    sha256: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(240), default="")
+    kind: Mapped[str] = mapped_column(String(40), default="image", index=True)  # image|video|audio|other
+    origin: Mapped[str] = mapped_column(String(40), default="generated")  # generated|imported|shared
+    scope: Mapped[str] = mapped_column(String(20), default="project", index=True)  # project | shared
+    status: Mapped[str] = mapped_column(String(20), default="ready", index=True)  # ready | missing | deleted
+    uri: Mapped[str] = mapped_column(Text, default="")  # location-relative path of current version
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     provenance_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AssetVersion(Base):
+    """Immutable version of an asset's bytes + media metadata."""
+
+    __tablename__ = "asset_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(ForeignKey("asset_files.sha256", ondelete="RESTRICT"), index=True)
+    media_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint("asset_id", "version_no", name="uq_asset_version"),)
+
+
+class SharedAssetLink(Base):
+    """Explicit, approved sharing of an asset into another project.
+    mode='link' references the origin asset's blob; mode='copy' points at a
+    new asset row in the consuming project. Created only via the
+    asset.share/asset.link commands — this is the sanctioned cross-project
+    channel; nothing else may read another project's rows."""
+
+    __tablename__ = "shared_asset_links"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    source_project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    mode: Mapped[str] = mapped_column(String(10), default="link")  # link | copy
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint("project_id", "asset_id", name="uq_shared_link"),)
+
+
+class Character(Base):
+    __tablename__ = "characters"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    profile_json: Mapped[dict] = mapped_column(JSON, default=dict)  # appearance|personality|backstory|voice|notes
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class World(Base):
+    __tablename__ = "worlds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    lore_json: Mapped[dict] = mapped_column(JSON, default=dict)  # tone|era|rules|aesthetic|notes
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Location(Base):
+    __tablename__ = "locations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    world_id: Mapped[str | None] = mapped_column(ForeignKey("worlds.id", ondelete="SET NULL"), nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    details_json: Mapped[dict] = mapped_column(JSON, default=dict)  # geography|mood|visual_refs|notes
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class EntityRevision(Base):
+    """Immutable snapshot of a versioned entity at one revision. Written on
+    every committed mutation; revert creates a NEW revision copying an old
+    snapshot — history is never rewritten."""
+
+    __tablename__ = "entity_revisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(30), index=True)  # character | world | location
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint("entity_type", "entity_id", "revision", name="uq_entity_rev"),)
+
+
+class BackupRun(Base):
+    """One backup/export/restore/import operation against a project."""
+
+    __tablename__ = "backup_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    project_name: Mapped[str] = mapped_column(String(200), default="")  # survives project deletion
+    kind: Mapped[str] = mapped_column(String(20))  # backup | export | import | restore
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # running | succeeded | failed
+    package_path: Mapped[str] = mapped_column(Text, default="")  # absolute path of .atomicpkg
+    package_sha256: Mapped[str] = mapped_column(String(64), default="")
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    stats_json: Mapped[dict] = mapped_column(JSON, default=dict)  # entity/file counts, verified hashes
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ApprovedShotManifest(Base):

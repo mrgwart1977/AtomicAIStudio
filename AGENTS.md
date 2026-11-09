@@ -18,4 +18,9 @@
 - No model downloads, cloud calls, or paid work without explicit owner approval.
 
 ## Milestone state
-- M0 (foundation) + M0.1 (standalone PyInstaller sidecar installer) implemented; M1 not started — requires owner approval.
+- M0 + M0.1 approved and merged in PR #2; **M1 implemented** on `feat/m1-projects` (project mgmt, bibles, CAS storage, backups, workspace UI).
+- New M1 command types: `project.{rename,archive,restore,update_settings,duplicate,delete}`, `{character,world,location}.{create,update,archive,unarchive,revert}`, `asset.{import,share,link,relink}`, `assets.verify`, `backup.{export,import,restore}` — all via `/commands/commit` only.
+- Screenshots: `scripts/cdp-shots.cjs` (Edge on :9222 → `docs/m1-evidence/`); window capture `scripts/capture-window.ps1` uses PrintWindow (required for WebView2).
+- Zustand rule: never return `?? []` / `?? {}` / `.map/.filter` inside `useApp` selectors — new ref each call = infinite re-render. Select the stable field, derive outside.
+- Gotchas: Git Bash mangles `$_` and `/S` in PowerShell one-liners — use files or `//S`; headless Edge `--dump-dom` is unreliable here, use `scripts/cdp-diag.cjs`.
+- M2 requires owner approval.

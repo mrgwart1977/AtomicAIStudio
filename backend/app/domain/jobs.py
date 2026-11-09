@@ -179,24 +179,68 @@ class JobEngine:
             if final_output is None:
                 job.status = "failed"
                 job.error = "adapter finished without an output record"
+            elif final_output.get("no_asset"):
+                job.result_json = final_output.get("result")
+                job.status = "succeeded"
+                job.progress = 1.0
             else:
-                asset = Asset(
-                    id=new_id(),
-                    project_id=job.project_id,
-                    kind=final_output.get("kind", "other"),
-                    origin="generated",
-                    uri=str(Path(final_output["path"]).relative_to(self._data_dir)) if Path(final_output["path"]).is_relative_to(self._data_dir) else final_output["path"],
-                    sha256=final_output.get("sha256", ""),
-                    provenance_json={"adapter_id": job.adapter_id, "job_id": job.id, "request": job.request_json},
-                )
-                s.add(asset)
-                s.flush()
+                asset = self._register_asset(s, job, final_output)
                 job.output_asset_id = asset.id
                 job.status = "succeeded"
                 job.progress = 1.0
             job.completed_at = utcnow()
             s.commit()
             await self._publish(job)
+
+    def _register_asset(self, s: Session, job: GenerationJob, output: dict[str, Any]) -> Asset:
+        """Register a produced/imported file: CAS blob row + asset + version 1."""
+        from app.db.models import AssetFile, AssetVersion, StorageLocation
+
+        path = Path(output["path"])
+        sha = output.get("sha256") or ""
+        if not sha and path.exists():
+            from app.domain.storage import hash_file
+            sha, _ = hash_file(path)
+        size = output.get("byte_size") or (path.stat().st_size if path.exists() else 0)
+
+        default_loc = s.execute(
+            select(StorageLocation).where(StorageLocation.is_default.is_(True))
+        ).scalar_one_or_none()
+        rel_path = output.get("rel_path")
+        if not rel_path:
+            try:
+                rel_path = str(path.relative_to(self._data_dir))
+            except ValueError:
+                rel_path = f"blobs/{sha[:2]}/{sha}"
+        af = s.get(AssetFile, sha) or AssetFile(sha256=sha)
+        if default_loc is not None:
+            af.storage_location_id = default_loc.id
+        af.rel_path = rel_path
+        af.byte_size = size
+        af.status = "ready"
+        s.add(af)
+
+        asset = Asset(
+            id=new_id(),
+            project_id=job.project_id,
+            name=output.get("name") or path.name,
+            kind=output.get("kind", "other"),
+            origin=output.get("origin", "generated"),
+            uri=rel_path,
+            sha256=sha,
+            byte_size=size,
+            provenance_json={"adapter_id": job.adapter_id, "job_id": job.id, "request": job.request_json},
+        )
+        s.add(asset)
+        s.flush()
+        version = AssetVersion(
+            id=new_id(), asset_id=asset.id, version_no=1, sha256=sha,
+            media_json=output.get("media") or {},
+        )
+        s.add(version)
+        s.flush()
+        asset.current_version_id = version.id
+        return asset
 
     def _finalize_crash(self, job_id: str) -> None:
         try:

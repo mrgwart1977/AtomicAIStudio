@@ -1,17 +1,40 @@
 """Adapter registry. Adapters are registered explicitly; nothing is
 auto-enabled. Capability profiles are exposed to the UI verbatim so the
-interface can gate controls honestly."""
+interface can gate controls honestly.
+
+Two families: generation providers (mock only until verified hardware
+adapters arrive in M3+) and local ops adapters (filesystem jobs —
+import/export/verify — registered with backend services injected).
+"""
 
 from __future__ import annotations
 
 from app.adapters.base import ProviderAdapter
 from app.adapters.mock import MockImageAdapter
+from app.adapters.ops import (
+    AssetImportAdapter,
+    AssetRelinkAdapter,
+    AssetsVerifyAdapter,
+    BackupExportAdapter,
+    BackupImportAdapter,
+    BackupRestoreAdapter,
+)
 
 
 class AdapterRegistry:
-    def __init__(self) -> None:
+    def __init__(self, session_factory=None, storage=None, settings=None) -> None:
         self._adapters: dict[str, ProviderAdapter] = {}
         self.register(MockImageAdapter())
+        if session_factory is not None and storage is not None:
+            for cls in (
+                AssetImportAdapter,
+                AssetRelinkAdapter,
+                AssetsVerifyAdapter,
+                BackupExportAdapter,
+                BackupImportAdapter,
+                BackupRestoreAdapter,
+            ):
+                self.register(cls(session_factory, storage, settings))
 
     def register(self, adapter: ProviderAdapter) -> None:
         self._adapters[adapter.profile.adapter_id] = adapter
