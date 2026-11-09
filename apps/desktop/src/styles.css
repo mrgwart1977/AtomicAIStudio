@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* Atomic AI Studio design tokens — from the v0.9 schematic boards:
+   dark navy surfaces, restrained teal actions, violet selection cues,
+   warm warnings. Never communicate state by color alone. */
+@theme {
+  --color-ink: #0c111c;
+  --color-panel: #101828;
+  --color-card: #16202f;
+  --color-card-hi: #1b2740;
+  --color-line: #283850;
+  --color-fg: #edf3ff;
+  --color-muted: #aebbd0;
+  --color-faint: #6b7a94;
+  --color-teal: #39d3bb;
+  --color-action: #2f8f76;
+  --color-action-hi: #39a888;
+  --color-violet: #8b7cf6;
+  --color-amber: #e8b45a;
+  --color-danger: #e26d6d;
+  --font-ui: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: 15px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-teal);
+  outline-offset: 2px;
+}
