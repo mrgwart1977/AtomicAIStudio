@@ -88,6 +88,14 @@ CommandType = Literal[
     "location.unarchive", "location.revert",
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
     "backup.export", "backup.import", "backup.restore",
+    "scene.create", "scene.update", "scene.archive", "scene.unarchive",
+    "scene.revert", "scene.duplicate", "scene.move",
+    "scene.cast.assign", "scene.cast.update", "scene.cast.remove",
+    "shot.create", "shot.update", "shot.archive", "shot.unarchive",
+    "shot.revert", "shot.duplicate", "shot.move",
+    "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    "character.duplicate",
+    "entity.assets.link", "entity.assets.unlink",
 ]
 
 
@@ -208,6 +216,91 @@ class EntityRevisionOut(BaseModel):
     summary: str
     snapshot_json: dict[str, Any]
     created_at: datetime
+
+
+# ---------- storyboard (M2) ----------
+
+class EntityAssetLinkOut(BaseModel):
+    id: str
+    project_id: str
+    entity_type: str
+    entity_id: str
+    asset_id: str
+    role: str
+    label: str
+    position: int
+    created_at: datetime
+
+
+class CastMemberOut(BaseModel):
+    """One cast row + the character's display info."""
+    id: str
+    character_id: str
+    position: int
+    character: dict[str, Any]  # {id, name, status}
+    # scene-cast fields
+    role: str | None = None
+    notes_json: dict[str, Any] | None = None
+    # shot-cast fields
+    wardrobe_variant: str | None = None
+    blocking: str | None = None
+    expression: str | None = None
+    emotion: str | None = None
+    action_instructions: str | None = None
+    dialogue: str | None = None
+    voice_override: str | None = None
+    model_ref: str | None = None
+    lora_json: list[Any] | None = None
+    continuity_json: dict[str, Any] | None = None
+
+
+class ShotOut(BaseModel):
+    id: str
+    project_id: str
+    scene_id: str
+    title: str
+    description: str
+    intent: str
+    prompt: str
+    shot_type: str
+    duration_sec: float
+    position: int
+    status: str
+    location_id: str | None
+    thumbnail_asset_id: str | None
+    continuity_json: dict[str, Any]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryboardShotOut(BaseModel):
+    shot: ShotOut
+    location_name: str
+    cast: list[CastMemberOut]
+
+
+class SceneOut(BaseModel):
+    id: str
+    project_id: str
+    title: str
+    description: str
+    intent: str
+    position: int
+    status: str
+    world_id: str | None
+    location_id: str | None
+    continuity_json: dict[str, Any]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryboardSceneOut(BaseModel):
+    scene: SceneOut
+    location_name: str
+    cast: list[CastMemberOut]
+    shots: list[StoryboardShotOut]
 
 
 # ---------- storage ----------

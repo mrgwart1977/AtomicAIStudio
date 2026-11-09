@@ -153,3 +153,95 @@ Status as of the `feat/m1.1-storage` branch (builds on M1).
 |---|---|
 | Custom destinations, persistence, overrides, missing/disconnected, insufficient space, streaming, cancel, crash recovery, corruption, concurrency, v1 compat, isolation | `backend/tests/test_m11.py` — **19 tests**, plus 34 M1/M0 regression = **53/53 pass** |
 | Packaged Windows verification | NSIS reinstall over M1 DB → real `0002→0003` migration → custom dir set → export → **live cancel at 117/981 MB** → no `.partial` left → cancelled run row; screenshots `10-installed-app.png` |
+
+---
+
+# Milestone 2 — Multi-Character Foundation
+
+Status as of the `feat/m2-storyboard` branch (builds on M1.1).
+
+## A. Character Library
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Create / edit / duplicate / archive / search / organize | `EntityPage` (Cast tab): search box over name/summary/data, `character.duplicate` command, archive/unarchive, structured editor | `test_character_duplicate`, `test_character_search_*` via API coverage; `docs/m2-evidence/02-character-library.png` |
+| Name, identity, appearance, distinguishing features | `FIELD_HINTS.character` structured sections over `profile_json`; non-string values round-trip as editable JSON (never `[object Object]`) | `04-character-editor.png` |
+| Personality / behavior / background | Same field set: `personality`, `behavior`, `backstory` | `04-character-editor.png` |
+| Facial expressions & emotional states | `LIST_FIELDS.character.expressions` — add/remove rows `{name, notes}` stored as JSON array | `04-character-editor.png` |
+| Wardrobe & costume variations | `LIST_FIELDS.character.wardrobe` rows | `04-character-editor.png` |
+| Voice profile & speaking style | `voice_profile`, `speaking_style` fields | `04-character-editor.png` |
+| Reference images & identity assets | `entity_assets` table + `entity.assets.link/unlink` commands; `ReferenceAssets` picker over ready image assets with role (`reference`/`identity`/`wardrobe`/`voice`/`style`) | `test_entity_asset_link_roles`, `test_entity_asset_isolation` |
+| AI model & LoRA associations | `model_ref` field + `loras` CSV list in `profile_json` | `04-character-editor.png` |
+| Version history & continuity metadata | `entity_revisions` snapshots (create/update/revert); `continuity_notes` + `visual_anchor` fields reserved for Identity Lock baseline | `test_entity_revert` (M1 suite), `test_m2.py` revert coverage |
+| Strict isolation / explicit sharing | All character queries scoped by `project_id`; sharing unchanged (asset-level only) | `test_entity_isolation` (M1), `test_m2` isolation tests |
+
+## B. Multi-character casting
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Multiple characters per scene/shot | `scene_characters`, `shot_characters` join tables — no hard-coded limit (unique (shot, character) constraint only) | `test_multi_character_cast_state`, `test_scene_cast_multiple` |
+| Independent per-cast state | `shot_characters.state_json` / `scene_characters.state_json`: `expression`, `emotion`, `wardrobe_variant`, `blocking`, `action`, `dialogue`, `voice`, `model_ref`, `lora_refs`, `continuity_notes` | `test_cast_state_independent_across_shots` |
+| Identity / model / LoRA / reference associations | `model_ref`, `lora_refs`, `reference_asset_ids` keys inside cast `state_json`; entity-asset links carry `role` | cast payload round-trip tests |
+| No arbitrary limit | Single test casts 5 characters into one shot; design imposes no cap | `test_many_characters_per_shot` |
+
+## C. Scene & shot management
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Persistent scenes/shots, stable IDs | `scenes` / `shots` tables, UUID `new_id()` | `test_scene_shot_create` |
+| Ordering | Integer `position` + `scene.move` / `shot.move` commands; `_next_position` max+1 (zero-safe) | `test_scene_order`, `test_shot_reorder_and_move_across_scenes` |
+| Duplication | `scene.duplicate` deep-copies scene + shots + cast rows + entity-asset links; `shot.duplicate` same at shot scope | `test_scene_duplicate_deep`, `test_shot_duplicate` |
+| Editing / archiving | `scene.update`, `shot.update`, `scene.archive`/`unarchive` (shot archiving via scene or `shot.archive`) | update/archive tests |
+| Version history | `entity_revisions` rows for every scene/shot mutation (including cast snapshots) via `snapshot_scene`/`snapshot_shot` | `test_scene_version_revert`, `test_shot_revert_restores_cast` |
+| Character/world/location assignment | `scene.world_id`, `scene.location_id`, `shot.location_id` FKs + `scene.cast.*` | `test_scene_location_world_links` |
+| Referential integrity | `_validate` rejects cross-project/dead refs before mutation; FK CASCADE on entity delete | `test_isolation_rejects_cross_project_cast` |
+
+## D. Visual storyboard
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Shot cards with type, title, prompt | `StoryboardPage` — scene sections with per-shot cards (type badge, title, prompt preview, cast chips) | `docs/m2-evidence/01-storyboard.png` |
+| Drag-and-drop ordering | Hand-rolled HTML5 DnD (no external lib): drag shot card → drop target → `shot.move` command | `01-storyboard.png` (ordered cards), reorder covered by `test_shot_reorder_*` API-side |
+| Character assignments visible on cards | Cast initials chips per card from `shot.cast` | `01-storyboard.png` (AV/MK chips) |
+| Locations, descriptions, cinematic intent | `scene.intent`, `scene.location_id`, `shot.title/description/prompt` shown on cards and editors | `01-storyboard.png` |
+| Manual prompt editing always available | `prompt` field in shot editor → `shot.update`; bottom PromptBar unchanged | shot update tests |
+| Scene/shot editor dialogs | Radix dialogs: `New scene`, `Edit`, `Duplicate`, `Archive` per scene; `+ Shot` per scene; full shot editor with cast table | `01-storyboard.png` |
+
+## E. Continuity foundations
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| Structured continuity metadata | Cast `state_json.continuity_notes` + `expression`/`emotion`/`wardrobe_variant` per shot; character `continuity_notes`/`visual_anchor` in `profile_json` | `test_cast_state_independent_across_shots` asserts per-shot wardrobe/expression deltas |
+| Scene-to-scene change tracking | Revisions snapshot cast state, so a wardrobe change between shots is diffable in history | `test_shot_revert_restores_cast` |
+| Architecture for Identity Lock / Film Memory / Continuity Supervisor | `entity_assets` role taxonomy (`identity`, `voice`), cast `reference_asset_ids`, `model_ref`/`lora_refs` hooks; documented in code | schema + domain comments |
+| No false consistency claims | No inference run; copy says "structured metadata" not "AI-consistent" | strings in UI |
+
+## F. Unified Creative Commands
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| All M2 mutations via preview/commit/audit/undo | `SUPPORTED_COMMANDS` + `_validate` + `_commit_storyboard` + `_undo_storyboard`; `CommandType` literals in API schema | `test_m2.py` command-path tests (all mutations via `/commands/commit`) |
+| Cross-project protection | `_validate` checks every referenced id's `project_id` before commit | `test_isolation_rejects_cross_project_cast`, `test_isolation_rejects_cross_project_entity_asset` |
+| Optimistic concurrency / idempotency | `expected_revision` + `idempotency_key` on every commit (existing machinery) | `test_commands.py` + M2 usage |
+| Undo | Scene/shot/cast/entity-asset undo reconstructs rows from `before`/`after` snapshots; timestamps stripped → fresh defaults | `test_undo_scene_create`, `test_undo_cast_assign` |
+
+## G. Testing & delivery
+
+| Requirement | Evidence |
+|---|---|
+| Multi-char cast, independent state, casting, ordering, storyboard persistence, continuity, versioning/undo, isolation, upgrades | `backend/tests/test_m2.py` — **18 tests**; full suite **72/72 pass** |
+| Database upgrade | `0004_m2` guarded for fresh + upgrade; packaged reinstall ran real `0003→0004` on installed DB (backend.log) |
+| Packaged Windows verification | NSIS reinstall over M1.1 DB → `0003→0004` migration → character ×2 / scene / shot ×2 / cast command sequence committed via installed backend → storyboard endpoint returned scene + 2 shots + cast row with full state |
+| Screenshots | `docs/m2-evidence/` — `01-storyboard.png`, `02-character-library.png`, `03-overview.png`, `04-character-editor.png` |
+| Backup round-trip | Format v2 exports scenes/shots/cast/entity_assets; v1 packages still import | `test_backup_roundtrip_preserves_storyboard`, `test_format_v1_compat_roundtrip` (M1.1) |
+
+## Bugs fixed during M2
+
+- `_next_position` falsy-zero bug (`0 or -1` → -1): all new scenes landed at position 0 — fixed with explicit `None` check.
+- Undo reinsertion passed ISO timestamp strings into `DateTime` columns — stripped on restore.
+- `EntityPage` rendered structured `profile_json` values as `[object Object]` — `fieldText`/`fieldValue` JSON round-trip added.
+- `cdp-shots.cjs` updated for M2 routes.
+
+## Tracked outstanding items
+
+See `docs/RELEASE_CHECKLIST.md` (items #5–#15 on GitHub). No M2 requirement is left open; tracked items concern install/VM verification, signing, UNC soak, FAT32 edge coverage, import resume, security review, scalability soak, installer/DB matrix, model approval workflow, first real adapter, and usability testing.

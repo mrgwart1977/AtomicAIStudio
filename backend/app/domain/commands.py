@@ -33,6 +33,7 @@ from app.db.models import (
     utcnow,
 )
 from app.domain import bibles
+from app.domain import storyboard as sb
 
 SUPPORTED_COMMANDS = {
     "prompt.set_text",
@@ -53,6 +54,15 @@ SUPPORTED_COMMANDS = {
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
     # backups
     "backup.export", "backup.import", "backup.restore",
+    # scenes & storyboard (M2)
+    "scene.create", "scene.update", "scene.archive", "scene.unarchive",
+    "scene.revert", "scene.duplicate", "scene.move",
+    "scene.cast.assign", "scene.cast.update", "scene.cast.remove",
+    "shot.create", "shot.update", "shot.archive", "shot.unarchive",
+    "shot.revert", "shot.duplicate", "shot.move",
+    "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    "character.duplicate",
+    "entity.assets.link", "entity.assets.unlink",
 }
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
@@ -76,6 +86,12 @@ UNDOABLE = {
     "character.archive", "character.unarchive",
     "world.archive", "world.unarchive",
     "location.archive", "location.unarchive",
+    # scenes & storyboard — structural moves and cast state are reversible
+    "scene.update", "scene.archive", "scene.unarchive", "scene.move",
+    "scene.cast.assign", "scene.cast.update", "scene.cast.remove",
+    "shot.update", "shot.archive", "shot.unarchive", "shot.move",
+    "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    "entity.assets.link", "entity.assets.unlink",
 }
 
 PROJECT_FORMAT_FIELDS = ("kind", "aspect_ratio", "width", "height", "fps_num", "fps_den", "style")
@@ -132,6 +148,38 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Import package '{payload.get('package_path', '')}'"
     if command_type == "backup.restore":
         return "Restore project from a backup run"
+    if command_type.startswith("scene."):
+        if command_type == "scene.create":
+            return f"Create scene '{payload.get('title', '')}'"
+        if command_type == "scene.duplicate":
+            return "Duplicate scene (with its shots and cast)"
+        if command_type == "scene.move":
+            return f"Move scene to position {(payload.get('to_index') or 0) + 1}"
+        if command_type == "scene.revert":
+            return f"Revert scene to revision {payload.get('to_revision')}"
+        if command_type.startswith("scene.cast."):
+            op = command_type.rsplit(".", 1)[1]
+            return f"{op.capitalize()} character in scene cast"
+        return f"{command_type.split('.', 1)[1].capitalize()} scene"
+    if command_type.startswith("shot."):
+        if command_type == "shot.create":
+            return f"Create shot '{payload.get('title') or payload.get('shot_type', 'medium')}'"
+        if command_type == "shot.duplicate":
+            return "Duplicate shot (with its cast)"
+        if command_type == "shot.move":
+            return f"Move shot to position {(payload.get('to_index') or 0) + 1}"
+        if command_type == "shot.revert":
+            return f"Revert shot to revision {payload.get('to_revision')}"
+        if command_type.startswith("shot.cast."):
+            op = command_type.rsplit(".", 1)[1]
+            return f"{op.capitalize()} character in shot cast"
+        return f"{command_type.split('.', 1)[1].capitalize()} shot"
+    if command_type == "character.duplicate":
+        return "Duplicate character (with its linked assets)"
+    if command_type == "entity.assets.link":
+        return f"Link asset to {payload.get('entity_type', 'entity')} ({payload.get('role', 'reference')})"
+    if command_type == "entity.assets.unlink":
+        return "Unlink asset from entity"
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -201,6 +249,59 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             raise CommandError(404, "asset not found in this project")
         if not (payload.get("source_path") or "").strip():
             raise CommandError(422, "source_path is required")
+    # ---- M2: scenes / shots / cast / entity assets ----
+    if command_type == "scene.create":
+        if not (payload.get("title") or "").strip():
+            raise CommandError(422, "scene title is required")
+        _check_storyboard_links(session, project, payload)
+    if command_type in ("scene.update", "scene.archive", "scene.unarchive",
+                        "scene.revert", "scene.duplicate", "scene.move"):
+        _get_scene(session, project, payload)
+        if command_type == "scene.update":
+            _check_storyboard_links(session, project, payload)
+    if command_type.startswith("scene.cast."):
+        _get_scene(session, project, payload)
+        _get_character(session, project, payload)
+        if command_type != "scene.cast.assign":
+            _require_scene_cast(session, project, payload)
+    if command_type == "shot.create":
+        _get_scene(session, project, payload)
+        _check_storyboard_links(session, project, payload)
+        _check_shot_fields(payload)
+    if command_type in ("shot.update", "shot.archive", "shot.unarchive",
+                        "shot.revert", "shot.duplicate", "shot.move"):
+        _get_shot(session, project, payload)
+        if command_type == "shot.update":
+            _check_storyboard_links(session, project, payload)
+            _check_shot_fields(payload)
+        if command_type == "shot.move" and payload.get("to_scene_id"):
+            _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
+    if command_type.startswith("shot.cast."):
+        _get_shot(session, project, payload)
+        _get_character(session, project, payload)
+        if command_type != "shot.cast.assign":
+            _require_shot_cast(session, project, payload)
+    if command_type == "character.duplicate":
+        _get_character(session, project, payload)
+    if command_type == "entity.assets.link":
+        for k in ("entity_type", "entity_id", "asset_id"):
+            if not payload.get(k):
+                raise CommandError(422, f"{k} is required")
+        if payload["entity_type"] not in sb.ENTITY_ASSET_TYPES:
+            raise CommandError(422, f"unsupported entity_type '{payload['entity_type']}'")
+        if payload.get("role", "reference") not in sb.ENTITY_ASSET_ROLES:
+            raise CommandError(422, f"unsupported role '{payload.get('role')}'")
+        ent = session.get(sb.ENTITY_MODELS[payload["entity_type"]], payload["entity_id"])
+        if ent is None or ent.project_id != project.id:
+            raise CommandError(404, f"{payload['entity_type']} not found in this project")
+        asset = session.get(Asset, payload["asset_id"])
+        if asset is None or asset.project_id != project.id:
+            raise CommandError(404, "asset not found in this project")
+    if command_type == "entity.assets.unlink":
+        from app.db.models import EntityAssetLink
+        link = session.get(EntityAssetLink, payload.get("link_id") or "")
+        if link is None or link.project_id != project.id:
+            raise CommandError(404, "link not found in this project")
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -212,6 +313,86 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             except KeyError:
                 raise CommandError(404, f"{etype} not found in this project") from None
     return warnings
+
+
+# ---- M2 validation helpers (project isolation is the invariant) ----
+
+def _get_scene(session: Session, project: Project, payload: dict):
+    from app.domain import storyboard as sb
+    try:
+        return sb.get_scene(session, payload.get("scene_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "scene not found in this project") from None
+
+
+def _get_shot(session: Session, project: Project, payload: dict):
+    from app.domain import storyboard as sb
+    try:
+        return sb.get_shot(session, payload.get("shot_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "shot not found in this project") from None
+
+
+def _get_character(session: Session, project: Project, payload: dict):
+    from app.domain import storyboard as sb
+    try:
+        return sb.get_character(session, payload.get("character_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "character not found in this project") from None
+
+
+def _require_scene_cast(session: Session, project: Project, payload: dict) -> None:
+    from app.db.models import SceneCharacter
+    row = session.execute(
+        select(SceneCharacter).where(
+            SceneCharacter.scene_id == payload.get("scene_id"),
+            SceneCharacter.character_id == payload.get("character_id"),
+            SceneCharacter.project_id == project.id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise CommandError(404, "character is not in this scene's cast")
+
+
+def _require_shot_cast(session: Session, project: Project, payload: dict) -> None:
+    from app.db.models import ShotCharacter
+    row = session.execute(
+        select(ShotCharacter).where(
+            ShotCharacter.shot_id == payload.get("shot_id"),
+            ShotCharacter.character_id == payload.get("character_id"),
+            ShotCharacter.project_id == project.id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise CommandError(404, "character is not in this shot's cast")
+
+
+def _check_storyboard_links(session: Session, project: Project, payload: dict) -> None:
+    from app.db.models import Location, World
+    for key, model, label in (
+        ("world_id", World, "world"), ("location_id", Location, "location"),
+    ):
+        lid = payload.get(key)
+        if lid is None:
+            continue
+        row = session.get(model, lid)
+        if row is None or row.project_id != project.id:
+            raise CommandError(404, f"{label} not found in this project")
+    tid = payload.get("thumbnail_asset_id")
+    if tid:
+        a = session.get(Asset, tid)
+        if a is None or a.project_id != project.id:
+            raise CommandError(404, "thumbnail asset not found in this project")
+
+
+def _check_shot_fields(payload: dict) -> None:
+    from app.domain import storyboard as sb
+    st = payload.get("shot_type")
+    if st is not None and st not in sb.SHOT_TYPES:
+        raise CommandError(422, f"unknown shot_type '{st}'")
+    dur = payload.get("duration_sec")
+    if dur is not None and float(dur) < 0:
+        raise CommandError(422, "duration_sec cannot be negative")
 
 
 def _diff_for(command_type: str, payload: dict) -> dict[str, Any]:
@@ -320,18 +501,24 @@ def _duplicate_project(session: Session, project: Project, new_name: str, comman
         )
         session.add(nw)
         world_map[w.id] = nw.id
+    char_map: dict[str, str] = {}
     for c in session.execute(select(Character).where(Character.project_id == project.id)).scalars():
-        session.add(Character(
+        nc = Character(
             id=new_id(), project_id=clone.id, name=c.name, summary=c.summary,
             profile_json=dict(c.profile_json or {}), status=c.status, revision=c.revision,
-        ))
+        )
+        session.add(nc)
+        char_map[c.id] = nc.id
+    loc_map: dict[str, str] = {}
     for loc in session.execute(select(Location).where(Location.project_id == project.id)).scalars():
-        session.add(Location(
+        nl = Location(
             id=new_id(), project_id=clone.id,
             world_id=world_map.get(loc.world_id or "", None),
             name=loc.name, summary=loc.summary,
             details_json=dict(loc.details_json or {}), status=loc.status, revision=loc.revision,
-        ))
+        )
+        session.add(nl)
+        loc_map[loc.id] = nl.id
     asset_map: dict[str, str] = {}
     for a in session.execute(
         select(Asset).where(Asset.project_id == project.id, Asset.status != "deleted")
@@ -356,6 +543,77 @@ def _duplicate_project(session: Session, project: Project, new_name: str, comman
             session.flush()
             if a.current_version_id == v.id:
                 na.current_version_id = nv.id
+
+    # M2 storyboard graph — scenes → scene cast → shots → shot cast,
+    # then entity↔asset links. All references remap through the maps above.
+    from app.db.models import EntityAssetLink, Scene, SceneCharacter, Shot, ShotCharacter
+
+    scene_map: dict[str, str] = {}
+    for s in session.execute(select(Scene).where(Scene.project_id == project.id)).scalars():
+        ns = Scene(
+            id=new_id(), project_id=clone.id, title=s.title, description=s.description,
+            intent=s.intent, position=s.position, status=s.status,
+            world_id=world_map.get(s.world_id or "", None),
+            location_id=loc_map.get(s.location_id or "", None),
+            continuity_json=dict(s.continuity_json or {}), revision=s.revision,
+        )
+        session.add(ns)
+        session.flush()
+        scene_map[s.id] = ns.id
+    for scc in session.execute(
+        select(SceneCharacter).where(SceneCharacter.project_id == project.id)
+    ).scalars():
+        if scc.scene_id not in scene_map or scc.character_id not in char_map:
+            continue
+        session.add(SceneCharacter(
+            id=new_id(), project_id=clone.id, scene_id=scene_map[scc.scene_id],
+            character_id=char_map[scc.character_id], position=scc.position,
+            role=scc.role, notes_json=dict(scc.notes_json or {}),
+        ))
+    shot_map: dict[str, str] = {}
+    for sh in session.execute(select(Shot).where(Shot.project_id == project.id)).scalars():
+        if sh.scene_id not in scene_map:
+            continue
+        nsh = Shot(
+            id=new_id(), project_id=clone.id, scene_id=scene_map[sh.scene_id],
+            title=sh.title, description=sh.description, intent=sh.intent,
+            prompt=sh.prompt, shot_type=sh.shot_type, duration_sec=sh.duration_sec,
+            position=sh.position, status=sh.status,
+            location_id=loc_map.get(sh.location_id or "", None),
+            thumbnail_asset_id=asset_map.get(sh.thumbnail_asset_id or "", None),
+            continuity_json=dict(sh.continuity_json or {}), revision=sh.revision,
+        )
+        session.add(nsh)
+        session.flush()
+        shot_map[sh.id] = nsh.id
+    for shc in session.execute(
+        select(ShotCharacter).where(ShotCharacter.project_id == project.id)
+    ).scalars():
+        if shc.shot_id not in shot_map or shc.character_id not in char_map:
+            continue
+        session.add(ShotCharacter(
+            id=new_id(), project_id=clone.id, shot_id=shot_map[shc.shot_id],
+            character_id=char_map[shc.character_id], position=shc.position,
+            wardrobe_variant=shc.wardrobe_variant, blocking=shc.blocking,
+            expression=shc.expression, emotion=shc.emotion,
+            action_instructions=shc.action_instructions, dialogue=shc.dialogue,
+            voice_override=shc.voice_override, model_ref=shc.model_ref,
+            lora_json=list(shc.lora_json or []), continuity_json=dict(shc.continuity_json or {}),
+        ))
+    entity_id_map = {**char_map, **world_map, **loc_map}
+    for link in session.execute(
+        select(EntityAssetLink).where(EntityAssetLink.project_id == project.id)
+    ).scalars():
+        new_ent = entity_id_map.get(link.entity_id)
+        new_asset = asset_map.get(link.asset_id)
+        if not new_ent or not new_asset:
+            continue
+        session.add(EntityAssetLink(
+            id=new_id(), project_id=clone.id, entity_type=link.entity_type,
+            entity_id=new_ent, asset_id=new_asset, role=link.role,
+            label=link.label, position=link.position,
+        ))
+
     session.add(
         AuditEvent(
             id=new_id(), project_id=clone.id, event_type="project.duplicated_from",
@@ -363,6 +621,265 @@ def _duplicate_project(session: Session, project: Project, new_name: str, comman
         )
     )
     return clone
+
+
+def _commit_storyboard(session: Session, project: Project, command: CreativeCommand,
+                       command_type: str, payload: dict, audit: dict) -> None:
+    """Scene/shot/cast/entity-asset mutations. Cast ops also bump the parent
+    scene/shot revision so history shows cast changes."""
+    from app.db.models import EntityAssetLink
+
+    def scene() -> "object":
+        try:
+            return sb.get_scene(session, payload.get("scene_id") or "", project.id)
+        except KeyError:
+            raise CommandError(404, "scene not found in this project") from None
+
+    def shot() -> "object":
+        try:
+            return sb.get_shot(session, payload.get("shot_id") or "", project.id)
+        except KeyError:
+            raise CommandError(404, "shot not found in this project") from None
+
+    def character() -> "object":
+        try:
+            return sb.get_character(session, payload.get("character_id") or "", project.id)
+        except KeyError:
+            raise CommandError(404, "character not found in this project") from None
+
+    if command_type == "scene.create":
+        s = sb.create_scene(
+            session, project.id,
+            title=payload["title"], description=payload.get("description", ""),
+            intent=payload.get("intent", ""), world_id=payload.get("world_id"),
+            location_id=payload.get("location_id"), continuity=payload.get("continuity"),
+            command_id=command.id,
+        )
+        audit["after"]["scene_id"] = s.id
+        return
+
+    if command_type == "shot.create":
+        sc = scene()
+        sh = sb.create_shot(
+            session, sc,
+            title=payload.get("title", ""), shot_type=payload.get("shot_type", "medium"),
+            description=payload.get("description", ""), intent=payload.get("intent", ""),
+            prompt=payload.get("prompt", ""), duration_sec=payload.get("duration_sec", 0.0),
+            location_id=payload.get("location_id"), continuity=payload.get("continuity"),
+            command_id=command.id,
+        )
+        audit["after"]["shot_id"] = sh.id
+        return
+
+    if command_type == "character.duplicate":
+        c = character()
+        dup = sb.duplicate_character(session, c, name=payload.get("name"), command_id=command.id)
+        audit["after"]["character_id"] = dup.id
+        return
+
+    if command_type == "entity.assets.link":
+        link = sb.link_entity_asset(
+            session, project.id,
+            entity_type=payload["entity_type"], entity_id=payload["entity_id"],
+            asset_id=payload["asset_id"], role=payload.get("role", "reference"),
+            label=payload.get("label", ""),
+        )
+        audit["after"]["link_id"] = link.id
+        return
+    if command_type == "entity.assets.unlink":
+        link = session.get(EntityAssetLink, payload.get("link_id") or "")
+        if link is None or link.project_id != project.id:
+            raise CommandError(404, "link not found in this project")
+        audit["before"]["link"] = sb._cols(link)
+        session.delete(link)
+        return
+
+    # --- scene-level ops ---
+    if command_type == "scene.update":
+        s = scene()
+        fields = {f: payload[f] for f in sb.SCENE_FIELDS if f in payload}
+        try:
+            before = sb.update_scene(
+                session, s, fields=fields,
+                world_id=payload.get("world_id", ...), location_id=payload.get("location_id", ...),
+                continuity=payload.get("continuity"), command_id=command.id,
+                change_summary=payload.get("change_summary") or "Updated scene",
+            )
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+        audit["before"]["snapshot"] = before
+        audit["after"]["scene_id"] = s.id
+        return
+    if command_type in ("scene.archive", "scene.unarchive"):
+        s = scene()
+        before_status = sb.set_scene_archived(
+            session, s, archived=(command_type == "scene.archive"), command_id=command.id,
+        )
+        audit["before"]["status"] = before_status
+        audit["after"]["scene_id"] = s.id
+        return
+    if command_type == "scene.revert":
+        s = scene()
+        try:
+            sb.revert_scene(session, s, int(payload["to_revision"]), command_id=command.id)
+        except KeyError:
+            raise CommandError(404, "revision not found") from None
+        audit["after"]["scene_id"] = s.id
+        audit["after"]["reverted_to"] = int(payload["to_revision"])
+        return
+    if command_type == "scene.duplicate":
+        s = scene()
+        dup = sb.duplicate_scene(session, s, title=payload.get("title"), command_id=command.id)
+        audit["after"]["scene_id"] = dup.id
+        return
+    if command_type == "scene.move":
+        s = scene()
+        before = sb.move_scene(session, s, int(payload.get("to_index", 0)), command_id=command.id)
+        audit["before"]["scene_move"] = before
+        audit["after"]["scene_id"] = s.id
+        return
+
+    # --- scene cast ---
+    if command_type.startswith("scene.cast."):
+        s = scene()
+        c = character()
+        if command_type == "scene.cast.assign":
+            try:
+                row = sb.scene_cast_assign(
+                    session, s, c, role=payload.get("role", ""), notes=payload.get("notes"),
+                )
+            except ValueError as exc:
+                raise CommandError(409, str(exc)) from None
+            audit["after"]["cast_row"] = sb._cols(row)
+            summary = f"Cast {c.name} in scene"
+        elif command_type == "scene.cast.update":
+            audit["before"]["cast_row"] = sb._cols(
+                _scene_cast_row(session, s.id, c.id))
+            row = sb.scene_cast_update(
+                session, s, c.id,
+                role=payload.get("role"), notes=payload.get("notes"),
+                position=payload.get("position"),
+            )
+            audit["after"]["cast_row"] = sb._cols(row)
+            summary = f"Updated {c.name}'s scene role"
+        else:  # remove
+            audit["before"]["cast_row"] = sb._cols(
+                _scene_cast_row(session, s.id, c.id))
+            sb.scene_cast_remove(session, s, c.id)
+            summary = f"Removed {c.name} from scene cast"
+        s.revision += 1
+        s.updated_at = utcnow()
+        session.flush()
+        sb.write_scene_revision(session, s, command_id=command.id, summary=summary)
+        return
+
+    # --- shot-level ops ---
+    if command_type == "shot.update":
+        sh = shot()
+        fields = {f: payload[f] for f in sb.SHOT_FIELDS if f in payload}
+        try:
+            before = sb.update_shot(
+                session, sh, fields=fields,
+                location_id=payload.get("location_id", ...),
+                thumbnail_asset_id=payload.get("thumbnail_asset_id", ...),
+                continuity=payload.get("continuity"), command_id=command.id,
+                change_summary=payload.get("change_summary") or "Updated shot",
+            )
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+        audit["before"]["snapshot"] = before
+        audit["after"]["shot_id"] = sh.id
+        return
+    if command_type in ("shot.archive", "shot.unarchive"):
+        sh = shot()
+        before_status = sb.set_shot_archived(
+            session, sh, archived=(command_type == "shot.archive"), command_id=command.id,
+        )
+        audit["before"]["status"] = before_status
+        audit["after"]["shot_id"] = sh.id
+        return
+    if command_type == "shot.revert":
+        sh = shot()
+        try:
+            sb.revert_shot(session, sh, int(payload["to_revision"]), command_id=command.id)
+        except KeyError:
+            raise CommandError(404, "revision not found") from None
+        audit["after"]["shot_id"] = sh.id
+        audit["after"]["reverted_to"] = int(payload["to_revision"])
+        return
+    if command_type == "shot.duplicate":
+        sh = shot()
+        dup = sb.duplicate_shot(session, sh, title=payload.get("title"), command_id=command.id)
+        audit["after"]["shot_id"] = dup.id
+        return
+    if command_type == "shot.move":
+        sh = shot()
+        before = sb.move_shot(
+            session, sh, int(payload.get("to_index", 0)),
+            to_scene_id=payload.get("to_scene_id"), command_id=command.id,
+        )
+        audit["before"]["shot_move"] = before
+        audit["after"]["shot_id"] = sh.id
+        return
+
+    # --- shot cast ---
+    if command_type.startswith("shot.cast."):
+        sh = shot()
+        c = character()
+        if command_type == "shot.cast.assign":
+            try:
+                row = sb.shot_cast_assign(session, sh, c, state=payload.get("state") or {})
+            except ValueError as exc:
+                raise CommandError(409, str(exc)) from None
+            audit["after"]["cast_row"] = sb._cols(row)
+            summary = f"Cast {c.name} in shot"
+        elif command_type == "shot.cast.update":
+            audit["before"]["cast_row"] = sb._cols(
+                _shot_cast_row(session, sh.id, c.id))
+            try:
+                row = sb.shot_cast_update(session, sh, c.id, state=payload.get("state") or {})
+            except KeyError as exc:
+                raise CommandError(404, str(exc)) from None
+            audit["after"]["cast_row"] = sb._cols(row)
+            summary = f"Updated {c.name}'s shot state"
+        else:  # remove
+            audit["before"]["cast_row"] = sb._cols(
+                _shot_cast_row(session, sh.id, c.id))
+            sb.shot_cast_remove(session, sh, c.id)
+            summary = f"Removed {c.name} from shot cast"
+        sh.revision += 1
+        sh.updated_at = utcnow()
+        session.flush()
+        sb.write_shot_revision(session, sh, command_id=command.id, summary=summary)
+        return
+
+    raise CommandError(422, f"unsupported command_type '{command_type}'")
+
+
+def _scene_cast_row(session: Session, scene_id: str, character_id: str):
+    from app.db.models import SceneCharacter
+    row = session.execute(
+        select(SceneCharacter).where(
+            SceneCharacter.scene_id == scene_id, SceneCharacter.character_id == character_id
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise CommandError(404, "character is not in this scene's cast")
+    return row
+
+
+def _shot_cast_row(session: Session, shot_id: str, character_id: str):
+    from app.db.models import ShotCharacter
+    row = session.execute(
+        select(ShotCharacter).where(
+            ShotCharacter.shot_id == shot_id, ShotCharacter.character_id == character_id
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise CommandError(404, "character is not in this shot's cast")
+    return row
 
 
 def _share_asset(session: Session, project: Project, asset_id: str, audit: dict) -> Asset:
@@ -521,6 +1038,9 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
 
+    elif command_type.startswith(("scene.", "shot.", "entity.assets.")) or command_type == "character.duplicate":
+        _commit_storyboard(session, project, command, command_type, payload, audit)
+
     elif parts:
         _commit_entity(session, project, command, parts[0], parts[1], payload, audit)
 
@@ -642,7 +1162,9 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
     txn = session.execute(
         select(CommandTransaction).where(CommandTransaction.command_id == command.id)
     ).scalar_one_or_none()
-    before = (txn.audit_json or {}).get("before", {}) if txn else {}
+    audit_json = (txn.audit_json or {}) if txn else {}
+    before = audit_json.get("before", {})
+    after = audit_json.get("after", {})
 
     if command.command_type == "prompt.set_text":
         draft = session.execute(
@@ -658,6 +1180,8 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
                 setattr(project, f, before[f])
         if "settings" in before:
             project.settings_json = before["settings"]
+    elif command.command_type.startswith(("scene.", "shot.", "entity.assets.")):
+        _undo_storyboard(session, project, command, before, after)
     else:
         parts = _entity_parts(command.command_type)
         if parts:
@@ -693,6 +1217,169 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
         )
     )
     return command
+
+
+def _undo_storyboard(session: Session, project: Project, command: CreativeCommand,
+                     before: dict, after: dict) -> None:
+    """Reverse M2 mutations from their audit records."""
+    from app.db.models import EntityAssetLink, Scene, SceneCharacter, Shot, ShotCharacter
+
+    ct = command.command_type
+
+    def get_scene() -> Scene | None:
+        sid = after.get("scene_id") or before.get("scene_id") or command.target_id
+        row = session.get(Scene, sid) if sid else None
+        return row if row and row.project_id == project.id else None
+
+    def get_shot() -> Shot | None:
+        sid = after.get("shot_id") or before.get("shot_id") or command.target_id
+        row = session.get(Shot, sid) if sid else None
+        return row if row and row.project_id == project.id else None
+
+    if ct in ("scene.update", "scene.archive", "scene.unarchive"):
+        s = get_scene()
+        if s is None:
+            return
+        if "snapshot" in before:
+            snap = before["snapshot"]
+            for f in sb.SCENE_FIELDS + ("status", "world_id", "location_id",
+                                        "continuity_json", "position"):
+                if f in snap:
+                    setattr(s, f, snap[f])
+            sb._restore_scene_cast(session, s, snap.get("cast") or [])
+        elif "status" in before:
+            s.status = before["status"]
+        s.revision += 1
+        s.updated_at = utcnow()
+        session.flush()
+        sb.write_scene_revision(session, s, command_id=command.id, summary="Undo")
+        return
+
+    if ct == "scene.move":
+        for sid, pos in (before.get("scene_move", {}).get("positions") or {}).items():
+            row = session.get(Scene, sid)
+            if row and row.project_id == project.id:
+                row.position = pos
+        s = get_scene()
+        if s is not None:
+            s.revision += 1
+            session.flush()
+            sb.write_scene_revision(session, s, command_id=command.id, summary="Undo move")
+        return
+
+    if ct in ("shot.update", "shot.archive", "shot.unarchive"):
+        sh = get_shot()
+        if sh is None:
+            return
+        if "snapshot" in before:
+            snap = before["snapshot"]
+            for f in sb.SHOT_FIELDS + ("status", "scene_id", "location_id",
+                                       "thumbnail_asset_id", "continuity_json", "position"):
+                if f in snap:
+                    setattr(sh, f, snap[f])
+            sb._restore_shot_cast(session, sh, snap.get("cast") or [])
+        elif "status" in before:
+            sh.status = before["status"]
+        sh.revision += 1
+        sh.updated_at = utcnow()
+        session.flush()
+        sb.write_shot_revision(session, sh, command_id=command.id, summary="Undo")
+        return
+
+    if ct == "shot.move":
+        mv = before.get("shot_move", {})
+        sh = get_shot()
+        if sh is not None and mv.get("scene_id"):
+            # Move back to the original scene, then restore positions in both.
+            sh.scene_id = mv["scene_id"]
+        for key in ("positions", "old_positions", "new_positions"):
+            for sid, pos in (mv.get(key) or {}).items():
+                row = session.get(Shot, sid)
+                if row and row.project_id == project.id:
+                    row.position = pos
+        if sh is not None:
+            # Its own position lives in whichever map covers its scene.
+            for key in ("positions", "new_positions", "old_positions"):
+                if sh.id in (mv.get(key) or {}):
+                    sh.position = mv[key][sh.id]
+                    break
+            sh.revision += 1
+            sh.updated_at = utcnow()
+            session.flush()
+            sb.write_shot_revision(session, sh, command_id=command.id, summary="Undo move")
+        return
+
+    if ct.endswith(".cast.assign"):
+        row_id = (after.get("cast_row") or {}).get("id")
+        for model in (SceneCharacter, ShotCharacter):
+            row = session.get(model, row_id) if row_id else None
+            if row is not None and row.project_id == project.id:
+                session.delete(row)
+                break
+        _bump_parent_revision(session, project, command, ct)
+        return
+
+    if ct.endswith(".cast.update"):
+        snap = before.get("cast_row") or {}
+        for model in (SceneCharacter, ShotCharacter):
+            row = session.get(model, snap.get("id", ""))
+            if row is not None and row.project_id == project.id:
+                for f in snap:
+                    if f not in ("id", "created_at", "updated_at") and hasattr(row, f):
+                        setattr(row, f, snap[f])
+                break
+        _bump_parent_revision(session, project, command, ct)
+        return
+
+    if ct.endswith(".cast.remove"):
+        snap = before.get("cast_row") or {}
+        model = SceneCharacter if ct.startswith("scene.") else ShotCharacter
+        row = session.get(model, snap.get("id", ""))
+        if row is None and snap:
+            cols = {c.name for c in model.__table__.columns} - {"id", "created_at", "updated_at"}
+            session.add(model(id=new_id(), **{k: v for k, v in snap.items() if k in cols}))
+            session.flush()
+        _bump_parent_revision(session, project, command, ct)
+        return
+
+    if ct == "entity.assets.link":
+        link = session.get(EntityAssetLink, after.get("link_id") or "")
+        if link is not None and link.project_id == project.id:
+            session.delete(link)
+        return
+
+    if ct == "entity.assets.unlink":
+        snap = before.get("link") or {}
+        if snap and session.get(EntityAssetLink, snap.get("id", "")) is None:
+            session.add(EntityAssetLink(
+                id=new_id(), project_id=project.id,
+                entity_type=snap["entity_type"], entity_id=snap["entity_id"],
+                asset_id=snap["asset_id"], role=snap["role"],
+                label=snap.get("label", ""), position=snap.get("position", 0),
+            ))
+        return
+
+
+def _bump_parent_revision(session: Session, project: Project, command: CreativeCommand,
+                          command_type: str) -> None:
+    """After undoing a cast change, bump the parent scene/shot revision so
+    history reflects it."""
+    from app.db.models import Scene, Shot
+    payload = command.payload_json or {}
+    if command_type.startswith("scene."):
+        parent = session.get(Scene, payload.get("scene_id") or "")
+        if parent is not None and parent.project_id == project.id:
+            parent.revision += 1
+            parent.updated_at = utcnow()
+            session.flush()
+            sb.write_scene_revision(session, parent, command_id=command.id, summary="Undo cast change")
+    else:
+        parent = session.get(Shot, payload.get("shot_id") or "")
+        if parent is not None and parent.project_id == project.id:
+            parent.revision += 1
+            parent.updated_at = utcnow()
+            session.flush()
+            sb.write_shot_revision(session, parent, command_id=command.id, summary="Undo cast change")
 
 
 def new_idempotency_key() -> str:

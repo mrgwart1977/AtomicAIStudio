@@ -47,6 +47,7 @@ from app.schemas.api import (
     CommandOut,
     CommandPreviewRequest,
     CommandProposalOut,
+    EntityAssetLinkOut,
     EntityOut,
     EntityRevisionOut,
     JobOut,
@@ -61,6 +62,7 @@ from app.schemas.api import (
     StorageLocationCreate,
     StorageLocationOut,
     StorageLocationUpdate,
+    StoryboardSceneOut,
 )
 
 # /health stays token-free so the desktop shell can poll readiness.
@@ -562,6 +564,53 @@ async def import_package(body: PackageImportRequest, request: Request, db: Sessi
         "job_id": result["job"].id if result.get("job") else None,
         "command_id": result["command"].id,
     }
+
+
+# ---------- storyboard (M2) ----------
+# Literal routes — must precede the dynamic {etype} catch-all below.
+
+@api_router.get("/api/projects/{project_id}/storyboard", response_model=list[StoryboardSceneOut])
+def get_storyboard(
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+    include_archived: bool = True,
+):
+    """Full board in one payload: scenes → shots → cast with names."""
+    from app.domain import storyboard as sb
+    return sb.storyboard(db, project.id, include_archived=include_archived)
+
+
+@api_router.get("/api/projects/{project_id}/scenes/{scene_id}/versions",
+                response_model=list[EntityRevisionOut])
+def scene_versions(scene_id: str, project: Project = Depends(get_project),
+                   db: Session = Depends(get_db)):
+    from app.domain import storyboard as sb
+    try:
+        sb.get_scene(db, scene_id, project.id)
+    except KeyError:
+        raise HTTPException(404, "scene not found in this project") from None
+    return sb.revision_history(db, "scene", scene_id)
+
+
+@api_router.get("/api/projects/{project_id}/shots/{shot_id}/versions",
+                response_model=list[EntityRevisionOut])
+def shot_versions(shot_id: str, project: Project = Depends(get_project),
+                  db: Session = Depends(get_db)):
+    from app.domain import storyboard as sb
+    try:
+        sb.get_shot(db, shot_id, project.id)
+    except KeyError:
+        raise HTTPException(404, "shot not found in this project") from None
+    return sb.revision_history(db, "shot", shot_id)
+
+
+@api_router.get("/api/projects/{project_id}/entity-assets",
+                response_model=list[EntityAssetLinkOut])
+def list_entity_asset_links(
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+    entity_type: str | None = None, entity_id: str | None = None,
+):
+    from app.domain import storyboard as sb
+    return sb.list_entity_assets(db, project.id, entity_type=entity_type, entity_id=entity_id)
 
 
 # ---------- bibles ----------

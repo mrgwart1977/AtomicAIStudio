@@ -1,15 +1,128 @@
-# Outstanding release requirements
+# Release tracking — outstanding items
 
-Tracked, non-blocking items before a public release. Opened at M1; none are
-closed yet.
+Central tracker for every known limitation, deferred improvement, and release
+requirement. **Rules:** nothing here is removed or marked resolved without
+test evidence or a documented resolution. Reviewed and updated at the end of
+every milestone. v1.0-blockers are called out explicitly.
 
-| # | Item | Status | Notes |
-|---|---|---|---|
-| 1 | **Clean Windows VM install verification** | open | M0.1/M1/M1.1 validated on the dev machine (env-scrubbed + real install). Still needs a pristine VM/Hyper-V run: install → launch → screens → uninstall. |
-| 2 | **Windows code signing** | open | Unsigned NSIS → SmartScreen warning. Needs a cert decision (EV OV vs. self-sign + documented fingerprint). |
-| 3 | **Security review of test-only env overrides** | open | `ATOMIC_SIDECAR_TOKEN` (fixed token for automation) and `ATOMIC_PYTHON` (interpreter override). Decide: keep documented, gate behind debug builds, or remove for release. |
-| 4 | **Installer upgrade path + migration testing** | open | Per-user NSIS install over an existing install works; 0001→0002 (M0.1→M1) and 0002→0003 (M1→M1.1) both observed on the installed DB. Still needs a scripted upgrade matrix incl. old-installer→new-installer and downgrade-refusal behavior. |
-| 5 | Model download approval workflow | open | M3 gate: name/version/source/license/size/VRAM/use/alternatives must precede any download. |
-| 6 | First verified local adapter | open | M3: pick after hardware survey; never pre-commit. |
-| 7 | Usability test with target users | open | M9: moderated beginner sessions. |
-| 8 | Network-share backup soak test | open | M1.1: UNC path validation exists; real NAS/SMB backup+cancel cycle needs an actual share to verify (latency, disconnect mid-write). |
+Status values: `open` · `in-progress` · `blocked` · `resolved`
+
+| # | Item | Priority | Target | Status | Blocks v1.0 | Issue |
+|---|------|----------|--------|--------|-------------|-------|
+| 1 | Clean Windows VM install & upgrade verification | High | v1.0 | open | **yes** | #5 |
+| 2 | Windows installer code signing & SmartScreen | High | v1.0 | open | **yes** | #6 |
+| 3 | Real UNC/network-share backup stress test | Medium | v1.0 | open | **yes** (documented limitation acceptable short-term) | #7 |
+| 4 | Interrupted import resume support | Medium | post-v1.0 | open | no | #8 |
+| 5 | Security review of test-only env overrides | High | v1.0 | open | **yes** | #9 |
+| 6 | Large-project performance & scalability validation | High | v1.0 | open | **yes** | #10 |
+| 7 | Installer & DB migration compatibility matrix | Critical | v1.0 | open | **yes** | #11 |
+| 8 | Model download approval workflow | High | M3 | open | **yes** (gate before any real adapter) | #12 |
+| 9 | First verified local AI adapter | High | M3 | open | **yes** | #13 |
+| 10 | Usability testing with target users | Medium | M9 | open | **yes** | #14 |
+| 11 | FAT32 >4 GiB guard — edge coverage | Low | v1.0 | open | **yes** (defensible as-is; margin improvement) | #15 |
+
+---
+
+## 1. Clean Windows VM install & upgrade verification — #5
+
+- **What:** M0.1/M1/M1.1/M2 validated on the dev machine (env-scrubbed frozen
+  exe + real NSIS install + observed 0001→0002→0003→0004 upgrades). Still needs
+  a pristine VM/Hyper-V run: install → launch → all screens → upgrade → uninstall.
+- **Why open:** dev-machine validation can't prove a bare Windows box works.
+- **Acceptance:** documented VM run with screenshots; install-over-install
+  from a previous release verified; zero dev dependencies.
+
+## 2. Windows installer code signing & SmartScreen — #6
+
+- **What:** unsigned NSIS installer → SmartScreen warning on first install.
+- **Why open:** needs a certificate decision (EV/OV vs. self-sign + fingerprint doc).
+- **Acceptance:** signed install with no SmartScreen, or a documented
+  self-sign + fingerprint-verification flow.
+
+## 3. Real UNC/network-share backup stress test — #7
+
+- **What:** UNC paths validate and probe reachability (M1.1), but no real
+  NAS/SMB share was soak-tested — large streamed export, mid-write disconnect,
+  cancel, latency.
+- **Why open:** requires an actual share; behavior under real network
+  failure modes is unverified.
+- **Acceptance:** export + cancel + mid-write disconnect on a real share;
+  friendly errors verified and documented.
+
+## 4. Interrupted import resume support — #8
+
+- **What:** interrupted imports are safely cleaned (staging sweep + failed
+  run row) but must restart from zero — verified blobs aren't reused.
+- **Why open:** designed for correctness first; resume adds a checkpoint ledger.
+- **Acceptance:** re-running an interrupted import skips already-verified
+  blobs; crash-mid-import + resume covered by test.
+
+## 5. Security review of test-only env overrides — #9
+
+- **What:** `ATOMIC_SIDECAR_TOKEN` (fixed automation token) and
+  `ATOMIC_PYTHON` (interpreter override) ship in the release binary.
+- **Why open:** decision pending — keep documented / debug-gate / remove.
+- **Acceptance:** decision recorded and enforced in the packaged build.
+
+## 6. Large-project performance & scalability validation — #10
+
+- **What:** architecture targets TB-scale projects (CAS, bounded-memory
+  streaming, indexed queries, pagination) but was never load-tested at scale.
+- **Why open:** requires a synthetic large fixture; M2 added storyboard
+  queries that need the same validation.
+- **Acceptance:** project with tens of thousands of assets + hundreds of
+  shots; storyboard/assets/backup endpoints stay responsive; memory bounded;
+  numbers documented.
+
+## 7. Installer & DB migration compatibility matrix — #11
+
+- **What:** pairwise upgrades verified live (0001→0002→0003→0004), but no
+  scripted matrix over all migration pairs, old-installer→new-installer, or
+  downgrade refusal.
+- **Why open:** needs the scripted harness; highest-risk area for user data.
+- **Acceptance:** scripted matrix covering every migration pair +
+  installer-over-installer + downgrade behavior, run in CI or documented.
+
+## 8. Model download approval workflow — #12
+
+- **What:** before any model download: name/version/official
+  source/license/size+VRAM/intended use/smaller-or-cloud alternatives, and
+  explicit approval.
+- **Why open:** M3 scope; no downloads are permitted until implemented.
+- **Acceptance:** approval surface implemented + enforced on the download
+  path; test evidence.
+
+## 9. First verified local AI adapter — #13
+
+- **What:** all generation is the mock adapter; the first real local adapter
+  is chosen after a hardware survey in M3.
+- **Why open:** deliberate sequencing — never pre-committed.
+- **Acceptance:** one real local inference adapter verified end-to-end on a
+  target hardware tier.
+
+## 10. Usability testing with target users — #14
+
+- **What:** beginner-friendliness is a core requirement; no moderated
+  sessions yet.
+- **Why open:** scheduled for late milestones (M9).
+- **Acceptance:** moderated sessions; findings filed; critical UX issues fixed.
+
+## 11. FAT32 >4 GiB backup guard — edge coverage — #15
+
+- **What:** FAT32 destinations are rejected when the *estimated* package
+  exceeds 4 GiB (unit-tested via monkeypatch). Edge cases: estimate could
+  undershoot on text-heavy manifests + incompressible media; the G:\ test
+  drive turned out to be a disconnected reader, not a formatted FAT32 volume.
+- **Why open:** implemented and tested, but real-volume verification and an
+  estimate safety margin are still open.
+- **Acceptance:** margin added to the estimate, or a real FAT32 volume verified.
+
+---
+
+### Milestone notes
+
+- **M1.1 →** items 1, 3, 4, 5, 6, 7, 11 carried forward; FAT32 guard (#11→#15)
+  implemented with monkeypatched coverage.
+- **M2 →** all items re-validated; nothing closed (no new evidence). No new
+  issues discovered during M2 beyond those listed. M2 storyboard queries are
+  in scope of #10 (scalability validation).
