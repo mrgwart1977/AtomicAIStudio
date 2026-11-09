@@ -609,12 +609,26 @@ class SdCppVideoAdapter(SdCppAdapter):
         flavor, flavor_reason = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
         # Wan VAE is only reliable on CUDA/CPU per sd.cpp wan.md — on other
         # backends (Vulkan) decode must run on CPU or the clip corrupts.
+        backend_mods: list[str] = []
         if flavor not in ("cuda", "cpu"):
-            argv += ["--backend", "vae=cpu"]
-        # Catalog-declared 8 GiB strategy: weights live in RAM and stream to
-        # the GPU per layer (wan.md offload guidance for big models).
-        if spec.capabilities.get("weight_offload_cpu"):
+            backend_mods.append("vae=cpu")
+        # Residency mode (issue #28 Option B): per-module placement.
+        #   cpu_offload — weights in RAM, stream to GPU (Wan catalog default)
+        #   gpu         — everything device-resident (B1; needs big VRAM)
+        #   te_cpu      — text encoder on host, diffusion+VAE on GPU (B2)
+        #   disk        — params streamed from disk + --max-vram budget (B3)
+        mode = req.get("residency_mode") or (
+            "cpu_offload" if spec.capabilities.get("weight_offload_cpu") else "gpu")
+        if mode == "cpu_offload":
             argv += ["--offload-to-cpu"]
+        elif mode == "te_cpu":
+            backend_mods.append("te=cpu")
+        elif mode == "disk":
+            argv += ["--params-backend", "disk", "--mmap"]
+            budget = req.get("max_vram_gib") or 6
+            argv += ["--max-vram", str(budget)]
+        if backend_mods:
+            argv += ["--backend", ",".join(backend_mods)]
         gpu = req.get("assigned_gpu")
         if gpu in (None, "auto"):
             gpu = None if flavor == "cpu" else 0
@@ -690,7 +704,8 @@ class SdCppVideoAdapter(SdCppAdapter):
         if proc.returncode != 0 or not outputs:
             for f in outputs:
                 f.unlink(missing_ok=True)
-            raise ValueError(_friendly_error("\n".join(log_tail), spec))
+            raise ValueError(f"[{flavor}/{mode}] "
+                             + _friendly_error("\n".join(log_tail), spec))
 
         # Validated-output commit: the clip is probed BEFORE it becomes an
         # asset. Unreadable output never registers; an unresolvable probe

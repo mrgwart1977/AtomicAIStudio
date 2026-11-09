@@ -1285,9 +1285,11 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "shot_id": payload.get("shot_id"),
             "scene_id": payload.get("scene_id"),
             "set_thumbnail": bool(payload.get("set_thumbnail")),
+            "residency_mode": payload.get("residency_mode"),
+            "memory_risk_acknowledged": bool(payload.get("memory_risk_acknowledged")),
             "est_vram_bytes": compatibility.estimate_vram(
                 spec, int(payload.get("width", 512)), int(payload.get("height", 512)),
-                int(payload.get("batch", 1))) if spec else None,
+                int(payload.get("batch", 1)), payload.get("residency_mode")) if spec else None,
             # models without a CPU path must stay queued (honest), not burn CPU
             "allow_cpu": bool(spec.capabilities.get("cpu_fallback")) if spec else True,
         }
@@ -1312,9 +1314,12 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "image_asset_id": payload.get("image_asset_id"),
             "shot_id": payload.get("shot_id"),
             "scene_id": payload.get("scene_id"),
+            "residency_mode": payload.get("residency_mode"),
+            "max_vram_gib": payload.get("max_vram_gib"),
+            "memory_risk_acknowledged": bool(payload.get("memory_risk_acknowledged")),
             "est_vram_bytes": compatibility.estimate_vram(
-                spec, int(payload.get("width", 832)), int(payload.get("height", 480)), 1
-            ) if spec else None,
+                spec, int(payload.get("width", 832)), int(payload.get("height", 480)), 1,
+                payload.get("residency_mode")) if spec else None,
             "allow_cpu": False,  # Wan-class video on CPU is days, not minutes
         }
         # i2v: resolve the project image asset to an on-disk path for the

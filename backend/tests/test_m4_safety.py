@@ -290,3 +290,19 @@ def test_residency_modes_change_ram_estimate():
     assert e_off > e_gpu > e_disk
     assert e_te < e_off  # te on host (3.4G) + 15% of rest + 2G < full 6.28G + 2G
     assert e_te > e_disk
+
+
+def test_vram_estimate_per_residency_mode():
+    """Mode-aware VRAM: B1 (all-GPU) must exceed an 8 GiB card; te_cpu and
+    disk must fit — using real component bytes, not the flat anchor."""
+    from app.domain import compatibility, model_catalog
+    spec = model_catalog.get("wan21.t2v.1_3b")
+    gpu = compatibility.estimate_vram(spec, 832, 480, 1, "gpu")
+    te = compatibility.estimate_vram(spec, 832, 480, 1, "te_cpu")
+    off = compatibility.estimate_vram(spec, 832, 480, 1, "cpu_offload")
+    disk = compatibility.estimate_vram(spec, 832, 480, 1, "disk")
+    gib = 1024 ** 3
+    assert gpu > 8 * gib          # B1 honestly does not fit an 8 GB card
+    assert 4 * gib < te < 7 * gib  # B2 viable
+    assert disk < te               # B3 lowest
+    assert off < te                # cpu_offload streams — low VRAM

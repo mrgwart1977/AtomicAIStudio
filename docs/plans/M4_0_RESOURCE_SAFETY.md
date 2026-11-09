@@ -224,3 +224,50 @@ RAM ≠ VRAM: the 8 GB card still bounds model size, resolution, and
 frame count regardless of system memory. 32 GB is the sensible
 minimum-for-video recommendation; 64 GB is forward-headroom, not a fix
 for VRAM.
+
+## B2 vs B3 — real-inference proposal (PENDING owner approval)
+
+Verified against the installed pinned binary's `--help` (module names
+`diffusion`, `vae`, `te` confirmed; `disk` is a valid `--params-backend`).
+
+### B2 — `te=cpu` (recommended first real test)
+
+```
+sd-cli.exe -M vid_gen --diffusion-model <fp16> --vae <vae> --t5xxl <gguf>
+  -p "..." -n "..." --video-frames 17 --fps 24 -W 832 -H 480
+  --cfg-scale 6.0 --sampling-method euler --flow-shift 3.0 --vae-tiling
+  --backend te=cpu            # text encoder on host
+  --seed 42 -o <job>.webm -v
+```
+
+| Measure | Estimate | Basis |
+|---|---|---|
+| GPU VRAM | ~6.0 GiB (diff+VAE 2.88 + act ~3.1) | file bytes measured; act = estimator heuristic |
+| Host RAM | ~5.8 GiB (UMT5 3.40 + 15% rest + 2.0 overhead) | component files + overhead model |
+| Free RAM needed | ≥9.8 GiB no-warn; ≥6.8 minimum | gate math |
+| Free VRAM needed | ≥6 GiB + GPU headroom | gpu_sched usable check |
+
+### B3 — `--params-backend disk` (safest, slowest)
+
+Same argv but: `--params-backend disk --mmap --max-vram 6` — weights
+stream from mmap'd files under a 6 GiB device budget.
+
+| Measure | Estimate |
+|---|---|
+| GPU VRAM | ~4.0 GiB (bounded by budget) |
+| Host RAM | ~2.9 GiB |
+| Free RAM needed | ≥6.9 GiB no-warn; ≥3.9 minimum |
+
+### Shared run conditions
+
+- CUDA flavor only; 17 frames / 832×480 / 30 steps / seed 42.
+- `ATOMIC_MAX_WORKER_SECONDS=300`; watchdog at defaults (5 s period).
+- Monitor every 2 s: worker RSS, avail phys, commit headroom, VRAM.
+- Auto-abort: critical headroom, runtime cap, surviving process post-job.
+- Emergency stop: job cancel endpoint → terminate_tree; any parent
+  death → kernel reaps via the Job Object.
+- OOM outcome: clean nonzero exit → `[cuda/<mode>] out-of-memory` job
+  error; partial `.webm` deleted pre-asset; RAM+GPU reservations
+  released in the engine finally path.
+- Unknowns: activation peak on CUDA, `te=cpu`/`disk` end-to-end behavior,
+  B3 throughput. First test: **B2, one attempt, no retries**.

@@ -63,25 +63,42 @@ def classify_profile(hw: dict) -> dict:
 # ------------------------------------------------------------- estimation
 
 def estimate_vram(spec: ModelSpec, width: int = 512, height: int = 512,
-                  batch: int = 1) -> int | None:
+                  batch: int = 1, residency_mode: str | None = None) -> int | None:
     """Estimated peak VRAM for one generation — ESTIMATE, not a guarantee.
 
     Model: resident weights (catalog anchor) + activation that scales
     sub-linearly with pixel count relative to each model's native baseline —
     sd.cpp streams VAE decode in tiles and most UNet activations are
     reused, so sqrt(px_ratio) is a conservative-but-realistic heuristic.
-    Batch scales activation further (weights load once)."""
+    Batch scales activation further (weights load once).
+
+    residency_mode: 'cpu_offload' (weights stream from RAM → activations +
+    ~30% weight buffer), 'gpu' (all component bytes resident on device),
+    'te_cpu' (text encoder on host, other components on device), 'disk'
+    (params streamed from disk → activation + segment buffer only)."""
     if not spec.vram_baseline_bytes or not spec.vram_weight_bytes:
         return None
     native_px = 1024 * 1024 if spec.family == "sdxl" else 512 * 512
     act_base = spec.vram_baseline_bytes - spec.vram_weight_bytes
     px_ratio = (width * height) / native_px
     act = act_base * (px_ratio ** 0.5) * max(1, batch)
-    if spec.capabilities.get("weight_offload_cpu"):
-        # --offload-to-cpu streams weights from RAM; peak VRAM ≈ activations
-        # + a streaming layer buffer (~30% of weights, conservative).
-        return int(act + spec.vram_weight_bytes * 0.3)
-    return int(spec.vram_weight_bytes + act)
+    mode = residency_mode or (
+        "cpu_offload" if spec.capabilities.get("weight_offload_cpu") else "gpu")
+    # real component bytes when files exist (anchors underestimate for
+    # multi-component models); fall back to the catalog anchor otherwise
+    by_role: dict[str, int] = {}
+    for f in spec.files:
+        by_role[f.role or "diffusion"] = by_role.get(f.role or "diffusion", 0) + f.size_bytes
+    weights_total = sum(by_role.values()) or spec.vram_weight_bytes
+    weights_gpu = (weights_total - by_role.get("text_encoder", 0)
+                   if by_role else spec.vram_weight_bytes)
+    if mode == "cpu_offload":
+        return int(act + weights_total * 0.3)
+    if mode == "te_cpu":
+        return int(weights_gpu + act)
+    if mode == "disk":
+        return int(act + weights_total * 0.15)
+    return int(weights_total + act)  # gpu: everything resident
 
 
 def usable_vram(gpu: dict) -> int | None:
