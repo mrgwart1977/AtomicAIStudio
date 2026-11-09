@@ -252,6 +252,33 @@ class CastMemberOut(BaseModel):
     model_ref: str | None = None
     lora_json: list[Any] | None = None
     continuity_json: dict[str, Any] | None = None
+    # M2.1: named schema fields + forward-compat bag
+    reference_ids_json: list[Any] | None = None
+    ext_json: dict[str, Any] | None = None
+    # "shot" = own row (override) · "scene" = inherited from scene cast
+    source: str | None = None
+
+
+class ShotCastState(BaseModel):
+    """Wire form of per-character shot state (schema v1) — the `state`
+    object inside shot.cast.* command payloads. Unknown keys are preserved
+    forward-compatibly in ext_json; legacy aliases are normalised
+    (`action`→action_instructions, `voice`→voice_override, `lora_refs`→loras,
+    `continuity_notes`→continuity.notes)."""
+    model_config = {"extra": "allow"}
+    schema_version: int = 1
+    wardrobe_variant: str | None = None
+    blocking: str | None = None
+    expression: str | None = None
+    emotion: str | None = None
+    action_instructions: str | None = None
+    dialogue: str | None = None
+    voice_override: str | None = None
+    model_ref: str | None = None
+    loras: list[str] | None = None
+    continuity: dict[str, Any] | None = None
+    reference_asset_ids: list[str] | None = None
+    position: int | None = None
 
 
 class ShotOut(BaseModel):
@@ -278,6 +305,7 @@ class StoryboardShotOut(BaseModel):
     shot: ShotOut
     location_name: str
     cast: list[CastMemberOut]
+    inherited: list[CastMemberOut] = []  # scene-cast members without an own row
 
 
 class SceneOut(BaseModel):

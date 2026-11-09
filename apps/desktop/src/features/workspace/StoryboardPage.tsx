@@ -60,6 +60,7 @@ const castStateOf = (c?: Partial<CastMember>): CastState => ({
   loras: (c?.lora_json ?? []).join(", "),
 });
 const castPayload = (s: CastState) => ({
+  schema_version: 1,
   wardrobe_variant: s.wardrobe_variant, blocking: s.blocking,
   expression: s.expression, emotion: s.emotion,
   action_instructions: s.action_instructions, dialogue: s.dialogue,
@@ -371,12 +372,18 @@ function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onD
         {s.prompt && <div className="mt-0.5 line-clamp-2 text-[10px] text-muted">{s.prompt}</div>}
         <div className="mt-1.5 flex items-center gap-1">
           {entry.cast.slice(0, 4).map((c) => (
-            <span key={c.id} title={`${c.character.name}${c.expression ? ` · ${c.expression}` : ""}`}
+            <span key={c.id} title={`${c.character.name}${c.expression ? ` · ${c.expression}` : ""} (shot)`}
               className={`flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold ${chipColor(c.character_id)}`}>
               {initials(c.character.name)}
             </span>
           ))}
           {entry.cast.length > 4 && <span className="text-[9px] text-muted">+{entry.cast.length - 4}</span>}
+          {(entry.inherited ?? []).slice(0, Math.max(0, 4 - entry.cast.length)).map((c) => (
+            <span key={c.id} title={`${c.character.name} — inherited from scene cast`}
+              className={`flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-current text-[9px] font-bold opacity-55 ${chipColor(c.character_id)}`}>
+              {initials(c.character.name)}
+            </span>
+          ))}
           {entry.location_name && (
             <span className="ml-auto truncate text-[9px] text-faint">{entry.location_name}</span>
           )}
@@ -530,35 +537,70 @@ function SceneCast({ row, characters, run }: {
   run: (t: string, p: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [pick, setPick] = useState("");
+  const [removeConfirm, setRemoveConfirm] = useState<{ cid: string; name: string; heirs: number } | null>(null);
   const assigned = new Set(row.cast.map((c) => c.character_id));
   const avail = characters.filter((c) => c.status === "active" && !assigned.has(c.id));
+  // How many shots currently inherit each scene-cast member (no own row).
+  const heirCount = (cid: string) =>
+    row.shots.filter((sh) => (sh.inherited ?? []).some((x) => x.character_id === cid)).length;
   return (
     <div className="mt-4 rounded-md border border-line p-3">
-      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Scene cast</h4>
+      <div className="flex items-center justify-between">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Scene cast</h4>
+        <span className="text-[10px] text-faint">flows into every shot · shots may override</span>
+      </div>
       <ul className="mt-2 space-y-1.5">
-        {row.cast.map((c) => (
-          <li key={c.id} className="flex items-center gap-2 text-sm">
-            <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold ${chipColor(c.character_id)}`}>
-              {initials(c.character.name)}
-            </span>
-            <span className="font-medium">{c.character.name}</span>
-            <input
-              defaultValue={c.role ?? ""}
-              placeholder="role (lead, supporting…)"
-              onBlur={(e) => {
-                if (e.target.value !== (c.role ?? "")) {
-                  void run("scene.cast.update", {
-                    scene_id: row.scene.id, character_id: c.character_id, role: e.target.value,
-                  });
-                }
-              }}
-              className="ml-2 flex-1 rounded border border-line bg-card px-2 py-1 text-xs text-fg"
-            />
-            <button title="Remove from scene"
-              onClick={() => void run("scene.cast.remove", { scene_id: row.scene.id, character_id: c.character_id })}
-              className="rounded border border-line px-1.5 py-0.5 text-xs text-muted hover:text-danger">✕</button>
+        {row.cast.map((c) => {
+          const heirs = heirCount(c.character_id);
+          return (
+          <li key={c.id} className="rounded border border-line bg-card px-2 py-1.5">
+            <div className="flex items-center gap-2 text-sm">
+              <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold ${chipColor(c.character_id)}`}>
+                {initials(c.character.name)}
+              </span>
+              <span className="font-medium">{c.character.name}</span>
+              {heirs > 0 && (
+                <span title={`Inherited by ${heirs} shot${heirs === 1 ? "" : "s"}`}
+                  className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-faint">
+                  → {heirs} shot{heirs === 1 ? "" : "s"}
+                </span>
+              )}
+              <button title="Remove from scene cast"
+                onClick={() => heirs > 0
+                  ? setRemoveConfirm({ cid: c.character_id, name: c.character.name, heirs })
+                  : void run("scene.cast.remove", { scene_id: row.scene.id, character_id: c.character_id })}
+                className="ml-auto rounded border border-line px-1.5 py-0.5 text-xs text-muted hover:text-danger">✕</button>
+            </div>
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <input
+                defaultValue={c.role ?? ""}
+                placeholder="role (lead, supporting…)"
+                onBlur={(e) => {
+                  if (e.target.value !== (c.role ?? "")) {
+                    void run("scene.cast.update", {
+                      scene_id: row.scene.id, character_id: c.character_id, role: e.target.value,
+                    });
+                  }
+                }}
+                className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg"
+              />
+              <input
+                defaultValue={String(c.notes_json?.notes ?? "")}
+                placeholder="scene-level continuity notes…"
+                onBlur={(e) => {
+                  if (e.target.value !== String(c.notes_json?.notes ?? "")) {
+                    void run("scene.cast.update", {
+                      scene_id: row.scene.id, character_id: c.character_id,
+                      notes: { ...(c.notes_json ?? {}), notes: e.target.value },
+                    });
+                  }
+                }}
+                className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg"
+              />
+            </div>
           </li>
-        ))}
+          );
+        })}
         {row.cast.length === 0 && <li className="text-xs text-muted">No characters assigned yet.</li>}
       </ul>
       {avail.length > 0 && (
@@ -576,6 +618,17 @@ function SceneCast({ row, characters, run }: {
           </button>
         </div>
       )}
+      <ConfirmDialog
+        open={removeConfirm !== null}
+        onOpenChange={(o) => !o && setRemoveConfirm(null)}
+        title={`Remove ${removeConfirm?.name} from the scene cast?`}
+        body={`${removeConfirm?.name} is inherited by ${removeConfirm?.heirs} shot${removeConfirm?.heirs === 1 ? "" : "s"} — they'll lose the assignment too. Per-shot overrides in other shots stay untouched.`}
+        confirmLabel="Remove from scene"
+        onConfirm={() => {
+          if (removeConfirm) void run("scene.cast.remove", { scene_id: row.scene.id, character_id: removeConfirm.cid });
+          setRemoveConfirm(null);
+        }}
+      />
     </div>
   );
 }
@@ -630,8 +683,15 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     [entry],
   );
   const assigned = new Set(Object.keys(cast));
-  const avail = characters.filter((c) => c.status === "active" && !assigned.has(c.id));
-  const charName = (id: string) => characters.find((c) => c.id === id)?.name ?? "?";
+  // Inherited members aren't "available" — they're customized via Override.
+  const inheritedRows = entry?.inherited ?? [];
+  const inheritedIds = new Set(inheritedRows.map((c) => c.character_id));
+  const sceneCastIds = new Set(scene.cast.map((c) => c.character_id));
+  const avail = characters.filter(
+    (c) => c.status === "active" && !assigned.has(c.id) && !inheritedIds.has(c.id));
+  const charName = (id: string) =>
+    characters.find((c) => c.id === id)?.name ??
+    inheritedRows.find((c) => c.character_id === id)?.character.name ?? "?";
 
   async function save() {
     setBusy(true);
@@ -777,6 +837,11 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
                     Shot cast · {assigned.size}
+                    {inheritedIds.size > 0 && (
+                      <span className="ml-1.5 font-normal normal-case text-faint">
+                        + {inheritedIds.size - [...inheritedIds].filter((x) => assigned.has(x)).length} inherited
+                      </span>
+                    )}
                   </h4>
                   {avail.length > 0 && (
                     <div className="flex gap-2">
@@ -800,13 +865,19 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                   )}
                 </div>
                 <ul className="mt-2 space-y-1.5">
-                  {Object.keys(cast).map((cid) => (
+                  {Object.keys(cast).map((cid) => {
+                    const isOverride = inheritedIds.has(cid) || (!origCast[cid] && sceneCastIds.has(cid));
+                    const pending = added.includes(cid);
+                    return (
                     <li key={cid} className="rounded border border-line bg-card">
                       <div className="flex items-center gap-2 px-2 py-1.5">
                         <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold ${chipColor(cid)}`}>
                           {initials(charName(cid))}
                         </span>
                         <span className="text-sm font-medium">{charName(cid)}</span>
+                        {pending && isOverride && (
+                          <span className="rounded bg-teal/15 px-1.5 py-0.5 text-[10px] text-teal">override</span>
+                        )}
                         {cast[cid].expression && (
                           <span className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-muted">{cast[cid].expression}</span>
                         )}
@@ -818,7 +889,10 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                           className="ml-auto text-[10px] text-muted hover:text-fg">
                           {expanded === cid ? "▾ less" : "▸ state"}
                         </button>
-                        <button title="Remove from shot"
+                        <button
+                          title={!pending && sceneCastIds.has(cid)
+                            ? "Remove override — character returns to inherited scene state"
+                            : "Remove from shot"}
                           onClick={() => {
                             const next = { ...cast };
                             delete next[cid];
@@ -843,11 +917,45 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                         </div>
                       )}
                     </li>
-                  ))}
-                  {assigned.size === 0 && (
+                    );
+                  })}
+                  {assigned.size === 0 && inheritedRows.length === 0 && (
                     <li className="text-xs text-muted">Nobody in this shot yet — add characters above.</li>
                   )}
                 </ul>
+
+                {/* inherited from scene — read-only until customized */}
+                {inheritedRows.filter((c) => !assigned.has(c.character_id)).length > 0 && (
+                  <div className="mt-3 border-t border-dashed border-line pt-2.5">
+                    <h5 className="text-[10px] font-semibold uppercase tracking-wide text-faint">
+                      Inherited from scene cast
+                    </h5>
+                    <ul className="mt-1.5 space-y-1">
+                      {inheritedRows.filter((c) => !assigned.has(c.character_id)).map((c) => (
+                        <li key={c.character_id} className="flex items-center gap-2 rounded border border-dashed border-line bg-panel/50 px-2 py-1.5">
+                          <span className={`flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-current text-[10px] font-bold opacity-60 ${chipColor(c.character_id)}`}>
+                            {initials(c.character.name)}
+                          </span>
+                          <span className="text-sm text-muted">{c.character.name}</span>
+                          {c.role && <span className="rounded bg-card px-1.5 py-0.5 text-[10px] text-faint">{c.role}</span>}
+                          <button
+                            onClick={() => {
+                              setCast({ ...cast, [c.character_id]: castStateOf() });
+                              setAdded([...added, c.character_id]);
+                              setExpanded(c.character_id);
+                            }}
+                            className="ml-auto rounded border border-line px-2 py-0.5 text-[10px] text-muted hover:border-teal hover:text-teal">
+                            Customize for this shot
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1.5 text-[10px] text-faint">
+                      Inherited members use their scene defaults here. Customizing creates a per-shot
+                      override — it only affects this shot, never the others.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 

@@ -18,6 +18,12 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.domain.cast_state import (
+    CastStateError,
+    parse_scene_cast_fields,
+    parse_shot_cast_state,
+)
+
 from app.db.models import (
     Character,
     EntityAssetLink,
@@ -244,6 +250,8 @@ def _copy_shot(session: Session, src: Shot, scene_id: str, project_id: str, posi
             action_instructions=c.action_instructions, dialogue=c.dialogue,
             voice_override=c.voice_override, model_ref=c.model_ref,
             lora_json=list(c.lora_json or []), continuity_json=dict(c.continuity_json or {}),
+            reference_ids_json=list(c.reference_ids_json or []),
+            ext_json=dict(c.ext_json or {}),
         ))
     return shot
 
@@ -334,6 +342,7 @@ def _restore_scene_cast(session: Session, scene: Scene, cast_rows: list[dict]) -
 
 def scene_cast_assign(session: Session, scene: Scene, character: Character, *,
                       role: str = "", notes: dict | None = None) -> SceneCharacter:
+    parse_scene_cast_fields(role, notes)
     row = session.execute(
         select(SceneCharacter).where(
             SceneCharacter.scene_id == scene.id, SceneCharacter.character_id == character.id
@@ -362,6 +371,7 @@ def scene_cast_update(session: Session, scene: Scene, character_id: str, *,
     ).scalar_one_or_none()
     if row is None:
         raise KeyError("character is not in this scene's cast")
+    parse_scene_cast_fields(role, notes)
     if role is not None:
         row.role = role
     if notes is not None:
@@ -554,6 +564,8 @@ def _restore_shot_cast(session: Session, shot: Shot, cast_rows: list[dict]) -> N
                 setattr(row, f, snap_row[f])
         row.lora_json = list(snap_row.get("lora_json") or [])
         row.continuity_json = dict(snap_row.get("continuity_json") or {})
+        row.reference_ids_json = list(snap_row.get("reference_ids_json") or [])
+        row.ext_json = dict(snap_row.get("ext_json") or {})
 
 
 # ---------- shot cast ----------
@@ -567,19 +579,20 @@ def shot_cast_assign(session: Session, shot: Shot, character: Character, *,
     ).scalar_one_or_none()
     if row is not None:
         raise ValueError("character is already in this shot's cast")
-    state = state or {}
+    st = parse_shot_cast_state(state)
     row = ShotCharacter(
         id=new_id(), project_id=shot.project_id, shot_id=shot.id,
         character_id=character.id,
         position=_next_position(session, ShotCharacter, ShotCharacter.shot_id == shot.id),
-        lora_json=list(state.get("loras") or state.get("lora_json") or []),
-        continuity_json=dict(state.get("continuity") or state.get("continuity_json") or {}),
+        lora_json=st["loras"],
+        continuity_json=st["continuity"],
+        reference_ids_json=st["reference_asset_ids"],
+        ext_json=st["ext"],
     )
-    for f in SHOT_CAST_FIELDS:
-        if state.get(f):
-            setattr(row, f, state[f])
-    if state.get("position") is not None:
-        row.position = int(state["position"])
+    for f, v in st["fields"].items():
+        setattr(row, f, v)
+    if st["position"] is not None:
+        row.position = st["position"]
     session.add(row)
     session.flush()
     return row
@@ -594,14 +607,19 @@ def shot_cast_update(session: Session, shot: Shot, character_id: str, *,
     ).scalar_one_or_none()
     if row is None:
         raise KeyError("character is not in this shot's cast")
-    for f in SHOT_CAST_FIELDS + ("position",):
-        if f in state and state[f] is not None:
-            setattr(row, f, state[f])
-    if "loras" in state or "lora_json" in state:
-        row.lora_json = list(state.get("loras") or state.get("lora_json") or [])
-    if "continuity" in state or "continuity_json" in state:
-        cont = state.get("continuity") or state.get("continuity_json") or {}
-        row.continuity_json = {**(row.continuity_json or {}), **cont}
+    st = parse_shot_cast_state(state, partial=True)
+    for f, v in st["fields"].items():
+        setattr(row, f, v)
+    if st["loras"] is not None:
+        row.lora_json = st["loras"]
+    if st["continuity"]:
+        row.continuity_json = {**(row.continuity_json or {}), **st["continuity"]}
+    if st["reference_asset_ids"] is not None:
+        row.reference_ids_json = st["reference_asset_ids"]
+    if st["ext"]:
+        row.ext_json = {**(row.ext_json or {}), **st["ext"]}
+    if st["position"] is not None:
+        row.position = st["position"]
     row.updated_at = utcnow()
     session.flush()
     return row
@@ -752,24 +770,35 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
 
     out = []
     for s in scenes:
+        scene_cast_rows = sc_by_scene.get(s.id, [])
+
+        def shot_entry(sh: Shot) -> dict:
+            own = sc_by_shot.get(sh.id, [])
+            own_ids = {c.character_id for c in own}
+            # Shots inherit scene cast unless they hold their own row for that
+            # character — an own row is the per-shot override.
+            inherited = [
+                {**_cols(c), "character": char_brief(c.character_id), "source": "scene"}
+                for c in scene_cast_rows if c.character_id not in own_ids
+            ]
+            return {
+                "shot": sh,
+                "location_name": locs.get(sh.location_id or "", None)
+                                 and locs[sh.location_id].name or "",
+                "cast": [
+                    {**_cols(c), "character": char_brief(c.character_id), "source": "shot"}
+                    for c in own
+                ],
+                "inherited": inherited,
+            }
+
         out.append({
             "scene": s,
             "location_name": locs.get(s.location_id or "", None) and locs[s.location_id].name or "",
             "cast": [
-                {**_cols(c), "character": char_brief(c.character_id)}
-                for c in sc_by_scene.get(s.id, [])
+                {**_cols(c), "character": char_brief(c.character_id), "source": "scene"}
+                for c in scene_cast_rows
             ],
-            "shots": [
-                {
-                    "shot": sh,
-                    "location_name": locs.get(sh.location_id or "", None)
-                                     and locs[sh.location_id].name or "",
-                    "cast": [
-                        {**_cols(c), "character": char_brief(c.character_id)}
-                        for c in sc_by_shot.get(sh.id, [])
-                    ],
-                }
-                for sh in sh_by_scene.get(s.id, [])
-            ],
+            "shots": [shot_entry(sh) for sh in sh_by_scene.get(s.id, [])],
         })
     return out

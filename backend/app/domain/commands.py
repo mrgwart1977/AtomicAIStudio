@@ -262,6 +262,10 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
     if command_type.startswith("scene.cast."):
         _get_scene(session, project, payload)
         _get_character(session, project, payload)
+        try:
+            sb.parse_scene_cast_fields(payload.get("role"), payload.get("notes"))
+        except sb.CastStateError as e:
+            raise CommandError(422, str(e)) from None
         if command_type != "scene.cast.assign":
             _require_scene_cast(session, project, payload)
     if command_type == "shot.create":
@@ -279,6 +283,7 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
     if command_type.startswith("shot.cast."):
         _get_shot(session, project, payload)
         _get_character(session, project, payload)
+        _check_cast_state(session, project, payload, partial=command_type != "shot.cast.assign")
         if command_type != "shot.cast.assign":
             _require_shot_cast(session, project, payload)
     if command_type == "character.duplicate":
@@ -365,6 +370,20 @@ def _require_shot_cast(session: Session, project: Project, payload: dict) -> Non
     ).scalar_one_or_none()
     if row is None:
         raise CommandError(404, "character is not in this shot's cast")
+
+
+def _check_cast_state(session: Session, project: Project, payload: dict, *, partial: bool) -> None:
+    """Validate cast.state: schema types, then project-scope on every
+    reference_asset_id (rejects foreign + dead IDs before any write)."""
+    from app.domain import cast_state
+    try:
+        st = cast_state.parse_shot_cast_state(payload.get("state"), partial=partial)
+    except cast_state.CastStateError as e:
+        raise CommandError(422, str(e)) from None
+    for aid in st["reference_asset_ids"] or []:
+        a = session.get(Asset, aid)
+        if a is None or a.project_id != project.id:
+            raise CommandError(404, "reference asset not found in this project")
 
 
 def _check_storyboard_links(session: Session, project: Project, payload: dict) -> None:
