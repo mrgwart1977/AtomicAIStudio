@@ -10,7 +10,7 @@ import/export/verify — registered with backend services injected).
 from __future__ import annotations
 
 from app.adapters.base import ProviderAdapter
-from app.adapters.inference import ModelDownloadAdapter, SdCppAdapter
+from app.adapters.inference import ModelDownloadAdapter, SdCppAdapter, SdCppVideoAdapter
 from app.adapters.mock import MockImageAdapter
 from app.adapters.ops import (
     AssetImportAdapter,
@@ -36,7 +36,9 @@ class AdapterRegistry:
                 BackupRestoreAdapter,
             ):
                 self.register(cls(session_factory, storage, settings))
+        if session_factory is not None:
             self.register(SdCppAdapter(session_factory, settings))
+            self.register(SdCppVideoAdapter(session_factory, settings))
             self.register(ModelDownloadAdapter(session_factory, settings))
 
     def register(self, adapter: ProviderAdapter) -> None:

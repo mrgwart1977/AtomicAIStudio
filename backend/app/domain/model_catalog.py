@@ -26,6 +26,11 @@ class ModelFile:
     size_bytes: int
     url: str  # primary download URL (may be mirrored via request override)
     sha256: str | None = None  # verified when the source publishes one
+    # M4: multi-component models (video pipelines need a diffusion model +
+    # VAE + text encoder + optional CLIP-vision). Role identifies the
+    # component to the adapter's argv builder. "diffusion" is the primary
+    # weight file; every spec needs exactly one.
+    role: str = "diffusion"  # diffusion | vae | audio_vae | text_encoder | clip_vision | upscaler
 
 
 @dataclass(frozen=True)
@@ -480,6 +485,86 @@ MODELS: dict[str, ModelSpec] = {
     # Catalog-visible future candidates. files=() and support="planned"
     # mean they can never be installed or selected in M3 — they exist so
     # the schema, UI, and roadmap carry real per-model metadata now.
+    "wan21.t2v.1_3b": ModelSpec(
+        key="wan21.t2v.1_3b",
+        display_name="Wan 2.1 T2V 1.3B (fp16)",
+        family="wan",
+        version="2.1-t2v-1.3b-fp16",
+        adapter_id="gen.video.sdcpp",
+        fmt="safetensors",
+        source={
+            "provider": "huggingface",
+            "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged + city96/umt5-xxl-encoder-gguf",
+            "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        },
+        license={
+            "name": "Apache 2.0",
+            "url": "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/LICENSE.txt",
+            "commercial_ok": True,
+            "notes": "Permissive Apache-2.0 across all three components (verified on Wan-AI source, "
+                     "Comfy-Org repackaged, and city96 GGUF).",
+        },
+        # Verified via HF API 2026-11-09 — three real components, exact
+        # sizes + sha256 recorded.
+        files=(
+            ModelFile(
+                name="wan2.1_t2v_1.3B_fp16.safetensors",
+                size_bytes=2838303560,
+                url="https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+                sha256="be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",
+                role="diffusion",
+            ),
+            ModelFile(
+                name="wan_2.1_vae.safetensors",
+                size_bytes=253815318,
+                url="https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+                sha256="2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+                role="vae",
+            ),
+            ModelFile(
+                name="umt5-xxl-encoder-Q4_K_M.gguf",
+                size_bytes=3655145312,
+                url="https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q4_K_M.gguf",
+                sha256="17cf97a5bbbc60a646d6105b832b6f657ce904a8a1ad970e4b59df0c67584a40",
+                role="text_encoder",
+            ),
+        ),
+        requirements={
+            # ~6.3 GiB disk for all three components. VRAM: with
+            # --offload-to-cpu + --vae-on-cpu (mandatory on Vulkan — sd.cpp
+            # only supports WAN VAE on CUDA/CPU) an 8 GiB card is the floor.
+            "min_vram_bytes": 8 * GIB,
+            "rec_vram_bytes": 12 * GIB,
+            "min_ram_bytes": 16 * GIB,   # CPU-offloaded components live in RAM
+            "min_disk_bytes": 8 * GIB,
+            "backends": ["vulkan", "cuda", "cpu"],
+        },
+        capabilities={
+            "tasks": ["text2video"],
+            "negative_prompt": True,
+            "seed": True,
+            "resolutions": ["832x480"],
+            "aspect_ratios": ["16:9"],
+            "frame_counts": [17, 33, 49, 81],  # 4k+1 temporal constraint
+            "durations_s": {"min": 1, "max": 5},
+            "fps": [16, 24],
+            "audio": False,
+            "ref_images": False,  # I2V needs the separate 14B model
+            "lora": False,
+            "precision": ["fp16"],
+            "cpu_fallback": True,
+            "vae_on_cpu": True,   # required on Vulkan; slow but works
+            "flow_shift": 3.0,
+        },
+        support="experimental",  # real artifacts verified; not yet run end-to-end here
+        runtime_key="sdcpp",
+        modality="video",
+        modes=("text2video",),
+        vram_baseline_bytes=int(5.5 * GIB),   # estimate: diffusion + UMT5 + act (CPU offload)
+        vram_weight_bytes=int(3.0 * GIB),
+        notes="Only credible T2V fit for an 8 GiB card on sd.cpp vid_gen: ~2-second 832x480 clips, "
+              "33 frames @ 16fps typical. I2V needs the 14B variant (not viable here).",
+    ),
     "ltx.2.5": ModelSpec(
         key="ltx.2.5",
         display_name="LTX-2.5 (dev)",
@@ -501,10 +586,13 @@ MODELS: dict[str, ModelSpec] = {
         },
         files=(),
         requirements={
-            "min_vram_bytes": 12 * GIB,  # distilled/quantized path
+            # 22B transformer + 12B Gemma text encoder + two VAEs — the Q4
+            # pipeline alone is ~15+ GiB of weights; realistic floor is a
+            # 16-24 GiB GPU or heavy CPU offload with 64 GiB RAM.
+            "min_vram_bytes": 16 * GIB,
             "rec_vram_bytes": 24 * GIB,
-            "min_ram_bytes": 32 * GIB,
-            "min_disk_bytes": 40 * GIB,  # weights + Gemma 12B text encoder + video decoder
+            "min_ram_bytes": 64 * GIB,
+            "min_disk_bytes": 45 * GIB,
             "backends": ["cuda", "cpu"],
         },
         capabilities={

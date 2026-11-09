@@ -45,7 +45,7 @@ SUPPORTED_COMMANDS = {
     "project.duplicate",
     "project.delete",
     # generation (mock + real local inference since M3)
-    "generate.image.mock", "generate.image",
+    "generate.image.mock", "generate.image", "generate.video",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -66,12 +66,13 @@ SUPPORTED_COMMANDS = {
 }
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
-GENERATION_COMMANDS = {"generate.image.mock", "generate.image"}
+GENERATION_COMMANDS = {"generate.image.mock", "generate.image", "generate.video"}
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
     "generate.image.mock": "mock.image",
     "generate.image": "gen.image.sdcpp",
+    "generate.video": "gen.video.sdcpp",
     "asset.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
     "assets.verify": "ops.assets.verify",
@@ -135,6 +136,8 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate image via mock adapter — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.image":
         return f"Generate image ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
+    if command_type == "generate.video":
+        return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
     if command_type == "asset.share":
@@ -202,6 +205,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         warnings.append("Uses the mock adapter — output is a placeholder, not AI inference")
     if command_type == "generate.image":
         _check_generation(session, project, payload)
+    if command_type == "generate.video":
+        _check_video_generation(session, project, payload)
     if command_type in {"project.archive", "project.restore", "project.duplicate"}:
         warnings.append("Applies to the whole project")
     if command_type == "project.delete":
@@ -417,6 +422,67 @@ def _check_generation(session: Session, project: Project, payload: dict) -> None
     if weight is None:
         raise CommandError(
             422, f"{spec.display_name} is not installed — install it from the Model Manager first")
+
+    device = payload.get("device", "auto")
+    if isinstance(device, str) and device not in ("auto", "cpu"):
+        raise CommandError(422, f"invalid device '{device}' — use 'auto', 'cpu', or a GPU index")
+    if isinstance(device, bool) or (isinstance(device, (int, float)) and int(device) < 0):
+        raise CommandError(422, "invalid GPU index")
+
+    shot_id = payload.get("shot_id")
+    if shot_id:
+        shot = session.get(Shot, shot_id)
+        if shot is None or shot.project_id != project.id:
+            raise CommandError(404, "shot not found in this project")
+        if payload.get("scene_id") and shot.scene_id != payload["scene_id"]:
+            raise CommandError(422, "shot does not belong to the given scene")
+    if payload.get("scene_id") and session.get(Scene, payload["scene_id"]) is None:
+        raise CommandError(404, "scene not found in this project")
+
+
+def _check_video_generation(session: Session, project: Project, payload: dict) -> None:
+    """generate.video: multi-component video model installed, prompt or a
+    project image asset for i2v, sane frames/fps/device."""
+    from app.domain import model_catalog, model_files
+
+    from app.db.models import Asset, Scene, Shot
+
+    if not (payload.get("prompt") or "").strip() and not payload.get("image_asset_id"):
+        raise CommandError(422, "a prompt or a source image is required for video generation")
+    spec = model_catalog.get(payload.get("model_key") or "")
+    if spec is None:
+        raise CommandError(422, f"unknown model '{payload.get('model_key')}' — pick an installed model")
+    if spec.modality != "video":
+        raise CommandError(
+            422, f"{spec.display_name} is a {spec.modality} model — generate.video requires a video model")
+    if spec.support not in ("production", "tested"):
+        raise CommandError(
+            422, f"{spec.display_name} is {spec.support} — catalog-visible but not usable for generation yet")
+    if not spec.license.get("commercial_ok", True):
+        raise CommandError(422, f"{spec.display_name} has a restricted license and cannot generate")
+    with session.no_autoflush:
+        weight = model_files.installed_file(session, None, spec)
+        vae = model_files.installed_component(session, None, spec, "vae") if weight else None
+        tenc = model_files.installed_component(session, None, spec, "text_encoder") if weight else None
+    if weight is None:
+        raise CommandError(
+            422, f"{spec.display_name} is not installed — install it from the Model Manager first")
+    if vae is None or tenc is None:
+        raise CommandError(
+            422, f"{spec.display_name} is missing components — reinstall it from the Model Manager")
+
+    image_asset_id = payload.get("image_asset_id")
+    if image_asset_id:
+        if "image2video" not in spec.modes:
+            raise CommandError(422, f"{spec.display_name} does not support image-to-video")
+        a = session.get(Asset, image_asset_id)
+        if a is None or a.project_id != project.id or a.kind != "image":
+            raise CommandError(404, "source image not found in this project")
+
+    frames = int(payload.get("frames") or spec.capabilities.get("frames", {}).get("default", 33))
+    fc = spec.capabilities.get("frames", {})
+    if not fc.get("min", 1) <= frames <= fc.get("max", 129):
+        raise CommandError(422, f"frames {frames} outside {fc.get('min', 1)}–{fc.get('max', 129)} for this model")
 
     device = payload.get("device", "auto")
     if isinstance(device, str) and device not in ("auto", "cpu"):
@@ -1126,6 +1192,9 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 idempotency_key=f"job:{idempotency_key}",
                 command_id=command.id,
                 model_key=payload.get("model_key"),
+                # Generation has no mid-flight checkpoints — an interrupted
+                # gen job restarts from scratch (bounded, user-initiated).
+                resumable=command_type not in ("generate.image", "generate.video"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1170,6 +1239,7 @@ def _job_kind(command_type: str) -> str:
     return {
         "generate.image.mock": "image",
         "generate.image": "image",
+        "generate.video": "video",
         "asset.import": "import",
         "asset.relink": "relink",
         "assets.verify": "verify",
@@ -1212,6 +1282,41 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             # models without a CPU path must stay queued (honest), not burn CPU
             "allow_cpu": bool(spec.capabilities.get("cpu_fallback")) if spec else True,
         }
+    elif command_type == "generate.video":
+        from app.domain import compatibility, model_catalog
+        spec = model_catalog.get(payload.get("model_key") or "")
+        req = {
+            "command_type": command_type,
+            "model_key": payload["model_key"],
+            "prompt": payload.get("prompt") or "",
+            "negative_prompt": payload.get("negative_prompt") or "",
+            "width": int(payload.get("width", 480)),
+            "height": int(payload.get("height", 480)),
+            "frames": int(payload.get("frames", 33)),
+            "fps": int(payload.get("fps", 24)),
+            "steps": int(payload.get("steps", 30)),
+            "cfg": float(payload.get("cfg", 7.0)),
+            "seed": payload.get("seed", -1),
+            "sampler": payload.get("sampler"),
+            "device": payload.get("device", "auto"),
+            "runtime_flavor": payload.get("runtime_flavor"),
+            "image_asset_id": payload.get("image_asset_id"),
+            "shot_id": payload.get("shot_id"),
+            "scene_id": payload.get("scene_id"),
+            "est_vram_bytes": compatibility.estimate_vram(
+                spec, int(payload.get("width", 480)), int(payload.get("height", 480)), 1
+            ) if spec else None,
+            "allow_cpu": False,  # Wan-class video on CPU is days, not minutes
+        }
+        # i2v: resolve the project image asset to an on-disk path for the
+        # worker via the CAS resolver (location root + blob rel_path).
+        if payload.get("image_asset_id"):
+            from app.db.models import Asset
+            a = session.get(Asset, payload["image_asset_id"])
+            if a is not None and storage is not None:
+                p = storage.asset_path(session, a)
+                if p is not None:
+                    req["image_path"] = str(p)
     if command_type == "backup.export":
         req["kind"] = payload.get("kind", "backup")
     return req

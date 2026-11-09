@@ -238,3 +238,15 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   persistent workers (docs/plans/M4_1_PERSISTENT_WORKERS.md), #24 worker
   stderr in job detail, #25 multi-GPU hardware validation, #26 VRAM
   calibration, #27 catalog expansion; plus pre-existing #5-#11, #14, #15.
+
+
+### M4.0 Phase 1 (video foundation — pre-download)
+
+- Suite **144/144**; `tsc -b` clean.
+- `wan21.t2v.1_3b` catalog entry is `experimental` — NOT generatable until
+  the approved download validates end-to-end (proposal:
+  `docs/plans/M4_0_MODEL_PROPOSAL.md`).
+- ffmpeg/ffprobe absent on dev machine — video validation currently falls
+  back to container signatures; bundling a verified ffmpeg is a Phase-2
+  proposal item.
+- Same tracked blockers: #22 CUDA EULA, #23 M4.1, #24-#27, #5-#11/#14/#15.

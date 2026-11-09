@@ -32,7 +32,7 @@ from sqlalchemy import select
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
 from app.db.models import RuntimeInstall, utcnow
-from app.domain import compatibility, hardware, model_catalog, model_files
+from app.domain import compatibility, hardware, media_probe, model_catalog, model_files
 from app.domain.model_catalog import ModelSpec
 from app.domain.backup import ProgressReporter
 
@@ -416,6 +416,260 @@ class SdCppAdapter:
         yield out
 
 
+class SdCppVideoAdapter(SdCppAdapter):
+    """Local video generation via sd.cpp `-M vid_gen` (Wan family).
+
+    Same subprocess-per-job discipline as the image adapter: fresh worker,
+    streamed log progress, terminate-on-cancel, validated-output commit.
+    Multi-component models (diffusion + VAE + text encoder [+ image
+    encoder]) resolve through installed_component().
+    """
+
+    profile = CapabilityProfile(
+        adapter_id="gen.video.sdcpp",
+        display_name="Local video generation (stable-diffusion.cpp)",
+        adapter_kind="local",
+        tasks=("text2video", "image2video"),
+        supports={
+            "negative_prompt": True, "seed": True, "size": True,
+            "steps": True, "cfg": True, "sampler": True, "batch": False,
+            "gpu_selection": True, "cpu_fallback": False, "ref_images": False,
+            "frames": True, "fps": True, "init_image": True, "lora": False,
+        },
+        limits={"max_frames": 129, "batch": 1},
+        requires_cloud=False,
+        cost_model="free",
+        lane="gen",
+        needs_gpu=True,
+        # M4.1 contracts, declared now so schedulers/UIs can read them:
+        worker_model="subprocess-per-job",      # persistent workers NOT claimed
+        resumable=False,                        # vid_gen has no checkpoints
+        recoverable_outputs="commit-on-success",  # partial output never kept
+        notes="Real local video inference via a subprocess worker (sd.cpp "
+              "vid_gen). Requires an installed multi-component video model; "
+              "all downloads are user-approved.",
+    )
+
+    def _resolve(self, request: dict) -> tuple[ModelSpec, Path, Path | None]:
+        key = request.get("model_key")
+        spec = model_catalog.get(key or "")
+        if spec is None:
+            raise ValueError(f"unknown model '{key}'")
+        if spec.modality != "video" or spec.support not in ("production", "tested"):
+            raise ValueError(
+                f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for video generation")
+        with self._sf() as s:
+            weight = model_files.installed_file(s, self._settings, spec)
+            if weight is None:
+                raise ValueError(
+                    f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
+            vae = model_files.installed_component(s, self._settings, spec, "vae")
+            if vae is None:
+                raise ValueError(f"model '{spec.display_name}' VAE component is missing — reinstall")
+            tenc = model_files.installed_component(s, self._settings, spec, "text_encoder")
+            if tenc is None:
+                raise ValueError(f"model '{spec.display_name}' text-encoder component is missing — reinstall")
+            imgenc = model_files.installed_component(s, self._settings, spec, "image_encoder")
+        self._components = {"vae": vae, "text_encoder": tenc, "image_encoder": imgenc}
+        exe = self._exe_path(request)
+        return spec, weight, exe
+
+    def validate(self, request: dict) -> list[str]:
+        errors = []
+        if not (request.get("prompt") or "").strip() and not request.get("image_asset_id"):
+            errors.append("a prompt or a source image is required")
+        try:
+            spec = model_catalog.get(request.get("model_key") or "")
+            caps = (spec.capabilities if spec else {}).get("frames", {})
+            frames = int(request.get("frames") or caps.get("default", 33))
+            lo, hi = caps.get("min", 1), caps.get("max", 129)
+            if not lo <= frames <= hi:
+                errors.append(f"frames {frames} outside {lo}–{hi} for this model")
+        except (TypeError, ValueError):
+            errors.append("invalid frames value")
+        return errors
+
+    async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
+        spec, weight, _ = self._resolve(handle.request)
+        req = handle.request
+        seed = req.get("seed", -1)
+        if seed in (-1, "random", None):
+            seed = random.randint(0, 2**31 - 1)
+        steps = int(req.get("steps", spec.capabilities.get("steps", {}).get("default", 30)))
+        width = int(req.get("width", 480))
+        height = int(req.get("height", 480))
+        frames = int(req.get("frames", spec.capabilities.get("frames", {}).get("default", 33)))
+        fps = int(req.get("fps", spec.capabilities.get("fps", {}).get("default", 24)))
+
+        work = Path(handle.work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+        out_base = work / f"{handle.job_id}"
+        comp = self._components
+
+        argv = self._argv_prefix(req) + [
+            "-M", "vid_gen",
+            "-m", str(weight),
+            "--vae", str(comp["vae"]),
+            "--t5xxl", str(comp["text_encoder"]),
+            "-p", req.get("prompt") or "",
+            "-o", str(out_base) + ".webm",
+            "-W", str(width), "-H", str(height),
+            "--steps", str(steps),
+            "--cfg-scale", str(req.get("cfg", 7.0)),
+            "--seed", str(seed),
+            "--video-frames", str(frames),
+            "--fps", str(fps),
+            "-v",
+        ]
+        if comp.get("image_encoder"):
+            argv += ["--clip_vision", str(comp["image_encoder"])]
+        if req.get("image_path"):
+            argv += ["--init-image", req["image_path"]]
+            if req.get("end_image_path"):
+                argv += ["--end-image", req["end_image_path"]]
+        if req.get("negative_prompt"):
+            argv += ["-n", req["negative_prompt"]]
+        if req.get("sampler"):
+            argv += ["--sampling-method", req["sampler"]]
+        rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
+        flavor, flavor_reason = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
+        # Wan VAE is only reliable on CUDA/CPU per sd.cpp wan.md — on other
+        # backends (Vulkan) decode must run on CPU or the clip corrupts.
+        if flavor not in ("cuda", "cpu") and "--vae-on-cpu" not in argv:
+            argv += ["--vae-on-cpu"]
+        gpu = req.get("assigned_gpu")
+        if gpu in (None, "auto"):
+            gpu = None if flavor == "cpu" else 0
+        env = dict(os.environ)
+        env.update(_device_env(flavor, gpu if isinstance(gpu, int) else None))
+
+        yield {"progress": 0.02, "message": "starting video inference worker"}
+        started = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env, cwd=str(work),
+        )
+        log_tail: list[str] = []
+        cancelled = False
+        try:
+            while True:
+                if handle.cancel_event is not None and handle.cancel_event.is_set():
+                    cancelled = True
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    break
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    log_tail.append(text)
+                    del log_tail[:-20]
+                m = _STEP_RE.search(text) or _ANY_FRAC_RE.search(text)
+                if m:
+                    cur, tot = int(m.group(1)), int(m.group(2))
+                    if tot:
+                        yield {"progress": 0.05 + 0.9 * (cur / tot),
+                               "message": f"sampling {cur}/{tot}",
+                               "detail": {"phase": "sampling", "step": cur, "steps_total": tot}}
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+        if cancelled:
+            for f in work.glob(f"{handle.job_id}*"):
+                f.unlink(missing_ok=True)
+            raise JobCancelled()
+
+        duration_ms = int((time.time() - started) * 1000)
+        outputs = sorted(work.glob(f"{handle.job_id}*.webm"), key=lambda p: p.name)
+        if proc.returncode != 0 or not outputs:
+            for f in outputs:
+                f.unlink(missing_ok=True)
+            raise ValueError(_friendly_error("\n".join(log_tail), spec))
+
+        # Validated-output commit: the clip is probed BEFORE it becomes an
+        # asset. Unreadable output never registers; an unresolvable probe
+        # (ffprobe absent) falls back to a container-signature check and is
+        # recorded in provenance rather than silently trusted.
+        probe: dict[str, Any] = {}
+        for f in outputs:
+            probe = media_probe.probe_video(f)
+            if not probe.get("ok"):
+                if probe.get("probe_unavailable"):
+                    if not media_probe.container_signature_ok(f):
+                        f.unlink(missing_ok=True)
+                        raise ValueError("video output failed validation — unrecognized container")
+                else:
+                    f.unlink(missing_ok=True)
+                    raise ValueError(f"video output failed validation — {probe.get('reason')}")
+
+        assets = []
+        for path in outputs:
+            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            assets.append({
+                "path": str(path),
+                "rel_path": str(path.relative_to(self._settings.data_dir))
+                if str(path).startswith(str(self._settings.data_dir)) else None,
+                "sha256": sha,
+                "name": f"{spec.key}-{seed}.webm",
+                "kind": "video",
+            })
+
+        media = {
+            "source": "generated",
+            "generated": True,
+            "model_key": spec.key,
+            "model_version": spec.version,
+            "model_family": spec.family,
+            "adapter_id": self.profile.adapter_id,
+            "runtime": {"key": "sdcpp", "flavor": flavor, "selection_reason": flavor_reason},
+            "prompt": req.get("prompt") or "",
+            "negative_prompt": req.get("negative_prompt") or "",
+            "width": width, "height": height,
+            "frames": frames, "fps": fps,
+            "steps": steps,
+            "cfg": req.get("cfg", 7.0),
+            "sampler": req.get("sampler") or "euler_a",
+            "seed": seed,
+            "gpu_index": req.get("assigned_gpu") if isinstance(req.get("assigned_gpu"), int) else None,
+            "duration_ms": duration_ms,
+            "generated_at": utcnow().isoformat(),
+            "is_mock": False,
+        }
+        if probe:
+            media["probe"] = {k: v for k, v in probe.items() if k != "reason"}
+            if probe.get("probe_unavailable"):
+                media["probe_unavailable"] = True
+        yield {
+            "done": True, "progress": 1.0,
+            "output": {
+                "path": assets[0]["path"],
+                "sha256": assets[0]["sha256"],
+                "name": assets[0]["name"],
+                "kind": "video",
+                "origin": "generation",
+                "media": media,
+                "extra_assets": assets[1:],
+            },
+        }
+
+
 class ModelDownloadAdapter:
     """Install a model (+ its inference runtime when missing) as a durable
     app-level job. project_id is None — downloads are not project-scoped."""
@@ -527,28 +781,34 @@ class ModelDownloadAdapter:
                                              "flavor": flavor}}}
                 return
 
-            # Phase 2: model weights — poll the thread so byte-level
-            # progress streams to the UI while it runs.
-            yield {"progress": 0.05, "message": f"downloading {spec.display_name}"}
+            # Phase 2: model weights — every declared component downloads +
+            # verifies; progress weights bytes across the whole set.
             dest_dir = model_files.model_dir(root, spec)
-            dest = dest_dir / spec.files[0].name
-            url = req.get("source_url") or spec.files[0].url
-            task = asyncio.create_task(asyncio.to_thread(
-                model_files.download_to, dest, url,
-                expected_size=spec.files[0].size_bytes,
-                progress=on_bytes, cancel_check=handle.check_cancel,
-            ))
-            while not task.done():
-                yield {"progress": state["p"], "message": state["m"], "detail": state["d"]}
-                await asyncio.sleep(0.3)
-            res = await task
-            yield {"progress": 0.96, "message": "verifying integrity",
-                   "detail": state["d"] or reporter.snapshot()}
-            ok, why = await asyncio.to_thread(model_files.verify_model_file, dest, spec)
-            if not ok:
-                self._mark(spec.key, status="failed", error=f"verification failed: {why}")
-                raise ValueError(f"model failed integrity verification: {why}")
-            self._mark(spec.key, status="installed", byte_size=res["bytes"],
+            n_files = len(spec.files)
+            total_bytes = 0
+            for fi, mf in enumerate(spec.files):
+                yield {"progress": 0.05 + 0.9 * (fi / n_files),
+                       "message": f"downloading {spec.display_name} ({mf.role} {fi + 1}/{n_files})"}
+                dest = dest_dir / mf.name
+                url = req.get("source_url") or mf.url
+                task = asyncio.create_task(asyncio.to_thread(
+                    model_files.download_to, dest, url,
+                    expected_size=mf.size_bytes,
+                    progress=on_bytes, cancel_check=handle.check_cancel,
+                ))
+                while not task.done():
+                    yield {"progress": state["p"], "message": state["m"], "detail": state["d"]}
+                    await asyncio.sleep(0.3)
+                res = await task
+                total_bytes += res["bytes"]
+                yield {"progress": 0.05 + 0.9 * ((fi + 1) / n_files),
+                       "message": f"verifying {mf.name}",
+                       "detail": state["d"] or reporter.snapshot()}
+                ok, why = await asyncio.to_thread(model_files.verify_component, dest, mf, spec.fmt)
+                if not ok:
+                    self._mark(spec.key, status="failed", error=f"verification failed ({mf.role}): {why}")
+                    raise ValueError(f"model failed integrity verification: {why}")
+            self._mark(spec.key, status="installed", byte_size=total_bytes,
                        sha256=res["sha256"], verified=True, error=None)
         except JobCancelled:
             if spec:

@@ -121,9 +121,11 @@ class JobEngine:
         """Called once at startup inside a short session; returns requeued count."""
         stuck = session.execute(select(GenerationJob).where(GenerationJob.status == "running")).scalars().all()
         for job in stuck:
+            job.recovery_state = "needs_reconciliation" if job.execution_scope == "remote" else "interrupted"
             if job.resumable:
                 job.status = "queued"
                 job.message = "re-queued after restart"
+                job.attempt_no = (job.attempt_no or 0) + 1
             else:
                 job.status = "failed"
                 job.error = "interrupted by application stop; not resumable"

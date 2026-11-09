@@ -129,11 +129,22 @@ def test_catalog_video_candidates_are_planned_not_supported():
     for required in ("ltx.2.5", "wan.2.2.ti2v", "hunyuan.video"):
         assert required in video, f"{required} missing from catalog"
     for key, spec in video.items():
-        assert spec.support == "planned"
-        assert spec.files == ()
+        # M4.0: wan21.t2v.1_3b is the install candidate — 'experimental' with
+        # real files pending the approved download + end-to-end validation.
+        # Every other entry stays 'planned' with no files. NOTHING video may
+        # be generatable (production/tested) before real-weight validation.
+        assert spec.support not in ("production", "tested")
+        if key == "wan21.t2v.1_3b":
+            assert spec.support == "experimental" and len(spec.files) == 3
+        else:
+            assert spec.support == "planned"
+            assert spec.files == ()
         c = compatibility.classify_model(spec, _hw(vram_gib=8))
-        assert c["status"] == "planned"
-        assert c["support"] == "planned" and c["modality"] == "video"
+        # 'planned' entries classify as planned; the experimental Wan
+        # candidate can classify 'compatible' (real requirements, fits 8 GB)
+        # — its support tier still blocks generation until validated.
+        assert c["status"] == ("planned" if spec.support == "planned" else "compatible")
+        assert c["modality"] == "video"
         assert set(c["modes"]) & {"text2video", "image2video", "audio2video"}
 
 
@@ -481,7 +492,12 @@ def test_models_endpoint_lists_catalog(client):
         assert m["modes"]
     keys = {m["key"] for m in models}
     assert {"ltx.2.5", "wan.2.2.ti2v", "hunyuan.video", "qwen.image"} <= keys
-    assert models and all(m["compatibility"]["status"] == "planned" for m in models if m["modality"] == "video")
+    # no video entry may be generatable — support tier stays below 'tested'
+    # until real-weight validation (compatibility status varies with hw)
+    assert models and all(
+        m["support"] in ("planned", "experimental")
+        for m in models if m["modality"] == "video"
+    )
 
 
 def test_install_restricted_or_unavailable_422(client):
@@ -495,8 +511,8 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
     job runs app-level (project_id=null), install row lands 'installed'."""
     from app.db.models import RuntimeInstall, new_id, utcnow
     from app.domain import model_files
-    monkeypatch.setattr(model_files, "verify_model_file",
-                        lambda path, spec: (True, "ok"))
+    monkeypatch.setattr(model_files, "verify_component",
+                        lambda path, f, fmt: (True, "ok"))
 
     def fake_dl(dest, url, *, expected_size=None, progress=None,
                 cancel_check=None, timeout=60):
@@ -570,9 +586,11 @@ def test_alembic_0006_tables_exist(settings):
     cols = {c["name"]: c for c in insp.get_columns("generation_jobs")}
     assert "gpu_index" in cols and "model_key" in cols
     assert cols["project_id"]["nullable"] is True
+    # M4.0 recovery columns land via 0007
+    assert "attempt_no" in cols and "execution_scope" in cols and "recovery_state" in cols
     with eng.connect() as c:
         v = c.execute(sa.text("select version_num from alembic_version")).scalar()
-    assert v == "0006_m3"
+    assert v == "0007_m4"
 
 
 # ------------------------------------------------ 9. Phase-2 follow-ups

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
 import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
+import { VideoGeneratePanel } from "./VideoGeneratePanel";
 import type { Asset, AssetPage, BackendInfo, ModelCatalogEntry, RuntimeInfo } from "../../api/types";
 
 const inputCls =
@@ -50,6 +51,26 @@ function gb(b: number | null | undefined): string {
   return b == null ? "?" : `${(b / 1e9).toFixed(1)} GB`;
 }
 
+function ModeTabs({ mode, onChange }: { mode: "image" | "video"; onChange: (m: "image" | "video") => void }) {
+  const btn = (m: "image" | "video", label: string) => (
+    <button
+      key={m}
+      onClick={() => onChange(m)}
+      className={`rounded-md px-3 py-1.5 text-sm ${
+        mode === m ? "bg-action text-white" : "border border-line text-muted"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="mb-4 flex gap-2">
+      {btn("image", "Image")}
+      {btn("video", "Video")}
+    </div>
+  );
+}
+
 export function GeneratePage() {
   const pid = useApp((s) => s.currentProjectId);
   const project = useApp((s) => s.currentProject());
@@ -70,8 +91,9 @@ export function GeneratePage() {
   const [submitting, setSubmitting] = useState(false);
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
 
+  const [mode, setMode] = useState<"image" | "video">("image");
   const installed = useMemo(
-    () => models.filter((m) => m.install?.status === "installed"),
+    () => models.filter((m) => (m.modality ?? "image") === "image" && m.install?.status === "installed"),
     [models],
   );
   const model = useMemo(
@@ -218,10 +240,20 @@ export function GeneratePage() {
 
   if (!pid) return null;
 
+  if (mode === "video") {
+    return (
+      <div className="h-full overflow-y-auto p-6">
+        <ModeTabs mode={mode} onChange={setMode} />
+        <VideoGeneratePanel />
+      </div>
+    );
+  }
+
   return (
     <div className="grid h-full grid-cols-[380px_1fr] gap-6 p-6">
       {/* ---------- controls ---------- */}
       <div className="space-y-4 overflow-y-auto pr-1">
+        <ModeTabs mode={mode} onChange={setMode} />
         <h2 className="text-lg font-semibold">Generate image</h2>
 
         <div>

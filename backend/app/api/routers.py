@@ -504,6 +504,7 @@ async def commit_command(
             origin=body.origin, target_type=body.target_type, target_id=body.target_id,
             expected_revision=body.expected_revision, idempotency_key=body.idempotency_key,
             job_engine=request.app.state.job_engine,
+            storage=request.app.state.storage,
         )
     except cmd.CommandError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

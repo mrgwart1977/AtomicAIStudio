@@ -74,6 +74,57 @@ isolation, cancellation, storyboard thumbnails, backup/restore, automatic
 backend selection. Failure in persistent mode → safe recovery to the
 subprocess path.
 
+## §5 — Crash recovery & job reconciliation (mandatory)
+
+Every generation job persists enough state to reconcile after any crash:
+job+project IDs, model/runtime versions, backend+GPU assignment, prompt/
+seed/params/input refs, worker identity + **execution-attempt ID**, state
+timestamps, output+temp refs, retry policy.
+
+Handled cases: worker crash, app crash, power loss, GPU failure/OOM,
+interrupted model load, interrupted output write, crash during asset
+registration. On restart: reconcile persisted jobs vs real state; keep
+validated outputs; quarantine invalid temp artifacts; release GPU
+reservations; never duplicate asset registration; bounded safe retries
+only; user-visible recovery options. No resume-from-interruption claims —
+restart = fresh attempt unless the runtime documents checkpoints.
+
+Crash-consistent state: durable transitions + stable attempt IDs; job
+persisted before execution; completion recorded only after output
+validation + commit; atomic file ops + transactions at the commit
+boundary; attempts recorded separately; auditable history.
+
+## §6 — Remote worker & cost protection (architecture-ready, not active)
+
+Paid remote execution is NOT authorized — the schema and state machine
+must be ready: provider identity, remote job ID, idempotency key,
+submission intent+status, estimated/actual cost+currency, billing state,
+cancellation state, retry authorization, reconciliation history.
+
+Rules: reconcile before new submissions; query by remote ID; provider
+idempotency keys; unknown outcome → `Needs Reconciliation`, NEVER
+auto-resubmit; cancellation ≠ refund; preserve provider/billing evidence;
+explicit approval before any billable retry; no second billable
+submission may ever start silently (crash, timeout, double-click, retry).
+No exactly-once claims where providers can't guarantee it.
+
+## §7 — Required recovery tests
+
+Worker crash · app crash · restart with unfinished jobs · GPU OOM ·
+interrupted load · interrupted write · crash during asset registration ·
+duplicate retry · remote disconnect post-submit · acceptance-then-crash
+before remote ID · remote completion while offline · unknown billing
+outcome · repeated reconciliation · cancel during recovery. Local
+recovery real; remote via mock provider.
+
+## §8 — Performance/UX
+
+Persistent vs subprocess benchmark (same methodology as Phase 4):
+first-gen latency, subsequent latency, reuse rate, idle/active VRAM,
+cancel latency, recovery time, unload behavior. States: Loading Model /
+Ready / Generating / Unloading / Recovering / Waiting for GPU.
+Auto-managed default; advanced worker/memory controls.
+
 ## Open questions for the feasibility pass
 
 1. Does sd.cpp (or a maintained fork) expose server/batch mode on Windows?
