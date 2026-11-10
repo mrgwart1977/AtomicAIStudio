@@ -99,8 +99,7 @@ def drain_control() -> None:
         elif cmd == "ping":
             emit({"type": "pong", "req_id": req_id})
         elif cmd == "shutdown":
-            emit({"type": "bye", "req_id": req_id})
-            sys.exit(0)
+            _delayed_exit(req_id)
         else:
             inbox.put(msg)  # not ours — put back for the main loop
             return
@@ -166,8 +165,20 @@ def main() -> None:
         elif cmd == "ping":
             emit({"type": "pong", "req_id": req_id})
         elif cmd == "shutdown":
-            emit({"type": "bye", "req_id": req_id})
-            sys.exit(0)
+            _delayed_exit(req_id)
+
+
+def _delayed_exit(req_id) -> None:
+    """Shutdown honoring test envs: MOCK_IGNORE_SHUTDOWN skips the exit
+    entirely (forces the supervisor's taskkill fallback), MOCK_EXIT_DELAY_S
+    sleeps first (slow graceful teardown — exercises confirm-exit waits)."""
+    if _env("MOCK_IGNORE_SHUTDOWN"):
+        return
+    emit({"type": "bye", "req_id": req_id})
+    delay = float(_env("MOCK_EXIT_DELAY_S", "0") or 0)
+    if delay:
+        time.sleep(delay)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

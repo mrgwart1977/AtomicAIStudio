@@ -43,11 +43,14 @@ class SupervisedWorker:
         self.current_job_id: str | None = None
         self.requests_completed = 0
         self.death_reason: str | None = None
-        self.reaped = False  # set once _force_kill has run — safe to drop records
+        # reaped == CONFIRMED OS exit. Never set while the process could
+        # still be alive — records/reservations may only drop after this.
+        self.reaped = False
         self._ready_at: float | None = None
         self._monitor_task: asyncio.Task | None = None
         self._dead_ev = asyncio.Event()
         self._next_probe: float = 0.0
+        self._stop_lock = asyncio.Lock()
 
     # ---------- lifecycle ----------
 
@@ -161,8 +164,14 @@ class SupervisedWorker:
                     break
         # A dead-marked worker must actually be dead — heartbeat-stale
         # processes are still alive and must be terminated before the
-        # pool reaps the record.
-        await self._force_kill(2.0)
+        # pool reaps the record. Retry until exit is confirmed; if it can
+        # never be confirmed the record stays dead-but-unreaped (its
+        # reservation is retained) and the pool sweeper keeps retrying.
+        for _ in range(3):
+            async with self._stop_lock:
+                if self.reaped or await self._force_kill(2.0):
+                    break
+            await asyncio.sleep(2.0)
         self._dead_ev.set()
 
     async def wait_dead(self, timeout_s: float = 10.0) -> bool:
@@ -185,53 +194,97 @@ class SupervisedWorker:
 
     # ---------- shutdown ----------
 
-    async def stop(self, grace_s: float = 5.0) -> None:
-        """Graceful protocol shutdown → wait → forced tree kill."""
-        if self.state is WorkerState.DEAD and self.proc is None:
-            return
-        self.state = WorkerState.DRAINING
-        if self.protocol is not None:
-            try:
-                await self.protocol.shutdown(grace_s)
-            except Exception:
-                pass
-        await self._force_kill(grace_s)
-        self.mark_dead("stopped")
-        if self._monitor_task is not None:
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
+    async def stop(self, grace_s: float = 5.0) -> bool:
+        """Graceful protocol shutdown → wait → forced tree kill → CONFIRM.
 
-    async def _force_kill(self, grace_s: float = 5.0) -> None:
+        Returns True only when the OS process is verifiably gone. If exit
+        cannot be confirmed within the bounded sequence, returns False and
+        leaves the worker dead-but-unreaped: the caller must keep its
+        record and reservation, and the pool sweeper will retry the kill.
+        Idempotent — concurrent/repeat stops serialize on the lock.
+        """
+        async with self._stop_lock:
+            if self.reaped:
+                return True
+            if self.state is WorkerState.DEAD and self.proc is None:
+                self.reaped = True
+                return True
+            self.state = WorkerState.DRAINING
+            if self.protocol is not None:
+                try:
+                    await self.protocol.shutdown(grace_s)
+                except Exception:
+                    pass
+            confirmed = await self._force_kill(grace_s)
+            self.mark_dead("stopped" if confirmed
+                           else "stop: exit unconfirmed — retaining")
+            if confirmed:
+                if self._monitor_task is not None:
+                    self._monitor_task.cancel()
+                    try:
+                        await self._monitor_task
+                    except asyncio.CancelledError:
+                        pass
+            return confirmed
+
+    async def _await_exit(self, timeout_s: float) -> bool:
+        """Wait up to timeout for the process to exit. True = confirmed.
+
+        Polls rather than awaiting proc.wait in an executor: a blocked
+        Popen.wait on an undead process would strand a thread-pool worker
+        forever, and enough of those exhaust the default executor and
+        stall the whole event loop's executor work."""
+        if self.proc is None:
+            return True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            if self.proc.poll() is not None:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+
+    async def _force_kill(self, grace_s: float = 5.0) -> bool:
+        """Terminate and CONFIRM exit. reaped=True only once the process
+        is verifiably dead — a timed-out kill leaves reaped=False so the
+        record/reservation is retained and the kill retried later."""
         if self.proc is None:
             self.reaped = True
-            return
+            return True
         pid = self.proc.pid
-        try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, self.proc.wait),
-                timeout=grace_s)
-        except (asyncio.TimeoutError, Exception):
-            pass
-        if self.proc.poll() is None:
-            import functools
-            await asyncio.get_running_loop().run_in_executor(
+        # 1) graceful/shutdown-driven exit window
+        if await self._await_exit(grace_s):
+            self._reap()
+            return True
+        # 2) forced termination; taskkill returns before OS teardown
+        #    completes, so confirm exit after each attempt
+        import functools
+        loop = asyncio.get_running_loop()
+        for _ in range(2):
+            await loop.run_in_executor(
                 None, functools.partial(proc_guard.terminate_tree,
                                         pid, grace_s=grace_s))
-            # taskkill returns before the OS finishes tearing the
-            # process down — wait so `reaped` guarantees the process is
-            # actually gone, not just signaled.
-            try:
-                await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(
-                        None, self.proc.wait), timeout=5.0)
-            except (asyncio.TimeoutError, Exception):
-                pass
+            if await self._await_exit(5.0):
+                self._reap()
+                return True
+        # 3) last resort: closing the Job Object handle kills the tree
+        #    (KILL_ON_JOB_CLOSE) — then still require confirmed exit.
         proc_guard.unsupervise(pid)
+        if await self._await_exit(5.0):
+            self._reap(unsupervised=True)
+            return True
+        log.error("worker %s (pid %d) unkillable — keeping record "
+                  "and reservation", self.id, pid)
+        return False
+
+    def _reap(self, *, unsupervised: bool = False) -> None:
+        """Final teardown bookkeeping — ONLY after confirmed OS exit."""
+        pid = self.proc.pid if self.proc else None
+        if pid is not None and not unsupervised:
+            proc_guard.unsupervise(pid)
         try:
-            if self.proc.stdin is not None:
+            if self.proc is not None and self.proc.stdin is not None:
                 self.proc.stdin.close()
         except OSError:
             pass

@@ -67,9 +67,16 @@ class WorkerPool:
         await asyncio.gather(*(w.stop() for w in workers), return_exceptions=True)
         async with self._lock:
             for w in workers:
-                self._registry.release(w.id)
-            self._workers.clear()
-            self._by_key.clear()
+                if w.reaped:
+                    self._registry.release(w.id)
+                    self._workers.pop(w.id, None)
+                    self._by_key.pop(self._key(w.spec), None)
+                else:
+                    # Confirmed-exit failed — keep record + reservation.
+                    # The Job Object still guarantees OS-level cleanup
+                    # when the backend exits; log honestly.
+                    log.error("pool.stop: worker %s exit unconfirmed — "
+                              "record retained", w.id)
 
     # ---------- acquisition ----------
 
@@ -96,10 +103,13 @@ class WorkerPool:
 
     async def _evict(self, w: SupervisedWorker, reason: str) -> None:
         log.info("evicting worker %s (%s)", w.id, reason)
-        await w.stop()
-        self._registry.release(w.id)
-        self._workers.pop(w.id, None)
-        self._by_key.pop(self._key(w.spec), None)
+        if await w.stop():
+            self._registry.release(w.id)
+            self._workers.pop(w.id, None)
+            self._by_key.pop(self._key(w.spec), None)
+        # else: exit unconfirmed — the worker stays dead-but-unreaped in
+        # the records so its reservation is retained; the monitor's dead-
+        # worker branch retries the kill on the next sweep.
 
     async def acquire(self, spec: WorkerSpec) -> "WorkerLease":
         """Return a lease on a live worker for spec.key, spawning one if
@@ -177,10 +187,15 @@ class WorkerPool:
             async with self._lock:
                 now = time.monotonic()
                 for w in list(self._workers.values()):
-                    if w.state is WorkerState.DEAD and w.reaped:
-                        self._registry.release(w.id)
-                        self._workers.pop(w.id, None)
-                        self._by_key.pop(self._key(w.spec), None)
+                    if w.state is WorkerState.DEAD:
+                        if w.reaped:
+                            self._registry.release(w.id)
+                            self._workers.pop(w.id, None)
+                            self._by_key.pop(self._key(w.spec), None)
+                        else:
+                            # Dead-marked but process not yet confirmed
+                            # gone — retry the kill, keep the reservation.
+                            await w._force_kill(2.0)
                         continue
                     if (w.state in (WorkerState.READY, WorkerState.IDLE)
                             and w.idle_since is not None
@@ -213,12 +228,13 @@ class WorkerLease:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if exc_type is WorkerDeadError or self.worker.state is WorkerState.DEAD:
-            # Stop inline — the worker must be killed + unsupervised
-            # before its record is dropped, or an orphaned monitor task
-            # could outlive the loop and leak the supervised handle.
-            await self.worker.stop()
-            self._pool._registry.release(self.worker.id)
-            self._pool._workers.pop(self.worker.id, None)
-            self._pool._by_key.pop(self._pool._key(self.worker.spec), None)
+            # Stop inline — the record (and reservation) is only dropped
+            # once the process is confirmed gone; an unconfirmed kill
+            # leaves a dead-unreaped record the pool sweeper keeps
+            # retrying so nothing is released while the OS process lives.
+            if await self.worker.stop():
+                self._pool._registry.release(self.worker.id)
+                self._pool._workers.pop(self.worker.id, None)
+                self._pool._by_key.pop(self._pool._key(self.worker.spec), None)
             return
         self._pool.release_lease(self.worker)
