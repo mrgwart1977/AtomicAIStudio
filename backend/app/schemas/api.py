@@ -79,7 +79,7 @@ CommandType = Literal[
     "prompt.set_text",
     "project.rename", "project.archive", "project.restore",
     "project.update_settings", "project.duplicate", "project.delete",
-    "generate.image.mock", "generate.image",
+    "generate.image.mock", "generate.image", "generate.video",
     "character.create", "character.update", "character.archive",
     "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive",
@@ -154,6 +154,10 @@ class JobOut(BaseModel):
     result_json: dict[str, Any] | None = None
     progress_json: dict[str, Any] | None = None
     cancel_requested: bool = False
+    # M4.0 recovery contracts
+    attempt_no: int = 1
+    execution_scope: str = "local"
+    recovery_state: str | None = None
     created_at: datetime
     completed_at: datetime | None
 

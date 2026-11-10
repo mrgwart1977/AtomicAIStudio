@@ -16,6 +16,12 @@ dependencies = [
     "pydantic-settings>=2.3",
     "psutil>=6.0",
     "pillow>=10.3",
+    # Optional probe backend: PyAV provides video validation/metadata when
+    # no ffprobe binary is installed. PyAV itself is BSD-3, but its wheels
+    # bundle FFmpeg built with libx264/libx265 (GPL-2.0+) — therefore `av`
+    # is EXCLUDED from the frozen installer build pending a licensing
+    # decision; media_probe falls back to container-signature checks.
+    "av>=13",
 ]
 
 [project.optional-dependencies]

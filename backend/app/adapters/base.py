@@ -35,6 +35,12 @@ class CapabilityProfile:
     # GPU-bound adapters acquire a scheduler slot (or the CPU lane marker)
     # before the engine claims them — a busy GPU leaves the job queued.
     needs_gpu: bool = False
+    # M4.1-facing execution contracts — declared, not yet implemented by a
+    # worker pool: how execution is hosted, whether mid-flight work can
+    # resume, and what happens to unvalidated output.
+    worker_model: str = "subprocess-per-job"
+    resumable: bool = False
+    recoverable_outputs: str = "commit-on-success"
     notes: str = ""
 
 

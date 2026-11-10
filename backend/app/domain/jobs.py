@@ -121,9 +121,11 @@ class JobEngine:
         """Called once at startup inside a short session; returns requeued count."""
         stuck = session.execute(select(GenerationJob).where(GenerationJob.status == "running")).scalars().all()
         for job in stuck:
+            job.recovery_state = "needs_reconciliation" if job.execution_scope == "remote" else "interrupted"
             if job.resumable:
                 job.status = "queued"
                 job.message = "re-queued after restart"
+                job.attempt_no = (job.attempt_no or 0) + 1
             else:
                 job.status = "failed"
                 job.error = "interrupted by application stop; not resumable"
@@ -215,6 +217,7 @@ class JobEngine:
         try:
             await self._execute(job_id)
         finally:
+            _release_memory_reservation(job_id)
             self._lane_busy[lane] = max(0, self._lane_busy.get(lane, 1) - 1)
             if self._sched is not None:
                 self._sched.release(job_id)
@@ -278,6 +281,36 @@ class JobEngine:
                 s.commit()
                 await self._publish(job)
                 return
+
+            # System-RAM preflight (issue #28): VRAM checks alone are not
+            # enough — CPU-offloaded weights live in physical RAM. Block
+            # when the estimate can't fit with OS headroom; flag unknowns.
+            profile = getattr(adapter, "profile", None)
+            if (profile is not None and getattr(profile, "lane", "") == "gen"
+                    and getattr(profile, "adapter_kind", "") != "mock"):
+                mem_gate = _memory_preflight(job.request_json, profile, job.id)
+                if mem_gate["decision"] == "block":
+                    job.status = "failed"
+                    job.error = f"preflight memory check failed: {mem_gate['reason']}"
+                    job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                    job.completed_at = utcnow()
+                    s.commit()
+                    await self._publish(job)
+                    return
+                if mem_gate["decision"] == "warn":
+                    if not job.request_json.get("memory_risk_acknowledged"):
+                        job.status = "failed"
+                        job.error = ("memory warning requires explicit confirmation: "
+                                     f"{mem_gate['reason']} — resubmit acknowledging "
+                                     "the risk (memory_risk_acknowledged)")
+                        job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                        job.completed_at = utcnow()
+                        s.commit()
+                        await self._publish(job)
+                        return
+                    job.message = f"memory warning acknowledged: {mem_gate['reason']}"
+                    job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                    s.commit()
 
             work_dir = self._data_dir / "jobs" / (job.project_id or "_app")
             cancel_ev = threading.Event()
@@ -473,3 +506,57 @@ class JobEngine:
                 "model_key": job.model_key,
             },
         )
+
+
+# RAM reservations held by gen jobs currently in flight (job_id → bytes).
+# Concurrent workers must subtract each other's estimates — one job's
+# preflight must account for the other.
+_reserved_ram: dict[str, int] = {}
+
+
+def _estimate_ram_bytes(request: dict[str, Any]) -> tuple[int, bool]:
+    """(bytes, known): host-RAM estimate for the requested residency mode.
+
+    residency_mode (request): 'cpu_offload' (default when the model declares
+    weight_offload_cpu — all component bytes host-resident), 'gpu' (weights
+    on-device; host holds only paging share ~30%), 'te_cpu' (text encoder
+    host-resident, diffusion+VAE on GPU), 'disk' (params streamed from disk —
+    minimal host residency). +2 GiB runtime overhead in every mode."""
+    from app.domain import model_catalog, resources
+    spec = model_catalog.get(request.get("model_key") or "")
+    if spec is None or not spec.files:
+        return 0, False
+    by_role: dict[str, int] = {}
+    for f in spec.files:
+        by_role[f.role or "diffusion"] = by_role.get(f.role or "diffusion", 0) + f.size_bytes
+    weights = sum(by_role.values())
+    mode = request.get("residency_mode") or (
+        "cpu_offload" if (spec.capabilities or {}).get("weight_offload_cpu") else "gpu")
+    if mode == "cpu_offload":
+        resident = weights
+    elif mode == "te_cpu":
+        resident = by_role.get("text_encoder", 0) + int(
+            (weights - by_role.get("text_encoder", 0)) * 0.15)
+    elif mode == "disk":
+        resident = int(weights * 0.15)          # mmap'd pages, streaming
+    else:  # gpu — host side only pages the runtime touches
+        resident = int(weights * 0.30)
+    return resident + int(2 * resources.GIB), True
+
+
+def _memory_preflight(request: dict[str, Any], profile: Any,
+                      job_id: str = "") -> dict[str, Any]:
+    """Gate a gen job on available RAM INCLUDING other workers' live
+    reservations. Reserves the estimate for the job's lifetime."""
+    from app.domain import resources
+    est, known = _estimate_ram_bytes(request)
+    reserved_by_others = sum(v for k, v in _reserved_ram.items() if k != job_id)
+    out = resources.preflight_memory_check(est + reserved_by_others, known=known)
+    out["snapshot"]["reserved_by_others_bytes"] = reserved_by_others
+    if out["decision"] != "block" and job_id:
+        _reserved_ram[job_id] = est
+    return out
+
+
+def _release_memory_reservation(job_id: str) -> None:
+    _reserved_ram.pop(job_id, None)

@@ -238,3 +238,54 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   persistent workers (docs/plans/M4_1_PERSISTENT_WORKERS.md), #24 worker
   stderr in job detail, #25 multi-GPU hardware validation, #26 VRAM
   calibration, #27 catalog expansion; plus pre-existing #5-#11, #14, #15.
+
+
+### M4.0 Phase 1 (video foundation — pre-download)
+
+- Suite **144/144**; `tsc -b` clean.
+- `wan21.t2v.1_3b` catalog entry is `experimental` — NOT generatable until
+  the approved download validates end-to-end (proposal:
+  `docs/plans/M4_0_MODEL_PROPOSAL.md`).
+- ffmpeg/ffprobe absent on dev machine — video validation currently falls
+  back to container signatures; bundling a verified ffmpeg is a Phase-2
+  proposal item.
+- Same tracked blockers: #22 CUDA EULA, #23 M4.1, #24-#27, #5-#11/#14/#15.
+
+### M4.0 Phase 2 (Wan 2.1 validation)
+- Real T2V clips validated on Vulkan AND CUDA (17/17 decode-clean frames).
+- Wan requires `--offload-to-cpu` at 8 GiB; Vulkan VAE on CPU (~34 min/clip),
+  CUDA ~2.6 min/clip. ffprobe still absent — PyAV used as documented
+  alternative; bundling ffmpeg/ffprobe remains a separate license/sourcing
+  decision. Same open blockers (#22 EULA, #23 M4.1, #24 stderr, etc.).
+
+### P0 Resource-safety incident (issue #28 — M4.0 merge blocker)
+- Orphaned sd-cli after backend death identified as primary vector;
+  fixed via kill-on-close Job Objects + atexit reaper + post-job dead-check.
+- RAM-aware preflight/compatibility, runtime pressure watchdog (never CPU%),
+  and configurable headroom thresholds added; see docs/plans/M4_0_RESOURCE_SAFETY.md.
+- Controlled real-hardware reproduction still requires owner approval.
+
+### M4.0 Phase 3 — non-inference integration (post-#28)
+- Sidecar rebuilt + smoke-verified: migrations, API, auth, PyAV bundled
+  (`av>=13`, existing approved dep — PyAV BSD-3; bundled FFmpeg libs are
+  LGPL — keep dynamic-linking notices in installer).
+- Video playback path verified: `/assets/{id}/file` serves the real Wan
+  clip (200, video/webm, 447 KB).
+- Honest-failure UX verified end-to-end: B2 job at 4.2 GiB free →
+  `preflight memory check failed: insufficient system RAM: job needs
+  ~5.8 GiB` — the residency-aware estimate flows to the user.
+- ffprobe/ffmpeg still not bundled (separate source/license review).
+- Open blockers unchanged: #22 EULA, #28 (merge blocker — preflight
+  refusal validated, real-inference stability still unverified), #23-27.
+
+### Licensing review — PyAV/FFmpeg (M4.0 merge audit)
+- PyAV wrapper: BSD-3-Clause. **But** the wheel's av.libs bundles FFmpeg
+  built `--enable-version3` WITH libx264 + libx265 (both GPL-2.0+).
+  Verified by reading --enable flags embedded in the shipped DLLs.
+- ACTION: `av` is EXCLUDED from the frozen installer (atomic-backend.spec)
+  — the distributed artifact contains no x264/x265/FFmpeg binaries.
+  media_probe degrades to container-signature validation in production.
+- PyAV remains a dev/test dependency only (never shipped in that form).
+- Reintroducing video probing to the packaged app requires either an
+  LGPL-clean FFmpeg build or standalone ffprobe under its own license —
+  separate approval item. NVIDIA EULA still tracked as #22.

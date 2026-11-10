@@ -135,6 +135,12 @@ class GenerationJob(Base):
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # non-asset op outputs
     progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # bytes/ETA detail
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # M4.0 recovery contracts: attempt counter (retries are distinct
+    # attempts), local vs future remote execution, reconciliation flag set
+    # when a restart finds the job mid-flight with unknown outcome.
+    attempt_no: Mapped[int] = mapped_column(Integer, default=1)
+    execution_scope: Mapped[str] = mapped_column(String(16), default="local")
+    recovery_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

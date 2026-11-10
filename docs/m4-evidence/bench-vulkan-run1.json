@@ -1,0 +1,2116 @@
+﻿{
+    "job_id":  "2ba36857-f56f-411f-8429-ee785986a538",
+    "final_status":  "failed",
+    "duration_s":  174.9,
+    "baseline_vram_mib":  1989,
+    "peak_vram_mib":  2196,
+    "delta_vram_mib":  207,
+    "peak_gpu_util_pct":  37,
+    "worker_peak_rss_mib":  0,
+    "samples":  [
+                    {
+                        "t_s":  0.4,
+                        "vram_mib":  1988,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  1.1,
+                        "vram_mib":  1994,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  1.7,
+                        "vram_mib":  1997,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  2.3,
+                        "vram_mib":  1997,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  3,
+                        "vram_mib":  1996,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  3.6,
+                        "vram_mib":  1994,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  4.3,
+                        "vram_mib":  1994,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  4.9,
+                        "vram_mib":  1994,
+                        "util_pct":  17,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  5.5,
+                        "vram_mib":  1996,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  6.2,
+                        "vram_mib":  1992,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  7,
+                        "vram_mib":  1992,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  7.6,
+                        "vram_mib":  1992,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  8.3,
+                        "vram_mib":  1992,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  9,
+                        "vram_mib":  1996,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  9.6,
+                        "vram_mib":  2020,
+                        "util_pct":  20,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  10.3,
+                        "vram_mib":  2098,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  11,
+                        "vram_mib":  2099,
+                        "util_pct":  20,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  11.7,
+                        "vram_mib":  2104,
+                        "util_pct":  22,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  12.4,
+                        "vram_mib":  2109,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  13,
+                        "vram_mib":  2105,
+                        "util_pct":  16,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  13.7,
+                        "vram_mib":  2111,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  14.4,
+                        "vram_mib":  2113,
+                        "util_pct":  18,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  15,
+                        "vram_mib":  2111,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  15.7,
+                        "vram_mib":  2111,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  16.3,
+                        "vram_mib":  2106,
+                        "util_pct":  18,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  16.9,
+                        "vram_mib":  2105,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  17.5,
+                        "vram_mib":  2104,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  18.2,
+                        "vram_mib":  2104,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  18.8,
+                        "vram_mib":  2102,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  19.4,
+                        "vram_mib":  2094,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  20.1,
+                        "vram_mib":  2093,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  20.7,
+                        "vram_mib":  2088,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  21.3,
+                        "vram_mib":  2088,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  21.9,
+                        "vram_mib":  2088,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  22.6,
+                        "vram_mib":  2094,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  23.2,
+                        "vram_mib":  2091,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  23.9,
+                        "vram_mib":  2088,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  24.5,
+                        "vram_mib":  2086,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  25.1,
+                        "vram_mib":  2082,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  25.8,
+                        "vram_mib":  2077,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  26.4,
+                        "vram_mib":  2071,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  27,
+                        "vram_mib":  2070,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  27.7,
+                        "vram_mib":  2059,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  28.3,
+                        "vram_mib":  2059,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  28.9,
+                        "vram_mib":  2054,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  29.6,
+                        "vram_mib":  2053,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  30.2,
+                        "vram_mib":  2053,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  30.8,
+                        "vram_mib":  2052,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  31.4,
+                        "vram_mib":  2052,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  32.1,
+                        "vram_mib":  2052,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  32.7,
+                        "vram_mib":  2044,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  33.3,
+                        "vram_mib":  2042,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  34,
+                        "vram_mib":  2042,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  34.6,
+                        "vram_mib":  2042,
+                        "util_pct":  10,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  35.2,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  35.9,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  36.5,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  37.1,
+                        "vram_mib":  2042,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  37.8,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  38.4,
+                        "vram_mib":  2042,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  39,
+                        "vram_mib":  2042,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  39.6,
+                        "vram_mib":  2042,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  40.3,
+                        "vram_mib":  2042,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  40.9,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  41.6,
+                        "vram_mib":  2042,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  42.2,
+                        "vram_mib":  2042,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  42.9,
+                        "vram_mib":  2042,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  43.5,
+                        "vram_mib":  2042,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  44.2,
+                        "vram_mib":  2042,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  44.8,
+                        "vram_mib":  2053,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  45.5,
+                        "vram_mib":  2082,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  46.1,
+                        "vram_mib":  2080,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  46.8,
+                        "vram_mib":  2095,
+                        "util_pct":  24,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  47.4,
+                        "vram_mib":  2096,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  48.1,
+                        "vram_mib":  2096,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  48.8,
+                        "vram_mib":  2097,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  49.4,
+                        "vram_mib":  2094,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  50,
+                        "vram_mib":  2088,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  50.7,
+                        "vram_mib":  2096,
+                        "util_pct":  15,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  51.4,
+                        "vram_mib":  2101,
+                        "util_pct":  23,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  52,
+                        "vram_mib":  2101,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  52.6,
+                        "vram_mib":  2101,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  53.3,
+                        "vram_mib":  2095,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  53.9,
+                        "vram_mib":  2096,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  54.6,
+                        "vram_mib":  2120,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  55.2,
+                        "vram_mib":  2125,
+                        "util_pct":  15,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  55.9,
+                        "vram_mib":  2125,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  56.5,
+                        "vram_mib":  2124,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  57.2,
+                        "vram_mib":  2129,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  57.9,
+                        "vram_mib":  2129,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  58.5,
+                        "vram_mib":  2129,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  59.2,
+                        "vram_mib":  2059,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  59.8,
+                        "vram_mib":  2065,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  60.5,
+                        "vram_mib":  2065,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  61.1,
+                        "vram_mib":  2040,
+                        "util_pct":  18,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  61.8,
+                        "vram_mib":  2041,
+                        "util_pct":  18,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  62.4,
+                        "vram_mib":  2040,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  63,
+                        "vram_mib":  2040,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  63.6,
+                        "vram_mib":  2039,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  64.3,
+                        "vram_mib":  2039,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  64.9,
+                        "vram_mib":  2039,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  65.6,
+                        "vram_mib":  2039,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  66.2,
+                        "vram_mib":  2039,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  66.8,
+                        "vram_mib":  2039,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  67.4,
+                        "vram_mib":  2039,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  68.1,
+                        "vram_mib":  2039,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  68.7,
+                        "vram_mib":  2039,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  69.3,
+                        "vram_mib":  2039,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  70,
+                        "vram_mib":  2051,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  70.7,
+                        "vram_mib":  2050,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  71.3,
+                        "vram_mib":  2066,
+                        "util_pct":  10,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  71.9,
+                        "vram_mib":  2062,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  72.6,
+                        "vram_mib":  2022,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  73.2,
+                        "vram_mib":  2022,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  73.9,
+                        "vram_mib":  2017,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  74.5,
+                        "vram_mib":  2016,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  75.1,
+                        "vram_mib":  2014,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  75.7,
+                        "vram_mib":  2014,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  76.3,
+                        "vram_mib":  2013,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  77,
+                        "vram_mib":  2013,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  77.6,
+                        "vram_mib":  2000,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  78.3,
+                        "vram_mib":  1989,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  78.9,
+                        "vram_mib":  2021,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  79.5,
+                        "vram_mib":  2021,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  80.2,
+                        "vram_mib":  2021,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  80.8,
+                        "vram_mib":  2020,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  81.5,
+                        "vram_mib":  2020,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  82.1,
+                        "vram_mib":  2020,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  82.8,
+                        "vram_mib":  2024,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  83.4,
+                        "vram_mib":  2029,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  84.2,
+                        "vram_mib":  2041,
+                        "util_pct":  25,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  84.9,
+                        "vram_mib":  2042,
+                        "util_pct":  15,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  85.5,
+                        "vram_mib":  2043,
+                        "util_pct":  21,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  86.1,
+                        "vram_mib":  2037,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  86.8,
+                        "vram_mib":  2037,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  87.4,
+                        "vram_mib":  2037,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  92.5,
+                        "vram_mib":  2044,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  93.2,
+                        "vram_mib":  2044,
+                        "util_pct":  26,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  93.8,
+                        "vram_mib":  2060,
+                        "util_pct":  30,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  94.5,
+                        "vram_mib":  2060,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  95.2,
+                        "vram_mib":  2055,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  95.8,
+                        "vram_mib":  2078,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  96.5,
+                        "vram_mib":  2083,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  97.2,
+                        "vram_mib":  2083,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  97.8,
+                        "vram_mib":  2076,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  98.5,
+                        "vram_mib":  2122,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  99.2,
+                        "vram_mib":  2109,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  99.8,
+                        "vram_mib":  2101,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  100.4,
+                        "vram_mib":  2102,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  101.1,
+                        "vram_mib":  2100,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  101.7,
+                        "vram_mib":  2099,
+                        "util_pct":  30,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  102.4,
+                        "vram_mib":  2099,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  103,
+                        "vram_mib":  2111,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  103.9,
+                        "vram_mib":  2136,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  104.5,
+                        "vram_mib":  2144,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  105.2,
+                        "vram_mib":  2124,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  105.8,
+                        "vram_mib":  2117,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  106.5,
+                        "vram_mib":  2117,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  107.2,
+                        "vram_mib":  2128,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  107.8,
+                        "vram_mib":  2127,
+                        "util_pct":  29,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  108.5,
+                        "vram_mib":  2124,
+                        "util_pct":  22,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  109.1,
+                        "vram_mib":  2114,
+                        "util_pct":  10,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  109.8,
+                        "vram_mib":  2116,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  110.5,
+                        "vram_mib":  2118,
+                        "util_pct":  21,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  111.1,
+                        "vram_mib":  2125,
+                        "util_pct":  15,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  111.7,
+                        "vram_mib":  2124,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  112.5,
+                        "vram_mib":  2124,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  113.1,
+                        "vram_mib":  2141,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  113.8,
+                        "vram_mib":  2141,
+                        "util_pct":  10,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  114.4,
+                        "vram_mib":  2138,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  115.1,
+                        "vram_mib":  2142,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  115.7,
+                        "vram_mib":  2142,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  116.3,
+                        "vram_mib":  2137,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  117,
+                        "vram_mib":  2114,
+                        "util_pct":  20,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  117.6,
+                        "vram_mib":  2114,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  118.3,
+                        "vram_mib":  2113,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  118.9,
+                        "vram_mib":  2113,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  119.5,
+                        "vram_mib":  2105,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  120.1,
+                        "vram_mib":  2105,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  120.8,
+                        "vram_mib":  2104,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  121.4,
+                        "vram_mib":  2098,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  122,
+                        "vram_mib":  2096,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  122.7,
+                        "vram_mib":  2093,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  123.3,
+                        "vram_mib":  2091,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  123.9,
+                        "vram_mib":  2091,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  124.6,
+                        "vram_mib":  2065,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  125.2,
+                        "vram_mib":  2064,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  125.8,
+                        "vram_mib":  2064,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  126.4,
+                        "vram_mib":  2064,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  127.1,
+                        "vram_mib":  2064,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  127.7,
+                        "vram_mib":  2063,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  128.3,
+                        "vram_mib":  2063,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  129,
+                        "vram_mib":  2055,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  129.6,
+                        "vram_mib":  2055,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  130.2,
+                        "vram_mib":  2054,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  130.8,
+                        "vram_mib":  2054,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  131.5,
+                        "vram_mib":  2045,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  132.1,
+                        "vram_mib":  2045,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  132.7,
+                        "vram_mib":  2045,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  133.4,
+                        "vram_mib":  2067,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  134,
+                        "vram_mib":  2084,
+                        "util_pct":  27,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  134.7,
+                        "vram_mib":  2086,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  135.3,
+                        "vram_mib":  2088,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  136,
+                        "vram_mib":  2088,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  136.6,
+                        "vram_mib":  2103,
+                        "util_pct":  23,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  137.3,
+                        "vram_mib":  2103,
+                        "util_pct":  21,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  137.9,
+                        "vram_mib":  2078,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  138.6,
+                        "vram_mib":  2079,
+                        "util_pct":  20,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  139.2,
+                        "vram_mib":  2072,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  139.9,
+                        "vram_mib":  2073,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  140.5,
+                        "vram_mib":  2077,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  141.1,
+                        "vram_mib":  2081,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  141.8,
+                        "vram_mib":  2076,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  142.4,
+                        "vram_mib":  2076,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  143.1,
+                        "vram_mib":  2073,
+                        "util_pct":  13,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  143.8,
+                        "vram_mib":  2074,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  144.4,
+                        "vram_mib":  2088,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  145.1,
+                        "vram_mib":  2088,
+                        "util_pct":  23,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  145.7,
+                        "vram_mib":  2082,
+                        "util_pct":  22,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  146.3,
+                        "vram_mib":  2077,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  147,
+                        "vram_mib":  2069,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  147.7,
+                        "vram_mib":  2102,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  148.4,
+                        "vram_mib":  2110,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  149.1,
+                        "vram_mib":  2099,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  149.7,
+                        "vram_mib":  2095,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  150.3,
+                        "vram_mib":  2095,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  151,
+                        "vram_mib":  2099,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  151.6,
+                        "vram_mib":  2098,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  152.3,
+                        "vram_mib":  2098,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  152.9,
+                        "vram_mib":  2096,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  153.5,
+                        "vram_mib":  2096,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  154.2,
+                        "vram_mib":  2083,
+                        "util_pct":  30,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  154.9,
+                        "vram_mib":  2100,
+                        "util_pct":  15,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  155.6,
+                        "vram_mib":  2101,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  156.2,
+                        "vram_mib":  2107,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  156.8,
+                        "vram_mib":  2105,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  157.5,
+                        "vram_mib":  2103,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  158.2,
+                        "vram_mib":  2106,
+                        "util_pct":  20,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  158.8,
+                        "vram_mib":  2139,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  159.4,
+                        "vram_mib":  2134,
+                        "util_pct":  14,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  160.1,
+                        "vram_mib":  2076,
+                        "util_pct":  28,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  160.7,
+                        "vram_mib":  2045,
+                        "util_pct":  9,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  161.4,
+                        "vram_mib":  2053,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  162,
+                        "vram_mib":  2055,
+                        "util_pct":  6,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  162.7,
+                        "vram_mib":  2055,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  163.3,
+                        "vram_mib":  2075,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  163.9,
+                        "vram_mib":  2075,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  164.6,
+                        "vram_mib":  2075,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  165.2,
+                        "vram_mib":  2099,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  165.9,
+                        "vram_mib":  2100,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  166.5,
+                        "vram_mib":  2096,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  167.2,
+                        "vram_mib":  2113,
+                        "util_pct":  19,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  167.8,
+                        "vram_mib":  2113,
+                        "util_pct":  21,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  168.5,
+                        "vram_mib":  2112,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  169.1,
+                        "vram_mib":  2125,
+                        "util_pct":  4,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  169.8,
+                        "vram_mib":  2145,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  170.5,
+                        "vram_mib":  2139,
+                        "util_pct":  5,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  171.1,
+                        "vram_mib":  2144,
+                        "util_pct":  12,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  171.7,
+                        "vram_mib":  2191,
+                        "util_pct":  11,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  172.4,
+                        "vram_mib":  2191,
+                        "util_pct":  8,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  173,
+                        "vram_mib":  2171,
+                        "util_pct":  7,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  173.7,
+                        "vram_mib":  2196,
+                        "util_pct":  37,
+                        "job_status":  "running",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    },
+                    {
+                        "t_s":  174.3,
+                        "vram_mib":  2187,
+                        "util_pct":  5,
+                        "job_status":  "failed",
+                        "job_progress":  0.0,
+                        "job_message":  "running on GPU 0 (NVIDIA GeForce RTX 3060 Ti)"
+                    }
+                ]
+}

@@ -35,7 +35,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pytest", "pytest_asyncio", "ruff", "tkinter"],
+    # 'av' (PyAV) ships GPL-licensed x264/x265 DLLs in its av.libs wheel
+    # payload — excluded from the distributed artifact pending a licensing
+    # decision (media_probe falls back to container-signature checks).
+    excludes=["pytest", "pytest_asyncio", "ruff", "tkinter", "av"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

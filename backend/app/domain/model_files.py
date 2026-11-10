@@ -131,38 +131,50 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
 
     have = part.stat().st_size if part.exists() else 0
     headers = {"User-Agent": "atomic-ai-studio"}
-    if have:
-        headers["Range"] = f"bytes={have}-"
-    req = urllib.request.Request(url, headers=headers)
     total = expected
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if have and resp.status == 200:
-                # Server ignored Range — restart cleanly rather than corrupt.
-                have = 0
-            elif have and resp.status != 206:
-                have = 0
-            cr = resp.headers.get("Content-Range")
-            if cr and "/" in cr:
-                total = int(cr.split("/")[-1])
-            elif resp.headers.get("Content-Length"):
-                total = have + int(resp.headers["Content-Length"])
-            mode = "ab" if have else "wb"
-            with open(part, mode) as fh:
-                while True:
-                    if cancel_check is not None:
-                        cancel_check()
-                    chunk = resp.read(_CHUNK)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    have += len(chunk)
-                    if progress:
-                        progress(have, total or 0)
-    except Exception:
-        # .part + sidecar stay on disk — next attempt resumes from `have`.
-        sidecar.write_text(json.dumps(meta))
-        raise
+    # Bounded in-stream retry: multi-GB downloads on flaky connections drop
+    # mid-stream; each attempt resumes via Range instead of restarting.
+    attempt, max_attempts = 0, 8
+    while True:
+        attempt += 1
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if have and resp.status == 200:
+                    # Server ignored Range — restart cleanly rather than corrupt.
+                    have = 0
+                elif have and resp.status != 206:
+                    have = 0
+                cr = resp.headers.get("Content-Range")
+                if cr and "/" in cr:
+                    total = int(cr.split("/")[-1])
+                elif resp.headers.get("Content-Length"):
+                    total = have + int(resp.headers["Content-Length"])
+                mode = "ab" if have else "wb"
+                with open(part, mode) as fh:
+                    while True:
+                        if cancel_check is not None:
+                            cancel_check()
+                        chunk = resp.read(_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        have += len(chunk)
+                        if progress:
+                            progress(have, total or 0)
+            break  # stream complete
+        except Exception as exc:
+            # Cancellation (JobCancelled — imported lazily by name to avoid an
+            # adapters→domain import cycle) must never be retried.
+            if exc.__class__.__name__ in ("JobCancelled", "ModelError"):
+                raise
+            # .part + sidecar stay on disk — next attempt resumes from `have`.
+            sidecar.write_text(json.dumps(meta))
+            if attempt >= max_attempts:
+                raise
+            time.sleep(min(2 ** attempt, 30))
 
     if expected and have != expected:
         sidecar.write_text(json.dumps(meta))
@@ -179,10 +191,9 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     return {"bytes": have, "sha256": sha.hexdigest()}
 
 
-def verify_model_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
-    """Integrity check on a finalized file: declared sha256 if present,
+def verify_component(path: Path, f: ModelFile, fmt: str) -> tuple[bool, str]:
+    """Integrity check on one component file: declared sha256 if present,
     else declared size + format magic bytes."""
-    f = spec.files[0]
     if f.sha256:
         sha = hashlib.sha256()
         with open(path, "rb") as fh:
@@ -194,9 +205,13 @@ def verify_model_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
     if f.size_bytes and path.stat().st_size != f.size_bytes:
         return False, (f"size mismatch: {path.stat().st_size} bytes, "
                        f"catalog expected {f.size_bytes}")
-    if not _format_magic_ok(path, spec.fmt):
-        return False, f"file does not look like a {spec.fmt} model (bad magic bytes)"
-    return True, f"size + {spec.fmt} format verified"
+    if not _format_magic_ok(path, fmt):
+        return False, f"file does not look like a {fmt} model (bad magic bytes)"
+    return True, f"size + {fmt} format verified"
+
+
+def verify_model_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
+    return verify_component(path, spec.files[0], spec.fmt)
 
 
 # ---------------------------------------------------------------- install
@@ -232,15 +247,34 @@ def install_row(session: Session, spec: ModelSpec, root: Path) -> ModelInstall:
     return row
 
 
+def installed_component(session: Session, settings, spec: ModelSpec, role: str) -> Path | None:
+    """Path to an installed component by role (vae / text_encoder / …)."""
+    row = session.execute(
+        select(ModelInstall).where(ModelInstall.model_key == spec.key,
+                                   ModelInstall.status == "installed")
+    ).scalars().first()
+    if row is None:
+        return None
+    for f in spec.files:
+        if f.role == role:
+            p = Path(row.install_root) / row.rel_dir / f.name
+            return p if p.exists() else None
+    return None
+
+
 def installed_file(session: Session, settings, spec: ModelSpec) -> Path | None:
-    """Path to the verified installed weight file, or None."""
+    """Path to the verified installed weight file, or None. For multi-
+    component models every declared file must exist on disk."""
     row = session.execute(
         select(ModelInstall).where(ModelInstall.model_key == spec.key,
                                    ModelInstall.status == "installed")
     ).scalars().first()
     if row is None or not row.file_name:
         return None
-    path = Path(row.install_root) / row.rel_dir / row.file_name
+    base = Path(row.install_root) / row.rel_dir
+    if len(spec.files) > 1 and not all((base / f.name).is_file() for f in spec.files):
+        return None
+    path = base / row.file_name
     return path if path.is_file() else None
 
 

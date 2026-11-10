@@ -129,11 +129,20 @@ def test_catalog_video_candidates_are_planned_not_supported():
     for required in ("ltx.2.5", "wan.2.2.ti2v", "hunyuan.video"):
         assert required in video, f"{required} missing from catalog"
     for key, spec in video.items():
-        assert spec.support == "planned"
-        assert spec.files == ()
+        # M4.0 Phase 2: wan21.t2v.1_3b ran a real validated clip end-to-end
+        # (Vulkan + CPU offload, RTX 3060 Ti) → 'tested' with 3 real files.
+        # Every other video entry stays 'planned' with no files — nothing
+        # else video may be generatable.
+        if key == "wan21.t2v.1_3b":
+            assert spec.support == "tested" and len(spec.files) == 3
+        else:
+            assert spec.support == "planned"
+            assert spec.files == ()
         c = compatibility.classify_model(spec, _hw(vram_gib=8))
-        assert c["status"] == "planned"
-        assert c["support"] == "planned" and c["modality"] == "video"
+        # 'planned' entries classify as planned; the tested Wan candidate
+        # classifies 'compatible' (real requirements, fits 8 GB).
+        assert c["status"] == ("planned" if spec.support == "planned" else "compatible")
+        assert c["modality"] == "video"
         assert set(c["modes"]) & {"text2video", "image2video", "audio2video"}
 
 
@@ -342,7 +351,7 @@ def test_generate_requires_prompt_422(client):
     assert "prompt" in r.json()["detail"]
 
 
-def test_generate_installed_enqueues_job(client, tmp_path):
+def test_generate_installed_enqueues_job(client, tmp_path, monkeypatch):
     """Committing generate.image on an installed model enqueues a GPU-lane
     job carrying model_key; the job then fails cleanly because no runtime
     binary exists — proving failure isolation, not data corruption."""
@@ -481,7 +490,12 @@ def test_models_endpoint_lists_catalog(client):
         assert m["modes"]
     keys = {m["key"] for m in models}
     assert {"ltx.2.5", "wan.2.2.ti2v", "hunyuan.video", "qwen.image"} <= keys
-    assert models and all(m["compatibility"]["status"] == "planned" for m in models if m["modality"] == "video")
+    # only the validated Wan entry may be generatable — every other video
+    # model stays below 'tested' until real-weight validation
+    assert models and all(
+        m["support"] in ("planned", "experimental")
+        for m in models if m["modality"] == "video" and m["key"] != "wan21.t2v.1_3b"
+    )
 
 
 def test_install_restricted_or_unavailable_422(client):
@@ -495,8 +509,8 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
     job runs app-level (project_id=null), install row lands 'installed'."""
     from app.db.models import RuntimeInstall, new_id, utcnow
     from app.domain import model_files
-    monkeypatch.setattr(model_files, "verify_model_file",
-                        lambda path, spec: (True, "ok"))
+    monkeypatch.setattr(model_files, "verify_component",
+                        lambda path, f, fmt: (True, "ok"))
 
     def fake_dl(dest, url, *, expected_size=None, progress=None,
                 cancel_check=None, timeout=60):
@@ -570,9 +584,11 @@ def test_alembic_0006_tables_exist(settings):
     cols = {c["name"]: c for c in insp.get_columns("generation_jobs")}
     assert "gpu_index" in cols and "model_key" in cols
     assert cols["project_id"]["nullable"] is True
+    # M4.0 recovery columns land via 0007
+    assert "attempt_no" in cols and "execution_scope" in cols and "recovery_state" in cols
     with eng.connect() as c:
         v = c.execute(sa.text("select version_num from alembic_version")).scalar()
-    assert v == "0006_m3"
+    assert v == "0007_m4"
 
 
 # ------------------------------------------------ 9. Phase-2 follow-ups
