@@ -21,6 +21,9 @@ jobs:
       - name: Install backend
         working-directory: backend
         run: pip install -e ".[dev]"
+      - name: Fetch approved FFmpeg (sha256-verified, see backend/ffmpeg-manifest.json)
+        shell: pwsh
+        run: scripts/fetch-ffmpeg.ps1
       - name: Tests
         working-directory: backend
         run: python -m pytest tests -q
@@ -73,11 +76,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Fetch approved FFmpeg (sha256-verified, see backend/ffmpeg-manifest.json)
+        shell: pwsh
+        run: scripts/fetch-ffmpeg.ps1
       - name: Build frozen backend sidecar
         working-directory: backend
         run: |
           pip install -e . pyinstaller
           pyinstaller atomic-backend.spec --noconfirm
+      - name: Verify FFmpeg staged in frozen build (fail closed)
+        shell: pwsh
+        run: |
+          $ff = "backend/dist/atomic-backend/_internal/ffmpeg/bin"
+          if (-not ((Test-Path "$ff/ffmpeg.exe") -and (Test-Path "$ff/ffprobe.exe"))) {
+            throw "frozen build missing bundled ffmpeg/ffprobe"
+          }
       - name: Stage sidecar into Tauri bundle dir
         shell: pwsh
         run: |

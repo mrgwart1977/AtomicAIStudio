@@ -28,6 +28,14 @@ def _fresh_resolution(monkeypatch):
 
 
 @pytest.fixture()
+def media_tools():
+    """Tests needing real ffmpeg+ffprobe resolution skip cleanly when the
+    approved binaries aren't staged (run scripts/fetch-ffmpeg.ps1)."""
+    if binaries.ffmpeg() is None or binaries.ffprobe() is None:
+        pytest.skip("ffmpeg/ffprobe not resolvable — run scripts/fetch-ffmpeg.ps1")
+
+
+@pytest.fixture()
 def dev_ffmpeg() -> str:
     """A full-featured ffmpeg for fixture synthesis — dev tool only.
     Prefers the system/PATH ffmpeg (gyan full build, GPL — fine for local
@@ -74,7 +82,7 @@ def mp4_12f(tmp_path: Path, ffmpeg: str) -> Path:
 # ------------------------------------------------------------ binaries
 
 
-def test_bundled_binary_resolves_and_is_lgpl():
+def test_bundled_binary_resolves_and_is_lgpl(media_tools):
     tool = binaries.ffmpeg()
     assert tool is not None and tool["source"] == "bundled"
     info = binaries.toolchain_info()["ffmpeg"]
@@ -118,7 +126,7 @@ def test_supervised_cancel_event():
 # ------------------------------------------------------------ probe
 
 
-def test_probe_valid_webm(tmp_path, dev_ffmpeg):
+def test_probe_valid_webm(tmp_path, dev_ffmpeg, media_tools):
     p = engine.probe(webm_17f(tmp_path, dev_ffmpeg))
     assert p["ok"] is True
     assert p["width"] == 64 and p["height"] == 48
@@ -126,12 +134,12 @@ def test_probe_valid_webm(tmp_path, dev_ffmpeg):
     assert p["duration_s"] > 0 and p["probe_backend"] == "ffprobe"
 
 
-def test_probe_valid_mp4(tmp_path, dev_ffmpeg):
+def test_probe_valid_mp4(tmp_path, dev_ffmpeg, media_tools):
     p = engine.probe(mp4_12f(tmp_path, dev_ffmpeg))
     assert p["ok"] is True and p["codec"] in ("h264", "mpeg4")
 
 
-def test_probe_audio_only_rejected(tmp_path, dev_ffmpeg):
+def test_probe_audio_only_rejected(tmp_path, dev_ffmpeg, media_tools):
     audio = _mk(tmp_path, dev_ffmpeg, "audio.mp3",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=1")
     p = engine.probe(audio)
@@ -141,7 +149,7 @@ def test_probe_audio_only_rejected(tmp_path, dev_ffmpeg):
 # ------------------------------------------------------------ validate
 
 
-def test_validate_full_pipeline(tmp_path, dev_ffmpeg):
+def test_validate_full_pipeline(tmp_path, dev_ffmpeg, media_tools):
     v = engine.validate(
         webm_17f(tmp_path, dev_ffmpeg),
         ValidationSpec(width=64, height=48, fps=24.0, frames=17))
@@ -152,27 +160,27 @@ def test_validate_full_pipeline(tmp_path, dev_ffmpeg):
     assert v["frame_check"]["frames"] == 17
 
 
-def test_validate_wrong_resolution_fails(tmp_path, dev_ffmpeg):
+def test_validate_wrong_resolution_fails(tmp_path, dev_ffmpeg, media_tools):
     v = engine.validate(
         webm_17f(tmp_path, dev_ffmpeg),
         ValidationSpec(width=320, height=240))
     assert v["ok"] is False and "width" in v["reason"]
 
 
-def test_validate_wrong_frame_count_fails(tmp_path, dev_ffmpeg):
+def test_validate_wrong_frame_count_fails(tmp_path, dev_ffmpeg, media_tools):
     v = engine.validate(
         webm_17f(tmp_path, dev_ffmpeg), ValidationSpec(frames=12))
     assert v["ok"] is False and "frame count" in v["reason"]
 
 
-def test_validate_unexpected_codec_fails(tmp_path, dev_ffmpeg):
+def test_validate_unexpected_codec_fails(tmp_path, dev_ffmpeg, media_tools):
     v = engine.validate(
         webm_17f(tmp_path, dev_ffmpeg),
         ValidationSpec(codecs=frozenset({"h264"})))
     assert v["ok"] is False and "codec" in v["reason"]
 
 
-def test_validate_empty_and_junk(tmp_path):
+def test_validate_empty_and_junk(media_tools, tmp_path):
     empty = tmp_path / "empty.webm"
     empty.write_bytes(b"")
     assert engine.validate(empty)["reason"] == "file missing or empty"
@@ -183,7 +191,7 @@ def test_validate_empty_and_junk(tmp_path):
     assert v["ok"] is False and v["fully_validated"] is False
 
 
-def test_validate_truncated_fails(tmp_path, dev_ffmpeg):
+def test_validate_truncated_fails(tmp_path, dev_ffmpeg, media_tools):
     src = webm_17f(tmp_path, dev_ffmpeg)
     trunc = tmp_path / "trunc.webm"
     trunc.write_bytes(src.read_bytes()[: src.stat().st_size // 3])
@@ -191,14 +199,14 @@ def test_validate_truncated_fails(tmp_path, dev_ffmpeg):
     assert v["ok"] is False
 
 
-def test_validate_missing_video_stream_fails(tmp_path, dev_ffmpeg):
+def test_validate_missing_video_stream_fails(tmp_path, dev_ffmpeg, media_tools):
     audio = _mk(tmp_path, dev_ffmpeg, "a.m4a",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=1")
     v = engine.validate(audio)
     assert v["ok"] is False and "no video stream" in v["reason"]
 
 
-def test_validate_cancelled(tmp_path, dev_ffmpeg):
+def test_validate_cancelled(tmp_path, dev_ffmpeg, media_tools):
     ev = threading.Event()
     ev.set()
     v = engine.validate(webm_17f(tmp_path, dev_ffmpeg),
@@ -206,7 +214,7 @@ def test_validate_cancelled(tmp_path, dev_ffmpeg):
     assert v["ok"] is False and v["cancelled"] is True
 
 
-def test_validate_no_decode_when_policy_allows(tmp_path, dev_ffmpeg):
+def test_validate_no_decode_when_policy_allows(tmp_path, dev_ffmpeg, media_tools):
     v = engine.validate(
         webm_17f(tmp_path, dev_ffmpeg),
         ValidationSpec(require_full_decode=False))
@@ -217,7 +225,7 @@ def test_validate_no_decode_when_policy_allows(tmp_path, dev_ffmpeg):
 # ------------------------------------------------------------ degraded modes
 
 
-def test_signature_only_never_fully_validated(tmp_path, monkeypatch):
+def test_signature_only_never_fully_validated(tmp_path, monkeypatch, media_tools):
     monkeypatch.setattr(binaries, "find_binary", lambda name: None)
     from app.domain.media_probe import container_signature_ok
     good = tmp_path / "x.webm"
@@ -233,7 +241,7 @@ def test_signature_only_never_fully_validated(tmp_path, monkeypatch):
     assert v2["ok"] is False
 
 
-def test_probe_only_when_ffmpeg_missing(tmp_path, dev_ffmpeg, monkeypatch):
+def test_probe_only_when_ffmpeg_missing(tmp_path, dev_ffmpeg, monkeypatch, media_tools):
     clip = webm_17f(tmp_path, dev_ffmpeg)
     real = binaries.find_binary
 
@@ -249,7 +257,7 @@ def test_probe_only_when_ffmpeg_missing(tmp_path, dev_ffmpeg, monkeypatch):
 # ------------------------------------------------------------ concurrency
 
 
-def test_concurrent_validations(tmp_path, dev_ffmpeg):
+def test_concurrent_validations(tmp_path, dev_ffmpeg, media_tools):
     clips = []
     for i in range(3):
         d = tmp_path / f"d{i}"
@@ -271,7 +279,7 @@ def test_concurrent_validations(tmp_path, dev_ffmpeg):
 # ------------------------------------------------------------ compat shim
 
 
-def test_media_probe_shim_delegates(tmp_path, dev_ffmpeg):
+def test_media_probe_shim_delegates(tmp_path, dev_ffmpeg, media_tools):
     from app.domain import media_probe
     out = media_probe.probe_video(webm_17f(tmp_path, dev_ffmpeg))
     assert out["ok"] is True and out["probe_backend"] == "ffprobe"
