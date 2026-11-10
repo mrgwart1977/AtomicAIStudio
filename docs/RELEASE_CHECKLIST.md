@@ -277,3 +277,15 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 - ffprobe/ffmpeg still not bundled (separate source/license review).
 - Open blockers unchanged: #22 EULA, #28 (merge blocker — preflight
   refusal validated, real-inference stability still unverified), #23-27.
+
+### Licensing review — PyAV/FFmpeg (M4.0 merge audit)
+- PyAV wrapper: BSD-3-Clause. **But** the wheel's av.libs bundles FFmpeg
+  built `--enable-version3` WITH libx264 + libx265 (both GPL-2.0+).
+  Verified by reading --enable flags embedded in the shipped DLLs.
+- ACTION: `av` is EXCLUDED from the frozen installer (atomic-backend.spec)
+  — the distributed artifact contains no x264/x265/FFmpeg binaries.
+  media_probe degrades to container-signature validation in production.
+- PyAV remains a dev/test dependency only (never shipped in that form).
+- Reintroducing video probing to the packaged app requires either an
+  LGPL-clean FFmpeg build or standalone ffprobe under its own license —
+  separate approval item. NVIDIA EULA still tracked as #22.
