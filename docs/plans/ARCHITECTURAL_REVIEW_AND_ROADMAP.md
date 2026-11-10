@@ -259,5 +259,47 @@ after the capability registry and hardware survey exist.
 
 ---
 
+## 11. Program C — Universal Cloud AI Integration (parallel workstream)
+
+*Added 2026-11 — amendment, not a revision of §§1–10. All M-series
+milestones, gates, and priorities are unchanged.*
+
+A second, parallel milestone family for external AI providers. M-series
+continues to own local generation, workers, GPU scheduling and media
+validation; C-series owns provider credentials, cloud job orchestration,
+cost control, and cloud workflows. Both share the same projects, CAS,
+durable jobs, provenance, and command system — a cloud job is just a new
+adapter family (`adapter_kind="cloud"`), not an architectural fork.
+
+| Phase | Scope | Gate |
+|---|---|---|
+| C0 | Feasibility + architecture (research only) | docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md + C0_PROVIDER_FEASIBILITY.md approved |
+| C1 | Unified Provider Manager + secure credential store | mock providers + security tests |
+| C2 | Cloud text (OpenAI, Anthropic, Gemini, DeepSeek, xAI) | tested w/ authorized creds + spend limits |
+| C3 | Cloud image (OpenAI, FLUX, Gemini, Ideogram, Recraft, Leonardo, …) | validated CAS outputs + usage accounting |
+| C4 | Cloud video (Kling, Runway, Luma, Veo, Seedance, Wan, Higgsfield, …) | durable remote jobs E2E + cost report |
+| C5 | Cloud audio/voice (ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble, …) | validated audio + clone consent |
+| C6 | Extended ecosystem (restricted/enterprise/niche/MCP + honest status for D/E rows) | truthful status for all 60 catalog rows |
+| C7 | Hybrid local/cloud orchestration (user-authorized routing) | controlled hybrid workflows |
+
+Feasibility snapshot (C0 research, 2026-11): **30 A-class** verified official
+APIs, **19 B-class** restricted/gated, **4 C-class** authorized agent/MCP
+channels, **3 D-class** external-only, **6 E-class** unavailable/prohibited
+(incl. 2 ambiguous names resolved to real providers). 60 catalog rows
+normalize to **53 provider accounts**.
+
+Hard rules carried into every C phase: credentials never in the DB/backups/
+logs (Windows Credential Manager / DPAPI vault); estimated cost shown in the
+command preview before any paid request; unknown remote outcomes reconcile,
+never silently resubmit; mock providers in CI — live calls only with
+explicit authorization and spend limits; D/E providers show honest status,
+never simulated functionality.
+
+Tracking: Program C epic + per-phase issues on GitHub. Documents:
+`docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md`,
+`docs/plans/C0_PROVIDER_FEASIBILITY.md`.
+
+---
+
 *Generated for owner review. No production code has been written. Awaiting
 approval before implementation begins.*
