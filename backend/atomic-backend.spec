@@ -26,6 +26,18 @@ datas = [
     ("app/db/alembic", "backend_res/alembic"),
 ]
 
+# Approved FFmpeg binaries (owner-approved, sha256-verified — see
+# backend/ffmpeg-manifest.json). Bundled only when present: the frozen
+# app REQUIRES them for full video validation, so build-sidecar runs
+# scripts/fetch-ffmpeg.ps1 first. Missing dir here means a dev-only
+# sidecar build.
+import os  # noqa: E402
+if os.path.isdir("vendor/ffmpeg/bin"):
+    datas += [
+        ("vendor/ffmpeg/bin", "ffmpeg/bin"),
+        ("vendor/ffmpeg/licenses", "ffmpeg/licenses"),
+    ]
+
 a = Analysis(
     ["sidecar_entry.py"],
     pathex=["."],
@@ -36,8 +48,10 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # 'av' (PyAV) ships GPL-licensed x264/x265 DLLs in its av.libs wheel
-    # payload — excluded from the distributed artifact pending a licensing
-    # decision (media_probe falls back to container-signature checks).
+    # payload — permanently excluded from the distributed artifact.
+    # Production media validation uses the approved BtbN LGPL FFmpeg
+    # binaries staged under vendor/ffmpeg (see ffmpeg-manifest.json);
+    # PyAV remains a dev-only probing dependency.
     excludes=["pytest", "pytest_asyncio", "ruff", "tkinter", "av"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

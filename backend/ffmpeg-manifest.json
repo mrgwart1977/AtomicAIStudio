@@ -1,0 +1,31 @@
+{
+  "name": "ffmpeg",
+  "approved_for": "Atomic AI Studio M4.0.1 production media engine",
+  "publisher": "BtbN/FFmpeg-Builds (Timo Rothenpieler — FFmpeg developer; CI autobuild)",
+  "upstream": "https://github.com/FFmpeg/FFmpeg",
+  "builds_repo": "https://github.com/BtbN/FFmpeg-Builds",
+  "release_tag": "autobuild-2026-11-09-12-42",
+  "release_url": "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-09-12-42",
+  "ffmpeg_version": "n9.0.2-48-gd4070a14ce",
+  "variant": "win64-lgpl-shared-9.0",
+  "license": "LGPL-2.1+ (no --enable-gpl, no --enable-nonfree; libx264/libx265/libxavs2/libxvid/fdk-aac explicitly disabled)",
+  "archive": {
+    "file": "ffmpeg-n9.0.2-48-gd4070a14ce-win64-lgpl-shared-9.0.zip",
+    "url": "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-09-12-42/ffmpeg-n9.0.2-48-gd4070a14ce-win64-lgpl-shared-9.0.zip",
+    "size": 76530124,
+    "sha256": "b0981aea79d223dd78e769ce3c9106e4b3f62f56464e243537e8976d957bb2a6"
+  },
+  "ship_files": [
+    "bin/ffmpeg.exe",
+    "bin/ffprobe.exe",
+    "bin/avcodec-63.dll",
+    "bin/avdevice-63.dll",
+    "bin/avfilter-12.dll",
+    "bin/avformat-63.dll",
+    "bin/avutil-61.dll",
+    "bin/swresample-7.dll",
+    "bin/swscale-10.dll"
+  ],
+  "skip_files": ["bin/ffplay.exe", "doc/"],
+  "notes": "Shared exes import every libav* DLL — ship all seven. ffplay (SDL2 preview player) is not needed and not shipped."
+}

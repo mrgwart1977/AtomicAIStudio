@@ -454,3 +454,16 @@ Open blockers carried forward (all stay open):
   persistent workers · **#24** worker stderr diagnostics · **#25**
   multi-GPU hardware validation · **#26** VRAM calibration · **#27**
   catalog expansion · pre-existing #5–#11, #14, #15.
+
+## M4.0.1 — production media engine (issue #31, 2026-11-09)
+
+| Requirement | Evidence | Where |
+|---|---|---|
+| Approved LGPL binaries | BtbN `n9.0.2-48-gd4070a14ce` lgpl-shared, sha256 `b0981aea…2a6` (3-way verified); no `--enable-gpl`/`--enable-nonfree`; x264/x265 disabled | `backend/ffmpeg-manifest.json`, `scripts/fetch-ffmpeg.ps1` |
+| Centralized media service | `binaries` (env→bundled→PATH + toolchain provenance), `supervise` (proc_guard Job Objects, fail-closed, timeout, cancel), `policy` (ValidationSpec tolerances), `engine` (probe/decode/validate) | `backend/app/domain/media/` |
+| Full-decode validation | ffprobe metadata → `ffmpeg -xerror -f null` full decode → `nb_read_frames` exact count → duration tolerance; signature never fully validates | `engine.validate()` |
+| Commit-boundary wiring | generation jobs validate before CAS registration; frozen builds REQUIRE `fully_validated`; provenance records mode + checks + toolchain | `adapters/inference.py` |
+| Process safety | argv-only, `-nostdin`, bounded timeouts, kill-on-close, tree terminate, unsupervised spawn impossible | `media/supervise.py`, `proc_guard.py` |
+| Packaging | `vendor/ffmpeg` staged by fetch script → `datas` → `_internal/ffmpeg/`; licenses+NOTICE+BUILDCONF shipped; installer 74.42 MiB | `atomic-backend.spec`, `build-sidecar.ps1` |
+
+Suite: **188/188** (21 new media tests). Not merged — awaiting owner review.

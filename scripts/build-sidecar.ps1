@@ -11,6 +11,10 @@ if (-not (Test-Path $pyinstaller)) {
     Write-Error "pyinstaller not found - run: backend\.venv\Scripts\pip install pyinstaller"
 }
 
+# Approved FFmpeg binaries must be staged before freezing — the frozen
+# app requires them for full video validation (M4.0.1).
+& (Join-Path $PSScriptRoot "fetch-ffmpeg.ps1")
+
 Push-Location $backend
 try {
     & $pyinstaller atomic-backend.spec --noconfirm
