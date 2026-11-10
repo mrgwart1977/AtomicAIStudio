@@ -290,6 +290,31 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   LGPL-clean FFmpeg build or standalone ffprobe under its own license —
   separate approval item. NVIDIA EULA still tracked as #22.
 
+### M4.0.1 — production media engine (issue #31, in progress on branch)
+
+- Approved binary: BtbN/FFmpeg-Builds `ffmpeg-n9.0.2-48-gd4070a14ce`
+  `win64-lgpl-shared-9.0`, tag `autobuild-2026-11-09-12-42`, zip sha256
+  `b0981aea…2a6` (verified vs publisher manifest + API digest + local
+  hash). LGPL-clean config confirmed on the shipped binaries:
+  no `--enable-gpl`/`--enable-nonfree`; x264/x265/xavs2/xvid/fdk-aac
+  explicitly disabled.
+- Shipped: ffmpeg.exe + ffprobe.exe + 7 shared DLLs (no ffplay) +
+  LICENSE.txt + NOTICE.txt (source pointer) + BUILDCONF.txt.
+- `domain/media/` service: binaries (env→bundled→PATH resolution +
+  toolchain provenance), supervise (proc_guard Job Objects, timeout,
+  cancel), policy (ValidationSpec + documented tolerances; VFR uses
+  measured decoded frames, never fps×duration), engine (probe /
+  full-decode `-xerror` / nb_read_frames count / ordered validate).
+- Generation commit boundary now requires `engine.validate()` pass;
+  signature-only can never mark output fully validated; frozen builds
+  REQUIRE full validation (missing bundled decoder = packaging bug =
+  fail closed).
+- Installer grew 27.67 → **74.42 MiB** (FFmpeg payload ~47 MiB
+  compressed).
+- PyAV remains dev-only and excluded; gyan.dev builds are GPL —
+  dev-machine fixture tool only, never bundled.
+- #28 stays open — critical (unchanged); #22 unchanged.
+
 ### M4.0 merged — internal development milestone (2026-11-10)
 
 - PR **#29** merged into `main`, merge commit

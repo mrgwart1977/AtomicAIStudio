@@ -26,6 +26,10 @@ apps/desktop/src-tauri/backend-dist/
 backend/build/
 backend/dist/
 
+# Vendored binaries (fetched + sha256-verified by scripts/fetch-ffmpeg.ps1;
+# see backend/ffmpeg-manifest.json)
+backend/vendor/
+
 # App data (local dev)
 data/
 *.local.json

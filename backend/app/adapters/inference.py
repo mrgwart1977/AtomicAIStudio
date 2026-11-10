@@ -25,6 +25,7 @@ import logging
 import os
 import random
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -33,7 +34,9 @@ from sqlalchemy import select
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
 from app.db.models import RuntimeInstall, utcnow
-from app.domain import compatibility, hardware, media_probe, model_catalog, model_files, proc_guard
+from app.domain import compatibility, hardware, model_catalog, model_files, proc_guard
+from app.domain.media import engine as media_engine
+from app.domain.media import policy as media_policy
 from app.domain.model_catalog import ModelSpec
 from app.domain.backup import ProgressReporter
 
@@ -707,21 +710,33 @@ class SdCppVideoAdapter(SdCppAdapter):
             raise ValueError(f"[{flavor}/{mode}] "
                              + _friendly_error("\n".join(log_tail), spec))
 
-        # Validated-output commit: the clip is probed BEFORE it becomes an
-        # asset. Unreadable output never registers; an unresolvable probe
-        # (ffprobe absent) falls back to a container-signature check and is
-        # recorded in provenance rather than silently trusted.
+        # Validated-output commit: the clip must pass full media-engine
+        # validation BEFORE it becomes an asset — ffprobe metadata +
+        # complete ffmpeg decode + exact decoded-frame count. A container
+        # signature alone can never mark output fully validated; degraded
+        # modes (no binaries — dev only) are flagged in provenance. Frozen
+        # builds REQUIRE full validation: a missing bundled decoder is a
+        # packaging bug, not a reason to register unchecked media.
+        vspec = media_policy.ValidationSpec(
+            width=width, height=height, fps=float(fps) if fps else None,
+            frames=int(frames) if frames else None,
+            duration_s=(frames / fps) if (frames and fps) else None)
+        validation: dict[str, Any] = {}
         probe: dict[str, Any] = {}
         for f in outputs:
-            probe = media_probe.probe_video(f)
-            if not probe.get("ok"):
-                if probe.get("probe_unavailable"):
-                    if not media_probe.container_signature_ok(f):
-                        f.unlink(missing_ok=True)
-                        raise ValueError("video output failed validation — unrecognized container")
-                else:
-                    f.unlink(missing_ok=True)
-                    raise ValueError(f"video output failed validation — {probe.get('reason')}")
+            validation = media_engine.validate(
+                f, vspec, cancel=handle.cancel_event)
+            probe = validation.get("probe") or {}
+            if validation.get("cancelled"):
+                f.unlink(missing_ok=True)
+                raise JobCancelled()
+            if not validation.get("ok"):
+                f.unlink(missing_ok=True)
+                raise ValueError(f"video output failed validation — {validation.get('reason')}")
+            if getattr(sys, "frozen", False) and not validation.get("fully_validated"):
+                f.unlink(missing_ok=True)
+                raise ValueError("video output could not be fully validated "
+                                 f"(mode: {validation.get('validation_mode')})")
 
         assets = []
         for path in outputs:
@@ -758,7 +773,19 @@ class SdCppVideoAdapter(SdCppAdapter):
         }
         if probe:
             media["probe"] = {k: v for k, v in probe.items() if k != "reason"}
-            if probe.get("probe_unavailable"):
+        if validation:
+            media["validation"] = {
+                "mode": validation.get("validation_mode"),
+                "fully_validated": validation.get("fully_validated"),
+                "checks": validation.get("checks"),
+                "decode": {k: v for k, v in (validation.get("decode") or {}).items()
+                           if k in ("ran", "ok", "exit", "elapsed_ms")},
+                "frame_check": validation.get("frame_check"),
+                "toolchain": {k: {kk: vv for kk, vv in v.items()
+                                  if kk in ("available", "source", "version")}
+                              for k, v in (validation.get("toolchain") or {}).items()},
+            }
+            if validation.get("probe_unavailable"):
                 media["probe_unavailable"] = True
         yield {
             "done": True, "progress": 1.0,
