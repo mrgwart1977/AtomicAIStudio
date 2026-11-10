@@ -416,3 +416,41 @@ Architecture + contracts only; the model download gate is
 | Retry-hardened downloads | bounded in-stream resume on flaky connections | `model_files.download_to` |
 
 Suite: **144/144**.
+
+## M4.0 Phase 3 — resource safety + packaged integration (2026-11-09/10)
+
+Resource-safety system built in response to issue #28 (orphaned-worker
+resource-exhaustion incident). See `docs/plans/M4_0_RESOURCE_SAFETY.md`.
+
+| Requirement | Evidence | Where |
+|---|---|---|
+| Fail-closed worker supervision | sd-cli spawned suspended, assigned to a Job Object with `KILL_ON_JOB_CLOSE` before resume; assign failure = never launched; orphan reaper on backend exit | `domain/proc_guard.py`, `adapters/inference.py` |
+| Memory admission control | preflight estimates per residency mode (`cpu_offload`/`gpu`/`te_cpu`/`disk`) using real component bytes + activation overhead; blocks on insufficient RAM, commit headroom, or VRAM incl. existing reservations; `warn` requires `memory_risk_acknowledged` | `domain/jobs.py`, `domain/compatibility.py`, `domain/gpu_sched.py` |
+| Runtime watchdog | samples avail-RAM/commit/VRAM + worker RSS every interval; critical-threshold breach = graceful cancel → bounded tree kill | `domain/jobs.py` watchdog |
+| Post-job hygiene | dead-check verifies worker+tree gone; RAM/VRAM reservations released in `finally`; partial output deleted before asset registration | `domain/jobs.py`, `adapters/inference.py` |
+| OOM diagnostics | nonzero worker exit tagged `[flavor/residency]`; OOM → friendly error, no asset, no auto-retry | `adapters/inference.py` |
+| Production override hygiene | `ATOMIC_ALLOW_EXPERIMENTAL_GEN` absent in frozen builds; Wan moved to `tested` so no override is needed for it | `adapters/inference.py`, `model_catalog.py` |
+| Real-hardware gate validation | live preflight BLOCK on the 16 GiB machine: 4.75 GiB avail vs ~5.8 GiB B2 estimate (clean threshold 9.8 GiB); no worker launched; recorded on #28 | `docs/plans/M4_0_RESOURCE_SAFETY.md`, issue #28 |
+| Packaged video playback | frozen sidecar serves the validated Wan clip (`200`, `video/webm`, 447 KB) and signature-validates media | `domain/media_probe.py`, asset file endpoint |
+| GPL hygiene | PyAV wheel bundles x264/x265 (`--enable-libx264/x265` embedded in shipped DLLs) → `av` excluded from frozen installer; dev/test dep only; production probes via container-signature fallback | `backend/atomic-backend.spec`, `docs/RELEASE_CHECKLIST.md` |
+
+Suite: **167/167** · tsc + vite clean · frozen backend smoke (migrations,
+auth, API) · NSIS installer 27.67 MiB without `av.libs`/x264/x265.
+
+## M4.0 merged (2026-11-10)
+
+Merged into `main` via **PR #29**, merge commit
+`b5c6af889b5adbdb1433a02b85ea286608f48a0b`. CI green on merge: backend
+3.12 + 3.14, frontend, package, tauri-check. Internal development
+milestone only — **not a public release**.
+
+Open blockers carried forward (all stay open):
+
+- **#28 — critical**: safety preflight refusal validated on real
+  hardware; real Wan inference under the new safeguards NOT yet
+  validated; B2/B3 residency modes unverified on hardware. Blocks
+  unrestricted video-generation validation and public release.
+- **#22** CUDA/NVIDIA redistribution (release blocker) · **#23** M4.1
+  persistent workers · **#24** worker stderr diagnostics · **#25**
+  multi-GPU hardware validation · **#26** VRAM calibration · **#27**
+  catalog expansion · pre-existing #5–#11, #14, #15.

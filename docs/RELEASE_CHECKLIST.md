@@ -289,3 +289,20 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 - Reintroducing video probing to the packaged app requires either an
   LGPL-clean FFmpeg build or standalone ffprobe under its own license —
   separate approval item. NVIDIA EULA still tracked as #22.
+
+### M4.0 merged — internal development milestone (2026-11-10)
+
+- PR **#29** merged into `main`, merge commit
+  `b5c6af889b5adbdb1433a02b85ea286608f48a0b`. CI green: backend 3.12/3.14,
+  frontend, package, tauri-check. Suite **167/167** on the merged tree.
+- Installer rebuilt post-PyAV-exclusion: `Atomic AI
+  Studio_0.1.0_x64-setup.exe` **27.67 MiB** — no `av.libs`, no x264/x265.
+- This is an internal milestone only — NOT a public release and NOT a
+  declaration that the #28 hardware-stability incident is resolved.
+- #28 stays **open — critical**: preflight refusal was validated on real
+  hardware (blocked at 4.75 GiB avail vs ~5.8 GiB B2 need), but real Wan
+  inference under the new safeguards has not run; B2/B3 residency modes
+  are unverified on hardware. Blocks unrestricted video-generation
+  validation and public release.
+- All other tracked items remain open as recorded (#22, #23–#27,
+  #5–#11, #14, #15).
