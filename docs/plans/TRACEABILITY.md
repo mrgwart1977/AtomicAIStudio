@@ -466,4 +466,10 @@ Open blockers carried forward (all stay open):
 | Process safety | argv-only, `-nostdin`, bounded timeouts, kill-on-close, tree terminate, unsupervised spawn impossible | `media/supervise.py`, `proc_guard.py` |
 | Packaging | `vendor/ffmpeg` staged by fetch script → `datas` → `_internal/ffmpeg/`; licenses+NOTICE+BUILDCONF shipped; installer 74.42 MiB | `atomic-backend.spec`, `build-sidecar.ps1` |
 
-Suite: **188/188** (21 new media tests). Not merged — awaiting owner review.
+Suite: **188/188** (21 new media tests).
+
+Merged into `main` via **PR #32**, merge commit
+`15181efc061db272a38594a4b118bb20a50a85ca` (issue #31 closed).
+CI green on merge: backend 3.12/3.14 (with approved-FFmpeg fetch),
+frontend, package (incl. staged-decoder fail-closed check), tauri-check.
+Internal development milestone only.

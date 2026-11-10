@@ -290,7 +290,7 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   LGPL-clean FFmpeg build or standalone ffprobe under its own license —
   separate approval item. NVIDIA EULA still tracked as #22.
 
-### M4.0.1 — production media engine (issue #31, in progress on branch)
+### M4.0.1 — production media engine (issue #31, MERGED via PR #32)
 
 - Approved binary: BtbN/FFmpeg-Builds `ffmpeg-n9.0.2-48-gd4070a14ce`
   `win64-lgpl-shared-9.0`, tag `autobuild-2026-11-09-12-42`, zip sha256
