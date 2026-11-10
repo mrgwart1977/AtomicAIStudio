@@ -264,3 +264,16 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 - RAM-aware preflight/compatibility, runtime pressure watchdog (never CPU%),
   and configurable headroom thresholds added; see docs/plans/M4_0_RESOURCE_SAFETY.md.
 - Controlled real-hardware reproduction still requires owner approval.
+
+### M4.0 Phase 3 — non-inference integration (post-#28)
+- Sidecar rebuilt + smoke-verified: migrations, API, auth, PyAV bundled
+  (`av>=13`, existing approved dep — PyAV BSD-3; bundled FFmpeg libs are
+  LGPL — keep dynamic-linking notices in installer).
+- Video playback path verified: `/assets/{id}/file` serves the real Wan
+  clip (200, video/webm, 447 KB).
+- Honest-failure UX verified end-to-end: B2 job at 4.2 GiB free →
+  `preflight memory check failed: insufficient system RAM: job needs
+  ~5.8 GiB` — the residency-aware estimate flows to the user.
+- ffprobe/ffmpeg still not bundled (separate source/license review).
+- Open blockers unchanged: #22 EULA, #28 (merge blocker — preflight
+  refusal validated, real-inference stability still unverified), #23-27.
