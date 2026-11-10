@@ -95,9 +95,18 @@ fn backend_command(port: u16, token: &str, data_dir: &Path) -> Option<Command> {
     Some(cmd)
 }
 
-fn wait_for_backend(port: u16, timeout: Duration) -> Result<(), String> {
+fn wait_for_backend(child: &mut Child, port: u16, timeout: Duration) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
+        // A backend that died during startup (e.g. data-dir lock held by
+        // another instance) should fail fast instead of waiting out the
+        // full timeout.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "backend sidecar exited during startup ({status}) — see the \
+                 data-dir logs; another instance may already be running"
+            ));
+        }
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
             // Probe /health — TCP accept alone does not mean uvicorn is serving.
             let req = b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
@@ -150,9 +159,9 @@ fn main() {
         eprintln!("[atomic] backend not found (no packaged binary, no dev source)");
         std::process::exit(2);
     });
-    let child = cmd.spawn().expect("spawn backend sidecar");
+    let mut child = cmd.spawn().expect("spawn backend sidecar");
 
-    if let Err(e) = wait_for_backend(port, Duration::from_secs(30)) {
+    if let Err(e) = wait_for_backend(&mut child, port, Duration::from_secs(30)) {
         eprintln!("[atomic] {e}");
         // Clean up the half-started child rather than orphaning it.
         let mut c = child;

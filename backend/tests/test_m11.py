@@ -303,6 +303,9 @@ def test_partial_package_swept_on_startup(client, settings, tmp_path):
     (staging / "blob").write_bytes(b"x")
 
     # Recreate the app → lifespan sweeps destinations + reconciles runs.
+    # Release the first app's data-dir ownership — simulates the backend
+    # exiting before the restarted instance takes over.
+    client.app.state.data_dir_lock.release()
     from app.main import create_app
     from fastapi.testclient import TestClient
     with TestClient(create_app(settings)) as c2:
@@ -325,6 +328,8 @@ def test_interrupted_run_row_reconciled(client, settings):
             destination_dir="x", stats_json={}, job_id=None,
         ))
         s.commit()
+    # Release the first app's data-dir ownership — simulates a restart.
+    client.app.state.data_dir_lock.release()
     from app.main import create_app
     from fastapi.testclient import TestClient
     with TestClient(create_app(settings)) as c2:

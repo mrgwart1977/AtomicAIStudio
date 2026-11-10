@@ -356,13 +356,17 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
     open the same data dir concurrently. WAL + busy_timeout prevent
     file-level corruption but two JobEngines could double-claim the
     same queued job. A data-dir lock file is proposed (see below).
-- **Proposed hardening (not yet implemented — awaiting approval):**
-  1. `<data_dir>\.atomic.lock` held via OS file lock for the process
-     lifetime (auto-released on exit/crash); second backend on the same
-     data dir exits with a clear "already in use" message.
-  2. Pre-migration revision check: if `alembic_version` contains a
-     revision unknown to this build, abort startup with a clear
-     "database was created by a newer version" error.
+- **Hardening shipped (issue #36, PR #37):**
+  1. `<data_dir>\.atomic.lock` — OS byte-range lock (`msvcrt.locking`)
+     held for backend lifetime; auto-released on exit/crash; second
+     backend exits before migrations/jobs/workers with a clear
+     "already in use" error. The file itself is never the lock and is
+     never deleted.
+  2. Pre-migration revision check: an `alembic_version` unknown to the
+     running build aborts startup with "database was created by a newer
+     version" — never downgraded, rewritten, or recreated.
+  3. Tauri shell fails fast if the sidecar dies during startup instead
+     of waiting out the 30 s readiness timeout.
 - WebView2 user-data folder follows the identifier
   (`%LOCALAPPDATA%\com.atomicdream.engine`) — harmless fresh state;
   the frontend persists nothing there.

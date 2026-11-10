@@ -82,6 +82,8 @@ def test_auth_required(client):
 def test_persistence_across_recreate(settings, client):
     p = make_project(client, "Persistent")
     client2 = None
+    # Release the first app's data-dir ownership — simulates a restart.
+    client.app.state.data_dir_lock.release()
     from fastapi.testclient import TestClient
     from app.main import create_app
 
