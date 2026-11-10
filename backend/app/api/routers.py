@@ -96,7 +96,7 @@ def _entity_out(row) -> dict:
 
 @open_router.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": "atomic-ai-studio-backend", "version": "0.1.0"}
+    return {"status": "ok", "service": "atomic-dream-engine-backend", "version": "0.1.0"}
 
 
 @api_router.get("/api/hardware")

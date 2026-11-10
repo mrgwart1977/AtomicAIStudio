@@ -73,7 +73,7 @@ export default function App() {
   if (!ready) {
     return (
       <div className="flex h-full items-center justify-center text-muted">
-        Starting Atomic AI Studio…
+        Starting Atomic Dream Engine…
       </div>
     );
   }

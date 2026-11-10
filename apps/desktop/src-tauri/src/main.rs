@@ -1,4 +1,4 @@
-//! Atomic AI Studio — Tauri shell.
+//! Atomic Dream Engine — Tauri shell.
 //!
 //! The Python/FastAPI backend runs as a managed sidecar: it is spawned
 //! when the app starts, probed for readiness, and killed when the app

@@ -57,7 +57,7 @@ one-click alternative in the Model Manager; CPU is the no-GPU fallback.
   the use restrictions (no illegal/harmful content categories, documented in
   the catalog + shown in the install dialog).
 - **Redistribution:** the license permits copying/sharing weights with the
-  license attached — but Atomic AI Studio **does not bundle weights** anyway
+  license attached — but Atomic Dream Engine **does not bundle weights** anyway
   (requirement G.6). Each user downloads separately from Hugging Face — the
   compliant-by-construction path.
 - **UI surface:** license name + notes + `commercial_ok` display on every

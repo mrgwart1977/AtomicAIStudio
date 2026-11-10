@@ -1,4 +1,4 @@
-# Atomic AI Studio — Devin Handoff v0.9
+# Atomic Dream Engine — Devin Handoff v0.9
 
 ## Start here
 1. Read [Devin instructions](prompts/DEVIN_START_HERE.md).
@@ -6,7 +6,7 @@
 3. Open the [offline design gallery](visuals/GALLERY.html) and [visual-to-requirement index](VISUAL_DESIGN_SPEC.md).
 4. Read the base plan and all feature amendments below. Newer amendments clarify conflicts; no accepted feature is silently dropped.
 
-The product is now **Atomic AI Studio**, repository slug `atomic-ai-studio`, Windows executable `AtomicAIStudio.exe`. This package is a specification and design handoff, not compiled software.
+The product is now **Atomic Dream Engine**, repository slug `atomic-dream-engine`, Windows executable `AtomicAIStudio.exe`. This package is a specification and design handoff, not compiled software.
 
 ## Previous scope and included documentation
 

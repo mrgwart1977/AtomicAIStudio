@@ -71,7 +71,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-ai-studio"
+name = "atomic-dream-engine"
 version = "0.1.0"
 dependencies = [
  "serde",

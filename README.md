@@ -1,4 +1,4 @@
-# Atomic AI Studio
+# Atomic Dream Engine
 
 A modular, offline-first Windows desktop application for planning, generating,
 editing, and finishing AI-assisted films. Windows executable: `AtomicAIStudio.exe`.
@@ -94,10 +94,10 @@ apps\desktop\src-tauri\
   backend-dist\atomic-backend\atomic-backend.exe   # bundled resource
 ```
 
-Installed layout (per-user, `%LOCALAPPDATA%\Atomic AI Studio\`):
+Installed layout (per-user, `%LOCALAPPDATA%\Atomic Dream Engine\`):
 
 ```
-atomic-ai-studio.exe
+atomic-dream-engine.exe
 backend\atomic-backend.exe + _internal\   (embedded Python runtime)
 uninstall.exe
 ```

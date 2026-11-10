@@ -1,6 +1,6 @@
 # packages/contracts
 
-Shared typed API contracts for Atomic AI Studio.
+Shared typed API contracts for Atomic Dream Engine.
 
 The backend is the single source of truth: FastAPI emits an OpenAPI
 schema at `/openapi.json`. The desktop app regenerates its client types

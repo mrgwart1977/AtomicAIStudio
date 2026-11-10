@@ -1,4 +1,4 @@
-# Atomic AI Studio — Architectural Review and Implementation Roadmap
+# Atomic Dream Engine — Architectural Review and Implementation Roadmap
 
 Date: 2026-11-08 · Basis: handoff v0.9 (`docs/handoff/`) · Status: proposal awaiting approval
 
@@ -93,7 +93,7 @@ simplifications:
 | G9 | **UI localization framework** | Subtitle/dialogue localization is specced; app-UI i18n is not | Wrap strings via i18next from day one; low cost now, expensive later. |
 | G10 | **Update mechanism / telemetry** | Opt-in required, mechanism unspecified | Tauri updater (signed) post-1.0; telemetry off by default. |
 | G11 | **Scope pressure** | ~60 feature systems, 100+ proposed tables, ten amendments | The spec itself warns against parallel placeholder modules. Strict vertical slices with a traceability table (see §7). |
-| G12 | **"nul"/naming hygiene** | Rename to Atomic AI Studio applies to future code; `nul` file accidentally committed earlier has been removed | Use `AtomicAIStudio` identifiers from the first commit. |
+| G12 | **"nul"/naming hygiene** | Rename to Atomic Dream Engine applies to future code; `nul` file accidentally committed earlier has been removed | Use `AtomicAIStudio` identifiers from the first commit. |
 
 Tensions worth noting rather than "fixing": beginner simplicity vs. the volume of
 advanced controls (resolved by Guided/Standard/Advanced depths — the design
@@ -140,7 +140,7 @@ checkable backlog:
 ## 6. Proposed repository structure
 
 ```
-atomic-ai-studio/
+atomic-dream-engine/
 ├── apps/
 │   └── desktop/                  # Tauri 2 shell
 │       ├── src-tauri/            # Rust: window, sidecar mgmt, credentials, updater
@@ -206,7 +206,7 @@ same smallest useful app:
 
 **First deliverable:** a Windows dev build where a user can
 
-1. Open Atomic AI Studio → four-action home (real layout per board 01).
+1. Open Atomic Dream Engine → four-action home (real layout per board 01).
 2. Create projects, rename/duplicate/archive/delete, switch without restart,
    per-project settings — with enforced isolation.
 3. Open a project → Character Library: create/edit/archive characters with
