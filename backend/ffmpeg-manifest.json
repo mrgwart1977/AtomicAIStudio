@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg",
-  "approved_for": "Atomic AI Studio M4.0.1 production media engine",
+  "approved_for": "Atomic Dream Engine M4.0.1 production media engine",
   "publisher": "BtbN/FFmpeg-Builds (Timo Rothenpieler — FFmpeg developer; CI autobuild)",
   "upstream": "https://github.com/FFmpeg/FFmpeg",
   "builds_repo": "https://github.com/BtbN/FFmpeg-Builds",

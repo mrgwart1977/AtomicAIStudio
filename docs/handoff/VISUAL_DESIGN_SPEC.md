@@ -1,4 +1,4 @@
-# Visual Design Specification — Atomic AI Studio v0.9
+# Visual Design Specification — Atomic Dream Engine v0.9
 
 ## Status and design authority
 

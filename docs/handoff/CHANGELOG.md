@@ -1,7 +1,7 @@
 # Changelog
 
 ## v0.9 — 2026-11-08
-Renamed the application to Atomic AI Studio throughout current documents, slug examples, diagram text, ZIP and root folder. Audited v0.8 visual coverage, documented unavailable exact in-chat picture sources, added 29 original labeled schematic boards plus offline gallery/index and embedded image references in plans. Recreated the two earlier UI previews with Atomic branding. Added branding migration and visual acceptance criteria; all accepted prior feature scope remains.
+Renamed the application to Atomic Dream Engine throughout current documents, slug examples, diagram text, ZIP and root folder. Audited v0.8 visual coverage, documented unavailable exact in-chat picture sources, added 29 original labeled schematic boards plus offline gallery/index and embedded image references in plans. Recreated the two earlier UI previews with Atomic branding. Added branding migration and visual acceptance criteria; all accepted prior feature scope remains.
 
 
 ## v0.8 — 2026-11-08

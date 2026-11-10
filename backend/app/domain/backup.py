@@ -162,7 +162,7 @@ def project_manifest(session: Session, project) -> tuple[dict, list[AssetFile]]:
 
     manifest = {
         "format_version": FORMAT_VERSION,
-        "app": "atomic-ai-studio",
+        "app": "atomic-dream-engine",
         "created_at": utcnow().isoformat(),
         "project": _row_dict(project),
         "prompt_draft": _row_dict(draft) if draft else None,

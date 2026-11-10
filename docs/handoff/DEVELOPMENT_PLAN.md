@@ -1,4 +1,4 @@
-# Atomic AI Studio — Devin Implementation Handoff
+# Atomic Dream Engine — Devin Implementation Handoff
 Version: 0.9  
 Status: Product requirements and implementation plan  
 Target: Windows standalone desktop application
@@ -9,7 +9,7 @@ Read [ADDITIONAL_REQUIREMENTS.md](ADDITIONAL_REQUIREMENTS.md) for the accepted v
 
 ## 1. Product objective
 
-Build **Atomic AI Studio**, a modular, Windows desktop application for planning, generating, editing, and finishing AI-assisted films. It must provide a professional workflow across project management, characters, reference analysis, image/video/audio generation, LoRA training, scene blocking, and a multitrack editor.
+Build **Atomic Dream Engine**, a modular, Windows desktop application for planning, generating, editing, and finishing AI-assisted films. It must provide a professional workflow across project management, characters, reference analysis, image/video/audio generation, LoRA training, scene blocking, and a multitrack editor.
 
 This document is an implementation handoff for Devin. Treat it as the source of truth for the initial implementation. Build working software incrementally; do not represent mock adapters or unimplemented features as production-ready.
 
@@ -423,4 +423,4 @@ Multitrack timeline, inspector, grade, audio and reversible edits.
 
 
 ## v0.9 branding and visual authority
-Product name is **Atomic AI Studio**. Read [Visual Audit and Rebrand](VISUAL_AUDIT_AND_REBRAND.md) and [Visual Design Specification](VISUAL_DESIGN_SPEC.md). Use the bundled original design boards as layout proposals with the preceding functional requirements.
+Product name is **Atomic Dream Engine**. Read [Visual Audit and Rebrand](VISUAL_AUDIT_AND_REBRAND.md) and [Visual Design Specification](VISUAL_DESIGN_SPEC.md). Use the bundled original design boards as layout proposals with the preceding functional requirements.

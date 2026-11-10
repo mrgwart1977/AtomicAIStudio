@@ -1,4 +1,4 @@
-"""Atomic AI Studio backend service.
+"""Atomic Dream Engine backend service.
 
 Local FastAPI sidecar started and stopped by the Tauri desktop shell.
 Binds to loopback only; every API call (except /health) requires the

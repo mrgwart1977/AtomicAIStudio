@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "atomic-ai-studio-backend"
+name = "atomic-dream-engine-backend"
 version = "0.1.0"
-description = "Atomic AI Studio local backend service (FastAPI sidecar for the Tauri desktop shell)"
+description = "Atomic Dream Engine local backend service (FastAPI sidecar for the Tauri desktop shell)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

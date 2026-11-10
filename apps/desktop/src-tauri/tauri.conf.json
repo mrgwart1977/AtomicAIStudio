@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Atomic AI Studio",
+  "productName": "Atomic Dream Engine",
   "version": "0.1.0",
-  "identifier": "com.atomicai.studio",
+  "identifier": "com.atomicdream.engine",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Atomic AI Studio",
+        "title": "Atomic Dream Engine",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,
@@ -36,7 +36,7 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "publisher": "Atomic AI Studio",
+    "publisher": "Atomic Dream Engine",
     "shortDescription": "AI filmmaking studio",
     "category": "Video"
   }

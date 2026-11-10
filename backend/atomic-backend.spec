@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the Atomic AI Studio backend sidecar.
+"""PyInstaller spec for the Atomic Dream Engine backend sidecar.
 
 Produces an onedir build: dist/atomic-backend/atomic-backend.exe plus
 _internal dependencies. Alembic migration scripts are bundled as data

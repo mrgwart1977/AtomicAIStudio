@@ -130,7 +130,7 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     expected = meta.get("expected_size") or expected_size
 
     have = part.stat().st_size if part.exists() else 0
-    headers = {"User-Agent": "atomic-ai-studio"}
+    headers = {"User-Agent": "atomic-dream-engine"}
     total = expected
     # Bounded in-stream retry: multi-GB downloads on flaky connections drop
     # mid-stream; each attempt resumes via Range instead of restarting.
@@ -357,7 +357,7 @@ def resolve_release_asset(spec: RuntimeSpec, flavor: str, *,
         api = api.rsplit("/", 1)[0] + f"/tags/{spec.release_tag}" \
             if api.endswith("/latest") else api
     fetch = fetch or (lambda url: json.loads(urllib.request.urlopen(
-        urllib.request.Request(url, headers={"User-Agent": "atomic-ai-studio"}),
+        urllib.request.Request(url, headers={"User-Agent": "atomic-dream-engine"}),
         timeout=30).read()))
     rel = fetch(api)
     needle = spec.asset_patterns.get(flavor, flavor).lower()

@@ -1,4 +1,4 @@
-# Agent notes — Atomic AI Studio
+# Agent notes — Atomic Dream Engine
 
 ## Commands
 - Backend tests: `cd backend && .venv\Scripts\python -m pytest tests -q`

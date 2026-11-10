@@ -117,7 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await job_engine.stop()
         engine.dispose()
 
-    app = FastAPI(title="Atomic AI Studio Backend", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Atomic Dream Engine Backend", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -131,7 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Atomic AI Studio backend sidecar")
+    p = argparse.ArgumentParser(description="Atomic Dream Engine backend sidecar")
     p.add_argument("--host", default=None)
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--token", default=None)

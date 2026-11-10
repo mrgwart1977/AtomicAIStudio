@@ -33,7 +33,7 @@ Bundled 29 new original schematic design boards covering every major prior visua
 | Onboarding and tutorials | 01_home, 21_model_setup and beginner requirements |
 
 ## Naming decision and implementation migration
-Display name: **Atomic AI Studio**. Repository/package slug: `atomic-ai-studio`. Windows executable: `AtomicAIStudio.exe`. Handoff root: `Atomic_AI_Studio_Devin_Handoff`. New installation/project examples use Atomic naming. Generic words such as cinematic, cinematography and Cinematic Style Designer retain their descriptive meaning.
+Display name: **Atomic Dream Engine**. Repository/package slug: `atomic-dream-engine`. Windows executable: `AtomicAIStudio.exe`. Handoff root: `Atomic_AI_Studio_Devin_Handoff`. New installation/project examples use Atomic naming. Generic words such as cinematic, cinematography and Cinematic Style Designer retain their descriptive meaning.
 
 All current-plan exact product-name strings and diagram text are renamed. Prior release versions remain historical version numbers, not rewritten as feature removals. This task amends a specification, not an existing software repository or published installer. Devin must apply the rename to implemented UI titles, About/help, package metadata, installer shortcuts, executable/product resources and documentation if a repository already exists. Inventory existing identifiers before changing application/bundle IDs, data paths or credential namespaces. Preserve UUIDs, project files, signed update compatibility and backup restore; migrate or alias old data paths with explicit reporting rather than creating an empty parallel studio. No domain, trademark or account registration is implied.
 

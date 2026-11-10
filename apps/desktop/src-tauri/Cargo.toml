@@ -1,7 +1,7 @@
 [package]
-name = "atomic-ai-studio"
+name = "atomic-dream-engine"
 version = "0.1.0"
-description = "Atomic AI Studio — Windows desktop AI filmmaking application"
+description = "Atomic Dream Engine — Windows desktop AI filmmaking application"
 edition = "2021"
 rust-version = "1.77"
 
