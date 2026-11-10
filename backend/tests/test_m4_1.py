@@ -225,6 +225,27 @@ class TestCancelAndEviction:
         finally:
             await pool.stop()
 
+    async def test_request_timeout_recycles_worker(self, tmp_path):
+        """A timed-out request leaves worker state UNKNOWN — the worker
+        may still be executing. It is killed + dropped, never returned
+        to the idle pool for reuse."""
+        pool = await _pool(_registry())
+        try:
+            async with await pool.acquire(_spec()) as w:
+                pid = w.proc.pid
+                with pytest.raises(TimeoutError):
+                    await w.request(
+                        "generate",
+                        {"out_path": str(tmp_path / "o.png"), "prompt": "t",
+                         "steps": 40},          # ~8s of work
+                        timeout_s=0.5)
+                assert w.state is WorkerState.DEAD
+            assert await w.wait_dead(10.0)
+            assert not proc_guard.process_alive(pid)
+            assert pool.live_count() == 0
+        finally:
+            await pool.stop()
+
     async def test_idle_eviction(self, tmp_path):
         pool = await _pool(_registry(), idle_timeout_s=0.5)
         try:
@@ -396,6 +417,24 @@ class TestEngineIntegration:
         assert attempts[0]["outcome"] == "succeeded"
         assert attempts[0]["worker_id"]
 
+    def test_adapter_detail_cannot_clobber_attempts(self, client):
+        """Adapter-emitted progress detail must never overwrite the
+        engine-owned attempt history."""
+        proj = make_project(client, "M41Clobber")
+        jid = _enqueue(client, proj["id"], "m41-clobber-0001",
+                       {"prompt": "x",
+                        "emit_detail": {"attempts": [{"attempt_id": "forged"}],
+                                        "note": "detail"}})
+        job = _wait_job(client, jid)
+        assert job["status"] == "succeeded"
+        attempts = _attempts(client, jid)
+        assert len(attempts) == 1
+        assert attempts[0]["attempt_id"] != "forged"
+        assert attempts[0]["outcome"] == "succeeded"
+        with client.app.state.session_factory() as s:
+            row = s.get(GenerationJob, jid)
+            assert row.progress_json.get("note") == "detail"
+
     def test_fallback_when_no_pool(self, client):
         """Adapter without a pool runs a transient subprocess worker —
         the pre-M4.1 execution shape stays intact."""
@@ -440,6 +479,12 @@ class TestEngineIntegration:
             row = s.get(GenerationJob, jid)
             row.status = "running"
             row.completed_at = None
+            # Simulate a crash mid-execution: the open attempt still
+            # reads 'running' — reconciliation must close it honestly.
+            pj = dict(row.progress_json or {})
+            pj["attempts"][0]["outcome"] = "running"
+            pj["attempts"][0]["ended_at"] = None
+            row.progress_json = pj
             s.commit()
             requeued = client.app.state.job_engine.reconcile_interrupted(s)
             s.commit()
@@ -447,11 +492,15 @@ class TestEngineIntegration:
             assert row.status == "queued"
             assert row.attempt_no == 2
             assert requeued == 1
+            interrupted = attempts_mod.list_attempts(row)
+            assert interrupted[0]["outcome"] == "interrupted"
+            assert interrupted[0]["ended_at"]
         client.app.state.job_engine.wake()
         job2 = _wait_job(client, jid)
         assert job2["status"] == "succeeded"
         attempts = _attempts(client, jid)
         assert len(attempts) == 2
+        assert attempts[0]["outcome"] == "interrupted"
         assert attempts[1]["attempt_no"] == 2
         assert attempts[1]["outcome"] == "succeeded"
 

@@ -88,6 +88,22 @@ def finish_attempt(session: Session, job: GenerationJob, attempt_id: str,
         _persist(session, job, pj)
 
 
+def close_open_attempts(session: Session, job: GenerationJob,
+                        outcome: str = "interrupted") -> int:
+    """Mark every attempt still reading 'running' as closed — used by
+    restart reconciliation so crashed executions never appear in-flight."""
+    pj = _attempts_copy(job)
+    closed = 0
+    for rec in pj.get(ATTEMPTS_KEY) or []:
+        if rec.get("outcome") == "running":
+            rec["outcome"] = outcome
+            rec["ended_at"] = _now()
+            closed += 1
+    if closed:
+        _persist(session, job, pj)
+    return closed
+
+
 def list_attempts(job: GenerationJob) -> list[dict[str, Any]]:
     return list((job.progress_json or {}).get(ATTEMPTS_KEY) or [])
 

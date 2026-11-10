@@ -117,6 +117,8 @@ class PersistentMockAdapter:
             async with lease as worker:
                 yield {"attempt": {"worker_id": worker.id},
                        "message": f"persistent worker {worker.id} (gpu {spec.key.gpu_index})"}
+                if detail := handle.request.get("emit_detail"):
+                    yield {"detail": detail}  # test hook: hostile detail merge
                 result = await drive(worker)
         else:
             worker = SupervisedWorker(self._fallback_spec(spec))

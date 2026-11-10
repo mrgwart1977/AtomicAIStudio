@@ -9,6 +9,8 @@ import/export/verify — registered with backend services injected).
 
 from __future__ import annotations
 
+import sys
+
 from app.adapters.base import ProviderAdapter
 from app.adapters.inference import ModelDownloadAdapter, SdCppAdapter, SdCppVideoAdapter
 from app.adapters.mock import MockImageAdapter
@@ -28,10 +30,13 @@ class AdapterRegistry:
                  worker_pool=None) -> None:
         self._adapters: dict[str, ProviderAdapter] = {}
         self.register(MockImageAdapter())
-        # M4.1 mock persistent adapter — runs through the WorkerPool when
-        # one is injected; otherwise each job spawns a transient worker
-        # (subprocess-per-job fallback). adapter_kind="mock" always.
-        self.register(PersistentMockAdapter(worker_pool))
+        # M4.1 mock persistent adapter — dev/test only. Its worker is a
+        # Python script spawned via sys.executable, which doesn't exist
+        # as a usable interpreter in a frozen build (sys.executable is
+        # atomic-backend.exe and tests/mock_worker.py isn't shipped).
+        # Registering it there would expose a mock that can only fail.
+        if not getattr(sys, "frozen", False):
+            self.register(PersistentMockAdapter(worker_pool))
         if session_factory is not None and storage is not None:
             for cls in (
                 AssetImportAdapter,

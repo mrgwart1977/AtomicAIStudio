@@ -120,8 +120,13 @@ class JobEngine:
     def reconcile_interrupted(self, session: Session) -> int:
         """Called once at startup inside a short session; returns requeued count."""
         stuck = session.execute(select(GenerationJob).where(GenerationJob.status == "running")).scalars().all()
+        from app.domain.workers import attempts as _attempts_mod
         for job in stuck:
             job.recovery_state = "needs_reconciliation" if job.execution_scope == "remote" else "interrupted"
+            # Close open attempt records — a job left "running" at
+            # shutdown must not keep an attempt that reads as still
+            # in-flight; it was interrupted, not completed.
+            _attempts_mod.close_open_attempts(session, job, "interrupted")
             if job.resumable:
                 job.status = "queued"
                 job.message = "re-queued after restart"
@@ -339,7 +344,10 @@ class JobEngine:
                     detail = update.get("detail")
                     if detail is not None:
                         merged = dict(job.progress_json or {})
-                        merged.update(detail)
+                        # Attempt history is engine-owned — adapter detail
+                        # may never overwrite it.
+                        merged.update({k: v for k, v in detail.items()
+                                       if k != "attempts"})
                         job.progress_json = merged
                     if update.get("done"):
                         final_output = update.get("output")

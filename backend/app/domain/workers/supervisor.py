@@ -112,6 +112,13 @@ class SupervisedWorker:
             result = await self.protocol.request(
                 cmd, payload, on_progress=on_progress,
                 is_cancelled=is_cancelled, timeout_s=timeout_s)
+        except (TimeoutError, RuntimeError):
+            # Timeout or broken channel: the worker's execution state is
+            # now UNKNOWN — it may still be running the request. Never
+            # return it to the idle pool; mark dead so the monitor kills
+            # it and the lease drops the record (recycle, don't reuse).
+            self.mark_dead("request timed out or channel broke — recycling")
+            raise
         finally:
             self.current_job_id = None
             if self.state is WorkerState.BUSY:
