@@ -50,3 +50,7 @@ credentials.json
 # Editors
 .vscode/
 .idea/
+
+# Local validation (scripts/validate.ps1)
+validation-reports/
+backend/.venv-ci-*/
