@@ -61,8 +61,11 @@ npm run tauri dev                                 # full desktop app
 
 Local validation (CI-equivalent): `scripts\validate.ps1` — backend on both
 Pythons + frontend build; `-Tauri` and `-Package` optional. Use
-`-Python312`/`-Python314` to point at explicit interpreter paths.
-Never downloads models, calls cloud providers, or runs real inference.
+`-Python312`/`-Python314` to point at explicit interpreter paths;
+`-SelfTest` exercises the harness itself. Timestamped reports land in
+`validation-reports\` (gitignored), per-check logs in `%TEMP%`; missing
+required toolchains fail, never skip. Never downloads models, calls cloud
+providers, or runs real inference.
 
 ## Architecture
 

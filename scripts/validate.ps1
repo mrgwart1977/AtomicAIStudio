@@ -25,6 +25,9 @@
 #   scripts\validate.ps1 -Tauri          # + cargo build check
 #   scripts\validate.ps1 -Package        # + sidecar + NSIS installer
 #   scripts\validate.ps1 -Python312 C:\path\python.exe
+#   scripts\validate.ps1 -SelfTest    # exercises the harness itself:
+#                                     # exit codes, missing-tool detection,
+#                                     # report structure/encoding, stderr vs fail
 #
 # Output: validation-reports\validate-<timestamp>.log (repo-local,
 # gitignored) -- per-check status, durations, and failure tails.
@@ -35,6 +38,7 @@
 param(
     [switch]$Tauri,
     [switch]$Package,
+    [switch]$SelfTest,
     [string]$Python312,
     [string]$Python314
 )
@@ -127,15 +131,49 @@ Out-Report "Atomic Dream Engine -- validation $stamp"
 Out-Report "repo: $root"
 Out-Report ""
 
+# ---------- self-test: exercises the harness itself, not the real checks ----------
+if ($SelfTest) {
+    $st = 0
+    Out-Report "validate.ps1 self-test -- synthetic Invoke-Step / discovery checks"
+    Invoke-Step "selftest-exit0" { & cmd /c "exit 0" } | Out-Null
+    if ($results[$results.Count-1].Status -eq "PASS") { Out-Report "  PASS: exit-0 step passes" } else { Out-Report "  FAIL: exit-0 step marked $($results[$results.Count-1].Status)"; $st++ }
+    Invoke-Step "selftest-nonzero" { & cmd /c "exit 7" } | Out-Null
+    if ($results[$results.Count-1].Status -eq "FAIL") { Out-Report "  PASS: nonzero exit fails the step" } else { Out-Report "  FAIL: nonzero exit not detected"; $st++ }
+    Invoke-Step "selftest-throw" { throw "synthetic failure" } | Out-Null
+    if ($results[$results.Count-1].Status -eq "FAIL") { Out-Report "  PASS: thrown error fails the step" } else { Out-Report "  FAIL: thrown error not detected"; $st++ }
+    Invoke-Step "selftest-stderr" { & cmd /c 'echo just-a-warning 1>&2 & exit /b 0' } | Out-Null
+    if ($results[$results.Count-1].Status -eq "PASS") { Out-Report "  PASS: native stderr warning is not a failure" } else { Out-Report "  FAIL: stderr warning caused false failure"; $st++ }
+    if (Test-Path $results[$results.Count-1].LogFile) { Out-Report "  PASS: per-check log file written" } else { Out-Report "  FAIL: per-check log missing"; $st++ }
+    $self = Join-Path $PSScriptRoot "validate.ps1"
+    $bogus = Join-Path $env:TEMP ("missing-python-" + [guid]::NewGuid().ToString("N") + ".exe")
+    $before = Get-Date
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $self -Python312 $bogus -Python314 $bogus | Out-Null
+    if ($LASTEXITCODE -ne 0) { Out-Report "  PASS: missing required interpreters -> nonzero exit" } else { Out-Report "  FAIL: missing interpreters silently skipped"; $st++ }
+    $childReport = Get-ChildItem $reportDir -Filter "validate-*.log" |
+        Where-Object { $_.FullName -ne $reportPath -and $_.CreationTime -ge $before.AddSeconds(-2) } |
+        Sort-Object CreationTime -Descending | Select-Object -First 1
+    $strict = New-Object System.Text.UTF8Encoding($false, $true)
+    $text = $strict.GetString([System.IO.File]::ReadAllBytes($childReport.FullName))
+    if ($text -match "backend-3\.12\s+FAIL" -and $text -match "backend-3\.14\s+FAIL") { Out-Report "  PASS: child report records both interpreter failures" } else { Out-Report "  FAIL: interpreter failures missing from report"; $st++ }
+    if ($text -match "CHECK\s+RESULT\s+SECONDS") { Out-Report "  PASS: summary table present" } else { Out-Report "  FAIL: summary table missing"; $st++ }
+    Out-Report "  PASS: report decodes as strict UTF-8"
+    $src = Get-Content $self -Raw
+    if ($src -match '\[switch\]\$Tauri' -and $src -match '\[switch\]\$Package') { Out-Report "  PASS: -Tauri/-Package optional flags present" } else { Out-Report "  FAIL: optional flags missing"; $st++ }
+    if ($st -gt 0) { Out-Report "self-test FAILED: $st assertion(s)"; exit 1 }
+    Out-Report "self-test passed: all assertions green"
+    exit 0
+}
+
 # ---------- required: backend under 3.12 and 3.14 ----------
 foreach ($ver in @("3.12", "3.14")) {
     $explicit = if ($ver -eq "3.12") { $Python312 } else { $Python314 }
-    $py = Resolve-Python $ver $explicit
+    $py = $null; $resolveErr = $null
+    try { $py = Resolve-Python $ver $explicit } catch { $resolveErr = "$_" }
     if (-not $py) {
+        $why = if ($resolveErr) { $resolveErr } else { "interpreter not found (install python.org $ver, uv, or pass -Python$($ver -replace '\.',''))" }
         $results.Add([pscustomobject]@{
-            Name = "backend-$ver"; Status = "FAIL"; Duration = 0
-            LogFile = ""; Detail = "Python $ver interpreter not found (install python.org $ver, uv, or pass -Python$($ver -replace '\.',''))" })
-        Out-Report "[FAIL] backend-$ver -- interpreter not found"
+            Name = "backend-$ver"; Status = "FAIL"; Duration = 0; LogFile = "" })
+        Out-Report "[FAIL] backend-$ver -- $why"
         continue
     }
     Out-Report "Python $ver = $py"
@@ -183,6 +221,7 @@ if ($Tauri -or $Package) {
         Push-Location $desktop
         try {
             & npm ci | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
             & npm run build | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "frontend build failed (required by tauri config)" }
             New-Item -ItemType Directory -Force "src-tauri\backend-dist\atomic-backend" | Out-Null
