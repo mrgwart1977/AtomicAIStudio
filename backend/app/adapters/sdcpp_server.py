@@ -71,9 +71,12 @@ class SdCppServerAdapter(SdCppAdapter):
         needs_gpu=True,
         worker_model="persistent-pool",
         resumable=False,
-        notes="Persistent sd-server worker (Phase 2A infrastructure). "
-              "Mid-request cancel recycles the worker — it cannot stop "
-              "server-side inference on this runtime build.",
+        notes="EXPERIMENTAL persistent sd-server worker (Phase 2A "
+              "infrastructure — not validated for production). Request "
+              "payload mapping is an unverified OpenAI/A1111 superset "
+              "(Phase 2B must measure the real field set). Mid-request "
+              "cancel recycles the worker — it cannot stop server-side "
+              "inference on this runtime build.",
     )
 
     def __init__(self, session_factory, settings,
