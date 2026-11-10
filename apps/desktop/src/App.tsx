@@ -8,6 +8,7 @@ import { TopBar } from "./components/TopBar";
 import { HomePage } from "./features/HomePage";
 import { ModelManagerPage } from "./features/ModelManagerPage";
 import { ProjectsPage } from "./features/ProjectsPage";
+import { ProvidersPage } from "./features/ProvidersPage";
 import { ProjectWorkspace } from "./features/workspace/ProjectWorkspace";
 import { useApp, type Page, type WorkspaceTab } from "./stores/appStore";
 
@@ -22,7 +23,7 @@ export default function App() {
       const s = useApp.getState();
       await s.refreshProjects().catch(() => {});
       const hash = location.hash.replace("#", "");
-      if (["home", "projects", "models"].includes(hash)) s.setPage(hash as Page);
+      if (["home", "projects", "models", "providers"].includes(hash)) s.setPage(hash as Page);
       else if (hash.startsWith("project")) {
         const t = hash.split("/")[1] as WorkspaceTab | undefined;
         if (t) useApp.setState({ workspaceTab: t });
@@ -87,6 +88,7 @@ export default function App() {
           {page === "home" && <HomePage />}
           {page === "projects" && <ProjectsPage />}
           {page === "models" && <ModelManagerPage />}
+          {page === "providers" && <ProvidersPage />}
           {page === "project" && <ProjectWorkspace />}
         </main>
         <JobsPanel />

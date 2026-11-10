@@ -25,6 +25,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.adapters.registry import AdapterRegistry
+from app.api.providers_router import providers_router
 from app.api.routers import api_router, open_router, websocket_endpoint
 from app.config import Settings, ensure_dirs, get_settings
 from app.db.session import create_engine_for, session_factory
@@ -105,6 +106,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.session_factory = sf
             app.state.settings = settings
             app.state.event_bus = EventBus()
+
+            # C1 provider credential vault — DPAPI-protected file under
+            # the data dir; secrets never enter the DB.
+            from app.domain.providers.credentials import CredentialVault
+            app.state.provider_vault = CredentialVault(
+                settings.data_dir / "credentials.vault")
 
             from app.domain.storage import StorageRegistry
             from app.domain.backup import sweep_backup_destinations, sweep_staging
@@ -199,6 +206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(open_router)
     app.include_router(api_router, dependencies=[Depends(require_token)])
+    app.include_router(providers_router, dependencies=[Depends(require_token)])
     app.websocket("/api/ws")(websocket_endpoint)
     return app
 

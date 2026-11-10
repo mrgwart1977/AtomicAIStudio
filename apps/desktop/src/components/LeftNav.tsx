@@ -27,6 +27,7 @@ const NAV: NavItem[] = [
   { id: "editor", label: "Editor", milestone: "M7" },
   { id: "workflows", label: "Workflows", milestone: "M4" },
   { id: "models", label: "Model Manager", page: "models" },
+  { id: "providers", label: "AI Providers", page: "providers" },
 ];
 
 export function LeftNav() {

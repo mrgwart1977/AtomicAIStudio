@@ -17,7 +17,7 @@ import type {
   StoryboardScene,
 } from "../api/types";
 
-export type Page = "home" | "projects" | "models" | "project";
+export type Page = "home" | "projects" | "models" | "providers" | "project";
 export type WorkspaceTab =
   | "overview" | "storyboard" | "cast" | "worlds" | "locations"
   | "generate" | "assets" | "backups" | "settings";
