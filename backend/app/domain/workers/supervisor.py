@@ -210,6 +210,15 @@ class SupervisedWorker:
             await asyncio.get_running_loop().run_in_executor(
                 None, functools.partial(proc_guard.terminate_tree,
                                         pid, grace_s=grace_s))
+            # taskkill returns before the OS finishes tearing the
+            # process down — wait so `reaped` guarantees the process is
+            # actually gone, not just signaled.
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, self.proc.wait), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
         proc_guard.unsupervise(pid)
         try:
             if self.proc.stdin is not None:
