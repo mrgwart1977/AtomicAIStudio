@@ -207,8 +207,13 @@ class TestStubWorkerLifecycle:
                 kids = psutil.Process(w.proc.pid).children(recursive=True)
                 assert kids, "stub should have spawned a child"
                 child_pid = kids[0].pid
-            # lease released → idle; stop it explicitly
+            # lease released → idle; stop it explicitly — the Job Object
+            # kills the child asynchronously, so wait for confirmation
+            # rather than asserting on the same tick.
             await w.stop()
+            deadline = time.time() + 10
+            while proc_guard.process_alive(child_pid) and time.time() < deadline:
+                await asyncio.sleep(0.1)
             assert not proc_guard.process_alive(child_pid)
         finally:
             await pool.stop()
