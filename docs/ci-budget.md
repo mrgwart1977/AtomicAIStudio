@@ -12,82 +12,104 @@ multiplied by OS: **Ubuntu 1x, Windows 2x, macOS 10x**.
 | Reserve (releases, reruns, incidents) | 600 |
 
 If projected usage for the cycle exceeds 2,400 billed-minutes, treat it
-as a budget breach: pause merges that only re-run CI, prefer local
-`scripts\validate.ps1` evidence for review, and defer non-urgent
-`main`-push packaging until the cycle resets.
+as a budget breach: switch pre-merge validation to `scripts\validate.ps1`
+and reserve CI for merge-candidate PRs until the cycle resets.
 
-## Per-run cost model
+## Measured November baseline
 
-Observed durations (before caching effects):
+From `gh api .../actions/runs` job durations x OS multiplier
+(67 runs / 300 jobs):
 
-| Job | Runner | ~Minutes | Billed |
+| Segment | Runs | Billed-min |
+|---|---|---|
+| pull_request — code branches | 40 | ~1,580 |
+| pull_request — docs-only (docs/, chore/) | 6 | ~66 |
+| push (main) | 19 | ~719 |
+| dynamic | 2 | ~2 |
+| **Total** | **67** | **~2,367** |
+
+Measured averages: successful PR run ≈ **37.5 billed**, successful
+main push ≈ **39.5 billed**. (PR jobs are billed individually even
+though they run in parallel.)
+
+## Per-PR projection (measured durations x new gating)
+
+| PR type | Old | New | Savings |
 |---|---|---|---|
-| changes | ubuntu | 0.5 | 0.5 |
-| backend (3.12) | windows | 5.5 | 11 |
-| backend (3.14) | windows | 5.5 | 11 |
-| frontend | ubuntu | 1.5 | 1.5 |
-| tauri-check | windows | 2 | 4 |
-| package | windows | 12 | 24 |
+| Backend-only (`backend/**`) | ~37.5 | ~22.5 | ~40% |
+| UI-only (`apps/desktop/src/**` etc.) | ~37.5 | ~2 | ~95% |
+| `src-tauri` only | ~37.5 | ~6 | ~84% |
+| Backend + UI mixed | ~37.5 | ~24–28 | ~30% |
+| Packaging-sensitive | ~37.5 | ~46 | ~0% (runs all) |
+| Docs-only | ~37.5 | ~0.5 | ~99% |
 
-## Per-PR projection vs. November baseline
+The ~50% per-PR target is met for every class except **backend-heavy
+PRs (~40%)**. The floor there is the Windows suite itself: two pytest
+legs ≈ 22 billed-minutes that requirement explicitly mandates keeping
+(3.12 + 3.14, Windows-only tests). Reaching 50% on backend PRs would
+require dropping a Python leg or moving the suite off Windows — both
+weaken mandated coverage, so they are excluded by design.
 
-| PR type | Old flow | New flow | Savings |
-|---|---|---|---|
-| Backend-only PR (typical) | ~52 | ~22.5 | ~57% |
-| Frontend/UI PR | ~52 | ~24 | ~54% |
-| Packaging-sensitive PR | ~52 | ~48 | ~8% |
-| Docs-only PR | ~52 | ~0.5 | ~99% |
+## Monthly projection at November activity (measured distribution)
 
-November actual: ~2,285 billed-minutes across ~64 runs / ~300 jobs.
-At identical activity the new structure projects **~1,900–2,200
-billed-minutes/month** — below the 2,400 ceiling — because typical PRs
-drop to ~22–24 billed and superseded/incident waste is eliminated:
+| Segment | Runs | New billed |
+|---|---|---|
+| ~25 backend-only PRs | | ~560 |
+| ~9 mixed code PRs | | ~240 |
+| ~6 UI/tauri-only PRs | | ~24 |
+| ~6 docs-only PRs | | ~3 |
+| 19 main pushes (all jobs, unchanged) | | ~760 |
+| **Projected total** | | **~1,600** |
 
-- Superseded PR pushes cancel in-flight runs instead of finishing them.
-- Job timeouts cap a hung run at ~2x normal instead of the observed
-  45+ minute stall (~90 billed-minutes for one incident).
-- FFmpeg binaries (~100 MB+ per job) are cached per manifest hash.
-- `package` (24 billed) no longer runs on ordinary PRs.
+**~1,600–1,800 billed-min vs 2,367 measured → ~25–32% monthly
+reduction**, comfortably under the 2,400 ceiling with the 600 reserve.
+The per-PR structural savings matter more over time: waste classes
+(superseded runs, hangs, docs-only full runs) are eliminated rather
+than amortized.
 
 ## Guardrails (implemented in ci.yml)
 
-1. `concurrency` group per ref with `cancel-in-progress: true` —
-   force-pushing a PR branch cancels its superseded run.
-2. `timeout-minutes` on every job (changes 5 / frontend 10 /
-   tauri-check 15 / backend 20 / package 30).
-3. `changes` job (ubuntu, ~0.5 min) gates PR jobs by touched paths and
-   **fails open** — a detection error runs everything, never skips.
-4. `package` only runs on `main` pushes, manual `workflow_dispatch`,
-   or PRs touching packaging-sensitive paths (PyInstaller spec/entry,
-   pyproject deps, ffmpeg manifest, build-sidecar/fetch-ffmpeg scripts,
-   `src-tauri/**`, the workflow itself).
-5. `frontend` runs on `ubuntu-latest` (platform-independent tsc+vite,
-   1x billing); all Windows-specific jobs stay on Windows.
-6. Caches: pip, npm, Rust (target + cargo registry + git db), FFmpeg
-   vendor dir keyed to `backend/ffmpeg-manifest.json`.
+1. `concurrency` per ref + `cancel-in-progress` — force-push cancels
+   the superseded run.
+2. `timeout-minutes` on every job (5/10/15/20/30) — caps hangs at ~2x
+   normal instead of the observed 45-min stall (~90 billed).
+3. `changes` job gates PR jobs by touched paths; detection uncertainty
+   (unresolvable base, diff error, empty diff) outputs all-true and runs
+   the full suite — it can only overspend, never under-validate.
+4. Dependent jobs use
+   `always() && !cancelled() && (... != 'false')`:
+   - `changes` succeeded + output=false → skip (neutral = pass)
+   - `changes` failed/cancelled → outputs unset → `"" != 'false'` →
+     the job RUNS — a dead gate can never turn required checks green
+   - workflow cancelled (concurrency/manual) → `!cancelled()` skips —
+     dedup still works
+5. `package` only on main pushes, `workflow_dispatch`, and
+   packaging-sensitive PRs.
+6. `frontend` on ubuntu (1x); all Windows-specific jobs stay Windows.
+7. Caches: pip, npm, cargo target+registry+git, FFmpeg vendor keyed on
+   `backend/ffmpeg-manifest.json`.
 
 ## Required-check behavior
 
-Job names are unchanged (`backend (3.12)`, `backend (3.14)`,
-`frontend`, `tauri-check`, `package`), so required-check identities in
-branch protection are preserved. A job skipped by its `if:` reports a
-**skipped/neutral** conclusion, which counts as success for required
-checks — an ordinary PR still shows `package` as green without paying
-for it. Never use workflow-level `paths-ignore` for this reason: a
-filtered workflow reports *no checks at all* and required checks stall
-as "expected".
+Job names unchanged (`backend (3.12)`, `backend (3.14)`, `frontend`,
+`tauri-check`, `package`) → required-check identities preserved.
+Skipped = neutral = success for required checks. Never add
+`paths-ignore` at workflow level — a filtered workflow reports *no*
+checks and required checks stall as "expected".
 
-## Monitoring
+## Automation vs. manual controls
 
-- **Weekly:** github.com/settings/billing → "Actions & Packages" shows
-  cycle-to-date billed minutes vs. allowance.
-- **Alerts:** enable usage alerts at 75% / 90% / 100% on the billing
-  page (the 100% point should never be reached under this policy —
-  2,400 is the working ceiling).
-- **CLI (user-side):** `gh api user/settings/billing/actions` returns
-  `total_minutes_used` / `included_minutes` (requires `user` scope).
-- **Per-run audit:** `gh api repos/mrgwart1977/AtomicAIStudio/actions/runs`
-  lists durations; billed = sum(duration) x OS multiplier.
-- **Warning threshold:** if cycle usage passes ~70% (2,100) before the
-  final week, switch pre-merge validation to `scripts\validate.ps1`
-  locally and reserve CI for merge-candidate PRs only.
+| Control | Mechanism | Type |
+|---|---|---|
+| Hard overage stop | Billing → spending limit **$0** → jobs refuse at scheduling once included minutes are gone (exactly the November symptom) | Native, automated |
+| Approaching-limit warning | Billing → "Budgets and alerts" → Actions budget with alerts at 2,100 / 2,400 / 2,700 | Native, automated (email) |
+| Superseded-run waste | `concurrency` cancel | In-workflow, automated |
+| Hang waste | `timeout-minutes` | In-workflow, automated |
+| Path gating / package skip | `changes` job | In-workflow, automated |
+| 2,400 soft ceiling | GitHub has no soft limit — monitor and throttle manually | Manual |
+| Per-run billed audit | `gh api .../actions/runs` durations x OS multiplier (or a small script) | Manual |
+| Monthly usage check | github.com/settings/billing → Actions & Packages | Manual (weekly) |
+
+Recommended posture: **$0 spending limit** (can never receive a bill —
+worst case is CI pauses and local validation carries merges) + budget
+alerts at the three thresholds + the in-workflow guardrails above.

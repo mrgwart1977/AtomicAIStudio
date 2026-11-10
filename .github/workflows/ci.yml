@@ -32,24 +32,42 @@ jobs:
       - id: diff
         shell: bash
         run: |
-          set +e
+          set -o pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="origin/${{ github.base_ref }}"
           else
             BASE="${{ github.event.before }}"
           fi
-          git diff --name-only "$BASE"...HEAD > files.txt 2>/dev/null
-          if [ ! -s files.txt ]; then git show --name-only --format= HEAD > files.txt 2>/dev/null; fi
-          out() { if grep -qE "$2" files.txt || [ ! -s files.txt ]; then echo "$1=true"; else echo "$1=false"; fi; }
+          # Unresolvable/empty base -> run everything (fail open)
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git rev-parse -q --verify "$BASE" >/dev/null 2>&1; then
+            BASE=""
+          fi
+          ok=1
+          if [ -n "$BASE" ]; then
+            # --name-status keeps BOTH old and new paths on renames;
+            # cut -f2- + tr makes each path its own line so ^ anchors
+            # match renames in either direction.
+            git diff --name-status "$BASE"...HEAD 2>/dev/null | cut -f2- | tr '\t' '\n' > files.txt || ok=0
+          else
+            ok=0
+          fi
+          [ -s files.txt ] || ok=0
+          # ok=0 means detection uncertainty -> every output true (run all)
+          out() { if [ "$ok" != "1" ] || grep -qE "$2" files.txt; then echo "$1=true"; else echo "$1=false"; fi; }
           out backend '^(backend/|scripts/fetch-ffmpeg\.ps1|\.github/workflows/ci\.yml)' >> "$GITHUB_OUTPUT"
           out frontend '^apps/desktop/' >> "$GITHUB_OUTPUT"
-          out tauri '^apps/desktop/' >> "$GITHUB_OUTPUT"
+          out tauri '^apps/desktop/(src-tauri/|package\.json|package-lock\.json)' >> "$GITHUB_OUTPUT"
           out package '^(backend/(atomic-backend\.spec|sidecar_entry\.py|pyproject\.toml|ffmpeg-manifest\.json)|scripts/(build-sidecar|fetch-ffmpeg)\.ps1|apps/desktop/src-tauri/|\.github/workflows/ci\.yml)' >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
+  # Jobs run UNLESS the changes job positively reports their paths
+  # unchanged. always() overrides needs-skip on changes failure/cancel;
+  # an unset output ("" != "false") runs the full suite -- a failed gate
+  # can never turn required checks green. !cancelled() still honors
+  # concurrency cancellation and manual aborts.
   backend:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.backend != 'false')
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -81,7 +99,7 @@ jobs:
   # and ubuntu minutes bill at 1x vs Windows 2x.
   frontend:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.frontend != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -99,7 +117,7 @@ jobs:
 
   tauri-check:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.tauri == 'true'
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.tauri != 'false')
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -134,7 +152,7 @@ jobs:
   # PRs skip it -- post-merge main runs still catch freeze/bundle issues.
   package:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.package == 'true'
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.package != 'false')
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
