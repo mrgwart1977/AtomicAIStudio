@@ -19,6 +19,8 @@ from pathlib import Path
 import uvicorn
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,6 +29,7 @@ from app.api.routers import api_router, open_router, websocket_endpoint
 from app.config import Settings, ensure_dirs, get_settings
 from app.db.session import create_engine_for, session_factory
 from app.domain.events import EventBus
+from app.domain.instance_lock import acquire_data_dir_lock
 from app.domain.jobs import JobEngine
 from app.logging_config import configure_logging
 from app.security import require_token
@@ -44,10 +47,41 @@ def _alembic_script_location() -> Path:
     return BACKEND_DIR / "app" / "db" / "alembic"
 
 
+class UnsupportedRevisionError(RuntimeError):
+    """The database was stamped by an app build that knows revisions
+    this build does not — almost always a NEWER version."""
+
+
+def _assert_supported_revision(cfg: AlembicConfig, db_url: str) -> None:
+    """Refuse to migrate a DB stamped with an unknown revision.
+
+    Reads `alembic_version` before any change is applied. A revision not
+    present in this build's script map aborts startup with a clear error;
+    the database is never downgraded, rewritten, or recreated.
+    """
+    script = ScriptDirectory.from_config(cfg)
+    known = {rev.revision for rev in script.walk_revisions()}
+    engine = create_engine_for(db_url)
+    try:
+        with engine.connect() as conn:
+            heads = MigrationContext.configure(conn).get_current_heads()
+    finally:
+        engine.dispose()
+    unknown = sorted(h for h in heads if h not in known)
+    if unknown:
+        raise UnsupportedRevisionError(
+            f"database revision {unknown} is not recognized by this build — "
+            f"it was likely written by a newer version of Atomic Dream "
+            f"Engine. Update the app or set ATOMIC_DATA_DIR to a different "
+            f"directory. The database was not modified."
+        )
+
+
 def run_migrations(db_url: str) -> None:
     cfg = AlembicConfig()
     cfg.set_main_option("script_location", str(_alembic_script_location()))
     cfg.set_main_option("sqlalchemy.url", db_url)
+    _assert_supported_revision(cfg, db_url)
     alembic_command.upgrade(cfg, "head")
 
 
@@ -58,64 +92,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        run_migrations(settings.db_url)
-        engine = create_engine_for(settings.db_url)
-        sf = session_factory(engine)
-        app.state.engine = engine
-        app.state.session_factory = sf
-        app.state.settings = settings
-        app.state.event_bus = EventBus()
+        # Exclusive data-dir ownership comes first: a second backend
+        # exits here before it can migrate, sweep, reconcile, or spawn.
+        lock = acquire_data_dir_lock(settings.data_dir)
+        app.state.data_dir_lock = lock
+        engine = None
+        try:
+            run_migrations(settings.db_url)
+            engine = create_engine_for(settings.db_url)
+            sf = session_factory(engine)
+            app.state.engine = engine
+            app.state.session_factory = sf
+            app.state.settings = settings
+            app.state.event_bus = EventBus()
 
-        from app.domain.storage import StorageRegistry
-        from app.domain.backup import sweep_backup_destinations, sweep_staging
-        storage = StorageRegistry(sf, settings.data_dir)
-        app.state.storage = storage
-        with sf() as s:
-            storage.ensure_default_location(s)
-            storage.probe_locations(s)
-            swept = storage.sweep(s)
-            staging_removed = sweep_staging(settings.data_dir)
-            staging_removed += sweep_backup_destinations(s, settings)
-            if swept["tmp_removed"] or staging_removed:
-                log.info("storage sweep: %d tmp blobs, %d staging dirs removed",
-                         swept["tmp_removed"], staging_removed)
-            s.commit()
-
-        app.state.adapter_registry = AdapterRegistry(
-            session_factory=sf, storage=storage, settings=settings
-        )
-
-        from app.domain import gpu_sched, hardware
-        from app.domain.model_files import _get_setting
-
-        def _gpu_prefs() -> dict:
+            from app.domain.storage import StorageRegistry
+            from app.domain.backup import sweep_backup_destinations, sweep_staging
+            storage = StorageRegistry(sf, settings.data_dir)
+            app.state.storage = storage
             with sf() as s:
-                return {
-                    "mode": _get_setting(s, "gpu_mode") or "auto",
-                    "preferred_gpu": _get_setting(s, "preferred_gpu"),
-                }
+                storage.ensure_default_location(s)
+                storage.probe_locations(s)
+                swept = storage.sweep(s)
+                staging_removed = sweep_staging(settings.data_dir)
+                staging_removed += sweep_backup_destinations(s, settings)
+                if swept["tmp_removed"] or staging_removed:
+                    log.info("storage sweep: %d tmp blobs, %d staging dirs removed",
+                             swept["tmp_removed"], staging_removed)
+                s.commit()
 
-        app.state.gpu_scheduler = gpu_sched.GpuScheduler(
-            hw_probe=hardware.probe, prefs=_gpu_prefs)
-        job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus,
-                               settings.data_dir, gpu_scheduler=app.state.gpu_scheduler)
-        app.state.job_engine = job_engine
-        with sf() as s:
-            requeued = job_engine.reconcile_interrupted(s)
-            if requeued:
-                log.info("re-queued %d interrupted job(s)", requeued)
-            # Backup runs left 'running' by a crash are failed honestly.
-            from app.db.models import BackupRun
-            from sqlalchemy import select as _select
-            for run in s.execute(_select(BackupRun).where(BackupRun.status == "running")).scalars():
-                run.status = "failed"
-                run.error = "interrupted by application stop"
-            s.commit()
-        await job_engine.start()
-        log.info("backend ready on %s:%s (data: %s)", settings.host, settings.port, settings.data_dir)
-        yield
-        await job_engine.stop()
-        engine.dispose()
+            app.state.adapter_registry = AdapterRegistry(
+                session_factory=sf, storage=storage, settings=settings
+            )
+
+            from app.domain import gpu_sched, hardware
+            from app.domain.model_files import _get_setting
+
+            def _gpu_prefs() -> dict:
+                with sf() as s:
+                    return {
+                        "mode": _get_setting(s, "gpu_mode") or "auto",
+                        "preferred_gpu": _get_setting(s, "preferred_gpu"),
+                    }
+
+            app.state.gpu_scheduler = gpu_sched.GpuScheduler(
+                hw_probe=hardware.probe, prefs=_gpu_prefs)
+            job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus,
+                                   settings.data_dir, gpu_scheduler=app.state.gpu_scheduler)
+            app.state.job_engine = job_engine
+            with sf() as s:
+                requeued = job_engine.reconcile_interrupted(s)
+                if requeued:
+                    log.info("re-queued %d interrupted job(s)", requeued)
+                # Backup runs left 'running' by a crash are failed honestly.
+                from app.db.models import BackupRun
+                from sqlalchemy import select as _select
+                for run in s.execute(_select(BackupRun).where(BackupRun.status == "running")).scalars():
+                    run.status = "failed"
+                    run.error = "interrupted by application stop"
+                s.commit()
+            await job_engine.start()
+            log.info("backend ready on %s:%s (data: %s)", settings.host, settings.port, settings.data_dir)
+            yield
+            await job_engine.stop()
+        finally:
+            if engine is not None:
+                engine.dispose()
+            lock.release()
 
     app = FastAPI(title="Atomic Dream Engine Backend", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
