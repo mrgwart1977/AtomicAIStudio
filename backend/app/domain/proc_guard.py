@@ -122,18 +122,19 @@ def _resume_main_thread(pid: int) -> None:
 
 def spawn_supervised(argv: list[str], *, env: dict | None = None,
                      cwd: str | None = None,
-                     stdout=subprocess.PIPE) -> subprocess.Popen:
+                     stdout=subprocess.PIPE,
+                     stdin=None) -> subprocess.Popen:
     """Spawn a worker suspended → assign to a kill-on-close Job Object →
     resume. Eliminates the spawn-to-assignment race entirely and FAILS
     CLOSED: if supervision can't be established the worker never runs.
     Returns a ready subprocess.Popen."""
     CREATE_SUSPENDED = 0x00000004
     if not _IS_WINDOWS:
-        proc = subprocess.Popen(argv, env=env, cwd=cwd,
+        proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=stdin,
                                 stdout=stdout, stderr=subprocess.STDOUT)
         _live_workers.add(proc.pid)
         return proc
-    proc = subprocess.Popen(argv, env=env, cwd=cwd,
+    proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=stdin,
                             stdout=stdout, stderr=subprocess.STDOUT,
                             creationflags=CREATE_SUSPENDED)
     try:

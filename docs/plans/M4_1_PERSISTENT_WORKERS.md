@@ -1,7 +1,8 @@
 # M4.1 — Persistent Inference Workers & GPU Memory Management
 
-**Status:** PLANNED — not started. Requires explicit approval before
-implementation. Tracked as GitHub issue #23.
+**Status:** PHASE 1 IMPLEMENTED (worker foundation, mock-validated).
+Real persistent-model inference is Phase 2 — not started, needs
+authorization. Tracked as GitHub issue #23.
 
 **Motivation (measured, not assumed):** every generation job today spawns a
 fresh `sd-cli.exe` worker that reloads the ~2 GiB model — the observed
@@ -10,15 +11,65 @@ process init. A persistent loaded-model worker could eliminate that on
 repeat jobs — **if** the runtime supports it. No speed figure is promised
 before measurement.
 
+## Phase 1 — implemented (this branch)
+
+Architecture (`app/domain/workers/`):
+
+| Module | Role |
+|---|---|
+| `types.py` | `WorkerKey` (model, runtime, flavor, gpu, protocol) — a lease never crosses keys; `WorkerSpec`; `WorkerState` starting→ready→busy→idle→draining→dead |
+| `protocol.py` | `StdioJsonLinesProtocol` (JSON-lines over pipes; non-JSON stdout = worker logs) + `SdServerHttpProtocol` (verified surface, see B.1) |
+| `supervisor.py` | `SupervisedWorker`: one OS process under `proc_guard` Job-Object supervision; readiness timeout, heartbeat deadline, crash detect, graceful→forced shutdown, wait_dead that guarantees the process is actually reaped |
+| `resources.py` | `ResidencyRegistry`: RAM+VRAM resident reservations, per-GPU accounting (VRAM never pools), fail-closed admission, headroom, pressure signal |
+| `pool.py` | `WorkerPool`: keyed reuse, global+per-GPU caps, LRU idle eviction (timeout, pressure, admission), `WorkerUnavailable` → lane-level backpressure |
+| `attempts.py` | Durable execution-attempt records appended to `generation_jobs.progress_json.attempts` — **no schema migration** (see §9) |
+| `remote.py` | Mock remote-provider contract: `SubmissionIntent`, idempotent submit (dedupes on idempotency key), unknown-outcome → never silent resubmit, best-effort cancel |
+
+Wiring: `JobEngine._execute` records an attempt before any work and
+finishes it on every outcome (succeeded/failed/cancelled/interrupted/
+worker_dead). `main.py` builds one `WorkerPool` inside the data-dir lock;
+pool drains at shutdown before lock release — workers cannot outlive the
+owning backend (belt: Job Objects; suspenders: lock + drain order).
+
+Adapters: `PersistentMockAdapter` (registered as `mock.persistent-image`,
+`adapter_kind="mock"`) prefers a pooled worker, falls back to a transient
+supervised subprocess when the pool is absent/unavailable — the pre-M4.1
+execution shape stays intact.
+
+## §9 — Proposed `0008_m4_1` migration (NOT applied — needs approval)
+
+Phase 1 stores attempts inside `progress_json` (JSON list). If Phase 2
+needs queryable worker rows (e.g. "which jobs ran on worker W"), a
+dedicated table is cleaner:
+
+```sql
+CREATE TABLE worker_attempts (
+  attempt_id   TEXT PRIMARY KEY,         -- uuid, stable per execution
+  job_id       TEXT NOT NULL REFERENCES generation_jobs(id),
+  worker_key   TEXT, worker_pid INTEGER,
+  started_at   TEXT, ended_at   TEXT,
+  outcome      TEXT                      -- succeeded|failed|cancelled|interrupted|worker_dead
+);
+```
+
+Owner decision required before Phase 2 writes it.
+
 ## B.1 — Runtime feasibility investigation (gate)
 
-Investigate before any implementation:
+**Verified on the pinned sd.cpp runtime (master-1073, `runtimes/sdcpp`):**
 
-- Does sd.cpp support a long-lived inference mode (server/REPL/API mode,
-  repeated `-M img_gen` without reload, or a library interface)?
-- Can individual requests be cancelled without killing the worker?
-- Can weights be unloaded/reloaded at runtime (model swap)?
-- How does it behave after a worker crash — auto-restart safety?
+| Capability | Status |
+|---|---|
+| Persistent multi-request mode | ✅ `sd-server.exe` ships alongside `sd-cli.exe`; full generation flag surface (`--diffusion-model`, `--vae`, `-p`, `-W/-H`, `--steps`, seed, cfg…) |
+| HTTP readiness/health | ✅ `GET /v1/models` → 200 without a model loaded (lazy `--model-dir` loading verified — server binds + serves before weights) |
+| Generation endpoint | ✅ `POST /v1/images/generations` (+ A1111-style `/sdapi/v1/txt2img`) — flag surface present, exercised via HTTP stub only, NOT on real weights |
+| Weights resident between requests | ✅ structural — server holds the loaded model across HTTP requests (the whole point of the mode) |
+| Mid-request cancel | ❌ no cancel endpoint in this build — Phase 2 must define cancel = abandon + worker-recycle decision |
+| Model unload/swap endpoint | ⚠️ not verified — `--model-dir` enables per-request model selection, hot-unload unproven |
+| Crash recovery | ✅ by architecture — process death is detectable; pool respawns; Job Object owns the tree |
+
+Phase 1 exercises the HTTP protocol class against an in-process stub and
+the real binary's readiness only — **no inference run**.
 
 If sd.cpp offers no suitable interface, evaluate alternatives **with the
 same approval discipline as any new runtime**:
@@ -127,9 +178,14 @@ Auto-managed default; advanced worker/memory controls.
 
 ## Open questions for the feasibility pass
 
-1. Does sd.cpp (or a maintained fork) expose server/batch mode on Windows?
+1. ~~Does sd.cpp expose server/batch mode on Windows?~~ **Resolved:
+   `sd-server.exe` is in the pinned build — see B.1.**
 2. What's the real warm-request latency when weights stay resident —
    the ~7.8 s warm figure is mostly sampling time; how much is actually
-   per-request overhead vs load?
+   per-request overhead vs load? → Phase 2 benchmark (§B.4)
 3. Does keeping a worker resident starve other jobs' VRAM fit checks
    (residency must integrate with the scheduler, not bypass it)?
+   → Phase 1 answer: `ResidencyRegistry` charges resident workers; the
+   scheduler's estimate-only path still applies per job on top.
+4. sd-server cancel + hot-unload semantics — must be measured in
+   Phase 2 before real-job cancellation policy is set.

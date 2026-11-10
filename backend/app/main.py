@@ -121,10 +121,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                              swept["tmp_removed"], staging_removed)
                 s.commit()
 
-            app.state.adapter_registry = AdapterRegistry(
-                session_factory=sf, storage=storage, settings=settings
-            )
-
             from app.domain import gpu_sched, hardware
             from app.domain.model_files import _get_setting
 
@@ -137,6 +133,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             app.state.gpu_scheduler = gpu_sched.GpuScheduler(
                 hw_probe=hardware.probe, prefs=_gpu_prefs)
+
+            # M4.1 persistent-worker pool — Phase 1 serves the mock
+            # persistent adapter only; real runtimes arrive in Phase 2.
+            import psutil as _psutil
+            from app.domain.workers.pool import WorkerPool
+            from app.domain.workers.resources import ResidencyRegistry
+
+            def _gpu_free(idx: int) -> int | None:
+                for g in app.state.gpu_scheduler.gpus():
+                    if g.get("index") == idx:
+                        return g.get("vram_free_bytes")
+                return None
+
+            residency = ResidencyRegistry(
+                ram_free_bytes=lambda: _psutil.virtual_memory().available,
+                gpu_free_bytes=_gpu_free,
+            )
+            app.state.worker_pool = WorkerPool(
+                residency,
+                max_total=settings.worker_pool_max,
+                max_per_gpu=settings.worker_pool_per_gpu,
+                idle_timeout_s=settings.worker_idle_s,
+            )
+            await app.state.worker_pool.start()
+
+            app.state.adapter_registry = AdapterRegistry(
+                session_factory=sf, storage=storage, settings=settings,
+                worker_pool=app.state.worker_pool,
+            )
             job_engine = JobEngine(sf, app.state.adapter_registry, app.state.event_bus,
                                    settings.data_dir, gpu_scheduler=app.state.gpu_scheduler)
             app.state.job_engine = job_engine
@@ -155,6 +180,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info("backend ready on %s:%s (data: %s)", settings.host, settings.port, settings.data_dir)
             yield
             await job_engine.stop()
+            # Workers are drained after the engine stops so no adapter
+            # still holds a lease; Job Objects cover abrupt deaths anyway.
+            pool = getattr(app.state, "worker_pool", None)
+            if pool is not None:
+                await pool.stop()
         finally:
             if engine is not None:
                 engine.dispose()

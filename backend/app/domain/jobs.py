@@ -120,8 +120,13 @@ class JobEngine:
     def reconcile_interrupted(self, session: Session) -> int:
         """Called once at startup inside a short session; returns requeued count."""
         stuck = session.execute(select(GenerationJob).where(GenerationJob.status == "running")).scalars().all()
+        from app.domain.workers import attempts as _attempts_mod
         for job in stuck:
             job.recovery_state = "needs_reconciliation" if job.execution_scope == "remote" else "interrupted"
+            # Close open attempt records — a job left "running" at
+            # shutdown must not keep an attempt that reads as still
+            # in-flight; it was interrupted, not completed.
+            _attempts_mod.close_open_attempts(session, job, "interrupted")
             if job.resumable:
                 job.status = "queued"
                 job.message = "re-queued after restart"
@@ -313,6 +318,11 @@ class JobEngine:
                     s.commit()
 
             work_dir = self._data_dir / "jobs" / (job.project_id or "_app")
+            # Durable execution-attempt record — written before any work
+            # so a crash leaves evidence of what was in flight (M4.1).
+            from app.domain.workers import attempts as attempts_mod
+            attempt = attempts_mod.start_attempt(s, job)
+
             cancel_ev = threading.Event()
             self._cancel_events[job.id] = cancel_ev
             if job.cancel_requested:
@@ -329,14 +339,22 @@ class JobEngine:
                 async for update in adapter.run(handle):
                     job.progress = float(update.get("progress", job.progress))
                     job.message = update.get("message", job.message)
+                    if patch := update.get("attempt"):
+                        attempts_mod.patch_attempt(s, job, attempt["attempt_id"], patch)
                     detail = update.get("detail")
                     if detail is not None:
-                        job.progress_json = detail
+                        merged = dict(job.progress_json or {})
+                        # Attempt history is engine-owned — adapter detail
+                        # may never overwrite it.
+                        merged.update({k: v for k, v in detail.items()
+                                       if k != "attempts"})
+                        job.progress_json = merged
                     if update.get("done"):
                         final_output = update.get("output")
                     s.commit()
                     await self._publish(job)
             except JobCancelled:
+                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "cancelled")
                 job.status = "cancelled"
                 job.message = "cancelled"
                 job.completed_at = utcnow()
@@ -345,11 +363,16 @@ class JobEngine:
                 self._purge_work_dir(work_dir, job.id)
                 return
             except asyncio.CancelledError:
+                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "interrupted")
                 job.status = "failed"
                 job.error = "cancelled by shutdown"
                 s.commit()
                 raise
             except Exception as exc:
+                from app.domain.workers.supervisor import WorkerDeadError
+                attempts_mod.finish_attempt(
+                    s, job, attempt["attempt_id"],
+                    "worker_dead" if isinstance(exc, WorkerDeadError) else "failed")
                 job.status = "failed"
                 job.error = str(exc)
                 job.completed_at = utcnow()
@@ -361,11 +384,13 @@ class JobEngine:
                 self._cancel_events.pop(job.id, None)
 
             if final_output is None:
+                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "failed")
                 job.status = "failed"
                 job.error = "adapter finished without an output record"
                 self._purge_work_dir(work_dir, job.id)
             elif final_output.get("no_asset"):
                 job.result_json = final_output.get("result")
+                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "succeeded")
                 job.status = "succeeded"
                 job.progress = 1.0
             else:
@@ -377,6 +402,7 @@ class JobEngine:
                         "media": final_output.get("media"),
                         **extra,
                     })
+                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "succeeded")
                 job.status = "succeeded"
                 job.progress = 1.0
                 self._apply_post_command(s, job, final_output, asset)

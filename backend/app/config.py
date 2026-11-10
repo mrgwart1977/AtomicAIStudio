@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Optional fixed models root; normally resolved per-call from the
     # app_settings row (models_dir) or data_dir/models.
     models_dir: Path | None = None
+    # M4.1 worker pool policy — conservative caps; real persistent
+    # adapters arrive in Phase 2. Values are env-overridable.
+    worker_pool_max: int = 2
+    worker_pool_per_gpu: int = 1
+    worker_idle_s: float = 300.0
 
     @property
     def db_path(self) -> Path:
