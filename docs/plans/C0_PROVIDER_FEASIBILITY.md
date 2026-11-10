@@ -140,3 +140,25 @@ no integration work is authorized by it.
 4. **Region-pinned credentials**: DashScope (Alibaba) keys are region-bound (SG/BJ/TYO/HK); Volcengine Ark is CN-centric; Kling has separate CN/international endpoints — provider config needs a region field.
 5. **MCP as a legitimate third channel**: Suno, OpenArt, Descript, invideo, Midjourney (closed test) all ship MCP servers. Our registry should treat "agent-channel provider" as a first-class access class, distinct from REST adapters.
 6. **Hard E list**: Midjourney (ToS), Sudowrite, QuillBot, Hemingway (no API), Udio (walled garden, no exports). These get catalog rows with honest status — never simulated functionality.
+
+## Access strategies (C1.5 amendment)
+
+Every provider carries one or more **AccessStrategy** records — see
+`C1_5_ACCESS_BRIDGE.md` for the schema, the four capability tiers
+(T1 direct · T2 assisted · T3 manual import · T4 informational), and the
+hard prohibition rules. Access class now maps to a *best strategy*, not a
+verdict:
+
+| Class | Best available strategy | Reachable via |
+|---|---|---|
+| A (30) | `official_api` (T1) | Unattended, within cost/rate gates; `aggregator_api` secondary where the model also ships on fal/Replicate/OpenRouter/Cloudflare |
+| B (19) | `official_api` (T1) when plan/entitlement allows | Same provider, plan-gated; `assisted_workflow` (T2) fallback so the row is still *useful* on a lower plan |
+| C (4) | `mcp_connector` / `aggregator_api` (T1) | Suno, OpenArt, Descript, invideo — official MCP/CLI channels; Happy Horse via Higgsfield workflow |
+| D (3) | `assisted_workflow` (T2) | Sudowrite, Copy.ai-lower-tiers, Canva — prompt-prep → user generates → validate → CAS import |
+| E (6) | `assisted_workflow` or `external_info` (T2/T4) | Midjourney (T2 — ToS permits *user-driven* web use, never automation) · QuillBot, Hemingway (T3 clipboard/file) · Udio (T4 — no exports; monitor) · Suno (T1 via MCP) · Juan Prime → Wan Prime (A) |
+
+**Coverage impact of the bridge**: without it, ~15 catalog rows (25%)
+would be dead entries. With it, every row except Udio reaches at least a
+useful T2/T3 workflow, and Udio is an honest T4 status pending any export
+capability returning. Assisted/manual paths are import jobs with
+`user_reported_external` provenance — never presented as API integration.

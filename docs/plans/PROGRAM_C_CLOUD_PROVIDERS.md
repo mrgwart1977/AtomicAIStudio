@@ -12,6 +12,8 @@ workflows. Both share the same projects, CAS assets, durable jobs, provenance,
 command system, and configuration surfaces.
 
 Feasibility research for all 60 catalog entries: `C0_PROVIDER_FEASIBILITY.md`.
+Multi-method access architecture (bridge for non-API providers):
+`C1_5_ACCESS_BRIDGE.md`.
 
 ---
 
@@ -21,12 +23,13 @@ Feasibility research for all 60 catalog entries: `C0_PROVIDER_FEASIBILITY.md`.
 |---|---|---|---|---|
 | C0 | Cloud architecture & feasibility | High | M4.1 remote contracts | This document + matrix reviewed/approved |
 | C1 | Unified Provider Manager + secure credentials | Critical infra | C0 approved | Provider Manager works with mock providers; security tests pass |
-| C2 | Cloud text generation | High | C1 | Approved providers tested w/ authorized creds + explicit spend limits |
+| C1.5 | Universal AI Access Bridge | High (coverage) | C1 | Strategy registry + assisted/import workflows proven on mocks; no automation beyond documented permission |
+| C2 | Cloud text generation | High | C1 (+C1.5 for assisted paths) | Approved providers tested w/ authorized creds + explicit spend limits |
 | C3 | Cloud image generation | High | C1 + asset infra (M1) | Validated images in CAS w/ provenance + usage accounting |
 | C4 | Cloud video generation | High | C1 + media engine (M4.0.1) + durable remote jobs | E2E authorized generation w/ validation + cost report |
 | C5 | Cloud audio & voice | Medium | C1 + audio asset infra | Validated audio, secure connections, usage tracking; clone-consent controls |
-| C6 | Extended provider ecosystem | Medium | C1 + relevant C2–C5 | Every catalog row has a truthful integration status |
-| C7 | Advanced hybrid orchestration | Low (future) | mature C2–C5 + stable local exec | User-controlled hybrid workflows across modalities |
+| C6 | Extended provider ecosystem | Medium | C1 + C1.5 + relevant C2–C5 | Every catalog row has a truthful integration status |
+| C7 | Advanced hybrid orchestration | Low (future) | mature C2–C5 + stable local exec | User-controlled hybrid workflows; automation only where the strategy permits |
 
 Execution note: C0 may proceed in parallel with M4.1 runtime work. Cloud work
 must never delay, replace, or weaken local AI milestones.
@@ -55,6 +58,11 @@ ProviderSpec         — one row per unique provider account (53 today)
   docs_url, tos_url, privacy_url
   status_reason      human text for non-A rows ("Enterprise plan only", ...)
   catalog_aliases    rows that resolve to this account (Juan Prime→wan-prime, …)
+  strategies         [AccessStrategy] — all permitted access methods for
+                     this provider, best-first; see C1_5_ACCESS_BRIDGE.md §3
+                     (official_api | aggregator_api | mcp_connector |
+                     browser_authorized | desktop_plugin | assisted_workflow
+                     | import_export | external_info)
 
 ModelSpec (cloud)    — extends the existing model_catalog concept
   provider_key → ProviderSpec
@@ -71,9 +79,14 @@ ModelSpec (cloud)    — extends the existing model_catalog concept
   `local|mock` — profiles expose `provider_key`, `access_class`,
   `requires_cloud=True`, honest status text. Unavailable providers render as
   disabled cards with their reason, never as functional adapters.
-- **Channel types**: REST adapters (A/B), agent-channel adapters via MCP
-  (C: Suno, OpenArt, invideo, Descript), external-workflow entries (D/E:
-  guidance text + "Open in browser", never simulated generation).
+- **Channel types** (per strategy, not per provider — a provider may carry
+  several): REST adapters (A/B), aggregator adapters (authorized gateways:
+  fal/Replicate/OpenRouter), agent-channel adapters via MCP (C: Suno,
+  OpenArt, invideo, Descript), official desktop CLIs (invideo, Descript),
+  assisted-workflow entries (T2: prompt-prep → user generates → import),
+  manual import/export (T3), and external-only entries (T4: guidance text +
+  "Open in browser", never simulated generation). Tier rules and the
+  per-provider recommended strategy table live in `C1_5_ACCESS_BRIDGE.md`.
 
 ## 3. Settings schema — Settings → AI Providers (C1)
 
@@ -85,11 +98,16 @@ Schema-driven, no per-provider hand-written UI:
   per-task default, per-project overrides, connection test, rate-limit /
   timeout / retry config, usage + estimated-cost readout, privacy summary
   (what leaves the machine), region selector where relevant.
-- Status line per provider: `verified | needs_key | plan_required |
-  preview_only | external_only | unavailable` — from `access_class` + a live
-  connection test where a key exists.
-- Non-A providers must never appear as working: they show their class badge
-  and reason (`"Sudowrite — no public API; use in browser"`).
+- Integration status per provider/strategy (from `C1_5_ACCESS_BRIDGE.md` §8):
+  `Connected — Official API | Connected — Authorized Connector |
+  Connected — Approved Browser Integration | Assisted Workflow |
+  Manual Import | Enterprise Access Required | Unavailable` — driven by the
+  best enabled strategy + a live connection test where a credential exists.
+- Assisted-workflow providers additionally show their T2 settings: preferred
+  site/region, prompt template, import directory, default asset type,
+  import behavior, project destination, provenance prefs. Manual/external
+  rows show an honest reason (`"Sudowrite — no public API; assisted
+  workflow available"`), never a fake generation surface.
 
 ## 4. Secure credential storage
 
@@ -184,22 +202,31 @@ section; no M-series table or behavior changes except the additive
 
 ## 10. Implementation roadmap (proposed order)
 
-1. **C1** (critical): ProviderSpec catalog + registry, credential vault,
-   Settings→AI Providers UI, mock providers, security tests. Foundation for
-   everything else.
-2. **C2**: text — OpenAI, Anthropic, Google, DeepSeek, xAI (all A-class,
-   uniform OpenAI-ish shapes except Anthropic).
-3. **C3**: image — OpenAI Images, FLUX, Gemini Images, Ideogram, Recraft,
-   Leonardo (+ Qwen/xAI/Meta/Freepik as bandwidth allows).
-4. **C4**: video — durable-remote-job layer first; Kling, Runway, Luma,
-   Veo, Seedance (via chosen official path), Wan-cloud, Higgsfield.
-5. **C5**: audio — ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble,
-   Speechify, Lovo, DupDub + clone-consent.
-6. **C6**: restricted/enterprise/niche (Jasper, Writer, Canva, Firefly,
+1. **C1** (critical): ProviderSpec catalog + registry (incl. strategies),
+   credential vault, Settings→AI Providers UI, mock providers, security
+   tests. Foundation for everything else.
+2. **C1.5**: AccessStrategy registry, four capability tiers, assisted-
+   workflow components (PromptPreparer, SiteLauncher, ImportWatcher,
+   ClipboardImport, ProvenanceTagger), browser/desktop permission model,
+   ToS-evidence records — proven entirely on mocks; no browser automation
+   shipped without documented provider permission.
+3. **C2**: text — OpenAI, Anthropic, Google, DeepSeek, xAI (all A-class,
+   uniform OpenAI-ish shapes except Anthropic) + assisted paths for the
+   no-API writing tools (Sudowrite, QuillBot, Hemingway via C1.5).
+4. **C3**: image — OpenAI Images, FLUX, Gemini Images, Ideogram, Recraft,
+   Leonardo (+ Qwen/xAI/Meta/Freepik as bandwidth allows) + Midjourney/
+   Canva assisted workflows via C1.5.
+5. **C4**: video — durable-remote-job layer first; Kling, Runway, Luma,
+   Veo, Seedance (via chosen official path), Wan-cloud, Higgsfield +
+   assisted paths where a plan-gated API isn't reachable.
+6. **C5**: audio — ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble,
+   Speechify, Lovo, DupDub + clone-consent + Suno MCP + Udio honest-status.
+7. **C6**: restricted/enterprise/niche (Jasper, Writer, Canva, Firefly,
    Synthesia, HeyGen, LTX, MiniMax, TaskAGI, TTSMaker, WellSaid, Descript,
-   Copy.ai, Writesonic, Notion, Anyword, Rytr, OpenArt-MCP, Suno-MCP) +
-   honest-status completion of D/E rows.
-7. **C7**: hybrid routing/orchestration after C2–C5 mature.
+   Copy.ai, Writesonic, Notion, Anyword, Rytr, OpenArt-MCP, Suno-MCP) —
+   leans on C1.5 for every non-API row; truthful status for all 60.
+8. **C7**: hybrid routing/orchestration after C2–C5 mature; automates only
+   where the underlying access strategy permits — T2/T3 stay user-driven.
 
 Every phase: mock providers in CI; live paid tests only with explicit
 authorization + spend limits.
@@ -209,7 +236,10 @@ authorization + spend limits.
 - **Epic issue** "Program C — Universal Cloud AI Integration" (this doc).
 - **C0** planning (closed by this PR once approved).
 - **C1** Provider Manager + credential vault.
+- **C1.5** Universal AI Access Bridge (strategy registry + assisted/import
+  workflows + browser/desktop permission model).
 - **C2** cloud text; **C3** cloud image; **C4** cloud video; **C5** cloud audio.
-- **C6** extended ecosystem; **C7** hybrid orchestration.
+- **C6** extended ecosystem (uses C1.5 for non-API rows); **C7** hybrid
+  orchestration.
 - Each carries its exit gate + the standing rules: no unapproved paid calls,
   honest status, mock-first testing.

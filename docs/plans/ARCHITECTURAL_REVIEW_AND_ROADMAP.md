@@ -275,18 +275,25 @@ adapter family (`adapter_kind="cloud"`), not an architectural fork.
 |---|---|---|
 | C0 | Feasibility + architecture (research only) | docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md + C0_PROVIDER_FEASIBILITY.md approved |
 | C1 | Unified Provider Manager + secure credential store | mock providers + security tests |
-| C2 | Cloud text (OpenAI, Anthropic, Gemini, DeepSeek, xAI) | tested w/ authorized creds + spend limits |
-| C3 | Cloud image (OpenAI, FLUX, Gemini, Ideogram, Recraft, Leonardo, …) | validated CAS outputs + usage accounting |
+| C1.5 | Universal AI Access Bridge — multi-method access strategies (official API / aggregator / MCP / authorized-browser / desktop / assisted / import) | strategy registry + assisted workflows proven on mocks |
+| C2 | Cloud text (OpenAI, Anthropic, Gemini, DeepSeek, xAI) + assisted paths for no-API writing tools | tested w/ authorized creds + spend limits |
+| C3 | Cloud image (OpenAI, FLUX, Gemini, Ideogram, Recraft, Leonardo, …) + Midjourney/Canva assisted workflows | validated CAS outputs + usage accounting |
 | C4 | Cloud video (Kling, Runway, Luma, Veo, Seedance, Wan, Higgsfield, …) | durable remote jobs E2E + cost report |
-| C5 | Cloud audio/voice (ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble, …) | validated audio + clone consent |
-| C6 | Extended ecosystem (restricted/enterprise/niche/MCP + honest status for D/E rows) | truthful status for all 60 catalog rows |
-| C7 | Hybrid local/cloud orchestration (user-authorized routing) | controlled hybrid workflows |
+| C5 | Cloud audio/voice (ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble, …) + Suno MCP | validated audio + clone consent |
+| C6 | Extended ecosystem (restricted/enterprise/niche/MCP + assisted/manual coverage via C1.5) | truthful status for all 60 catalog rows |
+| C7 | Hybrid local/cloud orchestration (user-authorized routing; automates only where the access strategy permits) | controlled hybrid workflows |
+
+Dependencies: C0 → C1 → C1.5; C1 gates C2–C5 official-API work; C1.5
+delivers assisted/browser/desktop strategies inside C2–C6; C7 orchestrates
+only automated (T1) strategies — assisted/manual tiers stay user-driven.
 
 Feasibility snapshot (C0 research, 2026-11): **30 A-class** verified official
 APIs, **19 B-class** restricted/gated, **4 C-class** authorized agent/MCP
 channels, **3 D-class** external-only, **6 E-class** unavailable/prohibited
 (incl. 2 ambiguous names resolved to real providers). 60 catalog rows
-normalize to **53 provider accounts**.
+normalize to **53 provider accounts**. With the C1.5 bridge, every row
+reaches at least a useful T2/T3 workflow except Udio (honest T4 — no export
+path today); nothing is excluded for lacking a public REST API.
 
 Hard rules carried into every C phase: credentials never in the DB/backups/
 logs (Windows Credential Manager / DPAPI vault); estimated cost shown in the
@@ -297,7 +304,8 @@ never simulated functionality.
 
 Tracking: Program C epic + per-phase issues on GitHub. Documents:
 `docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md`,
-`docs/plans/C0_PROVIDER_FEASIBILITY.md`.
+`docs/plans/C0_PROVIDER_FEASIBILITY.md`,
+`docs/plans/C1_5_ACCESS_BRIDGE.md`.
 
 ---
 
