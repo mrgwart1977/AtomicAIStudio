@@ -228,16 +228,22 @@ class SupervisedWorker:
             return confirmed
 
     async def _await_exit(self, timeout_s: float) -> bool:
-        """Wait up to timeout for the process to exit. True = confirmed."""
-        if self.proc is None or self.proc.poll() is not None:
+        """Wait up to timeout for the process to exit. True = confirmed.
+
+        Polls rather than awaiting proc.wait in an executor: a blocked
+        Popen.wait on an undead process would strand a thread-pool worker
+        forever, and enough of those exhaust the default executor and
+        stall the whole event loop's executor work."""
+        if self.proc is None:
             return True
-        try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, self.proc.wait),
-                timeout=timeout_s)
-        except (asyncio.TimeoutError, Exception):
-            pass
-        return self.proc.poll() is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            if self.proc.poll() is not None:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
 
     async def _force_kill(self, grace_s: float = 5.0) -> bool:
         """Terminate and CONFIRM exit. reaped=True only once the process
