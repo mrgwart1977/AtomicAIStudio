@@ -51,6 +51,13 @@ class AdapterRegistry:
             self.register(SdCppAdapter(session_factory, settings))
             self.register(SdCppVideoAdapter(session_factory, settings))
             self.register(ModelDownloadAdapter(session_factory, settings))
+            # M4.1 Phase 2A — real persistent sd-server worker. Registered
+            # only behind ATOMIC_PERSISTENT_INFERENCE_ENABLED=1:
+            # unvalidated persistent inference is not selectable by default.
+            if getattr(settings, "persistent_inference_enabled", False):
+                from app.adapters.sdcpp_server import SdCppServerAdapter
+                self.register(SdCppServerAdapter(
+                    session_factory, settings, worker_pool))
 
     def register(self, adapter: ProviderAdapter) -> None:
         self._adapters[adapter.profile.adapter_id] = adapter

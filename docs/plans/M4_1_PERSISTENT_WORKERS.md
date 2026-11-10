@@ -1,8 +1,8 @@
 # M4.1 — Persistent Inference Workers & GPU Memory Management
 
-**Status:** PHASE 1 IMPLEMENTED (worker foundation, mock-validated).
-Real persistent-model inference is Phase 2 — not started, needs
-authorization. Tracked as GitHub issue #23.
+**Status:** Phase 1 merged (PR #39). PHASE 2A IMPLEMENTED — real
+sd-server integration, **no model inference**. Phase 2B (real weight
+inference + benchmark) remains gated. Tracked as GitHub issue #23.
 
 **Motivation (measured, not assumed):** every generation job today spawns a
 fresh `sd-cli.exe` worker that reloads the ~2 GiB model — the observed
@@ -35,6 +35,18 @@ Adapters: `PersistentMockAdapter` (registered as `mock.persistent-image`,
 `adapter_kind="mock"`) prefers a pooled worker, falls back to a transient
 supervised subprocess when the pool is absent/unavailable — the pre-M4.1
 execution shape stays intact.
+
+## Phase 2A — implemented (sd-server, no inference)
+
+`SdCppServerAdapter` (`adapter_kind="local"`, `worker_model="persistent-pool"`)
+registered only behind `ATOMIC_PERSISTENT_INFERENCE_ENABLED=1` — unvalidated
+persistent inference is never selectable by default.
+
+- Launch: `sd-server.exe -l 127.0.0.1 --listen-port <alloc> --model-dir <dir> --log-level warn` — loopback only; port allocation is TOCTOU so bind failure retries on a fresh port (≤3); admission refusals surface honestly.
+- `SdServerHttpProtocol`: `GET /v1/models` readiness + active health probe (heartbeat-interval cadence); `POST /v1/images/generations`; stdout drained into a bounded log deque (sd-server logs per request — an unread pipe would deadlock it).
+- Uncertain-outcome contract: transport failure / read timeout / abandoned-cancel → raise → supervisor marks dead → process killed → reservation released. A coherent HTTP response (even 500+JSON) is a real answer — worker survives and is reused.
+- GPU identity: `WorkerKey.gpu_index` + `_device_env` pin (`GGML_VULKAN_DEVICE`/`CUDA_VISIBLE_DEVICES`); residency estimates = weight bytes + 2 GiB VRAM / max(4 GiB, weight) RAM — uncalibrated Phase 2A numbers.
+- `GET /v1/models` → 200 with no weights (verified on real binary); a model-resident server is NOT assumed to fit — M4.0 preflight still gates every job.
 
 ## §9 — Proposed `0008_m4_1` migration (NOT applied — needs approval)
 

@@ -47,6 +47,7 @@ class SupervisedWorker:
         self._ready_at: float | None = None
         self._monitor_task: asyncio.Task | None = None
         self._dead_ev = asyncio.Event()
+        self._next_probe: float = 0.0
 
     # ---------- lifecycle ----------
 
@@ -139,14 +140,23 @@ class SupervisedWorker:
                 break
             # Heartbeat enforcement applies when the spec declares one —
             # a worker that never sends its first hb after readiness is
-            # just as dead as one whose heartbeats stop.
+            # just as dead as one whose heartbeats stop. Protocols without
+            # push heartbeats (HTTP) get an active probe at the declared
+            # cadence; a successful probe refreshes last_heartbeat.
             if (self.protocol is not None
                     and self.spec.heartbeat_interval_s > 0
                     and self.state not in (WorkerState.STARTING,)):
+                now = time.monotonic()
+                if now >= self._next_probe:
+                    self._next_probe = now + self.spec.heartbeat_interval_s
+                    try:
+                        await self.protocol.health_probe()
+                    except Exception:
+                        pass  # probe failure just doesn't refresh the hb
                 base = self.protocol.last_heartbeat() or self._ready_at
-                if base is not None and time.monotonic() - base > self.spec.heartbeat_grace_s:
+                if base is not None and now - base > self.spec.heartbeat_grace_s:
                     self.mark_dead(
-                        f"heartbeat stale ({time.monotonic() - base:.1f}s "
+                        f"heartbeat stale ({now - base:.1f}s "
                         f"> {self.spec.heartbeat_grace_s}s)")
                     break
         # A dead-marked worker must actually be dead — heartbeat-stale

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import deque
@@ -52,6 +53,13 @@ class WorkerProtocol:
         """Monotonic time of the last liveness signal, if the protocol
         produces them. None = protocol provides no heartbeat."""
         return None
+
+    async def health_probe(self) -> bool:
+        """Active liveness check for protocols without push heartbeats
+        (e.g. HTTP). The supervisor calls this on heartbeat_interval
+        cadence; implementations should update last_heartbeat() on
+        success. Default: passive — protocol has no probe."""
+        return True
 
     async def shutdown(self, grace_s: float = 5.0) -> None:
         raise NotImplementedError
@@ -196,13 +204,57 @@ class SdServerHttpProtocol(WorkerProtocol):
     - ``GET /v1/models`` → 200 = server up and accepting requests
     - ``POST /v1/images/generations`` → image generation
     - ``POST /sdapi/v1/txt2img`` → alternate A1111-style endpoint
-    No heartbeat channel — health is an HTTP GET on a short timeout.
+
+    Health is an HTTP GET on a short timeout — the server has no push
+    channel. The spawned process's stdout IS drained (into a bounded log
+    deque): sd-server logs on every request and would block on a full
+    pipe buffer if nobody read it.
     Model swap/unload endpoints are NOT verified and intentionally unused.
+
+    Request semantics (Phase 2A contract):
+    - a *coherent* HTTP response (any status with a readable body) means
+      the server is alive and sane → return the result, worker reusable
+    - transport failure / read timeout / abandoned-cancel → the request
+      outcome is UNKNOWN — raise so the supervisor kills the worker;
+      never return it to the idle pool.
     """
 
-    def __init__(self, base_url: str, http_timeout_s: float = 5.0) -> None:
+    def __init__(self, base_url: str, http_timeout_s: float = 5.0,
+                 proc=None) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = http_timeout_s
+        self._last_hb: float | None = None
+        self._logs: deque[str] = deque(maxlen=200)
+        self._proc = proc
+        if proc is not None and getattr(proc, "stdout", None) is not None:
+            threading.Thread(target=self._drain_stdout, daemon=True,
+                             name=f"sdserver-stdout-{proc.pid}").start()
+
+    def _drain_stdout(self) -> None:
+        try:
+            for raw in iter(self._proc.stdout.readline, b""):
+                self._logs.append(raw.decode("utf-8", "replace").rstrip())
+        except (ValueError, OSError):
+            pass
+
+    def last_heartbeat(self) -> float | None:
+        return self._last_hb
+
+    def log_tail(self, n: int = 20) -> list[str]:
+        return list(self._logs)[-n:]
+
+    async def health_probe(self) -> bool:
+        """GET /v1/models — 200 keeps the worker alive; anything else is
+        NOT immediate death (a busy server may be slow) — the heartbeat
+        timestamp simply doesn't advance, so sustained failure goes stale
+        and the supervisor kills it."""
+        loop = asyncio.get_running_loop()
+        code, _ = await loop.run_in_executor(
+            None, self._get, "/v1/models", 2.0)
+        if code == 200:
+            self._last_hb = time.monotonic()
+            return True
+        return False
 
     def _get(self, path: str, timeout: float | None = None) -> tuple[int, bytes]:
         req = urllib.request.Request(self._base + path, method="GET")
@@ -233,8 +285,13 @@ class SdServerHttpProtocol(WorkerProtocol):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         while loop.time() < deadline:
+            # A dead process can never become ready — fail fast rather
+            # than burning the whole timeout (e.g. bind failure exits).
+            if self._proc is not None and self._proc.poll() is not None:
+                return False
             code, _ = await loop.run_in_executor(None, self._get, "/v1/models", 2.0)
             if code == 200:
+                self._last_hb = time.monotonic()
                 return True
             await asyncio.sleep(0.3)
         return False
@@ -249,13 +306,32 @@ class SdServerHttpProtocol(WorkerProtocol):
         timeout_s: float = 600.0,
     ) -> dict[str, Any]:
         # sd-server has no mid-request cancel endpoint in this build —
-        # cancellation means abandoning the request; the supervisor
-        # decides whether the worker is still trustworthy afterwards.
+        # cancellation abandons the request and the supervisor kills the
+        # worker; a clean HTTP response is the only trustworthy outcome.
         if cmd != "generate":
             raise ValueError(f"unsupported sd-server command: {cmd}")
         loop = asyncio.get_running_loop()
-        code, body = await loop.run_in_executor(
+        future = loop.run_in_executor(
             None, self._post, "/v1/images/generations", payload, timeout_s)
+        # Poll for cancellation/abandonment while the blocking HTTP call
+        # runs — a disconnect does NOT stop server-side inference, so an
+        # abandoned request means the worker is recycled (supervisor).
+        while True:
+            if is_cancelled is not None and is_cancelled():
+                raise TimeoutError(
+                    "request abandoned by cancellation — worker recycled")
+            done, _ = await asyncio.wait({future}, timeout=0.25)
+            if done:
+                break
+        code, body = future.result()
+        if code == 0:
+            # Transport failure/read timeout — outcome unknown, the
+            # server may still be generating. Raise → worker recycled.
+            err = str(body.get("error") or "")
+            if "timed out" in err.lower() or "timeout" in err.lower():
+                raise TimeoutError(f"sd-server request timed out: {err}")
+            raise RuntimeError(
+                f"sd-server request transport failure: {err}")
         if code == 200:
             return {"type": "result", "ok": True, "http": code, "body": body}
         return {"type": "result", "ok": False, "http": code,

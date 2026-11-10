@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     worker_pool_max: int = 2
     worker_pool_per_gpu: int = 1
     worker_idle_s: float = 300.0
+    # Phase 2A gate: registers the real persistent sd-server adapter.
+    # Off by default — persistent inference is not yet validated (Phase
+    # 2B). The subprocess-per-job adapter is unaffected.
+    persistent_inference_enabled: bool = False
 
     @property
     def db_path(self) -> Path:
