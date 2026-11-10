@@ -12,6 +12,7 @@ from __future__ import annotations
 from app.adapters.base import ProviderAdapter
 from app.adapters.inference import ModelDownloadAdapter, SdCppAdapter, SdCppVideoAdapter
 from app.adapters.mock import MockImageAdapter
+from app.adapters.persistent_mock import PersistentMockAdapter
 from app.adapters.ops import (
     AssetImportAdapter,
     AssetRelinkAdapter,
@@ -23,9 +24,14 @@ from app.adapters.ops import (
 
 
 class AdapterRegistry:
-    def __init__(self, session_factory=None, storage=None, settings=None) -> None:
+    def __init__(self, session_factory=None, storage=None, settings=None,
+                 worker_pool=None) -> None:
         self._adapters: dict[str, ProviderAdapter] = {}
         self.register(MockImageAdapter())
+        # M4.1 mock persistent adapter — runs through the WorkerPool when
+        # one is injected; otherwise each job spawns a transient worker
+        # (subprocess-per-job fallback). adapter_kind="mock" always.
+        self.register(PersistentMockAdapter(worker_pool))
         if session_factory is not None and storage is not None:
             for cls in (
                 AssetImportAdapter,
