@@ -259,5 +259,57 @@ after the capability registry and hardware survey exist.
 
 ---
 
+## 11. Program C — Universal Cloud AI Integration (parallel workstream)
+
+*Added 2026-11 — amendment, not a revision of §§1–10. All M-series
+milestones, gates, and priorities are unchanged.*
+
+A second, parallel milestone family for external AI providers. M-series
+continues to own local generation, workers, GPU scheduling and media
+validation; C-series owns provider credentials, cloud job orchestration,
+cost control, and cloud workflows. Both share the same projects, CAS,
+durable jobs, provenance, and command system — a cloud job is just a new
+adapter family (`adapter_kind="cloud"`), not an architectural fork.
+
+| Phase | Scope | Gate |
+|---|---|---|
+| C0 | Feasibility + architecture (research only) | docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md + C0_PROVIDER_FEASIBILITY.md approved |
+| C1 | Unified Provider Manager + secure credential store | mock providers + security tests |
+| C1.5 | Universal AI Access Bridge — multi-method access strategies (official API / aggregator / MCP / authorized-browser / desktop / assisted / import) | strategy registry + assisted workflows proven on mocks |
+| C2 | Cloud text (OpenAI, Anthropic, Gemini, DeepSeek, xAI) + assisted paths for no-API writing tools | tested w/ authorized creds + spend limits |
+| C3 | Cloud image (OpenAI, FLUX, Gemini, Ideogram, Recraft, Leonardo, …) + Midjourney/Canva assisted workflows | validated CAS outputs + usage accounting |
+| C4 | Cloud video (Kling, Runway, Luma, Veo, Seedance, Wan, Higgsfield, …) | durable remote jobs E2E + cost report |
+| C5 | Cloud audio/voice (ElevenLabs, Cartesia, Hume, Murf, Fish, Resemble, …) + Suno MCP | validated audio + clone consent |
+| C6 | Extended ecosystem (restricted/enterprise/niche/MCP + assisted/manual coverage via C1.5) | truthful status for all 60 catalog rows |
+| C7 | Hybrid local/cloud orchestration (user-authorized routing; automates only where the access strategy permits) | controlled hybrid workflows |
+
+Dependencies: C0 → C1 → C1.5; C1 gates C2–C5 official-API work; C1.5
+delivers assisted/browser/desktop strategies inside C2–C6; C7 orchestrates
+only automated (T1) strategies — assisted/manual tiers stay user-driven.
+
+Feasibility snapshot (C0 research, audited 2026-11): by catalog entry —
+**32 A-class** verified official APIs, **16 B-class** restricted/gated,
+**4 C-class** authorized agent/MCP channels, **2 D-class** external-only,
+**6 E-class** unavailable/prohibited (incl. Juan Prime + Miniax, which
+resolve to A-class providers → resolved-provider view: 34/16/4/2/4). 60
+catalog rows normalize to **51 unique credential accounts**. With the C1.5
+bridge, every row reaches at least a useful T2/T3 workflow except Udio
+(honest T4 — no export path today); nothing is excluded for lacking a
+public REST API.
+
+Hard rules carried into every C phase: credentials never in the DB/backups/
+logs (Windows Credential Manager / DPAPI vault); estimated cost shown in the
+command preview before any paid request; unknown remote outcomes reconcile,
+never silently resubmit; mock providers in CI — live calls only with
+explicit authorization and spend limits; D/E providers show honest status,
+never simulated functionality.
+
+Tracking: Program C epic + per-phase issues on GitHub. Documents:
+`docs/plans/PROGRAM_C_CLOUD_PROVIDERS.md`,
+`docs/plans/C0_PROVIDER_FEASIBILITY.md`,
+`docs/plans/C1_5_ACCESS_BRIDGE.md`.
+
+---
+
 *Generated for owner review. No production code has been written. Awaiting
 approval before implementation begins.*
