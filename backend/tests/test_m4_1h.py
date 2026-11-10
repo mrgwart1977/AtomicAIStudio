@@ -211,8 +211,11 @@ class TestStopReap:
             await stop_task
             assert w.reaped
             assert not proc_guard.process_alive(pid)
+            # live_count excludes dead workers — a dead-reaped record can
+            # still hold its reservation until the sweeper's drop pass.
+            # Wait on the reservation itself, not liveness.
             deadline = time.time() + 15
-            while pool.live_count() and time.time() < deadline:
+            while reg.resident_totals() != (0, 0) and time.time() < deadline:
                 await asyncio.sleep(0.1)
             assert pool.live_count() == 0
             assert reg.resident_totals() == (0, 0)
