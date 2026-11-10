@@ -181,6 +181,33 @@ class TestVault:
         assert b"sk-ant" not in blob
 
     @win_only
+    def test_concurrent_writes_do_not_corrupt(self, tmp_path):
+        """Two threads racing set_fields on the same vault must leave a
+        readable, complete file — no torn JSON, no lost providers."""
+        import threading
+        v = CredentialVault(tmp_path / "c.vault")
+        errs = []
+
+        def put(key, val):
+            try:
+                for i in range(10):
+                    v.set_fields(key, {"api_key": f"{val}-{i}"})
+            except Exception as e:  # pragma: no cover
+                errs.append(e)
+
+        threads = [threading.Thread(target=put, args=(k, v_))
+                   for k, v_ in (("openai", "oai"), ("xai", "x"), ("rytr", "r"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errs
+        fresh = CredentialVault(tmp_path / "c.vault")
+        for k in ("openai", "xai", "rytr"):
+            got = fresh.get_fields(k)
+            assert got["api_key"].split("-")[0] in ("oai", "x", "r")
+
+    @win_only
     def test_removal_and_status(self, tmp_path):
         v = CredentialVault(tmp_path / "c.vault")
         v.set_fields("xai", {"api_key": "xai-key"})

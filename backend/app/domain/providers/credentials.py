@@ -23,6 +23,7 @@ import ctypes
 import json
 import logging
 import os
+import threading
 from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +90,9 @@ class CredentialVault:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._state: dict[str, Any] | None = None
+        # Serialize mutating ops — sync FastAPI endpoints run on a thread
+        # pool; two concurrent set_fields must not race the tmp-file swap.
+        self._mu = threading.Lock()
 
     # ---------- persistence ----------
 
@@ -124,15 +128,17 @@ class CredentialVault:
             raise VaultUnavailable(
                 "Secure credential storage requires Windows DPAPI; "
                 "this platform cannot store credentials safely.")
-        state = self._load()
-        prov = state["providers"].setdefault(provider_key, {"fields": {}, "set_at": None})
-        for name, value in fields.items():
-            if value is None or value == "":
-                continue
-            prov["fields"][name] = base64.b64encode(
-                _protect(value.encode("utf-8"))).decode("ascii")
-        prov["set_at"] = datetime.now(timezone.utc).isoformat()
-        self._save()
+        with self._mu:
+            state = self._load()
+            prov = state["providers"].setdefault(
+                provider_key, {"fields": {}, "set_at": None})
+            for name, value in fields.items():
+                if value is None or value == "":
+                    continue
+                prov["fields"][name] = base64.b64encode(
+                    _protect(value.encode("utf-8"))).decode("ascii")
+            prov["set_at"] = datetime.now(timezone.utc).isoformat()
+            self._save()
 
     def get_fields(self, provider_key: str) -> dict[str, str]:
         """Decrypt all stored fields — backend-internal use only."""
@@ -153,12 +159,13 @@ class CredentialVault:
     def delete(self, provider_key: str) -> bool:
         """Remove a provider's secrets entirely. True if something was
         removed — secure deletion = ciphertext gone."""
-        provs = self._load()["providers"]
-        if provider_key in provs:
-            del provs[provider_key]
-            self._save()
-            return True
-        return False
+        with self._mu:
+            provs = self._load()["providers"]
+            if provider_key in provs:
+                del provs[provider_key]
+                self._save()
+                return True
+            return False
 
     def status(self, provider_key: str) -> dict[str, Any]:
         """Metadata only — presence + which fields exist + set_at +
