@@ -287,13 +287,15 @@ Dependencies: C0 → C1 → C1.5; C1 gates C2–C5 official-API work; C1.5
 delivers assisted/browser/desktop strategies inside C2–C6; C7 orchestrates
 only automated (T1) strategies — assisted/manual tiers stay user-driven.
 
-Feasibility snapshot (C0 research, 2026-11): **30 A-class** verified official
-APIs, **19 B-class** restricted/gated, **4 C-class** authorized agent/MCP
-channels, **3 D-class** external-only, **6 E-class** unavailable/prohibited
-(incl. 2 ambiguous names resolved to real providers). 60 catalog rows
-normalize to **53 provider accounts**. With the C1.5 bridge, every row
-reaches at least a useful T2/T3 workflow except Udio (honest T4 — no export
-path today); nothing is excluded for lacking a public REST API.
+Feasibility snapshot (C0 research, audited 2026-11): by catalog entry —
+**32 A-class** verified official APIs, **16 B-class** restricted/gated,
+**4 C-class** authorized agent/MCP channels, **2 D-class** external-only,
+**6 E-class** unavailable/prohibited (incl. Juan Prime + Miniax, which
+resolve to A-class providers → resolved-provider view: 34/16/4/2/4). 60
+catalog rows normalize to **51 unique credential accounts**. With the C1.5
+bridge, every row reaches at least a useful T2/T3 workflow except Udio
+(honest T4 — no export path today); nothing is excluded for lacking a
+public REST API.
 
 Hard rules carried into every C phase: credentials never in the DB/backups/
 logs (Windows Credential Manager / DPAPI vault); estimated cost shown in the

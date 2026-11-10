@@ -97,31 +97,39 @@ no integration work is authorized by it.
 | 14 | Resemble AI | **A** | Official API — TTS, voice cloning (consent workflow), realtime WS, deepfake detect | C5 target — cloning consent flow aligns with our consent design. |
 | 15 | TTSMaker | **B** | `pro.ttsmaker.com` API — token auth, voice list + create-order + quota APIs; **Pro/Studio tier required**; CN free API paused | Budget TTS; viable low-cost option. |
 
-## Summary counts
+## Summary counts (audited 2026-11-10 — by catalog entry)
 
-| Class | Count | Share |
+| Class | Count | Rows |
 |---|---|---|
-| A — verified official API | 30 | 50% |
-| B — restricted/gated API | 19 | 32% |
-| C — authorized third-party/agent channel | 4 | 7% |
-| D — external workflow only | 3 | 5% |
-| E — unavailable/prohibited | 6 (incl. 2 resolved ambiguous names) | 10% |
+| A — verified official API | **32** | text 6 · images 10 · video 7 (Kling, Runway, Luma, Veo, Wan, HeyGen, Higgsfield) · audio 9 |
+| B — restricted/gated API | **16** | text 5 · images 3 · video 5 · audio 3 |
+| C — authorized third-party/agent channel | **4** | Writesonic, OpenArt, Happy Horse, TaskAGI |
+| D — external workflow only | **2** | Suno, Udio |
+| E — unavailable/prohibited | **6** | Sudowrite, QuillBot, Hemingway, Midjourney, Juan Prime*, Miniax* |
+| **Total** | **60** | |
 
-*Two "E" rows (Juan Prime → Wan Prime; Miniax → MiniMax) are ambiguous **names** that resolve to real A-class providers — catalog keeps the requested label but routes to the resolved provider.*
+\*Juan Prime and Miniax are E-class **as named** (no such products) that resolve
+to A-class providers (Wan 3.0 Prime on DashScope; MiniMax). Counting each row
+at its *resolved provider's* class instead: **34 A / 16 B / 4 C / 2 D / 4 E** —
+same 60 rows, two views. An earlier draft reported 30/19/4/3/6 (=62) which
+double-counted the resolved pair; the figures above are the audited values.
 
-## Provider normalization (shared accounts)
+## Provider normalization (shared accounts) — audited
 
 | Catalog entries merged | Single provider account |
 |---|---|
-| Gemini text + Gemini Images/Nano Banana + Veo | **Google** (Gemini API / Vertex) |
-| OpenAI text + OpenAI Images | **OpenAI** |
-| xAI Grok text + Grok Imagine | **xAI** |
-| Leonardo + Lucid Origin | **Leonardo** (Lucid Origin is a model, not a provider) |
-| Wan + Juan Prime (→ Wan Prime) | **Alibaba Model Studio / DashScope** |
-| Adobe Firefly + Firefly Video | **Adobe Firefly Services** |
-| Synthesia/HeyGen share avatar-video niche but remain separate accounts | — |
+| Gemini text + Gemini Images/Nano Banana + Veo (3 rows) | **Google** (Gemini API / Vertex) |
+| OpenAI text + OpenAI Images (2) | **OpenAI** |
+| xAI Grok text + Grok Imagine (2) | **xAI** |
+| Leonardo + Lucid Origin (2) | **Leonardo** (Lucid Origin is a model, not a provider) |
+| Qwen Image + Wan + Juan Prime (3) | **Alibaba Model Studio / DashScope** (one key serves all) |
+| Adobe Firefly + Firefly Video (2) | **Adobe Firefly Services** |
+| Higgsfield + Happy Horse (2) | **Higgsfield** (Happy Horse rides its AlibabaVideo workflow) |
 
-**60 catalog rows → 53 unique provider accounts** (7 normalizations).
+**60 catalog rows → 51 unique credential accounts**: 16 rows collapse into 7
+shared accounts (Google, OpenAI, xAI, Leonardo, DashScope, Adobe, Higgsfield).
+Earlier "53" under-counted the DashScope group and the Happy Horse→Higgsfield
+routing; both are corrected here.
 
 ## Ambiguous-name resolutions (verified)
 
@@ -151,11 +159,15 @@ verdict:
 
 | Class | Best available strategy | Reachable via |
 |---|---|---|
-| A (30) | `official_api` (T1) | Unattended, within cost/rate gates; `aggregator_api` secondary where the model also ships on fal/Replicate/OpenRouter/Cloudflare |
-| B (19) | `official_api` (T1) when plan/entitlement allows | Same provider, plan-gated; `assisted_workflow` (T2) fallback so the row is still *useful* on a lower plan |
-| C (4) | `mcp_connector` / `aggregator_api` (T1) | Suno, OpenArt, Descript, invideo — official MCP/CLI channels; Happy Horse via Higgsfield workflow |
-| D (3) | `assisted_workflow` (T2) | Sudowrite, Copy.ai-lower-tiers, Canva — prompt-prep → user generates → validate → CAS import |
-| E (6) | `assisted_workflow` or `external_info` (T2/T4) | Midjourney (T2 — ToS permits *user-driven* web use, never automation) · QuillBot, Hemingway (T3 clipboard/file) · Udio (T4 — no exports; monitor) · Suno (T1 via MCP) · Juan Prime → Wan Prime (A) |
+| A (32) | `official_api` (T1) | Unattended, within cost/rate gates; `aggregator_api` secondary where the model also ships on fal/Replicate/OpenRouter/Cloudflare |
+| B (16) | `official_api` (T1) when plan/entitlement allows | Same provider, plan-gated; `assisted_workflow` (T2) fallback so the row is still *useful* on a lower plan |
+| C (4) | `mcp_connector` / `aggregator_api` (T1) | Writesonic (narrow), OpenArt + Happy Horse + TaskAGI channels; Suno/Descript/invideo MCP/CLI upgrade D/B rows to T1 |
+| D (2) | `assisted_workflow` (T2) | Suno (also T1 via official MCP), Udio (T4 only — no exports) |
+| E (6) | `assisted_workflow` or `external_info` (T2/T3/T4) | Midjourney (T2 — ToS permits *user-driven* web use, never automation) · Sudowrite (T2) · QuillBot, Hemingway (T3 clipboard/file) · Juan Prime → Wan Prime, Miniax → MiniMax (resolve to A) |
+
+Note: classes count *catalog entries*; strategies are per-provider-per-
+capability, so one row can legitimately span tiers (Descript T1 edit-jobs +
+T3 media-out; Suno T1-MCP generation + T2 library import).
 
 **Coverage impact of the bridge**: without it, ~15 catalog rows (25%)
 would be dead entries. With it, every row except Udio reaches at least a

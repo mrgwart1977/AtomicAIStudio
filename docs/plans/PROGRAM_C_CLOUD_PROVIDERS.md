@@ -42,7 +42,7 @@ A **declarative provider catalog** (data, not code) so new providers/models
 are config additions, not schema changes:
 
 ```
-ProviderSpec         — one row per unique provider account (53 today)
+ProviderSpec         — one row per unique provider account (51 audited)
   key                e.g. "openai", "google", "alibaba-dashscope"
   display_name       "OpenAI", "Google (Gemini/Imagen/Veo)"
   access_class       A|B|C|D|E            (from feasibility matrix)
