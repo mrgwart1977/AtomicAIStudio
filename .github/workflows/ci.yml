@@ -54,10 +54,14 @@ jobs:
           [ -s files.txt ] || ok=0
           # ok=0 means detection uncertainty -> every output true (run all)
           out() { if [ "$ok" != "1" ] || grep -qE "$2" files.txt; then echo "$1=true"; else echo "$1=false"; fi; }
-          out backend '^(backend/|scripts/fetch-ffmpeg\.ps1|\.github/workflows/ci\.yml)' >> "$GITHUB_OUTPUT"
-          out frontend '^apps/desktop/' >> "$GITHUB_OUTPUT"
-          out tauri '^apps/desktop/(src-tauri/|package\.json|package-lock\.json)' >> "$GITHUB_OUTPUT"
-          out package '^(backend/(atomic-backend\.spec|sidecar_entry\.py|pyproject\.toml|ffmpeg-manifest\.json)|scripts/(build-sidecar|fetch-ffmpeg)\.ps1|apps/desktop/src-tauri/|\.github/workflows/ci\.yml)' >> "$GITHUB_OUTPUT"
+          # scripts/ is CI-sensitive tooling: any change there warrants a
+          # full validation pass (validate.ps1, dev/test/build helpers).
+          # package stays narrower -- only scripts that participate in
+          # packaging or packaging-validation logic justify ~24 billed-min.
+          out backend '^(backend/|scripts/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
+          out frontend '^(apps/desktop/|scripts/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
+          out tauri '^(apps/desktop/(src-tauri/|package\.json|package-lock\.json)|scripts/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
+          out package '^(backend/(atomic-backend\.spec|sidecar_entry\.py|pyproject\.toml|ffmpeg-manifest\.json)|scripts/(validate\.ps1|build-sidecar\.ps1|fetch-ffmpeg\.ps1)|apps/desktop/src-tauri/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
   # Jobs run UNLESS the changes job positively reports their paths

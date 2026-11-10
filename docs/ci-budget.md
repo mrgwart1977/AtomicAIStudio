@@ -76,18 +76,28 @@ than amortized.
 3. `changes` job gates PR jobs by touched paths; detection uncertainty
    (unresolvable base, diff error, empty diff) outputs all-true and runs
    the full suite — it can only overspend, never under-validate.
-4. Dependent jobs use
+4. `scripts/` is CI-sensitive: any change under it triggers backend +
+   frontend + tauri (~26 billed); `package` additionally requires the
+   packaging/validation subset (`validate.ps1`, `build-sidecar.ps1`,
+   `fetch-ffmpeg.ps1`). Validation infrastructure changes can never
+   slip through all-skipped.
+5. Dependent jobs use
    `always() && !cancelled() && (... != 'false')`:
    - `changes` succeeded + output=false → skip (neutral = pass)
    - `changes` failed/cancelled → outputs unset → `"" != 'false'` →
      the job RUNS — a dead gate can never turn required checks green
    - workflow cancelled (concurrency/manual) → `!cancelled()` skips —
      dedup still works
-5. `package` only on main pushes, `workflow_dispatch`, and
+6. `package` only on main pushes, `workflow_dispatch`, and
    packaging-sensitive PRs.
-6. `frontend` on ubuntu (1x); all Windows-specific jobs stay Windows.
-7. Caches: pip, npm, cargo target+registry+git, FFmpeg vendor keyed on
+7. `frontend` on ubuntu (1x); all Windows-specific jobs stay Windows.
+8. Caches: pip, npm, cargo target+registry+git, FFmpeg vendor keyed on
    `backend/ffmpeg-manifest.json`.
+
+Static coverage: `scripts\test-ci-paths.ps1` asserts the classifier's
+real patterns against 18 cases (backend/frontend/tauri/package/CI-
+workflow/validation-script/docs-only/rename/mixed). Run it after any
+edit to the `out` patterns.
 
 ## Required-check behavior
 
