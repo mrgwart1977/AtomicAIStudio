@@ -1,148 +1,105 @@
 # Atomic Dream Engine
 
-A modular, offline-first Windows desktop application for planning, generating,
-editing, and finishing AI-assisted films. Windows executable: `AtomicAIStudio.exe`.
+A free, open-source **Windows desktop AI filmmaking suite** — local-first,
+project-scoped, and recoverable by design. Atomic Dream Engine organizes
+AI generation into real production structure: isolated projects, versioned
+character/world/location bibles, visual storyboards, durable generation
+jobs, and full provenance — not a loose pile of prompt boxes.
 
-Status: **Milestone 1 — project management + production foundations**. The
-specification lives in [`docs/handoff/`](docs/handoff/README.md) (v0.9); the
-accepted roadmap is in
-[`docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md`](docs/plans/ARCHITECTURAL_REVIEW_AND_ROADMAP.md)
-and requirement-to-code mapping in [`docs/plans/TRACEABILITY.md`](docs/plans/TRACEABILITY.md).
+**Status: early development (v0.x).** Local image and video pipelines are
+implemented and tested; cloud-provider integrations are a *foundation*,
+not finished features. See [ROADMAP.md](ROADMAP.md) for honest status.
+
+## What works today
+
+- **Projects** — isolated, portable, recoverable (`.atomicpkg` backup/restore)
+- **Versioned bibles** — characters, worlds, locations with history + revert
+- **Content-addressed asset store** — import, verify, relink, share across projects
+- **Scenes, shots & multi-character casting** — visual storyboard UI
+- **Local image generation** — Stable Diffusion 1.5 via stable-diffusion.cpp (Vulkan/CUDA), explicit model-download approval, SHA-verified
+- **Local video generation** — Wan 2.1 T2V 1.3B via sd.cpp, supervised workers, cancellation & recovery
+- **FFmpeg media engine** — pinned LGPL build for clip inspection/validation
+- **Provider Manager (foundation)** — catalog + DPAPI credential vault + settings UI; **no live cloud generation yet**
+- **Durable jobs & undo** — every mutation is an audited command; jobs survive restarts
+- **Windows installer** — NSIS via Tauri 2 + PyInstaller-frozen backend
+
+## What is NOT functional yet
+
+- **Cloud generation** — the 60-entry provider catalog is a management
+  foundation only. Nothing calls a real provider API, runs a paid job, or
+  drives a browser. Mock connectivity tests are labeled mock.
+- **C1.5+ import/automation workflows**, LTX integration, audio, editing
+  timelines — planned, not implemented.
+
+## Platform & hardware
+
+- **OS:** Windows 11 (x64). Windows 10 may work but is untested.
+- **GPU:** optional for development; needed for local generation.
+  - SD 1.5 fp16 image generation: ~4 GB VRAM realistic minimum
+  - Wan 2.1 T2V 1.3B fp16 video: **substantially more VRAM + RAM** —
+    this is a real video pipeline, not a toy. Low-memory systems are
+    rejected by admission control rather than half-running.
+- **Disk:** ~2 GB app + space for models (each 2–6 GB) and project media.
+
+## Install
+
+Released installers bundle everything (backend, FFmpeg, shell) — no
+Python/Node/Rust needed. *(Public releases are not published yet; the
+installer path exists in CI.)*
+
+## Develop
+
+Prereqs: Python 3.12 + 3.14, Node.js 22 LTS, Rust stable, PowerShell 5.1+.
+
+```powershell
+git clone https://github.com/mrgwart1977/AtomicAIStudio.git
+cd AtomicAIStudio
+backend\.venv\Scripts\python -m pytest tests -q   # backend suite (create .venv first)
+cd apps\desktop; npm ci; npm run build            # frontend
+npm run tauri dev                                 # full desktop app
+```
+
+Local validation (CI-equivalent): `scripts\validate.ps1` — backend on both
+Pythons + frontend build; `-Tauri` and `-Package` optional.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Tauri 2 shell (Rust)  ── spawns/stops sidecar ──┐           │
-│ React 19 + TS + Tailwind/Radix + Zustand        │           │
-│        │ HTTP + WS (loopback, session token)    ▼           │
-│        └──────────► FastAPI backend (frozen exe in prod,    │
-│                     .venv in dev)                           │
-│                     SQLAlchemy 2 + SQLite(WAL) + Alembic    │
-│                     Unified commands ─ jobs ─ adapters      │
-│                     CAS media store (files, never in DB)    │
-└─────────────────────────────────────────────────────────────┘
+apps/desktop        Tauri 2 shell — React 19 + TypeScript + Vite + Zustand
+  src-tauri         Rust shell (spawns + supervises the backend sidecar)
+backend             FastAPI service (frozen with PyInstaller for shipping)
+  app/domain        projects, bibles, CAS assets, jobs, workers, providers
+  app/api           REST + WebSocket; X-Atomic-Token session auth
+scripts/            dev, build-sidecar, fetch-ffmpeg, validation tooling
+docs/handoff        design spec of record (v0.9) — amendments extend it
 ```
 
-- All project mutations go through the **Unified Creative Command** system
-  (preview → commit → audit + undo); job-producing commands enqueue durable
-  ops (import/verify/backup/restore) that survive restarts.
-- Media lives in a **content-addressed store** under configurable storage
-  locations — SQLite only keeps references, so projects scale to TBs.
-- Projects are isolated by `project_id` FKs everywhere; sharing is explicit
-  via the shared library (link or copy).
-- Whole-project `.atomicpkg` backups are hash-verified and always restore
-  into a **new** project — the live one is never mutated.
-- **M1.1:** backup destinations are configurable app-wide or per-project
-  (native folder picker, free-space + FAT32/4 GiB checks, no silent
-  fallback); exports/imports stream in 8 MiB chunks with live
-  bytes/rate/ETA progress, safe cancellation, per-project op locking, and
-  crash recovery that sweeps `.partial`/`.staging` artifacts on startup.
+Every mutation flows through the command system (preview → commit →
+audit → undo). Project-owned rows are isolated by `project_id` at the
+DB/API layer. Mock adapters are labeled `adapter_kind="mock"` and are
+never presented as inference.
 
-- `apps/desktop` — Tauri shell (`src-tauri/`) + React UI (`src/`)
-- `backend` — FastAPI sidecar: `app/` (api, domain, db, adapters) + `tests/`
-- `packages/contracts` — typed API contract notes (OpenAPI → TS)
-- `docs` — handoff spec, architecture review, plans
-- `scripts` — dev entry points
+## License & third parties
 
-## Dev prerequisites
+Application code: **Apache-2.0** — see [LICENSE](LICENSE).
+Bundled/dependent components carry their own licenses — see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), including FFmpeg
+(LGPL-2.1+, shared-linked, source available upstream).
 
-| Tool | Version used | License |
-|---|---|---|
-| Node.js | ≥ 20 (26 dev) | MIT |
-| Python | ≥ 3.12 (3.14 dev) | PSF |
-| Rust (rustup, MSVC toolchain) | 1.99 stable | MIT/Apache-2.0 |
-| VS 2022 Build Tools (C++ workload) | 17.14 | Microsoft (free for OSS dev) |
-| FFmpeg (for media features) | 9.0.2 | LGPL/GPL — see ffmpeg.org/legal |
+**AI model weights are NOT covered by Apache-2.0.** Models (SD 1.5
+OpenRAIL-M, SDXL OpenRAIL++-M, Wan 2.1 Apache-2.0, etc.) are downloaded
+by the user with explicit approval and remain under their original
+licenses. This project never redistributes weights.
 
-Install: `winget install Rustlang.Rustup Microsoft.VisualStudio.2022.BuildTools Gyan.FFmpeg`
-(Build Tools needs the VCTools workload for Rust's MSVC linker.)
+## Security
 
-## Run it
+Report vulnerabilities via GitHub private vulnerability reporting — see
+[SECURITY.md](SECURITY.md). Provider credentials are stored in a
+Windows DPAPI (CurrentUser) vault, never in the database, exports, or logs.
 
-```powershell
-# one-time
-cd backend && python -m venv .venv && .venv\Scripts\pip install -e ".[dev]"
-cd apps\desktop && npm install
+## Contributing
 
-# full desktop app (shell spawns the backend sidecar itself)
-npm run tauri dev          # in apps/desktop
+[CONTRIBUTING.md](CONTRIBUTING.md) — workflow, conventions, acceptance
+criteria. [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). [ROADMAP.md](ROADMAP.md).
 
-# or browser-only dev (two terminals):
-scripts\dev-backend.ps1  # backend on :8788, token "dev"
-scripts\dev-ui.ps1       # vite on :1420
-```
-
-## Test
-
-```powershell
-cd backend && .venv\Scripts\python -m pytest tests -q   # 19 tests
-cd apps\desktop && npm run build                        # typecheck + bundle
-```
-
-## Standalone packaging (M0.1)
-
-The installer ships a **self-contained backend** — no Python, pip, Node.js,
-Rust, or virtualenv required on the user's machine. The backend is frozen
-with PyInstaller (onedir) and bundled by Tauri next to the shell exe:
-
-```
-backend\sidecar_entry.py      # PyInstaller entry
-backend\atomic-backend.spec   # freeze spec (hidden imports + alembic data)
-scripts\build-sidecar.ps1     # builds dist → syncs into src-tauri\backend-dist
-apps\desktop\src-tauri\
-  backend-dist\atomic-backend\atomic-backend.exe   # bundled resource
-```
-
-Installed layout (per-user, `%LOCALAPPDATA%\Atomic Dream Engine\`):
-
-```
-atomic-dream-engine.exe
-backend\atomic-backend.exe + _internal\   (embedded Python runtime)
-uninstall.exe
-```
-
-Sidecar resolution order in the shell: bundled exe → dev `.venv` /
-`ATOMIC_PYTHON` override → PATH `python`. The packaged app always uses the
-bundled exe; the dev fallbacks only exist for `cargo run`/`tauri dev`
-without built resources. Same flags in every mode
-(`--port --token --data-dir`), same per-launch token + ephemeral loopback
-port + kill-on-exit.
-
-Build the installer:
-
-```powershell
-scripts\build-sidecar.ps1     # pyinstaller → src-tauri\backend-dist
-cd apps\desktop
-npm run tauri build           # → target\release\bundle\nsis\*-setup.exe
-```
-
-Validated on this machine (clean of Python/dev tools on PATH):
-silent install `/S` → app window opens → bundled `atomic-backend.exe`
-spawned → migrations run → health + authenticated API + full
-command→job→asset pipeline → restart keeps DB → `/S` uninstall removes
-files, registry entry, and leaves no processes. Evidence:
-`docs/m0.1-evidence/`."
-
-## What M0 does (and does not do)
-
-**Works:** desktop shell with managed backend lifecycle; loopback API with
-per-launch session token; project create/list/open/rename/archive/restore with
-enforced isolation; persistent prompt draft; Unified Creative Command System
-(preview → approve → commit → audit → undo, idempotency + optimistic
-concurrency); durable job engine with restart reconciliation; WebSocket
-progress; a **clearly labeled mock** image adapter that proves the whole path
-prompt → proposal → job → asset without any model; hardware/environment probe
-(GPU vendor-agnostic); SQLite WAL + Alembic migrations; contract tables for
-manifests and render cache.
-
-**Deliberately not in M0:** real AI inference, model downloads, cloud calls,
-project dashboard extras (templates applied/duplicate/delete), character/world
-systems, asset import, backups UI, editor. Disabled nav entries are labeled
-with their target milestone — nothing nonfunctional is presented as working.
-
-## Layout
-
-Project data lives under `%LOCALAPPDATA%\AtomicAIStudio\` by default
-(`ATOMIC_DATA_DIR` overrides): `atomic.db` (SQLite), `assets/`, `jobs/`,
-`backups/`, `logs/`. Media bytes never go into SQLite.
+"Atomic Dream Engine" name and logo: see [docs/BRANDING.md](docs/BRANDING.md).
