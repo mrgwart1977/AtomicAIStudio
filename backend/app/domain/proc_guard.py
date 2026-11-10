@@ -57,6 +57,8 @@ if _IS_WINDOWS:
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
     _PROCESS_ALL_ACCESS = 0x1FFFFF
     _PROCESS_QUERY_INFORMATION = 0x0400
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_OBJECT_0 = 0x00000000
 
 
 def _create_kill_on_close_job() -> int | None:
@@ -207,13 +209,18 @@ def process_alive(pid: int) -> bool:
             return True
         except OSError:
             return False
-    h = _k32.OpenProcess(_PROCESS_QUERY_INFORMATION, False, pid)
+    # WaitForSingleObject(0) on the process object is the definitive
+    # liveness test: the object signals only after all threads die. The
+    # old GetExitCodeProcess==STILL_ACTIVE check raced — the exit-code
+    # field is stored slightly AFTER the object signals, so a terminated
+    # process could read "alive" for a few ms (idle-evict CI flake).
+    h = _k32.OpenProcess(_SYNCHRONIZE, False, pid)
     if not h:
         return False
-    code = ctypes.c_uint32()
-    ok = _k32.GetExitCodeProcess(h, ctypes.byref(code))
-    _k32.CloseHandle(h)
-    return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        return _k32.WaitForSingleObject(h, 0) != _WAIT_OBJECT_0
+    finally:
+        _k32.CloseHandle(h)
 
 
 def process_rss_bytes(pid: int) -> int | None:
