@@ -13,6 +13,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The "AtomicAIStudio" directory name predates the Atomic Dream Engine
+# rebrand and is intentionally retained: renaming it would orphan the
+# existing database, models, runtimes, and content-addressed assets.
 _DEFAULT_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "AtomicAIStudio"
 
 

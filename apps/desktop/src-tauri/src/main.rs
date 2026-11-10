@@ -117,6 +117,10 @@ fn wait_for_backend(port: u16, timeout: Duration) -> Result<(), String> {
 }
 
 fn data_dir() -> PathBuf {
+    // The "AtomicAIStudio" directory name predates the Atomic Dream Engine
+    // rebrand and is intentionally retained: renaming it would orphan the
+    // existing database, models, runtimes, and content-addressed assets.
+    // The Tauri bundle identifier does NOT drive this path.
     std::env::var("ATOMIC_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
