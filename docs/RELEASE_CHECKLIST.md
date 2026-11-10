@@ -331,3 +331,40 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   validation and public release.
 - All other tracked items remain open as recorded (#22, #23–#27,
   #5–#11, #14, #15).
+
+### Rebrand — Atomic Dream Engine (PR #34, MERGED)
+
+- Product renamed: **Atomic AI Studio → Atomic Dream Engine**
+  (`productName`, window title, binary `atomic-dream-engine.exe`,
+  bundle identifier `com.atomicdream.engine`, docs/plans). Supplied
+  hexagon logo drives the TopBar wordmark and the full Tauri icon set.
+- **Data directory unchanged on purpose:** `%LOCALAPPDATA%\AtomicAIStudio`
+  is hardcoded in `src-tauri/src/main.rs` and `backend/app/config.py` —
+  the name predates the rebrand and is retained so existing databases,
+  projects, models, runtimes, CAS assets, and backups keep working.
+  The bundle identifier does not drive this path. Do not rename without
+  a full migration design (detection → backup → copy → integrity check).
+- **Installer coexistence:** the new NSIS installer registers as a
+  different product (`Atomic Dream Engine`, new identifier/install dir).
+  An old "Atomic AI Studio" install may coexist side-by-side — and both
+  point at the SAME `%LOCALAPPDATA%\AtomicAIStudio` data directory and
+  `atomic.db`. Implications:
+  - Once the new build migrates the DB to `0007_m4`, an old install
+    crashes on startup ("can't locate revision") — fail-closed but
+    with an opaque error; a friendly newer-revision guard is proposed.
+  - There is currently **no single-instance guard**: two backends can
+    open the same data dir concurrently. WAL + busy_timeout prevent
+    file-level corruption but two JobEngines could double-claim the
+    same queued job. A data-dir lock file is proposed (see below).
+- **Proposed hardening (not yet implemented — awaiting approval):**
+  1. `<data_dir>\.atomic.lock` held via OS file lock for the process
+     lifetime (auto-released on exit/crash); second backend on the same
+     data dir exits with a clear "already in use" message.
+  2. Pre-migration revision check: if `alembic_version` contains a
+     revision unknown to this build, abort startup with a clear
+     "database was created by a newer version" error.
+- WebView2 user-data folder follows the identifier
+  (`%LOCALAPPDATA%\com.atomicdream.engine`) — harmless fresh state;
+  the frontend persists nothing there.
+- Uninstall removes the install dir only; the data dir is never
+  deleted by the installer.
