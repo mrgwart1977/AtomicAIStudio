@@ -33,7 +33,11 @@ class PersistentMockAdapter:
         requires_cloud=False,
         cost_model="free",
         lane="gen",
-        needs_gpu=True,
+        # The mock worker is a Python subprocess — it never allocates a
+        # GPU. Declaring needs_gpu would make the scheduler stamp an
+        # assigned_gpu and fail-closed VRAM admission rightly refuses on
+        # machines whose GPU VRAM can't be probed (e.g. GPU-less CI).
+        needs_gpu=False,
         worker_model="persistent-pool",
         resumable=False,
         notes="M4.1 mock: persistent-worker path with subprocess fallback. Not AI inference.",
