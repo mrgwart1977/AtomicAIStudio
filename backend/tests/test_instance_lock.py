@@ -67,6 +67,24 @@ def _settings(data_dir: Path) -> Settings:
     return Settings(session_token="t", data_dir=data_dir, log_level="WARNING")
 
 
+def _acquire_when_released(data_dir: Path, timeout: float = 10.0):
+    """Bounded wait for a dead holder's lock to be released.
+
+    Process wait() confirms the exit *signal*; Windows releases the
+    byte-range lock asynchronously during handle teardown, which can lag
+    the wait by a tick. Poll until the OS confirms release — same
+    bounded-wait pattern as the worker kill-confirmation tests.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return acquire_data_dir_lock(data_dir)
+        except DataDirLockError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
+
+
 def _alembic_version(db_path: Path) -> str | None:
     conn = sqlite3.connect(db_path)
     try:
@@ -117,15 +135,16 @@ class TestCrossProcess:
         finally:
             holder.terminate()
             holder.wait(timeout=10)
-        # Holder is gone — the OS released its lock.
-        acquire_data_dir_lock(tmp_path).release()
+        # Holder is gone — wait for the OS to confirm the lock released
+        # (handle teardown can lag wait() by a tick).
+        _acquire_when_released(tmp_path).release()
 
     def test_release_after_forced_kill(self, tmp_path):
         holder = _spawn_holder(tmp_path)
         assert _wait_line(holder) == "LOCKED"
         holder.kill()  # SIGKILL-equivalent on Windows
         holder.wait(timeout=10)
-        acquire_data_dir_lock(tmp_path).release()
+        _acquire_when_released(tmp_path).release()
 
     def test_second_process_error_message_is_clear(self, tmp_path):
         lock = acquire_data_dir_lock(tmp_path)
