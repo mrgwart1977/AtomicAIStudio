@@ -25,10 +25,26 @@ backend\.venv\Scripts\python -m app.domain.firstrun_watchdog `
     --log "$env:LOCALAPPDATA\AtomicAIStudio\watchdog\first-run.jsonl"
 ```
 
-Exit codes: `0` clean (worker finished or never appeared), `2` breach
-terminated the worker tree, `3` watchdog error.
+**Proceed only after the `"event": "ready"` record appears** in the log
+(and stdout) — that is the machine-verifiable signal that all startup
+gates passed and monitoring is armed. Exit codes: `0` clean, `2` breach
+terminated the worker tree, `3` watchdog error/refused.
 
-## Enforced breaches (first-run thresholds)
+## Startup gates — all must pass before "ready"
+
+| Gate | Requirement | On failure |
+|---|---|---|
+| Process scan | enumeration works, baseline **empty** (`--allow-baseline` overrides) | `refused`, exit 3 |
+| Telemetry | `nvidia-smi` + `psutil` respond (bounded retries) | `refused`, exit 3 |
+| VRAM readiness | free VRAM ≥ **4.5 GiB** | `refused`, exit 3 |
+| RAM readiness | available RAM ≥ **6 GiB** | `refused`, exit 3 |
+
+A `refused` record carries the exact reason. With a non-empty baseline
+the pre-existing `sd-server.exe` PIDs are printed — terminate them and
+restart; a watchdog that starts with a polluted baseline could never
+safely guard the run.
+
+## In-run breaches (after "ready")
 
 | Condition | Threshold | Grace |
 |---|---|---|
@@ -40,39 +56,47 @@ terminated the worker tree, `3` watchdog error.
 | Telemetry unavailable | nvidia-smi/psutil failure | 3 consecutive → fail closed |
 
 Gauge breaches need consecutive samples so a single transient spike
-can't kill the run; structural conditions (deadline, extra worker,
-monitor loss) fire immediately.
+can't kill the run; structural conditions fire immediately.
 
-## What it can and cannot kill
+## Kill targeting — identity, not just PID
 
-At startup the watchdog snapshots all running `sd-server.exe` PIDs as
-**baseline** and never touches them. Only post-baseline sd-server
-processes — the spawned inference worker — plus their descendants are
-termination targets. A foreign sd-server (or any other process) is
-never killed. If the worker exits but leaves orphan children, those
-orphans are treated as part of the run and killed.
+Every tracked process is recorded as `(pid, create_time)` and that
+identity is re-verified **immediately before every kill** — including
+the `taskkill /F /PID` fallback (which is deliberately *not* `/T`: `/T`
+would reap the unrelated children of a reused pid). A pid whose
+create_time no longer matches was reused by the OS — it is a different
+process and is never signaled; it is reported in the termination
+record under `identity_mismatch`.
+
+Baseline entries are identity-scoped too: a baseline pid that is later
+reused by a *new* `sd-server.exe` counts as a fresh post-baseline
+worker (correct — it is not the process that was snapshotted).
+
+If the worker exits but leaves orphan children, those orphans are
+identity-checked and killed.
 
 ## Evidence
 
 Every ~1 s sample is appended to the JSONL log (and stdout):
 `{ts, elapsed_s, ram_available_mib, gpu_free_mib, worker_pids,
-tree_rss_mib}`. A breach writes a terminal `termination` record with the
-reason, target PIDs, killed PIDs, and any survivors.
+tree_rss_mib}`. Gate results appear as `start` / `startup_probe` /
+`ready` / `refused` records. A breach writes a terminal `termination`
+record with reason, targets, killed, survivors and identity mismatches.
 
 ## Limitations (honest)
 
-- **~1 s granularity** — a faster VRAM spike can OOM before the second
-  confirming sample. The grace count trades safety for flap-resistance;
-  `--interval-s` can be lowered.
+- **~1 s granularity** — a fast VRAM spike can OOM inside the 2-sample
+  debounce window; `--interval-s` can be lowered.
 - **RSS ≠ VRAM** — the 8 GiB tree ceiling watches system RAM residency;
-  GPU memory is only watched via nvidia-smi free, not per-process.
-- **GPU index mapping** — `--gpu-index` is the nvidia-smi index. On this
-  single-GPU machine it equals the app's device 0; multi-GPU machines
-  must map it manually.
-- **nvidia-smi required** — if the driver tool is missing, GPU telemetry
-  fails closed after 3 samples. RAM/process monitoring alone still runs.
-- **Process-name matching** — discovery keys on `sd-server.exe`. A
-  renamed binary is invisible (but then the app couldn't launch it
-  either — the name is fixed by the runtime install).
-- **No backend visibility** — by design. It cannot see queued jobs,
-  worker leases, or HTTP state; it guards only the process boundary.
+  per-process GPU memory isn't visible (only card-level free via smi).
+- **GPU index mapping** — `--gpu-index` is the nvidia-smi index; equals
+  the app's device 0 on this single-GPU machine.
+- **nvidia-smi required** — the startup gate refuses to arm without it
+  (fail closed); mid-run loss also fails closed after 3 samples.
+- **Process-name matching** — discovery keys on `sd-server.exe`; a
+  renamed binary is invisible (but the app couldn't launch one either).
+- **No backend visibility** — by design; it guards the process
+  boundary, not job state.
+- **Ordering is procedural** — the watchdog cannot stop an operator
+  from committing a generation without it; the `ready` record +
+  empty-baseline gate are the verifiable checkpoints.
