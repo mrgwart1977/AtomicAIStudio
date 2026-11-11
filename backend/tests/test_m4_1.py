@@ -255,6 +255,12 @@ class TestCancelAndEviction:
             while pool.live_count() and time.time() < deadline:
                 await asyncio.sleep(0.2)
             assert pool.live_count() == 0
+            # Eviction stops the worker via Job-close — the kill lands
+            # asynchronously, so confirm exit rather than asserting on
+            # the same tick (same pattern as test_m4_2a's child wait).
+            deadline = time.time() + 10
+            while proc_guard.process_alive(pid) and time.time() < deadline:
+                await asyncio.sleep(0.1)
             assert not proc_guard.process_alive(pid)
         finally:
             await pool.stop()
