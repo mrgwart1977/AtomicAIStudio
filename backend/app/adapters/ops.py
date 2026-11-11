@@ -19,6 +19,11 @@ from app.domain import backup as backup_mod
 from app.domain import backup_dest
 
 
+def _is_bridge_tmp(src: Path) -> bool:
+    from app.domain import bridge
+    return bridge.is_bridge_tmp(src)
+
+
 def _validate_external_source(ext: Any) -> list[str]:
     """C1.5 §4 ProvenanceTagger — the user asserts where a file came from;
     the provider/strategy/method must be real catalog entries so the tag is
@@ -97,8 +102,15 @@ class AssetImportAdapter(_OpsBase):
         with self._sf() as session:
             project = session.get(Project, handle.project_id)
             loc = self._storage.get_location(session, project.storage_location_id if project else None)
-            af = self._storage.ingest(session, src, location=loc)
-            session.commit()
+            try:
+                af = self._storage.ingest(session, src, location=loc)
+                session.commit()
+            finally:
+                # Only files the bridge workflow itself materialized are
+                # ever deleted — ownership is proven by tempdir + prefix,
+                # never by a caller-supplied flag alone.
+                if handle.request.get("delete_source_after") and _is_bridge_tmp(src):
+                    src.unlink(missing_ok=True)
             out_path = self._storage.file_path(session, af)
             yield {"progress": 0.9, "message": "Registered in library"}
             ext = handle.request.get("external_source")
