@@ -16,8 +16,11 @@ weights remains a first-run acceptance gate (see
 docs/persistent-sd-server.md).
 
 Verified launch surface (pinned master-1073):
-    sd-server.exe -l 127.0.0.1 --listen-port <p> --model-dir <dir>
-    GET /v1/models → 200 even with no weights (lazy --model-dir loading)
+    sd-server.exe -l 127.0.0.1 --listen-port <p> -m <weight>
+                  --model-dir <dir> --log-level warn
+    -m preloads the context BEFORE listen() — a READY server has a
+    resident model; --model-dir alone only provides catalog scan
+    roots and would leave generation endpoints at 503 model_not_loaded.
 
 Cancel/recycle contract: sd-server exposes no mid-request cancel — an
 abandoned or transport-failed request leaves server-side execution
@@ -107,15 +110,26 @@ class SdCppServerAdapter(SdCppAdapter):
         return (exe if exe.exists() else None), flavor
 
     def server_argv(self, exe: Path | None, port: int,
-                    model_dir: Path) -> list[str]:
+                    model_dir: Path, weight: Path | None = None) -> list[str]:
         """Launch vector for the real server (or a stub via argv_prefix).
-        Loopback only — the server never binds a routable address."""
+        Loopback only — the server never binds a routable address.
+
+        ``-m <weight>`` is REQUIRED for a usable worker: verified in
+        server main.cpp at the pinned commit — the model context is
+        created only when model_path is set, BEFORE listen(), and the
+        process exit(1)s on load failure (an honest dead-proc signal).
+        ``--model-dir`` alone only defines scan roots for the recipe/
+        model-file catalog — it never loads a model, so generations
+        would 503 model_not_loaded."""
         prefix = self._argv_prefix or [str(exe)]
-        return [*prefix,
+        argv = [*prefix,
                 "-l", "127.0.0.1",
                 "--listen-port", str(port),
-                "--model-dir", str(model_dir),
                 "--log-level", "warn"]
+        if weight is not None:
+            argv += ["-m", str(weight)]
+        argv += ["--model-dir", str(model_dir)]
+        return argv
 
     def _spec(self, request: dict, job_id: str, *, port: int,
               model_key: str, weight: Path | None,
@@ -135,12 +149,16 @@ class SdCppServerAdapter(SdCppAdapter):
         return WorkerSpec(
             key=WorkerKey(model_key=model_key, runtime_key="sdcpp",
                           flavor=flavor, gpu_index=gpu, protocol="http"),
-            argv=tuple(self.server_argv(exe, port, model_dir)),
+            argv=tuple(self.server_argv(exe, port, model_dir,
+                                        weight=weight)),
             env=env,
             cwd=str(exe.parent) if exe is not None else None,
             est_ram_bytes=est_ram,
             est_vram_bytes=est_vram,
-            ready_timeout_s=float(request.get("ready_timeout_s", 30.0)),
+            # Model load happens BEFORE listen() — /v1/models cannot
+            # answer until the ctx exists. ~2 GiB on Vulkan can take a
+            # minute+ on first mmap; 120s is the honest bound.
+            ready_timeout_s=float(request.get("ready_timeout_s", 120.0)),
             heartbeat_interval_s=2.0,   # HTTP health-probe cadence
             heartbeat_grace_s=8.0,
             protocol_factory=lambda proc: SdServerHttpProtocol(
