@@ -82,6 +82,11 @@ def set_provider_config(key: str, body: ProviderConfigUpdate,
         raise HTTPException(422, "; ".join(problems))
     patch = {}
     if body.enabled is not None:
+        # C1.5 §9 — stale evidence demotes before enable: refuse to arm a
+        # strategy whose verification has aged out.
+        if body.enabled and registry.strategy_stale(catalog.get_provider(key)):
+            raise HTTPException(422, "strategy verification is stale — "
+                                     "needs re-check before enabling")
         patch["enabled"] = body.enabled
     if body.settings is not None:
         patch["settings"] = body.settings

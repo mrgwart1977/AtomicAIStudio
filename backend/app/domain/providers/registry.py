@@ -12,12 +12,14 @@ Status semantics (never conflate):
   preview_only   — API exists but preview/limited (Canva, Meta)
   assisted       — best path is T2/T3 (no API) — workflow, not integration
   external_only  — T4 informational (Udio)
+  needs_recheck  — best strategy's evidence is stale (C1.5 §9)
   mock           — connection test used the mock connector (never "connected")
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -96,11 +98,21 @@ def set_default(session: Session, task: str, provider_key: str | None) -> dict:
 
 # ---------- status ----------
 
+STRATEGY_FRESH_DAYS = 180  # C1.5 §9 — stale evidence demotes to needs_recheck
+
+
+def usable_strategies(provider: dict) -> list[dict]:
+    """Strategies excluding `prohibited` refusal-records — those exist only
+    to document why a tempting path is NOT offered (C1.5 §3)."""
+    return [s for s in (provider.get("strategies") or [])
+            if s.get("automation_permission") != "prohibited"]
+
+
 def best_strategy(provider: dict) -> dict | None:
     """Preferred strategy: first T1 wins (T1 = direct programmatic); among
     non-T1 providers the catalog's declared order is authoritative — it
     encodes the recommended path (e.g. QuillBot → T3 clipboard round-trip)."""
-    strats = provider.get("strategies") or []
+    strats = usable_strategies(provider)
     if not strats:
         return None
     for s in strats:
@@ -109,12 +121,27 @@ def best_strategy(provider: dict) -> dict | None:
     return strats[0]
 
 
+def strategy_stale(provider: dict, today: date | None = None) -> bool:
+    """True when the best strategy's verification is older than
+    STRATEGY_FRESH_DAYS — stale evidence demotes to 'needs_recheck'
+    before the provider may be enabled (C1.5 §9)."""
+    strat = best_strategy(provider)
+    if strat is None or strat["tier"] == "T4":
+        return False
+    raw = strat.get("last_verified") or (strat.get("tos_evidence") or {}).get("checked")
+    try:
+        checked = date.fromisoformat(str(raw)[:10])
+    except (TypeError, ValueError):
+        return True  # no usable verification date = stale by definition
+    return ((today or date.today()) - checked).days > STRATEGY_FRESH_DAYS
+
+
 def credential_required(provider: dict) -> bool:
     return any(f.get("required") for f in provider.get("credential_fields", []))
 
 
 def compute_status(provider: dict, cred_status: dict | None,
-                   enabled: bool) -> dict[str, Any]:
+                   enabled: bool, today: date | None = None) -> dict[str, Any]:
     """Honest status — access class + credential + tier, never inflated."""
     cls = provider["access_class"]
     strat = best_strategy(provider)
@@ -126,6 +153,8 @@ def compute_status(provider: dict, cred_status: dict | None,
 
     if cred_missing_readable:
         base, label = "credential_unreadable", "Credential unreadable — re-enter"
+    elif strategy_stale(provider, today):
+        base, label = "needs_recheck", "Verification stale — needs re-check"
     elif tier == "T4":
         base, label = "external_only", "External only"
     elif tier in ("T2", "T3"):

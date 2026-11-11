@@ -467,6 +467,22 @@ class JobEngine:
         af.status = "ready"
         s.add(af)
 
+        provenance = {"adapter_id": job.adapter_id, "job_id": job.id,
+                      "model_key": job.model_key, "gpu_index": job.gpu_index,
+                      "request": job.request_json}
+        ext = output.get("external_source")
+        if ext:
+            # C1.5 §4 ProvenanceTagger — user-reported external origin.
+            # `verified_remote` is reserved for T1 strategies with remote
+            # job ids and can never be claimed through the import path.
+            provenance.update({
+                "provenance_confidence": "user_reported",
+                "external_provider": ext.get("provider_key"),
+                "external_strategy": ext.get("strategy_id"),
+                "external_method": ext.get("method"),
+                "external_note": ext.get("note"),
+                "external_reported_at": utcnow().isoformat(),
+            })
         asset = Asset(
             id=new_id(),
             project_id=job.project_id,
@@ -476,9 +492,7 @@ class JobEngine:
             uri=rel_path,
             sha256=sha,
             byte_size=size,
-            provenance_json={"adapter_id": job.adapter_id, "job_id": job.id,
-                             "model_key": job.model_key, "gpu_index": job.gpu_index,
-                             "request": job.request_json},
+            provenance_json=provenance,
         )
         s.add(asset)
         s.flush()

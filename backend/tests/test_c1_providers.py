@@ -46,6 +46,8 @@ class TestCatalog:
             assert p["strategies"], p["key"]
             # T1 providers must declare credentials or explicitly need none
             strat = registry.best_strategy(p)
+            if strat is None:  # monitor-only providers (Udio) have no usable path
+                continue
             if strat["tier"] == "T1" and registry.credential_required(p):
                 assert p["credential_fields"], p["key"]
 
