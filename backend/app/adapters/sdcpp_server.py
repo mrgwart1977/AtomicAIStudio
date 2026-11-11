@@ -5,10 +5,13 @@ flavor, GPU, protocol="http") stays resident in the WorkerPool and serves
 many jobs — eliminating per-job model reload once real inference is
 validated.
 
-Phase 2A status: lifecycle/protocol/resource plumbing only. Generation
-requests are stub-tested; real weight inference is Phase 2B and is NOT
-enabled here — the adapter registers only when
-``ATOMIC_PERSISTENT_INFERENCE_ENABLED=1``.
+Phase 2B status: the full request path (spec → acquire → POST →
+decode → asset) is exercised end-to-end against the stub server,
+including the exact POST contract and both response shapes. Real
+weight inference is still NOT executed — the adapter registers only
+when ``ATOMIC_PERSISTENT_INFERENCE_ENABLED=1``, and field-level
+validation against a weight-loaded server remains a Phase 2B
+acceptance gate (see docs/persistent-sd-server.md).
 
 Verified launch surface (pinned master-1073):
     sd-server.exe -l 127.0.0.1 --listen-port <p> --model-dir <dir>
@@ -239,8 +242,14 @@ class SdCppServerAdapter(SdCppAdapter):
             raise RuntimeError(f"sd-server: {result.get('error') or 'request failed'}")
 
         body = result.get("body") or {}
+        # Accepted response shapes: OpenAI images {"data":[{b64_json}]}
+        # (primary) and A1111-style {"images":[b64]} (txt2img fallback) —
+        # both encode the generated image as base64 PNG.
         data = body.get("data") or []
         b64 = data[0].get("b64_json") if data and isinstance(data[0], dict) else None
+        if not b64:
+            images = body.get("images") or []
+            b64 = images[0] if images and isinstance(images[0], str) else None
         if not b64:
             raise RuntimeError("sd-server returned no image data")
         out_path = out_dir / f"{handle.job_id}.png"

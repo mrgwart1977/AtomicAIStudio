@@ -11,7 +11,10 @@ Launch args it understands: -l/--listen-ip, --listen-port, --model-dir,
 --log-level (extra args ignored) — same vector the real adapter passes.
 
 Env switches:
-  STUB_MODE        ok | error | malformed | hang | drop
+  STUB_MODE        ok | error | malformed | hang | drop | a1111 | crash
+                   a1111  → A1111-style {"images":[b64]} response shape
+                   crash  → os._exit(2) mid-request (recovery tests)
+                   noimg  → 200 {} — valid JSON without image payload
   STUB_MODELS_CODE HTTP status for /v1/models (default 200)
   STUB_MODELS_FAIL_AFTER  return 500 after N successful /v1/models calls
   STUB_BIND_PORT   fixed bind port (collision tests); bind failure → exit 3
@@ -74,12 +77,20 @@ class Handler(BaseHTTPRequestHandler):
                               "data": [{"id": "stub-model"}] if code == 200 else []})
         elif self.path == "/v1/child_pid":
             self._send(200, {"child_pid": self.server.child_pid})
+        elif self.path == "/v1/last_request":
+            # Phase 2B: lets tests assert the exact request contract the
+            # adapter sends (the "unverified superset" made verifiable).
+            self._send(200, self.server.last_request or {})
         else:
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)  # consume the request body
+        body = self.rfile.read(length)  # consume the request body
+        try:
+            self.server.last_request = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            self.server.last_request = {"_raw": body[:200].decode("utf-8", "replace")}
         mode = _env("STUB_MODE", "ok")
         _log(f"POST {self.path} mode={mode}")
         if self.path not in ("/v1/images/generations", "/sdapi/v1/txt2img"):
@@ -98,6 +109,17 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.close()
             self.close_connection = True
             return
+        elif mode == "crash":
+            # Die mid-request — transport sees a dropped connection AND
+            # the process is gone. Exercises worker-recovery paths.
+            os._exit(2)
+        elif mode == "noimg":
+            self._send(200, {"created": int(time.time()), "data": []})
+        elif mode == "a1111":
+            # A1111-style txt2img response shape ({"images": [b64]}) —
+            # alternate schema the adapter accepts as a fallback.
+            self._send(200, {"images": [PNG_B64],
+                             "parameters": {}, "info": ""})
         else:  # ok
             self._send(200, {
                 "created": int(time.time()),
