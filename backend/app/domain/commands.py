@@ -53,6 +53,8 @@ SUPPORTED_COMMANDS = {
     "location.create", "location.update", "location.archive", "location.unarchive", "location.revert",
     # assets / jobs
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
+    # C1.5 access bridge — user-driven external dispatch only
+    "bridge.prepare", "bridge.launch", "bridge.import",
     # backups
     "backup.export", "backup.import", "backup.restore",
     # scenes & storyboard (M2)
@@ -77,6 +79,7 @@ JOB_COMMANDS = {
     "generate.image.persistent": "gen.image.sdcpp-server",
     "generate.video": "gen.video.sdcpp",
     "asset.import": "ops.asset.import",
+    "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
     "assets.verify": "ops.assets.verify",
     "backup.export": "ops.backup.export",
@@ -145,6 +148,12 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
+    if command_type == "bridge.prepare":
+        return f"Prepare prompt for {payload.get('provider_key', '?')} — you paste it yourself"
+    if command_type == "bridge.launch":
+        return f"Open the documented {payload.get('provider_key', '?')} site"
+    if command_type == "bridge.import":
+        return f"Import user-provided file tagged from {payload.get('provider_key', '?')}"
     if command_type == "asset.share":
         return "Share asset to the shared library"
     if command_type == "asset.link":
@@ -241,6 +250,10 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
     if command_type == "asset.import":
         if not (payload.get("source_path") or "").strip():
             raise CommandError(422, "source_path is required")
+    if command_type.startswith("bridge."):
+        from app.domain import bridge as _bridge
+        warnings += _bridge.validate_dispatch(
+            session, project, command_type, payload)[0]
     if command_type == "asset.share":
         asset = session.get(Asset, payload.get("asset_id") or "")
         if asset is None or asset.project_id != project.id:
@@ -1192,6 +1205,31 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     elif command_type == "asset.share":
         _share_asset(session, project, payload["asset_id"], audit)
 
+    elif command_type in ("bridge.prepare", "bridge.launch"):
+        from app.domain import bridge as _bridge
+        provider = _bridge.get_provider(payload["provider_key"])
+        strat, _err = _bridge.resolve_strategy(
+            provider, command_type.rsplit(".", 1)[1],
+            payload.get("strategy_id"))
+        if command_type == "bridge.prepare":
+            prepared, meta = _bridge.prepare_prompt(provider, strat, payload)
+            audit["after"]["bridge"] = {
+                "action": "prepare", **meta,
+                "prepared_text": prepared, "char_count": len(prepared),
+            }
+        else:
+            url = _bridge.resolve_launch_url(provider, strat)
+            audit["after"]["bridge"] = {
+                "action": "launch", "provider_key": provider["key"],
+                "strategy_id": strat["strategy_id"], "method": strat["method"],
+                "url": url, "opened": None,
+            }
+            err = _bridge.launch(url) if url else "no documented launch URL"
+            audit["after"]["bridge"]["opened"] = err is None
+            if err:
+                warnings.append(f"Browser open failed — open manually: "
+                                f"{url} ({err})")
+
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
@@ -1227,6 +1265,12 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 raise CommandError(409, str(exc)) from exc
             raise
         audit["after"]["job_id"] = job.id
+        if command_type == "bridge.import":
+            audit["after"]["bridge"] = {
+                "action": "import", "job_id": job.id,
+                "provider_key": payload.get("provider_key"),
+                "external_source": request.get("external_source"),
+            }
 
     else:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
@@ -1257,6 +1301,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     }
     if command_type == "project.duplicate":
         out["duplicate_project_id"] = audit["after"].get("duplicate_project_id")
+    if command_type.startswith("bridge."):
+        out["bridge"] = audit["after"].get("bridge")
     return out
 
 
@@ -1267,6 +1313,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image.persistent": "image",
         "generate.video": "video",
         "asset.import": "import",
+        "bridge.import": "import",
         "asset.relink": "relink",
         "assets.verify": "verify",
         "backup.export": "backup",
@@ -1350,6 +1397,36 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
                     req["image_path"] = str(p)
     if command_type == "backup.export":
         req["kind"] = payload.get("kind", "backup")
+    if command_type == "bridge.import":
+        import os
+        import tempfile
+        from app.domain import bridge as _bridge
+        provider = _bridge.get_provider(payload["provider_key"])
+        strat, _err = _bridge.resolve_strategy(
+            provider, "import", payload.get("strategy_id"))
+        req = {
+            "command_type": command_type,
+            "source_path": (payload.get("source_path") or "").strip() or None,
+            "name": payload.get("name"),
+            "kind": payload.get("kind", "other"),
+            "external_source": {
+                "provider_key": provider["key"],
+                "strategy_id": strat["strategy_id"],
+                "method": strat["method"],
+                "note": (payload.get("note") or "")[:200],
+            },
+        }
+        if payload.get("content") is not None:
+            # Clipboard payload → temp file the ops adapter ingests, then
+            # deletes. The frontend passes content the user explicitly
+            # pasted; the backend never reads the clipboard itself.
+            fd, tmp = tempfile.mkstemp(prefix="ade-bridge-", suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload["content"])
+            req["source_path"] = tmp
+            req["delete_source_after"] = True
+            if not req["name"]:
+                req["name"] = f"clipboard-import-{provider['key']}.txt"
     return req
 
 

@@ -97,6 +97,7 @@ CommandType = Literal[
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
+    "bridge.prepare", "bridge.launch", "bridge.import",
 ]
 
 

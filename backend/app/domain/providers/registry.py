@@ -121,12 +121,11 @@ def best_strategy(provider: dict) -> dict | None:
     return strats[0]
 
 
-def strategy_stale(provider: dict, today: date | None = None) -> bool:
-    """True when the best strategy's verification is older than
-    STRATEGY_FRESH_DAYS — stale evidence demotes to 'needs_recheck'
-    before the provider may be enabled (C1.5 §9)."""
-    strat = best_strategy(provider)
-    if strat is None or strat["tier"] == "T4":
+def record_stale(strat: dict | None, today: date | None = None) -> bool:
+    """True when a strategy record's verification is older than
+    STRATEGY_FRESH_DAYS or carries no parseable date (C1.5 §9). T4
+    informational records are exempt — nothing is being enabled."""
+    if strat is None or strat.get("tier") == "T4":
         return False
     raw = strat.get("last_verified") or (strat.get("tos_evidence") or {}).get("checked")
     try:
@@ -134,6 +133,13 @@ def strategy_stale(provider: dict, today: date | None = None) -> bool:
     except (TypeError, ValueError):
         return True  # no usable verification date = stale by definition
     return ((today or date.today()) - checked).days > STRATEGY_FRESH_DAYS
+
+
+def strategy_stale(provider: dict, today: date | None = None) -> bool:
+    """True when the best strategy's verification is older than
+    STRATEGY_FRESH_DAYS — stale evidence demotes to 'needs_recheck'
+    before the provider may be enabled (C1.5 §9)."""
+    return record_stale(best_strategy(provider), today)
 
 
 def credential_required(provider: dict) -> bool:

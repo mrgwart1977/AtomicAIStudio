@@ -85,6 +85,37 @@ class ProviderTestOut(BaseModel):
     tier: str | None = None
 
 
+class CapabilityAlternateOut(BaseModel):
+    strategy_id: str | None
+    method: str | None
+    tier: str | None
+
+
+class CapabilityEntryOut(BaseModel):
+    capability: str
+    strategy_id: str | None
+    method: str | None
+    tier: str | None
+    # documented | needs_recheck | refused_prohibited
+    status: str
+    stale: bool
+    # Always "catalog_documented" — a cited evidence URL is NOT proof the
+    # integration method is authorized, the feature works, or was tested.
+    verification: str
+    dispatch: list[str]
+    dispatch_blocked: str | None
+    required_user_action: str
+    alternate: CapabilityAlternateOut | None
+
+
+class ProviderCapabilitiesOut(BaseModel):
+    provider_key: str
+    evidence_stamp: str
+    provider_status: str
+    enabled: bool
+    capabilities: list[CapabilityEntryOut]
+
+
 class DefaultsOut(BaseModel):
     defaults: dict[str, str]
 

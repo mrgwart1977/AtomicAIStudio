@@ -525,6 +525,7 @@ async def commit_command(
         "duplicate_project_id": result.get("duplicate_project_id"),
         "deleted": result.get("deleted", False),
         "warnings": result.get("warnings", []),
+        "bridge": result.get("bridge"),
     }
 
 

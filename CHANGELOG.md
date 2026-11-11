@@ -7,6 +7,15 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 Access Bridge dispatch + capability reporting: `GET
+  /api/providers/{key}/capabilities` (per-feature tier/method/strategy,
+  `catalog_documented` verification label, dispatch vs blocked actions),
+  and `bridge.prepare`/`bridge.launch`/`bridge.import` commands through
+  preview → commit → audit. Prepare renders prompt templates for manual
+  paste; launch opens only validated catalog HTTPS URLs in the user's
+  browser; import routes user-selected files/clipboard text through the
+  `external_source` provenance path. Prohibited/stale/T1 strategies are
+  refused — no programmatic provider calls, no browser automation.
 - C1.5 Access Bridge foundation: enriched AccessStrategy records across
   the 60-provider catalog (strategy_id, ToS evidence + verification
   dates, auth/cost/reliability), catalog integrity validation,

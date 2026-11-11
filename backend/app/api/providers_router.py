@@ -20,8 +20,8 @@ from app.domain.providers.credentials import CredentialVault, VaultError
 from app.domain.providers import catalog
 from app.schemas.providers import (
     CredentialStatusOut, CredentialUpdate, DefaultUpdate, DefaultsOut,
-    ProviderConfigUpdate, ProviderDetailOut, ProviderSummaryOut,
-    ProviderTestOut,
+    ProviderCapabilitiesOut, ProviderConfigUpdate, ProviderDetailOut,
+    ProviderSummaryOut, ProviderTestOut,
 )
 
 providers_router = APIRouter()
@@ -70,6 +70,26 @@ def provider_detail(key: str, request: Request, db: Session = Depends(get_db)):
     if out is None:
         raise HTTPException(404, "provider not found")
     return out
+
+
+@providers_router.get("/api/providers/{key}/capabilities",
+                      response_model=ProviderCapabilitiesOut)
+def provider_capabilities(key: str, request: Request, db: Session = Depends(get_db)):
+    """C1.5 — per-feature capability report. `catalog_documented` on every
+    entry: evidence URLs are not authorization, capability proof, or a
+    tested integration. `dispatch` reflects what the bridge can run today
+    (T2/T3 user-driven actions; T1 is never claimed operational)."""
+    from app.domain import bridge
+    p = catalog.get_provider(key)
+    if p is None:
+        raise HTTPException(404, "provider not found")
+    cfg = registry.get_config(db).get(key, {})
+    cred = _vault(request).status(key) if p.get("credential_fields") else None
+    report = bridge.capability_report(p)
+    report["provider_status"] = registry.compute_status(
+        p, cred, bool(cfg.get("enabled")))["status"]
+    report["enabled"] = bool(cfg.get("enabled"))
+    return report
 
 
 @providers_router.put("/api/providers/{key}/config", response_model=ProviderDetailOut)

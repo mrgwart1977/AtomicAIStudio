@@ -99,6 +99,8 @@ class AssetImportAdapter(_OpsBase):
             loc = self._storage.get_location(session, project.storage_location_id if project else None)
             af = self._storage.ingest(session, src, location=loc)
             session.commit()
+            if handle.request.get("delete_source_after"):
+                src.unlink(missing_ok=True)
             out_path = self._storage.file_path(session, af)
             yield {"progress": 0.9, "message": "Registered in library"}
             ext = handle.request.get("external_source")
