@@ -1,0 +1,16 @@
+# CODEOWNERS — proposed. Takes effect when enabled in repo settings.
+# Default owner for everything:
+* @mrgwart1977
+
+# Security / integrity-sensitive areas — require owner review:
+.github/                    @mrgwart1977
+backend/app/domain/providers/ @mrgwart1977
+backend/app/domain/workers/   @mrgwart1977
+backend/ffmpeg-manifest.json  @mrgwart1977
+backend/atomic-backend.spec   @mrgwart1977
+scripts/build-sidecar.ps1     @mrgwart1977
+scripts/fetch-ffmpeg.ps1      @mrgwart1977
+scripts/validate.ps1          @mrgwart1977
+LICENSE                       @mrgwart1977
+THIRD-PARTY-NOTICES.md        @mrgwart1977
+SECURITY.md                   @mrgwart1977
