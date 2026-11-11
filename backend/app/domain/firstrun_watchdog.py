@@ -263,6 +263,15 @@ class FirstRunWatchdog:
     # -------------------------------------------------- termination
 
     def _terminate(self, reason: str) -> int:
+        # Best-effort final sweep: a fail-closed breach can fire before
+        # any healthy sample recorded the worker (e.g. GPU telemetry dead
+        # from launch). Re-scan so the kill list is as complete as
+        # psutil still allows — still restricted to post-baseline pids.
+        try:
+            for w in self._post_baseline_workers():
+                self._tracked_tree.update(self.tel.tree_pids(w.pid))
+        except Exception:
+            pass
         targets = sorted(self._tracked_tree - self._baseline_pids)
         killed: list[int] = []
         survivors: list[int] = []

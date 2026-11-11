@@ -243,6 +243,17 @@ class TestStructuralBreaches:
         assert wd.run() == FirstRunWatchdog.EXIT_BREACH
         assert tel.killed == [100]
 
+    def test_telemetry_dead_from_launch_still_kills_discovered_worker(self):
+        """If telemetry dies before ANY healthy sample, _tracked_tree is
+        empty — the final re-scan must still find and kill the worker."""
+        tel = FakeTelemetry()
+        tel.fail_gpu = [RuntimeError("smi dead")] * 5  # dead from the start
+        wd = _wd(tel)
+        _on_sleep(wd, lambda n: tel.add(100) if n == 1 else None)
+
+        assert wd.run() == FirstRunWatchdog.EXIT_BREACH
+        assert tel.killed == [100]
+
 
 # ------------------------------------------------------------ targeting safety
 
