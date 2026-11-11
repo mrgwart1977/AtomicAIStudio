@@ -22,7 +22,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Item | Notes |
 |---|---|
 | CI reliability | cost-optimized workflow; then merge #55 → #57 → #53 → #56 |
-| M4.1 Phase 2B | real sd-server inference path — blocked pending authorization |
+| M4.1 Phase 2B | real sd-server inference path — in progress (request contract + recovery hardened, no weights yet; see docs/persistent-sd-server.md) |
 
 ## Planned (not implemented)
 
