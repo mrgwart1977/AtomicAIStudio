@@ -261,46 +261,51 @@ class TestBridgePrepare:
 # ---------------- bridge.launch ----------------
 
 class TestBridgeLaunch:
-    def test_commit_opens_documented_url(self, client, monkeypatch):
-        opened = []
-        monkeypatch.setattr(bridge, "_open_url",
-                            lambda url, new=0: opened.append(url) or True)
+    def test_backend_cannot_open_browser(self):
+        # The launch split is structural, not a policy flag: the module
+        # contains no mechanism to spawn a browser at all — no job, replay,
+        # or API request can produce a window server-side.
+        import inspect
+        src = inspect.getsource(bridge)
+        for forbidden in ("import webbrowser", "webbrowser.open",
+                          "import subprocess", "subprocess.run",
+                          "subprocess.Popen", "os.system"):
+            assert forbidden not in src, forbidden
+        # and no launch helper survives to be invoked
+        assert not hasattr(bridge, "_open_url")
+        assert not hasattr(bridge, "launch")
+
+    def test_commit_delivers_validated_url_to_client(self, client):
         p = make_project(client)
         r = _commit(client, p["id"], "bridge.launch",
                     {"provider_key": "midjourney"})
         assert r.status_code == 200, r.text
         b = r.json()["bridge"]
         assert b["url"] == "https://www.midjourney.com"
-        assert b["opened"] is True
-        assert opened == ["https://www.midjourney.com"]
+        assert b["open_via"] == "client_shell"  # desktop opens it explicitly
 
-    def test_payload_url_never_honored(self, client, monkeypatch):
+    def test_payload_url_never_honored(self, client):
         # "Do not accept arbitrary launch URLs" — the payload field is
-        # ignored entirely; only catalog URLs can be opened.
-        opened = []
-        monkeypatch.setattr(bridge, "_open_url",
-                            lambda url, new=0: opened.append(url) or True)
+        # ignored entirely; only catalog URLs can be delivered.
         p = make_project(client)
         r = _commit(client, p["id"], "bridge.launch",
                     {"provider_key": "midjourney",
                      "url": "https://evil.example/phish"})
         assert r.status_code == 200, r.text
-        assert opened == ["https://www.midjourney.com"]
-        assert "evil.example" not in r.json()["bridge"]["url"]
+        assert r.json()["bridge"]["url"] == "https://www.midjourney.com"
+        assert "evil.example" not in r.text
 
-    def test_browser_failure_warns_but_audits(self, client, monkeypatch):
-        monkeypatch.setattr(bridge, "_open_url", lambda url, new=0: False)
+    def test_launch_audited_in_command_row(self, client):
         p = make_project(client)
         r = _commit(client, p["id"], "bridge.launch",
                     {"provider_key": "midjourney"})
         assert r.status_code == 200, r.text
-        assert r.json()["bridge"]["opened"] is False
-        assert any("manually" in w for w in r.json()["warnings"])
+        cmds = client.get(f"/api/projects/{p['id']}/commands").json()
+        row = next(c for c in cmds if c["command_type"] == "bridge.launch")
+        assert row["status"] == "committed"
+        assert row["payload_json"]["provider_key"] == "midjourney"
 
-    def test_idempotent_replay_does_not_reopen(self, client, monkeypatch):
-        opened = []
-        monkeypatch.setattr(bridge, "_open_url",
-                            lambda url, new=0: opened.append(url) or True)
+    def test_idempotent_replay_not_redispatched(self, client):
         p = make_project(client)
         rev = _rev(client, p["id"])
         r1 = _commit(client, p["id"], "bridge.launch",
@@ -309,7 +314,9 @@ class TestBridgeLaunch:
                      {"provider_key": "suno"}, rev=rev, key="launch-1")
         assert r1.status_code == 200 and r2.status_code == 200
         assert r2.json()["idempotent_replay"] is True
-        assert len(opened) == 1  # replay must not re-open the browser
+        cmds = client.get(f"/api/projects/{p['id']}/commands").json()
+        assert sum(1 for c in cmds
+                   if c["command_type"] == "bridge.launch") == 1
 
     def test_launch_monitor_only_refused(self, client):
         p = make_project(client)
@@ -376,6 +383,78 @@ class TestBridgeImport:
         tmp = Path(prov["request"]["source_path"])
         assert tmp.name.startswith("ade-bridge-")
         assert not tmp.exists()
+
+    def test_enqueue_failure_cleans_tempfile(self, client, monkeypatch):
+        import tempfile as _tf
+        from app.domain.jobs import OpBusyError
+        made = []
+        real_mkstemp = _tf.mkstemp
+
+        def spy(*a, **k):
+            fd, path = real_mkstemp(*a, **k)
+            made.append(path)
+            return fd, path
+
+        monkeypatch.setattr(_tf, "mkstemp", spy)
+        engine = client.app.state.job_engine
+
+        def boom(*a, **k):
+            raise OpBusyError("ops engine busy")
+
+        monkeypatch.setattr(engine, "enqueue", boom)
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "quillbot", "content": "x"})
+        assert r.status_code == 409, r.text
+        assert made, "tempfile was never materialized"
+        assert all(not Path(m).exists() for m in made)
+
+    def test_ingest_failure_cleans_tempfile(self, client, monkeypatch):
+        import tempfile as _tf
+        made = []
+        real_mkstemp = _tf.mkstemp
+
+        def spy(*a, **k):
+            fd, path = real_mkstemp(*a, **k)
+            made.append(path)
+            return fd, path
+
+        monkeypatch.setattr(_tf, "mkstemp", spy)
+        storage = client.app.state.storage
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(storage, "ingest", boom)
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "quillbot", "content": "x"})
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, p["id"], r.json()["job_id"])
+        assert job["status"] == "failed", job
+        assert all(not Path(m).exists() for m in made)
+
+    def test_user_file_never_deleted(self, client, tmp_path):
+        # delete_source_after must not be weaponizable via plain
+        # asset.import — the ownership check requires tempdir + prefix.
+        f = tmp_path / "mine.png"
+        f.write_bytes(b"mine")
+        p = make_project(client)
+        r = _commit(client, p["id"], "asset.import",
+                    {"source_path": str(f), "delete_source_after": True})
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, p["id"], r.json()["job_id"])
+        assert job["status"] == "succeeded"
+        assert f.exists()  # user file survives
+
+        # Same guarantee through bridge.import file mode — no delete flag.
+        f2 = tmp_path / "mine2.png"
+        f2.write_bytes(b"mine2")
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "midjourney", "source_path": str(f2)})
+        assert r.status_code == 200, r.text
+        wait_for_job(client, p["id"], r.json()["job_id"])
+        assert f2.exists()
 
     def test_import_requires_exactly_one_source(self, client, tmp_path):
         p = make_project(client)

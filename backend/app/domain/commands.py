@@ -1218,17 +1218,15 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 "prepared_text": prepared, "char_count": len(prepared),
             }
         else:
+            # Validate + audit only — the validated destination goes to the
+            # client, which performs the shell.open after explicit user
+            # interaction. The backend can never produce a browser window.
             url = _bridge.resolve_launch_url(provider, strat)
             audit["after"]["bridge"] = {
                 "action": "launch", "provider_key": provider["key"],
                 "strategy_id": strat["strategy_id"], "method": strat["method"],
-                "url": url, "opened": None,
+                "url": url, "open_via": _bridge.OPEN_VIA,
             }
-            err = _bridge.launch(url) if url else "no documented launch URL"
-            audit["after"]["bridge"]["opened"] = err is None
-            if err:
-                warnings.append(f"Browser open failed — open manually: "
-                                f"{url} ({err})")
 
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])
@@ -1261,6 +1259,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
+            # A bridge clipboard tempfile must not survive a failed enqueue —
+            # it belongs to this workflow and is never a user file.
+            from app.domain import bridge as _b
+            if request.get("delete_source_after") and \
+                    _b.is_bridge_tmp(request.get("source_path") or ""):
+                from pathlib import Path as _P
+                _P(request["source_path"]).unlink(missing_ok=True)
             if isinstance(exc, OpBusyError):
                 raise CommandError(409, str(exc)) from exc
             raise
@@ -1420,7 +1425,7 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             # Clipboard payload → temp file the ops adapter ingests, then
             # deletes. The frontend passes content the user explicitly
             # pasted; the backend never reads the clipboard itself.
-            fd, tmp = tempfile.mkstemp(prefix="ade-bridge-", suffix=".txt")
+            fd, tmp = tempfile.mkstemp(prefix=_bridge.TMP_PREFIX, suffix=".txt")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload["content"])
             req["source_path"] = tmp

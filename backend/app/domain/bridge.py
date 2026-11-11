@@ -20,8 +20,9 @@ never be conflated:
 
 from __future__ import annotations
 
-import webbrowser
+import tempfile
 from datetime import date
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -138,19 +139,25 @@ def resolve_launch_url(provider: dict, strat: dict) -> str | None:
     return None
 
 
-# Indirection so tests can intercept the OS-level open without a browser.
-_open_url = webbrowser.open
+# Launch split: the backend command validates + audits the destination and
+# returns it to the caller; the desktop UI performs the actual shell.open
+# after the explicit user action. The backend NEVER opens a browser —
+# there is no webbrowser/subprocess call in this module, so no background
+# job, replay, or API request can produce an unexpected browser window.
+OPEN_VIA = "client_shell"
+
+TMP_PREFIX = "ade-bridge-"
 
 
-def launch(url: str) -> str | None:
-    """Open the validated URL in the user's default browser. Returns an
-    error string on failure, None on success. This is a user-initiated
-    shell open — ADE performs no automation, scraping, or form interaction."""
+def is_bridge_tmp(path) -> bool:
+    """True only for temp files this workflow materialized — the guard on
+    every delete so a caller-supplied path can never be unlinked."""
     try:
-        ok = _open_url(url, new=2)
-    except Exception as exc:  # pragma: no cover - platform dependent
-        return str(exc)
-    return None if ok else "browser reported failure opening the URL"
+        p = Path(path)
+        return (p.name.startswith(TMP_PREFIX)
+                and p.parent == Path(tempfile.gettempdir()))
+    except OSError:
+        return False
 
 
 def prepare_prompt(provider: dict, strat: dict, payload: dict) -> tuple[str, dict]:
