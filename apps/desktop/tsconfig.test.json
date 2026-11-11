@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "@tauri-apps/api", "node"]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "vitest.config.ts"]
+}

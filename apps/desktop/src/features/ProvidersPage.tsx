@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../api/client";
+import { commitCommand, pickFile } from "../api/commands";
+import { openBridgeResult, capabilityDisplay } from "../api/bridge";
+import { useApp } from "../stores/appStore";
 import type {
+  BridgeResult, CommitResult, Project, ProviderCapabilitiesReport,
   ProviderDetail, ProviderSummary, ProviderTestResult,
 } from "../api/types";
 
@@ -55,6 +59,16 @@ export function ProvidersPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // C1.5 bridge — capability report + assisted workflow state
+  const currentProjectId = useApp((s) => s.currentProjectId);
+  const projects = useApp((s) => s.projects);
+  const project = projects.find((p) => p.id === currentProjectId);
+  const [caps, setCaps] = useState<ProviderCapabilitiesReport | null>(null);
+  const [bridgePrompt, setBridgePrompt] = useState("");
+  const [prepared, setPrepared] = useState<BridgeResult | null>(null);
+  const [launchRes, setLaunchRes] = useState<CommitResult | null>(null);
+  const [bridgeNote, setBridgeNote] = useState<string | null>(null);
+
   const refresh = useCallback(async () => {
     try {
       const qs = new URLSearchParams();
@@ -72,14 +86,32 @@ export function ProvidersPage() {
   async function openDetail(key: string) {
     setErr(null);
     setTestResult(null);
+    setCaps(null);
+    setPrepared(null);
+    setLaunchRes(null);
+    setBridgeNote(null);
+    setBridgePrompt("");
     try {
-      const d = await apiFetch<ProviderDetail>(`/api/providers/${key}`);
+      const [d, c] = await Promise.all([
+        apiFetch<ProviderDetail>(`/api/providers/${key}`),
+        apiFetch<ProviderCapabilitiesReport>(`/api/providers/${key}/capabilities`)
+          .catch(() => null),
+      ]);
       setSelected(d);
+      setCaps(c);
       setSettingsDraft(d.settings || {});
       setCredValues({});
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  // Every bridge mutation is an audited project command — a fresh revision is
+  // fetched per call so stale store state can't cause a 409.
+  async function bridgeCommit(commandType: string, payload: Record<string, unknown>): Promise<CommitResult> {
+    if (!currentProjectId) throw new Error("Open a project to use bridge actions");
+    const proj = await apiFetch<Project>(`/api/projects/${currentProjectId}`);
+    return commitCommand(currentProjectId, proj.revision, commandType, payload);
   }
 
   async function saveConfig(patch: Record<string, unknown>) {
@@ -141,6 +173,99 @@ export function ProvidersPage() {
         `/api/providers/${selected.key}/test`, { method: "POST", body: "{}" }));
     } catch (e) {
       setTestResult({ ok: false, via: "mock", error: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---- assisted workflow handlers (all run inside click handlers only) ----
+
+  async function onPrepareCopy() {
+    if (!selected || !bridgePrompt.trim()) return;
+    setBusy(true); setErr(null); setBridgeNote(null);
+    try {
+      const res = await bridgeCommit("bridge.prepare", {
+        provider_key: selected.key, prompt: bridgePrompt,
+      });
+      const b = res.bridge ?? null;
+      setPrepared(b);
+      if (b?.prepared_text) {
+        // Clipboard write only on this explicit click — ADE never reads or
+        // writes the clipboard outside a user gesture.
+        await navigator.clipboard.writeText(b.prepared_text);
+        setBridgeNote("Prepared prompt copied — paste it into the provider's site yourself.");
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onGetSiteLink() {
+    if (!selected) return;
+    setBusy(true); setErr(null); setBridgeNote(null); setLaunchRes(null);
+    try {
+      // bridge.launch validates + audits the destination; the response only
+      // carries it — nothing opens yet. The URL is shown for explicit
+      // confirmation in the next step.
+      setLaunchRes(await bridgeCommit("bridge.launch", { provider_key: selected.key }));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onOpenSite() {
+    if (!launchRes) return;
+    setBusy(true); setErr(null);
+    try {
+      // THE browser-open call — only reachable from this confirm button, on a
+      // URL that passed backend catalog validation + the https://* capability
+      // scope + openBridgeResult's own checks.
+      const url = await openBridgeResult(launchRes);
+      if (url) setBridgeNote(`Opened ${url} — work on the provider's site, then import the result below.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImportFile() {
+    if (!selected) return;
+    setErr(null); setBridgeNote(null);
+    const path = await pickFile(`Import ${selected.label} output`);
+    if (!path) { setBridgeNote("No file selected (native picker requires the desktop app)."); return; }
+    setBusy(true);
+    try {
+      const res = await bridgeCommit("bridge.import", {
+        provider_key: selected.key, source_path: path,
+      });
+      setBridgeNote(`Import queued (job ${res.job_id ?? res.bridge?.job_id ?? "?"}) — provenance recorded as user-reported external.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImportClipboard() {
+    if (!selected) return;
+    setErr(null); setBridgeNote(null);
+    // Clipboard READ only inside this explicit click — the spec forbids
+    // automatic clipboard access.
+    const content = await navigator.clipboard.readText();
+    if (!content.trim()) { setBridgeNote("Clipboard is empty — nothing to import."); return; }
+    setBusy(true);
+    try {
+      const res = await bridgeCommit("bridge.import", {
+        provider_key: selected.key, content,
+      });
+      setBridgeNote(`Clipboard import queued (job ${res.job_id ?? res.bridge?.job_id ?? "?"}) — provenance recorded as user-reported external.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -294,6 +419,155 @@ export function ProvidersPage() {
                 </div>
               )}
             </section>
+
+            {/* C1.5 capability report — honest per-feature status */}
+            {caps && caps.capabilities.length > 0 && (
+              <section className="mb-4 rounded-md border border-line bg-panel p-3">
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">
+                  Capability report
+                </h3>
+                <p className="mb-2 text-[10px] leading-snug text-faint">
+                  {caps.evidence_stamp} — a documented strategy + valid evidence URL is
+                  not proof a method is authorized, works, or was ever tested.
+                </p>
+                {caps.capabilities.some((c) => c.stale || c.status === "needs_recheck") && (
+                  <div className="mb-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber">
+                    Verification is stale — re-check required before any bridge dispatch.
+                  </div>
+                )}
+                {caps.capabilities.map((c) => {
+                  const d = capabilityDisplay(c);
+                  const badgeCls = d.statusClass === "warn"
+                    ? "bg-amber/15 text-amber"
+                    : d.statusClass === "muted"
+                      ? "bg-line/40 text-muted"
+                      : "bg-sky/15 text-sky";
+                  return (
+                    <div key={c.capability} className="mb-2 border-t border-line/40 pt-2 text-sm first:border-0 first:pt-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-fg">{c.capability}</span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${badgeCls}`}>
+                          {d.statusLabel}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-faint">
+                        {c.tier ? (TIER_LABEL[c.tier] ?? c.tier) : "No usable strategy"}
+                        {c.method ? ` · ${METHOD_LABEL[c.method] ?? c.method}` : ""}
+                        {d.actionLabel ? ` — ${d.actionLabel}` : ""}
+                      </div>
+                      {c.required_user_action === "reverify_strategy" && (
+                        <div className="mt-0.5 text-[11px] text-amber">
+                          Required action: re-verify the strategy evidence (older than 180 days).
+                        </div>
+                      )}
+                      {c.alternate && (
+                        <div className="mt-0.5 text-[11px] text-faint">
+                          Alternate path: {TIER_LABEL[c.alternate.tier ?? ""] ?? c.alternate.tier}
+                          {" · "}{METHOD_LABEL[c.alternate.method ?? ""] ?? c.alternate.method}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </section>
+            )}
+
+            {/* C1.5 assisted workflow — canonical T2/T3 flow */}
+            {caps && caps.capabilities.some((c) => c.dispatch.length > 0) && (
+              <section className="mb-4 rounded-md border border-line bg-panel p-3">
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">
+                  Assisted workflow
+                </h3>
+                <p className="mb-2 text-[10px] leading-snug text-faint">
+                  You do the work on the provider's site — ADE prepares the prompt,
+                  opens the site on your click, and imports your result. Nothing is
+                  submitted, automated, or read without your action.
+                </p>
+                {!project ? (
+                  <p className="text-xs text-amber">
+                    Open a project to use assisted workflows — every step is an audited
+                    project command.
+                  </p>
+                ) : (
+                  <>
+                    {caps.capabilities.some((c) => c.dispatch.includes("prepare")) && (
+                      <div className="mb-3">
+                        <textarea
+                          value={bridgePrompt}
+                          onChange={(e) => setBridgePrompt(e.target.value)}
+                          placeholder={`Prompt to take to ${selected.label}…`}
+                          rows={3}
+                          className="mb-1.5 w-full rounded-md border border-line bg-ink px-2.5 py-1.5 text-sm text-fg placeholder:text-faint focus:border-action focus:outline-none"
+                        />
+                        <button
+                          onClick={onPrepareCopy}
+                          disabled={busy || !bridgePrompt.trim()}
+                          className="rounded-md bg-action px-3 py-1.5 text-xs text-ink hover:bg-action/80 disabled:opacity-40"
+                        >
+                          Prepare &amp; copy prompt
+                        </button>
+                        {prepared?.prepared_text && (
+                          <div className="mt-2 rounded-md border border-line bg-ink p-2">
+                            <pre className="whitespace-pre-wrap text-[11px] text-fg">{prepared.prepared_text}</pre>
+                            <p className="mt-1 text-[10px] text-faint">{prepared.paste_hint}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {caps.capabilities.some((c) => c.dispatch.includes("launch")) && (
+                      <div className="mb-3">
+                        {!launchRes ? (
+                          <button
+                            onClick={onGetSiteLink}
+                            disabled={busy}
+                            className="rounded-md border border-action/50 px-3 py-1.5 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
+                          >
+                            Get provider site link
+                          </button>
+                        ) : launchRes.bridge?.url ? (
+                          <div className="rounded-md border border-line bg-ink p-2">
+                            <div className="mb-1.5 break-all text-[11px] text-fg">
+                              Destination: <span className="text-sky">{launchRes.bridge.url}</span>
+                            </div>
+                            <button
+                              onClick={onOpenSite}
+                              disabled={busy}
+                              className="rounded-md bg-action px-3 py-1.5 text-xs text-ink hover:bg-action/80 disabled:opacity-40"
+                            >
+                              Open this site in my browser
+                            </button>
+                            <p className="mt-1 text-[10px] text-faint">
+                              ADE never automates, logs in, fills, or clicks anything on the site.
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                    {caps.capabilities.some((c) => c.dispatch.includes("import")) && (
+                      <div className="mb-1 flex gap-2">
+                        <button
+                          onClick={onImportFile}
+                          disabled={busy}
+                          className="rounded-md border border-action/50 px-3 py-1.5 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
+                        >
+                          Import file…
+                        </button>
+                        <button
+                          onClick={onImportClipboard}
+                          disabled={busy}
+                          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-card disabled:opacity-40"
+                        >
+                          Import clipboard text
+                        </button>
+                      </div>
+                    )}
+                    {bridgeNote && (
+                      <p className="mt-2 rounded-md bg-teal/10 px-2 py-1.5 text-[11px] text-teal">{bridgeNote}</p>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
 
             {/* credentials — write-only */}
             {selected.credential_fields.length > 0 && (

@@ -99,6 +99,34 @@ export interface ProviderTestResult {
   tier?: string | null;
 }
 
+// ---- C1.5 access bridge ----
+
+export interface CapabilityEntry {
+  capability: string;
+  strategy_id: string | null;
+  method: string | null;
+  tier: string | null;
+  status: string; // documented | needs_recheck | refused_prohibited
+  stale: boolean;
+  verification: string; // always "catalog_documented"
+  dispatch: string[]; // bridge actions runnable now, e.g. ["prepare","launch","import"]
+  dispatch_blocked: string | null; // stale | t1_not_implemented | informational_only | prohibited
+  required_user_action: string; // site_workflow | file_import | reverify_strategy | none_available
+  alternate: {
+    strategy_id: string | null;
+    method: string | null;
+    tier: string | null;
+  } | null;
+}
+
+export interface ProviderCapabilitiesReport {
+  provider_key: string;
+  evidence_stamp: string;
+  provider_status: string;
+  enabled: boolean;
+  capabilities: CapabilityEntry[];
+}
+
 export interface CommandProposal {
   command: Record<string, unknown>;
   summary: string;
@@ -119,6 +147,22 @@ export interface CommitResult {
   duplicate_project_id?: string | null;
   deleted?: boolean;
   warnings: string[];
+  bridge?: BridgeResult | null;
+}
+
+export interface BridgeResult {
+  action: "prepare" | "launch" | "import";
+  provider_key: string;
+  strategy_id?: string;
+  method?: string;
+  url?: string | null;
+  open_via?: string; // "client_shell" — desktop opens it, backend never can
+  prepared_text?: string;
+  char_count?: number;
+  paste_hint?: string;
+  template_applied?: boolean;
+  job_id?: string;
+  external_source?: Record<string, unknown>;
 }
 
 export interface Job {
