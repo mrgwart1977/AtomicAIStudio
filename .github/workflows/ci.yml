@@ -67,6 +67,11 @@ jobs:
           out tauri '^(apps/desktop/(src-tauri/|package\.json|package-lock\.json)|scripts/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
           out package '^(backend/(atomic-backend\.spec|sidecar_entry\.py|pyproject\.toml|ffmpeg-manifest\.json)|scripts/(validate\.ps1|build-sidecar\.ps1|fetch-ffmpeg\.ps1)|apps/desktop/src-tauri/|\.github/workflows/)' >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+      # Static regression check: fails this job (fail-open -> full suite
+      # still runs, but the `changes` check itself blocks merge) if the
+      # classifier patterns drift from expected behavior.
+      - name: Verify path classifier
+        run: pwsh -File scripts/test-ci-paths.ps1
 
   # Jobs run UNLESS the changes job positively reports their paths
   # unchanged. always() overrides needs-skip on changes failure/cancel;
