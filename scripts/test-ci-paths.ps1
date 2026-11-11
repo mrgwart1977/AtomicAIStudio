@@ -70,6 +70,33 @@ Check "rename docs->backend"    @("docs/old.md", "backend/new.py")              
 Check "rename backend->docs"    @("backend/old.py", "docs/new.md")              $true  $false $false $false
 Check "mixed code+docs"         @("backend/app/x.py", "docs/y.md")              $true  $false $false $false
 
+# --- Required-check / matrix-skip guard -----------------------------------
+# A job gated on needs.changes may be skipped. A skipped MATRIX job emits
+# only its parent check context ("backend"), never leg names
+# ("backend (3.12)") — so any required check named after a leg can never
+# report and branch protection stalls. Rule: a changes-gated job must not
+# use strategy.matrix, and every leg-named required check must appear as a
+# literal `name:` (or job id) in the workflow.
+$jobsSection = ($wf -split "(?m)^jobs:", 2)[-1]
+$jobKeys = [regex]::Matches($jobsSection, "(?m)^  ([^\s#][\w(). ""-]*):")
+for ($i = 0; $i -lt $jobKeys.Count; $i++) {
+    $start = $jobKeys[$i].Index
+    $end = if ($i + 1 -lt $jobKeys.Count) { $jobKeys[$i + 1].Index } else { $jobsSection.Length }
+    $block = $jobsSection.Substring($start, $end - $start)
+    $jid = $jobKeys[$i].Groups[1].Value.Trim().Trim('"')
+    if ($block -match "if:.*needs\.changes" -and $block -match "strategy:\s*\n\s*matrix:") {
+        Write-Host "FAIL matrix-guard : '$jid' is changes-gated AND uses strategy.matrix (skipped matrix can't emit leg-named check contexts)"
+        $script:fail++
+    }
+}
+foreach ($leg in @("backend (3.12)", "backend (3.14)")) {
+    if ($wf -notmatch "name:\s*`"$([regex]::Escape($leg))`"" -and $wf -notmatch "(?m)^  `"?$([regex]::Escape($leg))`"?:") {
+        Write-Host "FAIL required-name : '$leg' must exist as a literal job name/id so its context emits when skipped"
+        $script:fail++
+    }
+}
+Write-Host "PASS matrix-guard: no changes-gated matrix jobs; required leg names are literal"
+
 if ($fail -gt 0) { Write-Host "`n$fail classification check(s) FAILED"; exit 1 }
 Write-Host "`nAll path classifications correct"
 exit 0
