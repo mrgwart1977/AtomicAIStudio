@@ -152,7 +152,8 @@ class TestStubWorkerLifecycle:
                 assert code == 200 and body["data"]
                 r = await w.request("generate", {"prompt": "x"})
                 assert r["ok"] is True
-                assert r["body"]["data"][0]["b64_json"]
+                # Documented /sdapi/v1/txt2img response shape.
+                assert r["body"]["images"][0]
         finally:
             await pool.stop()
 

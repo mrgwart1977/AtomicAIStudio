@@ -11,10 +11,15 @@ Launch args it understands: -l/--listen-ip, --listen-port, --model-dir,
 --log-level (extra args ignored) — same vector the real adapter passes.
 
 Env switches:
-  STUB_MODE        ok | error | malformed | hang | drop | a1111 | crash
-                   a1111  → A1111-style {"images":[b64]} response shape
+  STUB_MODE        ok | error | malformed | hang | drop | a1111 | crash | noimg | nomodel
+                   ok     → documented shape for the POSTed path:
+                            /sdapi/v1/txt2img → {"images":[b64]},
+                            /v1/images/generations → {"data":[{b64_json}]}
+                   a1111  → force A1111-style {"images":[b64]} on any path
                    crash  → os._exit(2) mid-request (recovery tests)
                    noimg  → 200 {} — valid JSON without image payload
+                   nomodel → 503 {"error":"No model is loaded","code":"model_not_loaded"}
+                            (real server's no-weights response)
   STUB_MODELS_CODE HTTP status for /v1/models (default 200)
   STUB_MODELS_FAIL_AFTER  return 500 after N successful /v1/models calls
   STUB_BIND_PORT   fixed bind port (collision tests); bind failure → exit 3
@@ -115,12 +120,17 @@ class Handler(BaseHTTPRequestHandler):
             os._exit(2)
         elif mode == "noimg":
             self._send(200, {"created": int(time.time()), "data": []})
-        elif mode == "a1111":
-            # A1111-style txt2img response shape ({"images": [b64]}) —
-            # alternate schema the adapter accepts as a fallback.
+        elif mode == "nomodel":
+            # Real server's no-weights response (api.md: generation
+            # endpoints return 503 model_not_loaded when unloaded).
+            self._send(503, {"error": "No model is loaded",
+                             "code": "model_not_loaded"})
+        elif mode == "a1111" or (mode == "ok" and self.path == "/sdapi/v1/txt2img"):
+            # A1111-style txt2img response shape — the documented shape
+            # for the sdapi endpoint the adapter now uses.
             self._send(200, {"images": [PNG_B64],
                              "parameters": {}, "info": ""})
-        else:  # ok
+        else:  # ok — OpenAI shape for /v1/images/generations
             self._send(200, {
                 "created": int(time.time()),
                 "data": [{"b64_json": PNG_B64, "url": ""}],

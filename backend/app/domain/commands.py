@@ -45,7 +45,8 @@ SUPPORTED_COMMANDS = {
     "project.duplicate",
     "project.delete",
     # generation (mock + real local inference since M3)
-    "generate.image.mock", "generate.image", "generate.video",
+    "generate.image.mock", "generate.image", "generate.image.persistent",
+    "generate.video",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -66,12 +67,14 @@ SUPPORTED_COMMANDS = {
 }
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
-GENERATION_COMMANDS = {"generate.image.mock", "generate.image", "generate.video"}
+GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
+                       "generate.image.persistent", "generate.video"}
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
     "generate.image.mock": "mock.image",
     "generate.image": "gen.image.sdcpp",
+    "generate.image.persistent": "gen.image.sdcpp-server",
     "generate.video": "gen.video.sdcpp",
     "asset.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -136,6 +139,8 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate image via mock adapter — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.image":
         return f"Generate image ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
+    if command_type == "generate.image.persistent":
+        return f"Generate image via persistent worker ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.video":
         return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "asset.import":
@@ -204,7 +209,12 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             raise CommandError(422, "prompt is required for image generation")
         warnings.append("Uses the mock adapter — output is a placeholder, not AI inference")
     if command_type == "generate.image":
-        _check_generation(session, project, payload)
+        _check_generation(session, project, payload, "gen.image.sdcpp")
+    if command_type == "generate.image.persistent":
+        _check_generation(session, project, payload, "gen.image.sdcpp-server")
+        warnings.append(
+            "Experimental persistent worker — keeps the model resident between jobs; "
+            "not yet validated for production use")
     if command_type == "generate.video":
         _check_video_generation(session, project, payload)
     if command_type in {"project.archive", "project.restore", "project.duplicate"}:
@@ -396,10 +406,11 @@ def _check_cast_state(session: Session, project: Project, payload: dict, *, part
             raise CommandError(404, "reference asset not found in this project")
 
 
-def _check_generation(session: Session, project: Project, payload: dict) -> None:
-    """generate.image: model must be known, licensed, and actually
-    installed; referenced shot/scene must belong to the project; device
-    selection must be a sane value."""
+def _check_generation(session: Session, project: Project, payload: dict,
+                      adapter_id: str = "gen.image.sdcpp") -> None:
+    """generate.image / .persistent: model must be known, licensed, declared
+    compatible with the selected adapter, and actually installed; referenced
+    shot/scene must belong to the project; device selection must be sane."""
     from app.domain import model_catalog, model_files
 
     from app.db.models import Scene, Shot
@@ -417,6 +428,10 @@ def _check_generation(session: Session, project: Project, payload: dict) -> None
             422, f"{spec.display_name} is {spec.support} — catalog-visible but not usable for generation yet")
     if not spec.license.get("commercial_ok", True):
         raise CommandError(422, f"{spec.display_name} has a restricted license and cannot generate")
+    if not model_catalog.serves_adapter(spec, adapter_id):
+        raise CommandError(
+            422, f"{spec.display_name} is not declared compatible with adapter "
+                 f"'{adapter_id}' — its request contract is unverified for that path")
     with session.no_autoflush:
         weight = model_files.installed_file(session, None, spec)
     if weight is None:
@@ -1203,7 +1218,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 model_key=payload.get("model_key"),
                 # Generation has no mid-flight checkpoints — an interrupted
                 # gen job restarts from scratch (bounded, user-initiated).
-                resumable=command_type not in ("generate.image", "generate.video"),
+                resumable=command_type not in (
+                    "generate.image", "generate.image.persistent", "generate.video"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1248,6 +1264,7 @@ def _job_kind(command_type: str) -> str:
     return {
         "generate.image.mock": "image",
         "generate.image": "image",
+        "generate.image.persistent": "image",
         "generate.video": "video",
         "asset.import": "import",
         "asset.relink": "relink",
@@ -1265,7 +1282,7 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
         if payload.get("shot_id"):
             req["shot_id"] = payload["shot_id"]
         req["set_thumbnail"] = bool(payload.get("set_thumbnail"))
-    elif command_type == "generate.image":
+    elif command_type in ("generate.image", "generate.image.persistent"):
         from app.domain import compatibility, model_catalog
         spec = model_catalog.get(payload.get("model_key") or "")
         req = {
