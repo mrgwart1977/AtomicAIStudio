@@ -6,12 +6,16 @@
 #
 #   scripts\first-run-watchdog.ps1 [-GpuIndex 0] [-DeadlineS 420] [-DryRun]
 #
-# Exit codes: 0 clean, 2 breach terminated, 3 watchdog error.
+# Exit codes: 0 clean, 2 breach terminated, 3 refused/error.
+# Startup gates (all must pass before the "ready" record appears):
+#   empty sd-server baseline, working nvidia-smi+psutil telemetry,
+#   free VRAM >= 4.5 GiB, available RAM >= 6 GiB.
 param(
     [int]$GpuIndex = 0,
     [double]$DeadlineS = 420,
     [double]$IntervalS = 1.0,
     [switch]$DryRun,
+    [switch]$AllowBaseline,
     [string]$Log = "$env:LOCALAPPDATA\AtomicAIStudio\watchdog\first-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').jsonl"
 )
 
@@ -25,9 +29,11 @@ $argList = @("-m", "app.domain.firstrun_watchdog",
              "--interval-s", "$IntervalS",
              "--log", "$Log")
 if ($DryRun) { $argList += "--dry-run" }
+if ($AllowBaseline) { $argList += "--allow-baseline" }
 
 Write-Host "watchdog log: $Log"
 Write-Host "watching GPU $GpuIndex — VRAM floor 0.5 GiB, RAM floor 1.5 GiB, tree ceiling 8 GiB, deadline ${DeadlineS}s"
+Write-Host "startup gates: empty baseline (use -AllowBaseline to override), telemetry ok, VRAM >= 4.5 GiB, RAM >= 6 GiB — wait for the 'ready' record"
 Push-Location (Join-Path $repo "backend")
 & $py @argList
 $code = $LASTEXITCODE
