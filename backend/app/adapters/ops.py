@@ -19,6 +19,29 @@ from app.domain import backup as backup_mod
 from app.domain import backup_dest
 
 
+def _validate_external_source(ext: Any) -> list[str]:
+    """C1.5 §4 ProvenanceTagger — the user asserts where a file came from;
+    the provider/strategy/method must be real catalog entries so the tag is
+    honest. We record the claim as user_reported — never assert it."""
+    if not isinstance(ext, dict):
+        return ["external_source must be an object"]
+    from app.domain.providers import catalog
+    key = (ext.get("provider_key") or "").strip()
+    prov = catalog.get_provider(key)
+    if not key or prov is None:
+        return [f"external_source.provider_key '{key}' is not a catalog provider"]
+    sid = ext.get("strategy_id")
+    if sid is not None:
+        if not any(s.get("strategy_id") == sid for s in prov.get("strategies") or []):
+            return [f"strategy_id '{sid}' is not a strategy of provider '{key}'"]
+    method = ext.get("method")
+    if method is not None and method not in catalog.METHODS:
+        return [f"external_source.method '{method}' is not a known access method"]
+    if ext.get("note") is not None and not isinstance(ext["note"], str):
+        return ["external_source.note must be a string"]
+    return []
+
+
 class _OpsBase:
     def __init__(self, session_factory, storage, settings):
         self._sf = session_factory
@@ -59,6 +82,11 @@ class AssetImportAdapter(_OpsBase):
             return ["source_path is required"]
         if not Path(request["source_path"]).is_file():
             return [f"file not found: {request['source_path']}"]
+        ext = request.get("external_source")
+        if ext is not None:
+            errs = _validate_external_source(ext)
+            if errs:
+                return errs
         return []
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
@@ -73,18 +101,24 @@ class AssetImportAdapter(_OpsBase):
             session.commit()
             out_path = self._storage.file_path(session, af)
             yield {"progress": 0.9, "message": "Registered in library"}
-            yield {
-                "done": True,
-                "output": {
-                    "path": str(out_path),
-                    "rel_path": af.rel_path,
-                    "sha256": af.sha256,
-                    "kind": handle.request.get("kind", "other"),
-                    "name": handle.request.get("name") or src.name,
-                    "byte_size": af.byte_size,
-                    "origin": "imported",
-                },
+            ext = handle.request.get("external_source")
+            output = {
+                "path": str(out_path),
+                "rel_path": af.rel_path,
+                "sha256": af.sha256,
+                "kind": handle.request.get("kind", "other"),
+                "name": handle.request.get("name") or src.name,
+                "byte_size": af.byte_size,
+                "origin": "external" if ext else "imported",
             }
+            if ext:
+                output["external_source"] = {
+                    "provider_key": ext.get("provider_key"),
+                    "strategy_id": ext.get("strategy_id"),
+                    "method": ext.get("method"),
+                    "note": (ext.get("note") or "")[:200],
+                }
+            yield {"done": True, "output": output}
 
 
 class AssetRelinkAdapter(_OpsBase):

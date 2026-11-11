@@ -7,6 +7,14 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 Access Bridge foundation: enriched AccessStrategy records across
+  the 60-provider catalog (strategy_id, ToS evidence + verification
+  dates, auth/cost/reliability), catalog integrity validation,
+  staleness demotion (`needs_recheck`, enable blocked while stale),
+  `cloud-assisted`/`cloud-external` adapter kinds, and `external_source`
+  provenance tagging on asset import (`origin=external`,
+  `provenance_confidence=user_reported` — `verified_remote` stays
+  reserved for T1 remote job ids). No live provider contact.
 - Provider Manager foundation (C1): 60-entry catalog, DPAPI credential
   vault, Settings → AI Providers UI, project overrides — **management
   foundation only; no live cloud generation**

@@ -22,11 +22,41 @@ METHODS = (
 )
 
 
+# C1.5 §3 — catalog-wide verification stamp for strategy evidence.
+CATALOG_VERIFIED = "2026-11-10"
+
+METHODS = {"official_api", "aggregator_api", "mcp_connector",
+           "browser_authorized", "desktop_plugin", "assisted_workflow",
+           "import_export", "external_info"}
+# Access-method → tiers it may legitimately claim (§1/§2). T1 requires an
+# authorized unattended-capable channel; assisted/manual/info are capped.
+METHOD_TIERS = {
+    "official_api": {"T1"}, "aggregator_api": {"T1"},
+    "mcp_connector": {"T1", "T2"}, "desktop_plugin": {"T1", "T2"},
+    "browser_authorized": {"T2"}, "assisted_workflow": {"T2"},
+    "import_export": {"T3"}, "external_info": {"T4"},
+}
+AUTOMATION_PERMS = {"prohibited", "user_initiated", "assisted", "unattended"}
+USER_INTERACTIONS = {"none", "consent", "submit", "download", "all"}
+_AUTH_DEFAULT = {
+    "official_api": "api_key", "aggregator_api": "api_key",
+    "mcp_connector": "oauth_pkce", "browser_authorized": "account_session",
+    "desktop_plugin": "account_session", "assisted_workflow": "account_session",
+    "import_export": "none", "external_info": "none",
+}
+_COST_MAP = {"per_token": "per_credit", "per_image": "per_credit",
+             "per_second": "per_credit", "per_character": "per_credit",
+             "per_request": "per_credit", "per_video": "per_credit",
+             "per_generation": "per_credit", "credits": "per_credit",
+             "per_minute": "per_credit", "subscription": "subscription",
+             "free": "free"}
+
+
 def _p(key, label, category, cls, account, *, auth=(), creds=(),
        base_url=None, region=False, job_model=None, pricing=None,
        status_reason="", strategies=(), models=(), docs=None, tos=None,
        privacy="", notes="", aliases=()):
-    return {
+    p = {
         "key": key, "label": label, "category": category,
         "access_class": cls, "account": account,
         "auth_methods": list(auth), "credential_fields": list(creds),
@@ -38,16 +68,47 @@ def _p(key, label, category, cls, account, *, auth=(), creds=(),
         "privacy_summary": privacy, "notes": notes,
         "aliases": list(aliases),
     }
+    # Post-fill C1.5 §3 AccessStrategy fields that follow from context:
+    # strategy_id/provider_id, evidence URL default (provider ToS > docs),
+    # method-appropriate auth, and a cost guess from the pricing model.
+    seen: dict[str, int] = {}
+    for s in p["strategies"]:
+        n = seen.get(s["method"], 0) + 1
+        seen[s["method"]] = n
+        s["strategy_id"] = f"{key}.{s['method']}.v{n}"
+        s["provider_id"] = key
+        ev = s["tos_evidence"]
+        ev["url"] = ev.get("url") or tos or docs
+        if s["auth_method"] is None:
+            s["auth_method"] = _AUTH_DEFAULT.get(s["method"], "none")
+        if s["cost_implications"] is None:
+            s["cost_implications"] = _COST_MAP.get(pricing or "", "unknown")
+    return p
 
 
 def _key_credential(hint="API key"):
     return [{"name": "api_key", "secret": True, "required": True, "hint": hint}]
 
 
-def _s(method, tier, caps, automation="unattended", interaction="none", note=""):
-    return {"method": method, "tier": tier, "capabilities": list(caps),
+def _s(method, tier, caps, automation="unattended", interaction="none", note="",
+       *, auth=None, tos_url=None, tos_note="", checked=None, verified=None,
+       connection=None, inputs=(), outputs=(), settings=None, cost=None,
+       reliability=""):
+    """AccessStrategy record (C1.5 §3). _p() assigns strategy_id/provider_id
+    and fills evidence/auth/cost defaults from the provider row."""
+    return {"strategy_id": None, "provider_id": None,
+            "method": method, "tier": tier, "capabilities": list(caps),
+            "auth_method": auth,
             "automation_permission": automation,
-            "user_interaction": interaction, "note": note}
+            "user_interaction": interaction,
+            "tos_evidence": {"url": tos_url, "note": tos_note,
+                             "checked": checked or CATALOG_VERIFIED},
+            "connection": dict(connection or {}),
+            "input_formats": list(inputs), "output_formats": list(outputs),
+            "settings_schema": dict(settings or {}),
+            "cost_implications": cost, "reliability": reliability,
+            "last_verified": verified or CATALOG_VERIFIED,
+            "note": note}
 
 
 _API = "official_api"
@@ -121,6 +182,7 @@ TEXT = [
     _p("writesonic", "Writesonic", "text", "C", "writesonic",
        auth=["api_key"], creds=_key_credential("Writesonic Business API key"),
        base_url="https://api.writesonic.com", pricing="subscription",
+       tos="https://writesonic.com/legal/terms",
        status_reason="Botsonic/SEO APIs only — no creative-writing endpoint.",
        strategies=[_s(_API, "T1", ["text.chatbot"], note="Botsonic scope, not creative writing"),
                    _s(_ASSIST, "T2", ["text.generate"], **_T2)]),
@@ -134,20 +196,24 @@ TEXT = [
        auth=["api_key"], creds=[{"name": "token", "secret": True, "required": True,
                                  "hint": "Internal integration token (PAT)"}],
        base_url="https://api.notion.com", job_model="async_poll", pricing="subscription",
+       tos="https://www.notion.so/terms",
        status_reason="Agent APIs — session-shaped, workspace-coupled.",
        strategies=[_s(_API, "T1", ["text.agent"], note="agent-session shaped"),
                    _s(_ASSIST, "T2", ["text.generate"], **_T2)]),
     _p("anyword", "Anyword", "text", "B", "anyword",
        auth=["api_key"], creds=_key_credential("Anyword Enterprise API key"),
        job_model="sync", pricing="subscription",
+       tos="https://anyword.com/terms-of-use",
        status_reason="Official API is Enterprise-plan only.",
        strategies=[_s(_API, "T1", ["text.generate"], note="Enterprise only"),
                    _s(_ASSIST, "T2", ["text.generate"], **_T2)]),
     _p("sudowrite", "Sudowrite", "text", "E", "sudowrite",
+       tos="https://sudowrite.com/terms-and-conditions",
        status_reason="No public API — feature request open on their board.",
        strategies=[_s(_ASSIST, "T2", ["text.generate"], **_T2),
                    _s(_IMPEXP, "T3", ["text.import"], **_T3)]),
     _p("quillbot", "QuillBot", "text", "E", "quillbot",
+       tos="https://quillbot.com/terms",
        status_reason="Officially no API (help center); ToS restricts automation.",
        strategies=[_s(_IMPEXP, "T3", ["text.roundtrip"], **_T3),
                    _s(_ASSIST, "T2", ["text.rewrite"], **_T2)]),
@@ -166,8 +232,11 @@ TEXT = [
        strategies=[_s(_API, "T1", ["text.generate", "text.stream"])]),
     _p("hemingway", "Hemingway Editor Plus", "text", "E", "hemingway",
        status_reason="No API — readability/rewrite product only.",
-       strategies=[_s(_IMPEXP, "T3", ["text.roundtrip"], **_T3),
-                   _s(_ASSIST, "T2", ["text.rewrite"], **_T2)]),
+       strategies=[_s(_IMPEXP, "T3", ["text.roundtrip"],
+                      tos_url="https://www.hemingwayapp.com/",
+                      tos_note="Editor product only — no API offered; manual .docx/.md exchange", **_T3),
+                   _s(_ASSIST, "T2", ["text.rewrite"],
+                      tos_url="https://www.hemingwayapp.com/", **_T2)]),
 ]
 
 # =====================================================================
@@ -180,7 +249,13 @@ IMAGES = [
        docs="https://docs.midjourney.com", tos="https://www.midjourney.com/terms",
        strategies=[_s(_ASSIST, "T2", ["image.generate"],
                       automation="user_initiated", interaction="submit",
-                      note="ToS permits user-driven web use — never automation")]),
+                      note="ToS permits user-driven web use — never automation"),
+                   _s(_MCP, "T4", ["image.generate"],
+                      automation="prohibited",
+                      note="Closed MCP test explicitly excludes SaaS/product "
+                           "use — recorded to document why this path is refused",
+                      tos_note="Official MCP test excludes product integration; "
+                               "ToS prohibits automation")]),
     _p("openai-images", "OpenAI Images", "image", "A", "openai",
        auth=["api_key"], creds=_key_credential("shared OpenAI API key"),
        base_url="https://api.openai.com", job_model="sync", pricing="per_image",
@@ -211,6 +286,7 @@ IMAGES = [
                                      {"name": "client_secret", "secret": True, "required": True,
                                       "hint": "Firefly Services client secret"}],
        base_url="https://firefly-api.adobe.io", job_model="sync", pricing="per_credit",
+       tos="https://www.adobe.com/legal/terms.html",
        status_reason="Enterprise server-to-server OAuth credential.",
        notes="Shared Adobe credential also covers Firefly Video.",
        models=[{"id": "firefly-image-4", "capability": "image"}],
@@ -226,6 +302,7 @@ IMAGES = [
        auth=["oauth"], creds=[{"name": "oauth_token", "secret": True, "required": True,
                                "hint": "Connect API OAuth token (private app)"}],
        base_url="https://api.canva.com", job_model="async_poll", pricing="per_credit",
+       tos="https://www.canva.com/policies/connect-api-terms",
        status_reason="Connect API in preview — public apps can't pass review yet.",
        models=[{"id": "craft-1", "capability": "image"},
                {"id": "lucid-origin", "capability": "image"}],
@@ -254,6 +331,7 @@ IMAGES = [
     _p("openart", "OpenArt", "image", "C", "openart",
        auth=["oauth"], creds=[],
        base_url="https://mcp.openart.ai/mcp", pricing="per_credit",
+       docs="https://openart.ai/mcp", tos="https://openart.ai/terms/",
        status_reason="Official MCP server + CLI — OAuth, no API key.",
        notes="MCP-marked models only; credits via your OpenArt account.",
        strategies=[_s(_MCP, "T1", ["image.generate", "video.generate"], note="official MCP"),
@@ -278,7 +356,9 @@ IMAGES = [
        notes="Region-pinned DashScope key (SG/BJ/TYO/HK).",
        models=[{"id": "qwen-image-3.0", "capability": "image"}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
-                   _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate")]),
+                   _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate",
+                      tos_url="https://www.alibabacloud.com/help/en/model-studio/",
+                      tos_note="Aggregator listing authorized by the model vendor; official channel is DashScope")]),
     _p("lucid-origin", "Lucid Origin", "image", "A", "leonardo",
        status_reason="A model on the Leonardo account — not a separate provider.",
        notes="Catalog alias of Leonardo; no separate credentials.",
@@ -331,6 +411,7 @@ VIDEO = [
                                      {"name": "client_secret", "secret": True, "required": True,
                                       "hint": "Firefly Services client secret"}],
        job_model="async_poll", pricing="per_credit",
+       tos="https://www.adobe.com/legal/terms.html",
        status_reason="Enterprise S2S OAuth credential (shared with Firefly image).",
        models=[{"id": "firefly-video-1", "capability": "video"}],
        strategies=[_s(_API, "T1", ["video.generate"], note="S2S OAuth"),
@@ -338,6 +419,7 @@ VIDEO = [
     _p("ltx", "LTX Studio", "video", "B", "ltx",
        auth=["api_key"], creds=_key_credential("api.ltx.video key"),
        base_url="https://api.ltx.video", job_model="async_poll", pricing="per_second",
+       tos="https://static.lightricks.com/legal/ltxstudio-terms-of-use.pdf",
        status_reason="LTX-2 API is credit-based; Studio UI itself is enterprise.",
        models=[{"id": "ltx-2", "capability": "video"}],
        strategies=[_s(_API, "T1", ["video.generate"], note="credits"),
@@ -348,7 +430,9 @@ VIDEO = [
        notes="Regional-pinned DashScope key; also via aggregators.",
        models=[{"id": "wan3.0-video", "capability": "video"}],
        strategies=[_s(_API, "T1", ["video.generate", "video.i2v"]),
-                   _s(_AGGR, "T1", ["video.generate"], note="fal/Replicate")]),
+                   _s(_AGGR, "T1", ["video.generate"], note="fal/Replicate",
+                      tos_url="https://www.alibabacloud.com/help/en/model-studio/",
+                      tos_note="Aggregator listing authorized by the model vendor; official channel is DashScope")]),
     _p("juan-prime", "Juan Prime", "video", "E", "dashscope",
        status_reason="No such product — resolves to Wan 3.0 Prime (DashScope).",
        notes="Ambiguous name; aliases to wan3.0-video-prime.",
@@ -366,10 +450,13 @@ VIDEO = [
        status_reason="Alibaba ATH model; only authorized path is the Higgsfield workflow.",
        notes="Uses the Higgsfield credential.",
        models=[{"id": "happyhorse-1.0", "capability": "video"}],
-       strategies=[_s(_AGGR, "T1", ["video.generate"], note="Higgsfield AlibabaVideo workflow")]),
+       strategies=[_s(_AGGR, "T1", ["video.generate"], note="Higgsfield AlibabaVideo workflow",
+                      tos_url="https://higgsfield.ai/terms-of-use-agreement",
+                      tos_note="Only authorized path found — Higgsfield partner workflow, not a first-party API")]),
     _p("synthesia", "Synthesia", "video", "B", "synthesia",
        auth=["api_key"], creds=_key_credential("api.synthesia.io key"),
        base_url="https://api.synthesia.io", job_model="async_poll", pricing="subscription",
+       tos="https://www.synthesia.io/legal/user-terms-of-service",
        status_reason="Official videos API; Creator+ plans. Avatar-video niche.",
        models=[{"id": "synthesia-avatar", "capability": "video.avatar"}],
        strategies=[_s(_API, "T1", ["video.avatar"], note="plan-gated"),
@@ -415,6 +502,7 @@ AUDIO = [
     _p("suno", "Suno", "audio", "D", "suno",
        auth=["oauth"], creds=[],
        base_url="https://api.suno.com/mcp", pricing="per_credit",
+       docs="https://suno.com/mcp",
        status_reason="No public API — official MCP connector only.",
        notes="MCP is the sanctioned channel; outputs land in your Suno library → assisted import.",
        strategies=[_s(_MCP, "T1", ["audio.music"], note="official MCP, OAuth, account credits"),
@@ -423,7 +511,9 @@ AUDIO = [
        status_reason="No public API; downloads disabled since Oct 2025 — no import path.",
        notes="Walled garden post-UMG deal; output personal/non-commercial. Monitor only.",
        strategies=[_s(_INFO, "T4", [], automation="prohibited",
-                      interaction="all", note="informational only")]),
+                      interaction="all", note="informational only",
+                      tos_url="https://help.udio.com/en/articles/10756277-udio-public-api",
+                      tos_note="No public API; downloads disabled 2025-10-29 under the UMG deal — no import path")]),
     _p("hume", "Hume AI / Octave", "audio", "A", "hume",
        auth=["api_key"], creds=_key_credential("api.hume.ai key"),
        base_url="https://api.hume.ai", job_model="sync", pricing="per_character",
@@ -453,7 +543,9 @@ AUDIO = [
        base_url="https://api.wellsaidlabs.com", job_model="async_poll", pricing="subscription",
        status_reason="Enterprise voice — trial then sales plan.",
        strategies=[_s(_API, "T1", ["audio.tts"], note="plan-gated"),
-                   _s(_ASSIST, "T2", ["audio.tts"], **_T2)]),
+                   _s(_ASSIST, "T2", ["audio.tts"],
+                      tos_url="https://www.wellsaidlabs.com/",
+                      tos_note="Enterprise product — terms at account signup; no public self-serve API", **_T2)]),
     _p("descript", "Descript", "audio", "B", "descript",
        auth=["api_key"], creds=_key_credential("descriptapi.com token"),
        base_url="https://descriptapi.com/v1", job_model="async_poll", pricing="subscription",
@@ -496,6 +588,7 @@ AUDIO = [
     _p("ttsmaker", "TTSMaker", "audio", "B", "ttsmaker",
        auth=["api_key"], creds=_key_credential("pro.ttsmaker.com token"),
        base_url="https://pro.ttsmaker.com", job_model="async_poll", pricing="per_character",
+       tos="https://ttsmaker.com/terms-of-service",
        status_reason="API requires Pro/Studio tier; CN free API paused.",
        strategies=[_s(_API, "T1", ["audio.tts"], note="plan-gated"),
                    _s(_ASSIST, "T2", ["audio.tts"], **_T2)]),
@@ -532,3 +625,42 @@ def accounts() -> dict[str, list[str]]:
 
 def catalog_count() -> int:
     return len(PROVIDERS)
+
+
+def validate_catalog() -> list[str]:
+    """Structural integrity check (C1.5 §2/§3): unique strategy ids, valid
+    method/tier/automation enums, method-consistent tiers, mandatory
+    tos_evidence on non-official paths, ≥1 usable strategy per provider."""
+    errs: list[str] = []
+    seen_ids: set[str] = set()
+    for p in PROVIDERS:
+        # Providers exist for informational completeness too — Udio
+        # legitimately has only prohibited/monitor paths (§7).
+        if not p["strategies"]:
+            errs.append(f"{p['key']}: no strategies recorded")
+        for s in p["strategies"]:
+            sid = s.get("strategy_id") or "?"
+            if sid in seen_ids:
+                errs.append(f"{p['key']}: duplicate strategy_id {sid}")
+            seen_ids.add(sid)
+            if s["method"] not in METHODS:
+                errs.append(f"{sid}: unknown method {s['method']}")
+            prohibited = s["automation_permission"] == "prohibited"
+            if prohibited and s["tier"] != "T4":
+                errs.append(f"{sid}: prohibited records must be T4 "
+                            "(informational refusal only)")
+            elif not prohibited and s["tier"] not in METHOD_TIERS.get(s["method"], ()):
+                errs.append(f"{sid}: method {s['method']} cannot claim "
+                            f"tier {s['tier']}")
+            if s["automation_permission"] not in AUTOMATION_PERMS:
+                errs.append(f"{sid}: bad automation_permission "
+                            f"{s['automation_permission']}")
+            if s["user_interaction"] not in USER_INTERACTIONS:
+                errs.append(f"{sid}: bad user_interaction "
+                            f"{s['user_interaction']}")
+            if s["method"] != "official_api":
+                ev = s.get("tos_evidence") or {}
+                if not ev.get("url") or not ev.get("checked"):
+                    errs.append(f"{sid}: tos_evidence needs url+checked "
+                                "on non-official_api strategies")
+    return errs
