@@ -199,11 +199,25 @@ class StdioJsonLinesProtocol(WorkerProtocol):
 
 
 class SdServerHttpProtocol(WorkerProtocol):
-    """sd.cpp sd-server HTTP protocol (verified on pinned master-1073):
+    """sd.cpp sd-server HTTP protocol (verified vs pinned master-1073-991f825
+    server API docs — examples/server/api.md at that commit):
 
     - ``GET /v1/models`` → 200 = server up and accepting requests
-    - ``POST /v1/images/generations`` → image generation
-    - ``POST /sdapi/v1/txt2img`` → alternate A1111-style endpoint
+      (empty ``data`` when no model is loaded — readiness is liveness
+      only, NOT a weights-loaded signal)
+    - ``POST /sdapi/v1/txt2img`` → image generation. Documented request
+      fields cover the full generation parameter set (prompt,
+      negative_prompt, width, height, steps, cfg_scale, seed,
+      batch_size, sampler_name, scheduler, lora); response is the
+      A1111 shape ``{"images": [b64_png, ...]}``.
+    - ``POST /v1/images/generations`` → OpenAI-compat endpoint. Its
+      documented field set (prompt, n, size, output_format) cannot
+      express seed/steps/cfg/negative_prompt without embedding
+      ``sd_cpp_extra_args`` inside the prompt — kept as an unused
+      alternative, not the primary path.
+    - ``/sdcpp/v1/*`` → native async API (jobs/{id}/cancel exists on the
+      pinned build). Adopting the async API is a separate design change;
+      this protocol stays synchronous + abandon→recycle for now.
 
     Health is an HTTP GET on a short timeout — the server has no push
     channel. The spawned process's stdout IS drained (into a bounded log
@@ -305,14 +319,16 @@ class SdServerHttpProtocol(WorkerProtocol):
         is_cancelled: Callable[[], bool] | None = None,
         timeout_s: float = 600.0,
     ) -> dict[str, Any]:
-        # sd-server has no mid-request cancel endpoint in this build —
-        # cancellation abandons the request and the supervisor kills the
-        # worker; a clean HTTP response is the only trustworthy outcome.
+        # The synchronous sdapi endpoint has no mid-request cancel (the
+        # native /sdcpp/v1/jobs/{id}/cancel exists but is a different,
+        # async-job API). Cancellation abandons the request and the
+        # supervisor kills the worker; a clean HTTP response is the only
+        # trustworthy outcome.
         if cmd != "generate":
             raise ValueError(f"unsupported sd-server command: {cmd}")
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
-            None, self._post, "/v1/images/generations", payload, timeout_s)
+            None, self._post, "/sdapi/v1/txt2img", payload, timeout_s)
         # Poll for cancellation/abandonment while the blocking HTTP call
         # runs — a disconnect does NOT stop server-side inference, so an
         # abandoned request means the worker is recycled (supervisor).

@@ -1,10 +1,15 @@
-"""M4.1 Phase 2B — sd-server request contract + recovery, NO inference.
+"""M4.1 Phase 2B + readiness — sd-server request contract + recovery,
+NO inference.
 
-The stub server (tests/stub_sd_server.py) now captures the POST body the
+The stub server (tests/stub_sd_server.py) captures the POST body the
 adapter sends and exposes it on GET /v1/last_request — making the
 request contract a verifiable, regression-protected surface instead of
-an assumed superset. Also covered: both accepted response shapes,
-crash-mid-request worker recovery, and the no-image-data parse path.
+an assumed superset. The adapter posts to the DOCUMENTED
+/sdapi/v1/txt2img endpoint (verified vs examples/server/api.md at the
+pinned runtime master-1073-991f825) — these tests pin that documented
+field set exactly. Also covered: both accepted response shapes,
+crash-mid-request worker recovery, no-image-data and model_not_loaded
+paths.
 
 No model weights, no real binary, no inference anywhere.
 """
@@ -96,7 +101,7 @@ def _get_json(url: str, timeout: float = 3.0):
 class TestRequestContract:
     async def test_payload_fields_reach_the_server(self, tmp_path):
         """The exact POST body the adapter emits is captured by the stub —
-        pins the OpenAI/A1111 superset field-for-field."""
+        pins the DOCUMENTED /sdapi/v1/txt2img field set exactly."""
         pool = await _pool(_registry())
         try:
             adapter = _adapter(pool, tmp_path)
@@ -107,12 +112,14 @@ class TestRequestContract:
             assert sent["prompt"] == "a lighthouse"
             assert sent["negative_prompt"] == "fog"
             assert sent["seed"] == 42
-            assert sent["size"] == "512x640"
+            assert sent["width"] == 512 and sent["height"] == 640
             assert sent["steps"] == 20
             assert sent["cfg_scale"] == 7.5
-            assert sent["n"] == 1
-            # Model name is None in stub mode (no resolved weight file).
-            assert sent.get("model") is None
+            assert sent["batch_size"] == 1
+            # Undocumented/legacy fields must NOT leak onto the wire —
+            # only the api.md-declared surface is sent.
+            for forbidden in ("model", "size", "n", "output_format"):
+                assert forbidden not in sent, forbidden
         finally:
             await pool.stop()
 
@@ -125,10 +132,38 @@ class TestRequestContract:
                           "worker_vram_mb": 64})
             sent = _get_json(f"{_stub_base(pool)}/v1/last_request")
             assert sent["seed"] == -1
-            assert sent["size"] == "512x512"
+            assert sent["width"] == 512 and sent["height"] == 512
             assert sent["steps"] == 20
             assert sent["cfg_scale"] == 7.0
         finally:
+            await pool.stop()
+
+    async def test_sampler_and_scheduler_passthrough(self, tmp_path):
+        """Request-level sampler/scheduler map to the documented sdapi
+        fields; absent → keys omitted (not sent as null)."""
+        pool = await _pool(_registry())
+        try:
+            adapter = _adapter(pool, tmp_path)
+            await _drive(adapter, tmp_path,
+                         _request({"sampler": "euler_a",
+                                   "scheduler": "karras"}))
+            sent = _get_json(f"{_stub_base(pool)}/v1/last_request")
+            assert sent["sampler_name"] == "euler_a"
+            assert sent["scheduler"] == "karras"
+        finally:
+            await pool.stop()
+
+    async def test_model_not_loaded_503_fails_honestly(self, tmp_path):
+        """The real server returns 503 model_not_loaded with no weights —
+        a coherent HTTP response surfaces as an honest job error."""
+        os.environ["STUB_MODE"] = "nomodel"
+        pool = await _pool(_registry())
+        try:
+            adapter = _adapter(pool, tmp_path)
+            with pytest.raises(RuntimeError, match="No model is loaded"):
+                await _drive(adapter, tmp_path, _request())
+        finally:
+            os.environ.pop("STUB_MODE", None)
             await pool.stop()
 
 

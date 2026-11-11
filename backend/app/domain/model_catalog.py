@@ -39,7 +39,7 @@ class ModelSpec:
     display_name: str
     family: str
     version: str
-    adapter_id: str  # inference adapter that serves this model
+    adapter_id: str  # primary inference adapter that serves this model
     fmt: str  # safetensors | gguf | onnx | ...
     source: dict[str, Any]
     license: dict[str, Any]  # name, url, commercial_ok, notes
@@ -48,6 +48,12 @@ class ModelSpec:
     capabilities: dict[str, Any]  # tasks, sizes, seed, steps, cfg, samplers, batch, ref_images, lora, precision,
     #                              resolutions, durations_s, fps, audio, character_consistency
     runtime_key: str = "sdcpp"
+    # Additional adapters that may serve this model's installed files.
+    # adapter_id stays the primary/default choice (Model Manager UI,
+    # install-row metadata); compatible_adapters is an opt-in list —
+    # a model only lands here after its fields are verified against the
+    # alternate adapter's request contract.
+    compatible_adapters: tuple[str, ...] = ()
     # Engineering support tier — catalog presence does NOT imply local support:
     #   production   — validated end-to-end in this app
     #   tested       — works through a verified runtime path, not fully validated
@@ -177,6 +183,7 @@ MODELS: dict[str, ModelSpec] = {
         family="sd1.5",
         version="1.5-f16",
         adapter_id="gen.image.sdcpp",
+        compatible_adapters=("gen.image.sdcpp-server",),
         fmt="gguf",
         source={
             "provider": "huggingface",
@@ -214,6 +221,7 @@ MODELS: dict[str, ModelSpec] = {
         family="sd1.5",
         version="1.5-q8_0",
         adapter_id="gen.image.sdcpp",
+        compatible_adapters=("gen.image.sdcpp-server",),
         fmt="gguf",
         source={
             "provider": "huggingface",
@@ -252,6 +260,7 @@ MODELS: dict[str, ModelSpec] = {
         family="sd1.5",
         version="1.5",
         adapter_id="gen.image.sdcpp",
+        compatible_adapters=("gen.image.sdcpp-server",),
         fmt="safetensors",
         source={
             "provider": "huggingface",
@@ -742,6 +751,12 @@ def get_runtime(key: str) -> RuntimeSpec | None:
     return RUNTIMES.get(key)
 
 
+def serves_adapter(spec: ModelSpec, adapter_id: str) -> bool:
+    """True when adapter_id may serve this model — either as its primary
+    adapter or a declared compatible one."""
+    return adapter_id == spec.adapter_id or adapter_id in spec.compatible_adapters
+
+
 def spec_to_dict(spec: ModelSpec) -> dict:
     return {
         "key": spec.key,
@@ -749,6 +764,7 @@ def spec_to_dict(spec: ModelSpec) -> dict:
         "family": spec.family,
         "version": spec.version,
         "adapter_id": spec.adapter_id,
+        "compatible_adapters": list(spec.compatible_adapters),
         "format": spec.fmt,
         "source": spec.source,
         "license": spec.license,

@@ -5,13 +5,15 @@ flavor, GPU, protocol="http") stays resident in the WorkerPool and serves
 many jobs — eliminating per-job model reload once real inference is
 validated.
 
-Phase 2B status: the full request path (spec → acquire → POST →
-decode → asset) is exercised end-to-end against the stub server,
-including the exact POST contract and both response shapes. Real
-weight inference is still NOT executed — the adapter registers only
-when ``ATOMIC_PERSISTENT_INFERENCE_ENABLED=1``, and field-level
-validation against a weight-loaded server remains a Phase 2B
-acceptance gate (see docs/persistent-sd-server.md).
+Readiness status: the generation path now speaks the DOCUMENTED
+``/sdapi/v1/txt2img`` contract (verified against examples/server/api.md
+at the pinned runtime) — no inferred/superset fields. Jobs reach this
+adapter only through ``generate.image.persistent`` and only for models
+declaring ``compatible_adapters`` support. Real weight inference is
+still NOT executed — registration stays behind
+``ATOMIC_PERSISTENT_INFERENCE_ENABLED=1``, and behavior under loaded
+weights remains a first-run acceptance gate (see
+docs/persistent-sd-server.md).
 
 Verified launch surface (pinned master-1073):
     sd-server.exe -l 127.0.0.1 --listen-port <p> --model-dir <dir>
@@ -145,23 +147,29 @@ class SdCppServerAdapter(SdCppAdapter):
                 f"http://127.0.0.1:{port}", proc=proc),
         )
 
-    # ---------- request mapping (unverified vs real weights — Phase 2B) ----------
+    # ---------- request mapping (documented sdapi contract — master-1073) ----------
 
     def _payload(self, request: dict, weight: Path | None) -> dict:
-        w = int(request.get("width", 512))
-        h = int(request.get("height", 512))
-        return {
-            # OpenAI-images + A1111-style superset — the exact accepted
-            # field set must be measured in Phase 2B.
-            "model": weight.name if weight else None,
+        """POST /sdapi/v1/txt2img — only fields the pinned runtime's API
+        doc declares (examples/server/api.md @ master-1073-991f825).
+        ``cfg`` (request-side name) maps to ``cfg_scale``; ``batch`` to
+        ``batch_size`` (adapter limits max_batch=1)."""
+        payload = {
             "prompt": request.get("prompt", ""),
             "negative_prompt": request.get("negative_prompt", ""),
-            "seed": int(request.get("seed", -1)),
-            "width": w, "height": h, "size": f"{w}x{h}",
+            "width": int(request.get("width", 512)),
+            "height": int(request.get("height", 512)),
             "steps": int(request.get("steps", 20)),
-            "cfg_scale": float(request.get("cfg_scale", 7.0)),
-            "n": 1,
+            "cfg_scale": float(request.get("cfg_scale",
+                                          request.get("cfg", 7.0))),
+            "seed": int(request.get("seed", -1)),
+            "batch_size": int(request.get("batch", 1)),
         }
+        if request.get("sampler"):
+            payload["sampler_name"] = request["sampler"]
+        if request.get("scheduler"):
+            payload["scheduler"] = request["scheduler"]
+        return payload
 
     # ---------- run ----------
 
@@ -182,6 +190,10 @@ class SdCppServerAdapter(SdCppAdapter):
         else:
             spec, weight, _ = self._resolve(request)
             model_key = spec.key
+            if not model_catalog.serves_adapter(spec, self.profile.adapter_id):
+                raise RuntimeError(
+                    f"model '{spec.key}' is not declared compatible with "
+                    f"'{self.profile.adapter_id}' — request contract unverified")
             exe, flavor = self._server_exe(request)
             if exe is None:
                 raise RuntimeError(
@@ -242,14 +254,14 @@ class SdCppServerAdapter(SdCppAdapter):
             raise RuntimeError(f"sd-server: {result.get('error') or 'request failed'}")
 
         body = result.get("body") or {}
-        # Accepted response shapes: OpenAI images {"data":[{b64_json}]}
-        # (primary) and A1111-style {"images":[b64]} (txt2img fallback) —
-        # both encode the generated image as base64 PNG.
-        data = body.get("data") or []
-        b64 = data[0].get("b64_json") if data and isinstance(data[0], dict) else None
+        # Documented sdapi response shape is {"images": [b64_png, ...]};
+        # the OpenAI {"data":[{b64_json}]} shape is kept as a fallback so
+        # a future endpoint switch needs no parse change.
+        images = body.get("images") or []
+        b64 = images[0] if images and isinstance(images[0], str) else None
         if not b64:
-            images = body.get("images") or []
-            b64 = images[0] if images and isinstance(images[0], str) else None
+            data = body.get("data") or []
+            b64 = data[0].get("b64_json") if data and isinstance(data[0], dict) else None
         if not b64:
             raise RuntimeError("sd-server returned no image data")
         out_path = out_dir / f"{handle.job_id}.png"
