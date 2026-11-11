@@ -89,6 +89,14 @@ class TestProhibitedAndFreshness:
         assert all(s["automation_permission"] != "prohibited"
                    for s in registry.usable_strategies(mj))
 
+    def test_monitor_only_has_no_usable_path(self):
+        # Udio documents "no public API" — its only strategy record is the
+        # prohibited refusal record, so best_strategy is None (not a bug).
+        udio = catalog.get_provider("udio")
+        assert registry.best_strategy(udio) is None
+        st = registry.compute_status(udio, None, enabled=False)
+        assert st["status"] in ("external_only", "needs_recheck")
+
     def test_stale_demotes_status(self):
         prov = dict(catalog.get_provider("sudowrite"))
         old = {"last_verified": "2020-01-01",

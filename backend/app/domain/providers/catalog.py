@@ -23,7 +23,11 @@ METHODS = (
 
 
 # C1.5 §3 — catalog-wide verification stamp for strategy evidence.
-CATALOG_VERIFIED = "2026-11-10"
+# Date of the last completed pass over evidence URLs + record consistency —
+# certify only that the cited URL resolves to the provider's real ToS/docs
+# and that validate_catalog() passes; method-level permission review is the
+# §9 re-check performed at enable time.
+CATALOG_VERIFIED = "2026-11-11"
 
 METHODS = {"official_api", "aggregator_api", "mcp_connector",
            "browser_authorized", "desktop_plugin", "assisted_workflow",
@@ -203,7 +207,7 @@ TEXT = [
     _p("anyword", "Anyword", "text", "B", "anyword",
        auth=["api_key"], creds=_key_credential("Anyword Enterprise API key"),
        job_model="sync", pricing="subscription",
-       tos="https://anyword.com/terms-of-use",
+       tos="https://www.anyword.com/terms",
        status_reason="Official API is Enterprise-plan only.",
        strategies=[_s(_API, "T1", ["text.generate"], note="Enterprise only"),
                    _s(_ASSIST, "T2", ["text.generate"], **_T2)]),
@@ -220,7 +224,8 @@ TEXT = [
     _p("rytr", "Rytr", "text", "A", "rytr",
        auth=["api_key"], creds=_key_credential("app.rytr.me API key"),
        base_url="https://app.rytr.me/v1", job_model="sync", pricing="per_character",
-       docs="https://rytr.me/api",
+       tos="https://rytr.me/trust/terms-of-use",
+       docs="https://rytr.me/products/api",
        models=[{"id": "rytr-default", "capability": "text"}],
        strategies=[_s(_API, "T1", ["text.generate"])]),
     _p("xai", "xAI / Grok", "text", "A", "xai",
@@ -302,7 +307,7 @@ IMAGES = [
        auth=["oauth"], creds=[{"name": "oauth_token", "secret": True, "required": True,
                                "hint": "Connect API OAuth token (private app)"}],
        base_url="https://api.canva.com", job_model="async_poll", pricing="per_credit",
-       tos="https://www.canva.com/policies/connect-api-terms",
+       tos="https://www.canva.com/policies/canva-developer-terms/",
        status_reason="Connect API in preview — public apps can't pass review yet.",
        models=[{"id": "craft-1", "capability": "image"},
                {"id": "lucid-origin", "capability": "image"}],
@@ -375,7 +380,7 @@ VIDEO = [
        base_url="https://ark.cn-beijing.volces.com/api/v3", job_model="async_poll",
        pricing="per_second", region=True,
        status_reason="Official path is Volcengine Ark (CN/SG-centric).",
-       docs="https://docs.volcengine.com/docs/ark",
+       docs="https://docs.volcengine.com/docs/ark?lang=zh",
        models=[{"id": "doubao-seedance-1-5-pro", "capability": "video"}],
        strategies=[_s(_AGGR, "T1", ["video.generate"], note="fal/Replicate/Higgsfield — desktop default"),
                    _s(_API, "T1", ["video.generate"], note="Volcengine Ark — CN/enterprise")]),
