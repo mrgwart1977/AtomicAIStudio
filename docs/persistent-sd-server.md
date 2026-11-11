@@ -14,7 +14,7 @@ generate.image.persistent command ──► durable job (adapter gen.image.sdcpp
    ├─ SdCppServerAdapter.run()
    │   ├─ resolve approved model + runtime flavor + compat re-check
    │   ├─ WorkerSpec: sd-server.exe -l 127.0.0.1 --listen-port <p>
-   │   │              --model-dir <dir> --log-level warn
+   │   │              -m <weight> --model-dir <dir> --log-level warn
    │   │              Job-Object supervised, RAM/VRAM reservations
    │   │              charged for worker lifetime
    │   ├─ pool.acquire(spec) — admission-checked; port TOCTOU retried
@@ -58,13 +58,16 @@ fragile contract.
 
 Response: `{"images": [b64_png...], "parameters": {...}, "info": ""}`.
 
-**No-model abort condition:** with `--model-dir` lazy loading, the
-server is READY before weights load; generation calls return
-`503 {"error":"No model is loaded","code":"model_not_loaded"}` —
-a coherent HTTP response that surfaces as an honest job failure
-(verified by stub mode `nomodel`). `GET /v1/models` returns 200 with
-an empty `data` list when unloaded — readiness means *process alive*,
-not *weights resident*.
+**Model loading is command-line preloading (`-m <weight>`):** verified
+in server `main.cpp` at the pinned commit — the context is created
+only when `model_path` is set, synchronously BEFORE `listen()`, and
+the process `exit(1)`s on load failure. Consequences: READY implies
+weights resident; load failure is an honest dead-process signal; the
+readiness timeout must cover model load (~2 GiB on Vulkan can exceed
+30s — default bumped to 120s). `--model-dir` alone only defines scan
+roots for the recipe/model-file catalog — it never loads a model, and
+generation calls would `503 {"error":"No model is loaded",
+"code":"model_not_loaded"}` (stub mode `nomodel` covers the path).
 
 **Async alternative (documented, not adopted):** `/sdcpp/v1/img_gen`
 → `GET /sdcpp/v1/jobs/{id}` → `POST /sdcpp/v1/jobs/{id}/cancel`
@@ -120,8 +123,8 @@ VRAM probe < reservation, system RAM < floor + 2 GiB headroom.
    adapter serves the job and it fails honestly.
 3. A worker spawns only when a real generation job acquires the pool
    lease — never at app start.
-4. `sd-server --model-dir` loads weights lazily on first request —
-   the server being READY does not mean a model is resident.
+4. `-m` preloads weights at spawn — READY means the model IS resident
+   (and load failure exits the process honestly).
 5. All model weights are user-approved downloads under the data dir;
    nothing is fetched implicitly.
 

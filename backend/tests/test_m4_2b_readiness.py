@@ -26,6 +26,33 @@ from tests.test_m3 import _commit, _install_row
 PERSISTENT = "gen.image.sdcpp-server"
 
 
+# ================================================================ launch vector
+
+class TestLaunchVector:
+    """Verified against server main.cpp at the pinned commit: the model
+    context is created only when model_path (-m) is set — BEFORE listen()
+    — and the process exit(1)s on load failure. --model-dir alone only
+    provides catalog scan roots; without -m every generation would 503."""
+
+    def _argv(self, tmp_path, weight):
+        from app.adapters.sdcpp_server import SdCppServerAdapter
+        from app.config import Settings
+        a = SdCppServerAdapter(None, Settings(data_dir=tmp_path / "d"), None)
+        return a.server_argv(Path("C:/rt/sd-server.exe"), 8090,
+                             tmp_path / "models", weight=weight)
+
+    def test_weighted_spawn_preloads_model(self, tmp_path):
+        argv = self._argv(tmp_path, tmp_path / "w.gguf")
+        assert "-m" in argv and argv[argv.index("-m") + 1].endswith("w.gguf")
+        assert "--model-dir" in argv  # scan roots kept alongside preload
+        assert argv[argv.index("--model-dir") + 1].endswith("models")
+
+    def test_unweighted_spawn_has_no_model_flag(self, tmp_path):
+        argv = self._argv(tmp_path, None)
+        assert "-m" not in argv
+        assert "--model-dir" in argv
+
+
 # ================================================================ catalog routing
 
 class TestCatalogRouting:
