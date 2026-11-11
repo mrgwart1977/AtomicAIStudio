@@ -1,8 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default window capability — core APIs plus file dialogs for import/export.",
-  "windows": ["main"],
+  "description": "Default window capability \u00e2\u20ac\u201d core APIs plus file dialogs for import/export.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -11,7 +13,288 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://*" }
+        {
+          "url": "https://agents.invideo.io"
+        },
+        {
+          "url": "https://agents.invideo.io/**"
+        },
+        {
+          "url": "https://ai.google.dev"
+        },
+        {
+          "url": "https://ai.google.dev/**"
+        },
+        {
+          "url": "https://api-docs.deepseek.com"
+        },
+        {
+          "url": "https://api-docs.deepseek.com/**"
+        },
+        {
+          "url": "https://app.klingai.com"
+        },
+        {
+          "url": "https://app.klingai.com/**"
+        },
+        {
+          "url": "https://dev.hume.ai"
+        },
+        {
+          "url": "https://dev.hume.ai/**"
+        },
+        {
+          "url": "https://dev.writer.com"
+        },
+        {
+          "url": "https://dev.writer.com/**"
+        },
+        {
+          "url": "https://developers.jasper.ai"
+        },
+        {
+          "url": "https://developers.jasper.ai/**"
+        },
+        {
+          "url": "https://docs.anthropic.com"
+        },
+        {
+          "url": "https://docs.anthropic.com/**"
+        },
+        {
+          "url": "https://docs.bfl.ai"
+        },
+        {
+          "url": "https://docs.bfl.ai/**"
+        },
+        {
+          "url": "https://docs.cartesia.ai"
+        },
+        {
+          "url": "https://docs.cartesia.ai/**"
+        },
+        {
+          "url": "https://docs.copy.ai"
+        },
+        {
+          "url": "https://docs.copy.ai/**"
+        },
+        {
+          "url": "https://docs.descriptapi.com"
+        },
+        {
+          "url": "https://docs.descriptapi.com/**"
+        },
+        {
+          "url": "https://docs.dev.runwayml.com"
+        },
+        {
+          "url": "https://docs.dev.runwayml.com/**"
+        },
+        {
+          "url": "https://docs.freepik.com"
+        },
+        {
+          "url": "https://docs.freepik.com/**"
+        },
+        {
+          "url": "https://docs.heygen.com"
+        },
+        {
+          "url": "https://docs.heygen.com/**"
+        },
+        {
+          "url": "https://docs.higgsfield.ai"
+        },
+        {
+          "url": "https://docs.higgsfield.ai/**"
+        },
+        {
+          "url": "https://docs.ideogram.ai"
+        },
+        {
+          "url": "https://docs.ideogram.ai/**"
+        },
+        {
+          "url": "https://docs.leonardo.ai"
+        },
+        {
+          "url": "https://docs.leonardo.ai/**"
+        },
+        {
+          "url": "https://docs.lumalabs.ai"
+        },
+        {
+          "url": "https://docs.lumalabs.ai/**"
+        },
+        {
+          "url": "https://docs.volcengine.com"
+        },
+        {
+          "url": "https://docs.volcengine.com/**"
+        },
+        {
+          "url": "https://docs.x.ai"
+        },
+        {
+          "url": "https://docs.x.ai/**"
+        },
+        {
+          "url": "https://elevenlabs.io"
+        },
+        {
+          "url": "https://elevenlabs.io/**"
+        },
+        {
+          "url": "https://firefly.adobe.com"
+        },
+        {
+          "url": "https://firefly.adobe.com/**"
+        },
+        {
+          "url": "https://higgsfield.ai"
+        },
+        {
+          "url": "https://higgsfield.ai/**"
+        },
+        {
+          "url": "https://invideo.io"
+        },
+        {
+          "url": "https://invideo.io/**"
+        },
+        {
+          "url": "https://ltx.studio"
+        },
+        {
+          "url": "https://ltx.studio/**"
+        },
+        {
+          "url": "https://openart.ai"
+        },
+        {
+          "url": "https://openart.ai/**"
+        },
+        {
+          "url": "https://platform.openai.com"
+        },
+        {
+          "url": "https://platform.openai.com/**"
+        },
+        {
+          "url": "https://quillbot.com"
+        },
+        {
+          "url": "https://quillbot.com/**"
+        },
+        {
+          "url": "https://rytr.me"
+        },
+        {
+          "url": "https://rytr.me/**"
+        },
+        {
+          "url": "https://static.lightricks.com"
+        },
+        {
+          "url": "https://static.lightricks.com/**"
+        },
+        {
+          "url": "https://sudowrite.com"
+        },
+        {
+          "url": "https://sudowrite.com/**"
+        },
+        {
+          "url": "https://suno.com"
+        },
+        {
+          "url": "https://suno.com/**"
+        },
+        {
+          "url": "https://ttsmaker.com"
+        },
+        {
+          "url": "https://ttsmaker.com/**"
+        },
+        {
+          "url": "https://writesonic.com"
+        },
+        {
+          "url": "https://writesonic.com/**"
+        },
+        {
+          "url": "https://www.adobe.com"
+        },
+        {
+          "url": "https://www.adobe.com/**"
+        },
+        {
+          "url": "https://www.alibabacloud.com"
+        },
+        {
+          "url": "https://www.alibabacloud.com/**"
+        },
+        {
+          "url": "https://www.anyword.com"
+        },
+        {
+          "url": "https://www.anyword.com/**"
+        },
+        {
+          "url": "https://www.canva.com"
+        },
+        {
+          "url": "https://www.canva.com/**"
+        },
+        {
+          "url": "https://www.copy.ai"
+        },
+        {
+          "url": "https://www.copy.ai/**"
+        },
+        {
+          "url": "https://www.hemingwayapp.com"
+        },
+        {
+          "url": "https://www.hemingwayapp.com/**"
+        },
+        {
+          "url": "https://www.jasper.ai"
+        },
+        {
+          "url": "https://www.jasper.ai/**"
+        },
+        {
+          "url": "https://www.midjourney.com"
+        },
+        {
+          "url": "https://www.midjourney.com/**"
+        },
+        {
+          "url": "https://www.notion.so"
+        },
+        {
+          "url": "https://www.notion.so/**"
+        },
+        {
+          "url": "https://www.recraft.ai"
+        },
+        {
+          "url": "https://www.recraft.ai/**"
+        },
+        {
+          "url": "https://www.synthesia.io"
+        },
+        {
+          "url": "https://www.synthesia.io/**"
+        },
+        {
+          "url": "https://www.wellsaidlabs.com"
+        },
+        {
+          "url": "https://www.wellsaidlabs.com/**"
+        }
       ]
     }
   ]

@@ -138,7 +138,7 @@ describe("launch permission model — capability file is the narrowest https-onl
     resolve(import.meta.dirname, "../../src-tauri/capabilities/default.json"), "utf8"));
   const perms: unknown[] = caps.permissions;
 
-  it("grants opener:allow-open-url scoped to https:// URLs only", () => {
+  it("grants opener:allow-open-url scoped to explicit catalog hosts only", () => {
     const opener = perms.find((p) =>
       typeof p === "object" && p !== null &&
       (p as { identifier?: string }).identifier === "opener:allow-open-url") as
@@ -146,8 +146,20 @@ describe("launch permission model — capability file is the narrowest https-onl
     expect(opener).toBeDefined();
     expect(opener!.allow!.length).toBeGreaterThan(0);
     for (const a of opener!.allow!) {
-      expect(a.url).toMatch(/^https:\/\//); // never http, file:, or bare "*"
+      // Shape must be exactly https://host or https://host/** — the host
+      // portion can never contain a wildcard (https://h.com** would also
+      // match h.com.evil.com) and no bare https://* may exist.
+      expect(a.url).toMatch(/^https:\/\/[a-z0-9.-]+(\/\*\*)?$/);
+      expect(a.url).not.toBe("https://*");
     }
+    // Representative catalog destinations must be reachable (exact + path).
+    const urls = opener!.allow!.map((a) => a.url);
+    expect(urls).toContain("https://www.midjourney.com");
+    expect(urls).toContain("https://www.midjourney.com/**");
+    expect(urls).toContain("https://suno.com");
+    // A lookalike host must NOT be reachable — suffix-spoofing is excluded
+    // by construction (no host** patterns anywhere).
+    expect(urls).not.toContain("https://midjourney.com.evil.example/**");
   });
   it("grants no command-execution or file-path permissions", () => {
     const ids = perms.map((p) =>

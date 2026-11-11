@@ -537,3 +537,69 @@ class TestIsolation:
             r = _preview(client, p["id"], ctype, payload)
             assert r.status_code == 200, (ctype, r.text)
             assert any("terms" in w.lower() for w in r.json()["warnings"])
+
+
+# ---- desktop opener scope ↔ catalog sync (slice 3) ------------------------
+# The Tauri capability allow-list is host-scoped to exactly the destinations
+# bridge.launch can resolve. Any catalog change to a launch surface must
+# update capabilities/default.json in the same PR — enforced here in both
+# directions so neither side silently drifts.
+
+import json as _json
+from urllib.parse import urlparse as _urlparse
+
+_CAPS_PATH = (Path(__file__).resolve().parents[2]
+              / "apps/desktop/src-tauri/capabilities/default.json")
+
+
+def _resolvable_hosts() -> set[str]:
+    hosts: set[str] = set()
+    for p in catalog.PROVIDERS:
+        for s in p.get("strategies") or []:
+            if s.get("automation_permission") == "prohibited":
+                continue
+            url = bridge.resolve_launch_url(p, s)
+            if url:
+                hosts.add(_urlparse(url).netloc.lower())
+    return hosts
+
+
+def _allow_entries() -> list[str]:
+    caps = _json.loads(_CAPS_PATH.read_text(encoding="utf-8"))
+    perm = next(p for p in caps["permissions"]
+                if isinstance(p, dict)
+                and p.get("identifier") == "opener:allow-open-url")
+    return [e["url"] for e in perm["allow"]]
+
+
+class TestOpenerScopeSync:
+    def test_every_resolvable_launch_host_is_allowed(self):
+        allowed = set(_allow_entries())
+        for h in _resolvable_hosts():
+            assert f"https://{h}" in allowed, \
+                f"catalog launch host {h} missing from capability allow-list"
+            assert f"https://{h}/**" in allowed, \
+                f"catalog launch host {h} missing path glob"
+
+    def test_allow_list_admits_only_catalog_hosts(self):
+        hosts = _resolvable_hosts()
+        for url in _allow_entries():
+            assert url.startswith("https://"), \
+                f"non-https allow entry: {url}"
+            host = _urlparse(url.removesuffix("/**")).netloc.lower()
+            assert host in hosts, \
+                f"allow-list grants non-catalog host {host}"
+            # The authority component must never contain wildcards —
+            # https://host.com** would also match host.com.evil.com.
+            assert "*" not in host, f"wildcard in authority: {url}"
+            # Only two admissible shapes: exact host, or host + any path.
+            assert url == f"https://{host}" or url == f"https://{host}/**", \
+                f"unexpected allow shape: {url}"
+
+    def test_no_shell_or_path_open_permissions(self):
+        caps = _json.loads(_CAPS_PATH.read_text(encoding="utf-8"))
+        ids = [p if isinstance(p, str) else p.get("identifier", "")
+               for p in caps["permissions"]]
+        for pid in ids:
+            assert not pid.startswith("shell:"), pid
+            assert "open-path" not in pid and "execute" not in pid, pid
