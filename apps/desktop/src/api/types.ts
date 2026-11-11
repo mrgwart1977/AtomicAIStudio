@@ -32,6 +32,73 @@ export interface ProjectCard extends Project {
   thumbnail_asset_id: string | null;
 }
 
+// ---- C1 providers ----
+
+export interface ProviderSummary {
+  key: string;
+  label: string;
+  category: string; // text | image | video | audio
+  account: string;
+  status: string;
+  status_label: string;
+  tier: string; // T1 | T2 | T3 | T4
+  method: string;
+  access_class: string; // A | B | C | D | E
+  enabled: boolean;
+  credential_configured: boolean;
+  credential_unreadable: boolean;
+  capabilities: string[];
+  is_mock_only: boolean;
+  status_reason: string;
+}
+
+export interface CredentialStatus {
+  configured: boolean;
+  fields: string[];
+  set_at: string | null;
+  readable: boolean;
+  unreadable_reason: string | null;
+}
+
+export interface ProviderStrategy {
+  method: string;
+  tier: string;
+  capabilities: string[];
+  automation_permission: string;
+  user_interaction: string;
+  note: string;
+}
+
+export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
+  auth_methods: string[];
+  credential_fields: Array<{ name: string; secret: boolean; required: boolean; hint: string }>;
+  base_url: string | null;
+  region_selectable: boolean;
+  job_model: string | null;
+  pricing_model: string | null;
+  strategies: ProviderStrategy[];
+  models: Array<{ id: string; capability: string }>;
+  docs_url: string | null;
+  tos_url: string | null;
+  privacy_summary: string;
+  notes: string;
+  aliases: string[];
+  shared_credential_with: string[];
+  settings: Record<string, unknown>;
+  region: string | null;
+  credential: CredentialStatus;
+  capabilities: string[];
+}
+
+export interface ProviderTestResult {
+  ok: boolean;
+  via: string;
+  note?: string | null;
+  error?: string | null;
+  would_use?: string | null;
+  tier?: string | null;
+}
+
 export interface CommandProposal {
   command: Record<string, unknown>;
   summary: string;

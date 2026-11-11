@@ -900,6 +900,19 @@ def list_entity_asset_links(
 # NOTE: registered after all literal /api/projects/{id}/<name> routes —
 # FastAPI matches in order and {etype} would otherwise shadow them.
 
+# C1: per-project provider overlays (read-only; writes go through commands).
+@api_router.get("/api/projects/{project_id}/providers")
+def project_providers(
+    request: Request,
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+):
+    from app.domain.providers import registry as preg
+    overrides = (project.settings_json or {}).get("providers", {}) or {}
+    merged = preg.list_providers(
+        db, request.app.state.provider_vault, project_overrides=overrides)
+    return {"providers": merged}
+
+
 def _list_entities(etype: str, project: Project, db: Session, include_archived: bool):
     rows = bibles.list_entities(db, project.id, etype, include_archived=include_archived)
     return [_entity_out(r) for r in rows]
