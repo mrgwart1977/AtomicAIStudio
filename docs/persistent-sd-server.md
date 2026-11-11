@@ -112,6 +112,9 @@ admission rather than allowed to OOM.
 `503 model_not_loaded`, startup-timeout (model load pathology),
 request timeout, transport failure/crash (worker recycled), free
 VRAM probe < reservation, system RAM < floor + 2 GiB headroom.
+The standalone first-run watchdog (`docs/first-run-watchdog.md`)
+enforces the external memory/deadline bounds independently of the
+backend.
 
 ## Activation gates (no uncontrolled startup)
 
@@ -139,8 +142,8 @@ VRAM probe < reservation, system RAM < floor + 2 GiB headroom.
 - `resumable=False`: an unknown outcome (transport failure) marks the
   worker dead; the job may retry on a fresh worker per engine policy
 - Single GPU pin via `GGML_VULKAN_DEVICE`; multi-GPU untested
-- Model selection per request is not supported — `--model-dir` is
-  fixed at spawn; a different model_key is a different WorkerKey →
+- Model swap in a running worker is not supported — `-m`/`--model-dir`
+  are fixed at spawn; a different model_key is a different WorkerKey →
   a different resident process (admission caps prevent stacking)
 - `sampler_name`/`scheduler` accepted values come from
   `/sdapi/v1/samplers` at runtime — invalid names surface as honest
