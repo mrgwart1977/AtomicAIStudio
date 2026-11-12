@@ -101,6 +101,8 @@ CommandType = Literal[
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
+    "cloud.live.enable", "cloud.live.disable",
+    "cloud.live.disable_all", "cloud.live.resume",
 ]
 
 

@@ -227,6 +227,52 @@ def admit(session: Session, *, job_id: str, command_id: str | None,
                 "requested_usd": micro_to_usd(reserved),
                 "environment": environment,
             })
+    if environment == "live":
+        # C2 exit gate — the COMPLETE financial gate is enforced HERE,
+        # inside the caller's BEGIN IMMEDIATE write transaction, so two
+        # independent connections can never overbook validation exposure:
+        # the loser's SELECT re-reads after the winner commits.
+        # live_gate.dispatch_admission stays a pre-flight read for UX;
+        # this block is the booking-time guarantee and cannot be skipped
+        # by a restored opt-in, env var, config, or payload.
+        from app.domain import live_gate as _lg  # lazy: live_gate imports spend
+        gst = _lg.state(session)
+        if gst.get("global_disabled"):
+            raise BudgetError({"error": "global_kill",
+                               "detail": "live execution is globally disabled"})
+        entry = (gst.get("providers") or {}).get(provider_key) or {}
+        if not entry.get("enabled"):
+            raise BudgetError({"error": "not_enabled",
+                               "detail": f"no live opt-in for {provider_key}"})
+        if reserved > usd_to_micro(_lg.VALIDATION_CAPS_USD["per_request"]):
+            raise BudgetError({
+                "error": "cap_per_request",
+                "limit_usd": str(_lg.VALIDATION_CAPS_USD["per_request"]),
+                "requested_usd": micro_to_usd(reserved)})
+        prov_exp = _lg.live_exposure_micro(session, provider_key)
+        if prov_exp + reserved > usd_to_micro(_lg.VALIDATION_CAPS_USD["per_provider"]):
+            raise BudgetError({
+                "error": "cap_per_provider",
+                "limit_usd": str(_lg.VALIDATION_CAPS_USD["per_provider"]),
+                "consumed_usd": micro_to_usd(prov_exp),
+                "requested_usd": micro_to_usd(reserved)})
+        glob_exp = _lg.live_exposure_micro(session)
+        if glob_exp + reserved > usd_to_micro(_lg.VALIDATION_CAPS_USD["global"]):
+            raise BudgetError({
+                "error": "cap_global",
+                "limit_usd": str(_lg.VALIDATION_CAPS_USD["global"]),
+                "consumed_usd": micro_to_usd(glob_exp),
+                "requested_usd": micro_to_usd(reserved)})
+        open_n = session.execute(
+            select(func.count()).select_from(SpendReservation).where(
+                SpendReservation.environment == "live",
+                SpendReservation.provider_key == provider_key,
+                SpendReservation.status == "open")).scalar_one()
+        if open_n:
+            raise BudgetError({
+                "error": "concurrency",
+                "detail": "a live request is already in flight or ambiguous "
+                          f"for {provider_key} — never auto-resubmit"})
     res = SpendReservation(
         id=new_id(), job_id=job_id, command_id=command_id,
         project_id=project_id, provider_key=provider_key,

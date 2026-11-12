@@ -521,6 +521,7 @@ async def commit_command(
             expected_revision=body.expected_revision, idempotency_key=body.idempotency_key,
             job_engine=request.app.state.job_engine,
             storage=request.app.state.storage,
+            vault=request.app.state.provider_vault,
         )
     except cmd.CommandError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
@@ -571,6 +572,18 @@ def spend_reservations(
     Read-only; all mutations stay on the command path."""
     from app.domain import spend as _spend
     return _spend.reservation_list(db, project_id=project.id)
+
+
+@api_router.get("/api/projects/{project_id}/cloud/live-status")
+def cloud_live_status(
+    request: Request,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+):
+    """C2 exit gate Stage A — read-only enablement/admission view.
+    Mutations stay on the command path (cloud.live.*)."""
+    from app.domain import live_gate as _lg
+    return _lg.status_report(db, request.app.state.provider_vault)
 
 
 @api_router.get("/api/projects/{project_id}/commands", response_model=list[CommandOut])

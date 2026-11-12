@@ -215,6 +215,10 @@ function route(url: string, opts?: { method?: string }) {
   if (url.includes("spend/summary") && url.includes("environment=simulated")) return Promise.resolve(SIM_SUM);
   if (url.includes("spend/summary") && url.includes("environment=live")) return Promise.resolve(LIVE_SUM);
   if (url.includes("spend/reservations")) return Promise.resolve(RESERVATIONS);
+  if (url.includes("cloud/live-status")) return Promise.resolve(
+    { stage: "A — safety gates only", global_disabled: false,
+      global_disabled_at: null, caps_usd: {}, global_exposure_usd: 0,
+      timeouts: {}, providers: {} });
   if (url.includes("/cancel") && opts?.method === "POST") return Promise.resolve({ status: "cancel_requested" });
   return Promise.reject(new Error(`unmocked ${url}`));
 }

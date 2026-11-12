@@ -7,6 +7,29 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2 exit gate Stage A — live-connectivity safety infrastructure,
+  mock-only, no live transport wired (`domain/live_gate.py`). Durable,
+  audited provider+model-scoped opt-ins via new commands
+  `cloud.live.{enable,disable,disable_all,resume}` and a read-only
+  `GET /cloud/live-status` endpoint. Enablement validates: catalog
+  evidence freshness, model capability + cost table, credential-ref
+  presence in the local vault (value never read), project/global live
+  budgets, and per-provider/global spend caps ($0.10/req, $0.15/provider,
+  $0.75 total proposed — enforced as admission checks, not provider
+  billing guarantees). The complete financial gate is additionally
+  enforced inside `spend.admit()` under the BEGIN IMMEDIATE write lock,
+  so concurrent independent connections cannot overbook caps and no
+  stored opt-in, restored database, env var, config, or payload can book
+  live exposure without the gate. `generate.text.cloud` routes any
+  future live-reporting adapter through `dispatch_admission` before
+  booking — the independent execution boundary. Egress allowlist (`validate_request_url`) +
+  per-provider timeout/retry policy constants + `verified_remote`
+  evidence contract prepared for Stage B; the global kill switch and
+  per-provider disable refuse all future live dispatch, survive
+  restart, and never release outstanding reservations. New
+  "Live exit gate — Stage A" panel in Cloud Studio
+  (`features/workspace/LiveGatePanel.tsx`) exposes the state honestly:
+  no live dispatch exists in this build.
 - C1.5 assisted text workflows in Cloud Studio — a dedicated
   "Assisted text — no API integration" panel
   (`features/workspace/AssistedPanel.tsx`) for catalog providers whose
