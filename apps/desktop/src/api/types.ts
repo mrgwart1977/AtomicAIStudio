@@ -107,6 +107,7 @@ export interface CliDetectResult {
   platform: string;
   candidates: Array<{ name: string; path: string; via: string }>;
   skipped_untrusted: number;
+  verified: false; // every detected path is explicitly unverified
   reason?: string;
 }
 

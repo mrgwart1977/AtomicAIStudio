@@ -31,7 +31,9 @@ def _current_platform() -> str:
 
 def _exe_variants(name: str, platform: str) -> list[str]:
     if platform == "windows":
-        return [name] + [name + s for s in _WIN_SUFFIXES]
+        # A runnable Windows CLI must carry an executable extension —
+        # an extensionless file is never a valid candidate.
+        return [name + s for s in _WIN_SUFFIXES]
     return [name]
 
 
@@ -51,10 +53,28 @@ def _is_untrusted_link(p: Path) -> bool:
     return False
 
 
-def _check_candidate(p: Path) -> str | None:
+def _has_untrusted_ancestor(p: Path, max_depth: int = 64) -> bool:
+    """True if ANY ancestor directory is a symlink or Windows reparse
+    point (junction/mount). A linked parent would silently redirect the
+    candidate, so every level is checked — bounded by path depth, no
+    resolve() (which follows links). Unstattable ancestors are
+    untrusted by default."""
+    cur = p.parent
+    for _ in range(max_depth):
+        if _is_untrusted_link(cur):
+            return True
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return False
+
+
+def _check_candidate(p: Path, platform: str) -> str | None:
     """Return 'ok'/'untrusted_link'/None (not a usable regular file)."""
+    if platform == "windows" and not _acceptable_windows_suffix(p):
+        return None  # misleading extension is not a documented CLI shape
     try:
-        if _is_untrusted_link(p):
+        if _is_untrusted_link(p) or _has_untrusted_ancestor(p):
             return "untrusted_link"
         st = os.stat(p, follow_symlinks=False)
         if not os.path.isfile(p) or not (st.st_mode & 0o111 or sys.platform == "win32"):
@@ -62,6 +82,13 @@ def _check_candidate(p: Path) -> str | None:
         return "ok"
     except OSError:
         return None
+
+
+def _acceptable_windows_suffix(p: Path) -> bool:
+    """On Windows a detected candidate must carry a documented executable
+    suffix — PATHEXT is environment data and can be manipulated to
+    resolve misleading extensions (e.g. `openai.txt`)."""
+    return p.suffix.lower() in _WIN_SUFFIXES
 
 
 def detect_cli(provider: dict, *, platform: str | None = None) -> dict:
@@ -92,7 +119,7 @@ def detect_cli(provider: dict, *, platform: str | None = None) -> dict:
 
     def _record(p: Path, name: str, via: str) -> None:
         nonlocal skipped
-        verdict = _check_candidate(p)
+        verdict = _check_candidate(p, plat)
         if verdict == "untrusted_link":
             skipped += 1
             return
@@ -114,7 +141,8 @@ def detect_cli(provider: dict, *, platform: str | None = None) -> dict:
             base = Path(os.path.expandvars(os.path.expanduser(d)))
         except (OSError, ValueError):
             continue
-        if not base.is_dir() or _is_untrusted_link(base):
+        if (not base.is_dir() or _is_untrusted_link(base)
+                or _has_untrusted_ancestor(base)):
             continue
         for name in names:
             for variant in _exe_variants(name, plat):
@@ -123,4 +151,8 @@ def detect_cli(provider: dict, *, platform: str | None = None) -> dict:
     return {"status": "detected" if candidates else "not_found",
             "provider_key": provider.get("key"), "platform": plat,
             "candidates": candidates, "skipped_untrusted": skipped,
+            # Defense-in-depth honesty: every found path is explicitly
+            # unverified — filename or location proves nothing about
+            # authenticity, version, or executability.
+            "verified": False,
             "reason": "" if candidates else "no documented executable found on PATH or declared locations"}
