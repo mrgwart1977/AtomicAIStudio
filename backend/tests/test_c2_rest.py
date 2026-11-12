@@ -29,7 +29,7 @@ from app.domain.workers.rest_providers import (
     UnsupportedRemoteOp, make_provider)
 from app.domain.workers.rest_simulated import (
     anthropic_message_obj, chat_completion_obj, gemini_generate_obj,
-    openai_response_obj, simulated_transport)
+    openai_response_obj, simulated_handler, simulated_transport)
 from tests.conftest import make_project, wait_for_job
 
 _KEYS = itertools.count()
@@ -972,7 +972,28 @@ def test_chat_compat_no_choices_malformed_holds(client, monkeypatch, key):
     assert _reservation(client, job["id"]).status == "open"
 
 
-def test_new_provider_single_submit_no_retry(client, monkeypatch):
+@pytest.mark.parametrize("key", ["deepseek", "xai"])
+def test_chat_compat_error_object_holds(client, monkeypatch, key):
+    """A 200 whose body carries a documented error object instead of
+    choices — the request may have been processed → hold, never
+    release on the strength of the HTTP status alone."""
+    def h(req):
+        return httpx.Response(200, content=json.dumps(
+            {"error": {"message": "backend failure",
+                       "type": "server_error", "code": "500"}}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+@pytest.mark.parametrize("key", ["google-gemini", "deepseek", "xai"])
+def test_new_provider_single_submit_no_retry(client, monkeypatch, key):
     """Ambiguous submit on a new provider hits the wire exactly once —
     idempotency is 'none' so there is no safe automatic resubmit."""
     calls = {"n": 0}
@@ -980,15 +1001,87 @@ def test_new_provider_single_submit_no_retry(client, monkeypatch):
         calls["n"] += 1
         return httpx.Response(500, content=b'{"error":{"status":"INTERNAL"}}',
                               headers={"Content-Type": "application/json"})
-    _swap(client, monkeypatch, "google-gemini",
-          make_provider("google-gemini",
-                        transport=httpx.MockTransport(h)))
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=httpx.MockTransport(h)))
     pid = make_project(client)["id"]
-    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    r = _commit(client, pid, _payload(provider_key=key))
     job = wait_for_job(client, pid, r.json()["job_id"])
     assert job["status"] == "failed"
-    assert calls["n"] == 1
+    assert calls["n"] == 1                     # never resubmitted
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
     assert _reservation(client, job["id"]).status == "open"
+
+
+@pytest.mark.parametrize("key", ["google-gemini", "deepseek", "xai"])
+def test_sync_success_single_http_request(client, monkeypatch, key):
+    """A successful sync lifecycle issues EXACTLY ONE HTTP request —
+    no hidden retrieval/polling call follows the submit, because no
+    such endpoint is documented for these providers."""
+    calls = []
+    base = simulated_handler(key)
+    def h(req: httpx.Request) -> httpx.Response:
+        calls.append(f"{req.method} {req.url.path}")
+        return base(req)
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "succeeded", job.get("error")
+    assert len(calls) == 1, calls
+    assert calls[0].startswith("POST ")
+
+
+# ---------- catalog / model eligibility ----------
+
+@pytest.mark.parametrize("key,model", [
+    ("google-gemini", "gpt-5"),           # model belongs to openai
+    ("deepseek", "grok-4"),               # model belongs to xai
+    ("xai", "deepseek-chat"),             # model belongs to deepseek
+    ("google-gemini", "not-a-model")])
+def test_rest_provider_model_fails_closed(client, key, model):
+    """A model that isn't a text-capable catalog model OF THE CHOSEN
+    provider is refused at validation — nothing is admitted: no job
+    row, no reservation, no HTTP call."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key, model_id=model))
+    assert r.status_code == 422
+    with _sf(client)() as s:
+        from app.db.models import GenerationJob
+        assert s.execute(select(GenerationJob).where(
+            GenerationJob.project_id == pid)).scalars().all() == []
+        assert s.execute(select(SpendReservation).where(
+            SpendReservation.project_id == pid)).scalars().all() == []
+
+
+def test_ineligible_provider_fails_closed(client):
+    """No documented T1 official-API text strategy (sudowrite: T2/T3
+    assisted only) → refused before admission — provider integration
+    does not widen eligibility."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="sudowrite"))
+    assert r.status_code == 422
+    assert "eligible" in r.text
+    with _sf(client)() as s:
+        from app.db.models import GenerationJob
+        assert s.execute(select(GenerationJob).where(
+            GenerationJob.project_id == pid)).scalars().all() == []
+        assert s.execute(select(SpendReservation).where(
+            SpendReservation.project_id == pid)).scalars().all() == []
+
+
+def test_rest_contract_does_not_widen_model_surface(client):
+    """REST routing is keyed to the provider, not the model list —
+    a catalog provider WITHOUT a REST contract (rytr) still resolves
+    through its own models; a model id from another provider never
+    piggybacks on the integration."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="rytr",
+                                    model_id="gemini-2.5-pro"))
+    assert r.status_code == 422
+    r = _commit(client, pid, _payload(provider_key="rytr",
+                                    model_id="rytr-default"))
+    assert r.status_code == 200, r.text
 
 
 def test_new_provider_provenance_stays_simulated(client):
