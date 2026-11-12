@@ -32,6 +32,9 @@ vi.mock("../../stores/appStore", () => ({
 const PROVIDERS = [
   { key: "openai", label: "OpenAI", category: "text", access_class: "A", tier: "T1" },
   { key: "anthropic", label: "Anthropic", category: "text", access_class: "A", tier: "T1" },
+  { key: "google-gemini", label: "Google / Gemini", category: "text", access_class: "A", tier: "T1" },
+  { key: "deepseek", label: "DeepSeek", category: "text", access_class: "A", tier: "T1" },
+  { key: "xai", label: "xAI / Grok", category: "text", access_class: "A", tier: "T1" },
   { key: "inelig", label: "Inelig Co", category: "text", access_class: "C", tier: "T2" },
 ];
 
@@ -48,6 +51,24 @@ const DETAILS: Record<string, unknown> = {
     key: "anthropic", label: "Anthropic", access_class: "A",
     strategies: [{ method: "official_api", tier: "T1", capabilities: ["text_generation"] }],
     models: [{ id: "claude-opus-4-1", capability: "text", cost_table: { input_per_mtok: 15, output_per_mtok: 75 } }],
+  },
+  "google-gemini": {
+    key: "google-gemini", label: "Google / Gemini", access_class: "A",
+    strategies: [{ method: "official_api", tier: "T1", capabilities: ["text_generation"] }],
+    models: [
+      { id: "gemini-2.5-pro", capability: "text", cost_table: { input_per_mtok: 1.25, output_per_mtok: 10.0 } },
+      { id: "gemini-2.5-flash", capability: "text", cost_table: { input_per_mtok: 0.3, output_per_mtok: 2.5 } },
+    ],
+  },
+  deepseek: {
+    key: "deepseek", label: "DeepSeek", access_class: "A",
+    strategies: [{ method: "official_api", tier: "T1", capabilities: ["text_generation"] }],
+    models: [{ id: "deepseek-chat", capability: "text", cost_table: { input_per_mtok: 0.27, output_per_mtok: 1.1 } }],
+  },
+  xai: {
+    key: "xai", label: "xAI / Grok", access_class: "A",
+    strategies: [{ method: "official_api", tier: "T1", capabilities: ["text_generation"] }],
+    models: [{ id: "grok-4", capability: "text", cost_table: { input_per_mtok: 3.0, output_per_mtok: 15.0 } }],
   },
   inelig: {
     key: "inelig", label: "Inelig Co", access_class: "C",
@@ -140,6 +161,18 @@ const JOBS: Record<string, unknown> = {
       remote_intent: { provider_key: "anthropic", model_id: "claude-opus-4-1", lifecycle: "sync", simulated: true },
     },
   },
+  "job-gemini": {
+    id: "job-gemini", project_id: "p1", adapter_id: "cloud.text.rest", kind: "generate",
+    status: "succeeded", progress: 1, message: "", error: null,
+    execution_scope: "remote", recovery_state: null, cancel_requested: false,
+    created_at: "2026-01-01T00:04:00Z", completed_at: "2026-01-01T00:04:05Z",
+    progress_json: {
+      remote_intent: { provider_key: "google-gemini", model_id: "gemini-2.5-pro", lifecycle: "sync", simulated: true },
+      remote_job_id: null, remote_status: "succeeded",
+      remote_outcome: "succeeded",
+      usage_json: { input_tokens: 19, output_tokens: 31 },
+    },
+  },
   "job-set": {
     id: "job-set", project_id: "p1", adapter_id: "cloud.text.rest", kind: "generate",
     status: "failed", progress: 0, message: "", error: "interrupted",
@@ -223,7 +256,21 @@ describe("CloudPage — simulation honesty & eligibility", () => {
     render(createElement(CloudPage));
     await waitFor(() => screen.getByText("OpenAI (simulated API)"));
     expect(screen.getByText("Anthropic (simulated API)")).toBeTruthy();
+    // All five A-class T1 REST providers surface from the catalog —
+    // the selector is data-driven, nothing is hardcoded.
+    expect(screen.getByText("Google / Gemini (simulated API)")).toBeTruthy();
+    expect(screen.getByText("DeepSeek (simulated API)")).toBeTruthy();
+    expect(screen.getByText("xAI / Grok (simulated API)")).toBeTruthy();
     expect(screen.queryByText("Inelig Co (simulated API)")).toBeNull();
+  });
+
+  it("lists Gemini models for the new provider and computes its estimate", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByText("Google / Gemini (simulated API)"));
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "google-gemini" } });
+    await waitFor(() => screen.getByText("gemini-2.5-pro"));
+    expect(screen.getByText("gemini-2.5-flash")).toBeTruthy();
+    expect(screen.queryByText("gpt-5")).toBeNull(); // other provider's models hidden
   });
 
   it("model picker lists only text-capable models of the chosen provider", async () => {
@@ -371,6 +418,18 @@ describe("CloudPage — remote job lifecycle", () => {
     render(createElement(CloudPage));
     await waitFor(() => screen.getByTestId("remote-job-job-amb"));
     expect(screen.getByTestId("remote-job-job-amb").textContent).toContain("Needs reconciliation");
+  });
+
+  it("renders a sync job with no remote id honestly (Gemini)", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByTestId("remote-job-job-gemini"));
+    const g = screen.getByTestId("remote-job-job-gemini");
+    expect(g.textContent).toContain("google-gemini");
+    // generateContent returns no id — the Submitted step says so
+    // instead of inventing a synthetic handle.
+    expect(g.textContent).toContain("no remote id — sync contract");
+    expect(g.textContent).toContain("Completed");
+    expect(g.textContent).not.toContain("synthetic remote id");
   });
 
   it("offers cancel only where the provider documents it", async () => {

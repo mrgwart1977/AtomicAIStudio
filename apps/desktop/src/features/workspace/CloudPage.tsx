@@ -203,7 +203,7 @@ export function CloudPage() {
       </div>
       <SimBadge className="mt-3" />
       <p className="mt-2 text-xs text-muted">
-        OpenAI and Anthropic appear here as <b>simulated API integrations</b> — the request shape,
+        All providers below are <b>simulated API integrations</b> — the documented request shape,
         lifecycle, and spend accounting are exercised against mocked transports only.
       </p>
 
@@ -417,8 +417,11 @@ function RemoteJobCard({ job }: { job: Job }) {
 
   const steps: { label: string; state: "done" | "active" | "off" | "bad" }[] = [
     { label: "Intent recorded", state: intent ? "done" : "off" },
-    { label: `Submitted${d?.remote_job_id ? " (synthetic remote id)" : ""}`,
-      state: d?.remote_job_id ? "done" : running ? "active" : "off" },
+    { label: `Submitted${d?.remote_job_id
+          ? " (synthetic remote id)"
+          : d?.remote_status ? " (no remote id — sync contract)" : ""}`,
+      state: d?.remote_job_id || d?.remote_status ? "done"
+          : running ? "active" : "off" },
     { label: "Provider polling",
       state: lifecycle === "async_poll" || lifecycle === "mock"
         ? (d?.remote_polls || running ? (job.status === "running" ? "active" : "done") : "off")

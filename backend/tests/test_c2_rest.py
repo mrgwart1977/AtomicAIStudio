@@ -1,9 +1,11 @@
-"""C2.0c — REST provider contracts over mocked transports ONLY.
+"""C2.0c+ — REST provider contracts over mocked transports ONLY.
 
-Two documented A-class shapes, chosen because their lifecycles are
-genuinely distinct: OpenAI Responses (background mode → real resp_*
-operation id → documented poll + cancel) and Anthropic Messages
-(synchronous → msg_* response id; no documented poll/cancel).
+Five documented A-class text contracts across two lifecycles:
+- OpenAI Responses (background mode → real resp_* operation id →
+  documented poll + cancel);
+- Anthropic Messages, Gemini generateContent, DeepSeek and xAI chat
+  completions (synchronous → the response IS the completion; no
+  documented poll/cancel exists for single requests).
 
 Every test uses httpx.MockTransport — zero egress is structural (the
 provider constructor refuses anything else). All outputs remain
@@ -26,7 +28,7 @@ from app.domain.workers.rest_providers import (
     EgressRefused, REST_PROVIDER_KEYS,
     UnsupportedRemoteOp, make_provider)
 from app.domain.workers.rest_simulated import (
-    anthropic_message_obj,
+    anthropic_message_obj, chat_completion_obj, gemini_generate_obj,
     openai_response_obj, simulated_transport)
 from tests.conftest import make_project, wait_for_job
 
@@ -101,37 +103,39 @@ def _submit_status_transport(key, status, body=None):
 # ---------- transport guard / construction ----------
 
 def test_no_transport_refused():
-    with pytest.raises(EgressRefused):
-        make_provider("openai", transport=None)
-    with pytest.raises(EgressRefused):
-        make_provider("anthropic", transport=None)
+    for key in REST_PROVIDER_KEYS:
+        with pytest.raises(EgressRefused):
+            make_provider(key, transport=None)
 
 
 def test_live_transport_refused():
     """Accidental live egress construction is rejected at the boundary —
     AsyncHTTPTransport, the pool transport, and any non-mock object."""
-    with pytest.raises(EgressRefused):
-        make_provider("openai", transport=httpx.AsyncHTTPTransport())
-    with pytest.raises(EgressRefused):
-        make_provider("anthropic",
-                      transport=httpx.HTTPTransport())
-    with pytest.raises(EgressRefused):
-        make_provider("openai", transport=object())
+    for key in REST_PROVIDER_KEYS:
+        with pytest.raises(EgressRefused):
+            make_provider(key, transport=httpx.AsyncHTTPTransport())
+        with pytest.raises(EgressRefused):
+            make_provider(key, transport=httpx.HTTPTransport())
+        with pytest.raises(EgressRefused):
+            make_provider(key, transport=object())
 
 
 def test_unknown_provider_key_refused():
-    with pytest.raises(KeyError):
-        make_provider("deepseek",
-                      transport=httpx.MockTransport(lambda r: None))
+    """Catalog-eligible but contract-less providers (rytr) and unknown
+    keys both fail closed — no silent fallback to a generic shape."""
+    for key in ("rytr", "not-a-provider"):
+        with pytest.raises(KeyError):
+            make_provider(key,
+                          transport=httpx.MockTransport(lambda r: None))
 
 
 def test_registry_adapter_all_mocked(client):
     ad = _adapter(client)
     assert ad is not None
-    assert set(ad.providers) == {"openai", "anthropic"}
-    assert ad.supports_provider("openai")
-    assert ad.supports_provider("anthropic")
-    assert not ad.supports_provider("google-gemini")
+    assert set(ad.providers) == set(REST_PROVIDER_KEYS)
+    for key in REST_PROVIDER_KEYS:
+        assert ad.supports_provider(key)
+    assert not ad.supports_provider("rytr")
     assert ad.spend_environment == "simulated"
     for p in ad.providers.values():
         assert p.transport_is_simulated
@@ -150,9 +154,13 @@ def test_adapter_routing_by_provider(client):
     reg = client.app.state.adapter_registry
     assert _cloud_adapter_id(reg, "openai") == "cloud.text.rest"
     assert _cloud_adapter_id(reg, "anthropic") == "cloud.text.rest"
-    assert _cloud_adapter_id(reg, "google-gemini") == "cloud.text.mock"
-    assert _cloud_adapter_id(reg, "deepseek") == "cloud.text.mock"
-    assert REST_PROVIDER_KEYS == ("openai", "anthropic")
+    assert _cloud_adapter_id(reg, "google-gemini") == "cloud.text.rest"
+    assert _cloud_adapter_id(reg, "deepseek") == "cloud.text.rest"
+    assert _cloud_adapter_id(reg, "xai") == "cloud.text.rest"
+    # rytr stays mock-routed — no REST contract implementation.
+    assert _cloud_adapter_id(reg, "rytr") == "cloud.text.mock"
+    assert set(REST_PROVIDER_KEYS) == {
+        "openai", "anthropic", "google-gemini", "deepseek", "xai"}
 
 
 # ---------- auth header construction ----------
@@ -192,6 +200,60 @@ async def test_anthropic_auth_headers():
     assert seen["anthropic-version"] == "2023-06-01"
     assert "authorization" not in seen or \
         "dummy" not in seen.get("authorization", "")
+
+
+@pytest.mark.asyncio
+async def test_gemini_auth_headers_and_path():
+    """Gemini authenticates via the x-goog-api-key HEADER (never a
+    ?key= query param, which would leak into proxy logs) and carries
+    the model id in the URL path — unique to this contract."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen.update(dict(req.headers))
+        seen["path"] = req.url.path
+        seen["query"] = req.url.query.decode()
+        return httpx.Response(200, content=json.dumps(
+            gemini_generate_obj(model="gemini-2.5-pro")).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider("google-gemini", transport=httpx.MockTransport(h),
+                      api_key="dummy-test-key")
+    rh = await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": "gemini-2.5-pro", "prompt": "hi"}))
+    assert seen["path"] == "/v1beta/models/gemini-2.5-pro:generateContent"
+    assert seen["x-goog-api-key"] == "dummy-test-key"
+    assert "key=" not in seen["query"]            # credential never in URL
+    assert "authorization" not in seen
+    # generateContent returns no response id — remote_id is honestly
+    # None rather than a fabricated handle.
+    assert rh.remote_id is None
+    assert rh.status == remote_mod.RemoteStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key,path,model", [
+    ("deepseek", "/chat/completions", "deepseek-chat"),
+    ("xai", "/v1/chat/completions", "grok-4")])
+async def test_chat_compat_auth_headers_and_path(key, path, model):
+    """DeepSeek and xAI both use Bearer auth on their documented
+    completions paths — different hosts/paths, same header scheme."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen.update(dict(req.headers))
+        seen["path"] = req.url.path
+        return httpx.Response(200, content=json.dumps(
+            chat_completion_obj(comp_id="c1", model=model)).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider(key, transport=httpx.MockTransport(h),
+                      api_key="dummy-test-key")
+    rh = await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": model, "prompt": "hi"}))
+    assert seen["path"] == path
+    assert seen["authorization"] == "Bearer dummy-test-key"
+    assert "x-goog-api-key" not in seen and "x-api-key" not in seen
+    assert rh.remote_id == "c1"
+    assert rh.status == remote_mod.RemoteStatus.SUCCEEDED
 
 
 # ---------- documented lifecycles ----------
@@ -257,16 +319,75 @@ def test_anthropic_output_text_written(client):
     assert b"simulated transport response" in content
 
 
+def test_gemini_sync_lifecycle_end_to_end(client):
+    """generateContent is synchronous: submit → candidates +
+    usageMetadata in the SAME response. No response id exists in the
+    documented shape — remote_job_id stays None rather than invented."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    assert r.status_code == 200, r.text
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "succeeded", job.get("error")
+    detail = _detail(client, job["id"])
+    assert detail["remote_job_id"] is None      # honest — none documented
+    assert detail["remote_status"] == "succeeded"
+    assert detail["lifecycle"] == "sync"
+    # usageMetadata.promptTokenCount=19, candidatesTokenCount=31
+    assert detail["usage"] == {"input_tokens": 19, "output_tokens": 31}
+    # gemini-2.5-pro: 19×1.25 + 31×10 = 333.75 USD/Mtok → ceil 334 µUSD
+    assert detail["cost_micro"] == 334
+    assert detail["cost_basis"] == "usage_x_catalog_rates"
+    assert detail["cost_is_provider_billed"] is False
+    res = _reservation(client, job["id"])
+    assert res.status == "settled" and res.environment == "simulated"
+    chg = _charges(client, job["id"])
+    assert len(chg) == 1 and chg[0].micro == 334
+    assert chg[0].usage_json["usage_reported_by"] == \
+        "provider_response_simulated"
+
+
+@pytest.mark.parametrize("key,model,rid,micro", [
+    # deepseek-chat: 21×0.27 + 29×1.10 = 37.57 USD/Mtok → 38 µUSD
+    ("deepseek", "deepseek-chat", "deepseek-sim-0001", 38),
+    # grok-4: 21×3.00 + 29×15.00 = 498 USD/Mtok → 498 µUSD
+    ("xai", "grok-4", "xai-sim-0001", 498)])
+def test_chat_compat_sync_lifecycle_end_to_end(client, key, model,
+                                               rid, micro):
+    """DeepSeek/xAI synchronous completions: submit returns the
+    finished chat.completion — remote id is the response id, not an
+    operation handle; no documented retrieval or cancel follows."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key, model_id=model))
+    assert r.status_code == 200, r.text
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "succeeded", job.get("error")
+    detail = _detail(client, job["id"])
+    assert detail["remote_job_id"] == rid       # response id, not a job
+    assert detail["remote_status"] == "succeeded"
+    assert detail["lifecycle"] == "sync"
+    assert detail["usage"] == {"input_tokens": 21, "output_tokens": 29}
+    assert detail["cost_micro"] == micro
+    assert detail["cost_basis"] == "usage_x_catalog_rates"
+    assert detail["cost_is_provider_billed"] is False
+    res = _reservation(client, job["id"])
+    assert res.status == "settled" and res.environment == "simulated"
+    chg = _charges(client, job["id"])
+    assert len(chg) == 1 and chg[0].micro == micro
+    assert chg[0].source == "simulated"
+
+
 @pytest.mark.asyncio
-async def test_anthropic_no_poll_no_cancel():
-    """Documented lifecycle: single-message retrieval is not a thing —
-    query returns None (unknown), cancel raises unsupported rather
-    than inventing an endpoint."""
-    p = make_provider("anthropic",
-                      transport=simulated_transport("anthropic"))
-    assert await p.query("msg_x") is None
+@pytest.mark.parametrize("key", ["anthropic", "google-gemini",
+                                 "deepseek", "xai"])
+async def test_sync_providers_no_poll_no_cancel(key):
+    """None of the synchronous contracts documents single-request
+    retrieval or cancellation — query returns None (outcome unknown →
+    reconcile) and cancel raises UnsupportedRemoteOp rather than
+    inventing an endpoint."""
+    p = make_provider(key, transport=simulated_transport(key))
+    assert await p.query("any-id") is None
     with pytest.raises(UnsupportedRemoteOp):
-        await p.cancel("msg_x")
+        await p.cancel("any-id")
 
 
 @pytest.mark.asyncio
@@ -289,7 +410,10 @@ async def test_openai_poll_and_cancel_shapes():
 # ---------- idempotency: declared "none", no auto-resubmit ----------
 
 def test_idempotency_declared_none():
-    for key in ("openai", "anthropic"):
+    """No provider here documents server-side idempotency for the
+    contract we use — every one declares 'none'; the durable job key
+    is the only dedupe and ambiguous outcomes reconcile, never resubmit."""
+    for key in REST_PROVIDER_KEYS:
         p = make_provider(key, transport=simulated_transport(key))
         assert p.idempotency == "none"
 
@@ -689,35 +813,259 @@ async def test_anthropic_submit_body_shape():
     assert "background" not in body
 
 
+@pytest.mark.asyncio
+async def test_gemini_submit_body_shape():
+    """generateContent contract: {contents:[{role,parts:[{text}]}],
+    generationConfig:{maxOutputTokens}} — the model is NOT in the body
+    (it travels in the URL) and no OpenAI-shaped fields leak in."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, content=json.dumps(
+            gemini_generate_obj(model="m")).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider("google-gemini", transport=httpx.MockTransport(h))
+    await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": "gemini-2.5-flash", "prompt": "hi",
+                 "max_output_tokens": 256}))
+    body = seen["body"]
+    assert body["contents"] == [
+        {"role": "user", "parts": [{"text": "hi"}]}]
+    assert body["generationConfig"] == {"maxOutputTokens": 256}
+    assert "model" not in body and "messages" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key,model", [("deepseek", "deepseek-reasoner"),
+                                       ("xai", "grok-4")])
+async def test_chat_compat_submit_body_shape(key, model):
+    """Documented chat-completions body: {model, messages, max_tokens,
+    stream:false} — explicitly non-streaming so the response is the
+    full completion object."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, content=json.dumps(
+            chat_completion_obj(comp_id="c1", model=model)).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider(key, transport=httpx.MockTransport(h))
+    await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": model, "prompt": "hi",
+                 "max_output_tokens": 512}))
+    body = seen["body"]
+    assert body["model"] == model
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["max_tokens"] == 512
+    assert body["stream"] is False
+    assert "background" not in body and "input" not in body
+
+
+# ---------- new-provider error taxonomy ----------
+
+@pytest.mark.parametrize("key", ["google-gemini", "deepseek", "xai"])
+def test_new_provider_rejected_submit_releases(client, monkeypatch, key):
+    """A 4xx refusal on any new provider is confirmed pre-processing —
+    reservation released, outcome provider_rejected."""
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=_submit_status_transport(key, 401)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "provider_rejected"
+    assert _detail(client, job["id"])["error_kind"] == "authentication"
+    assert _reservation(client, job["id"]).status == "released"
+
+
+@pytest.mark.parametrize("key,status", [
+    ("google-gemini", 500), ("deepseek", 503), ("xai", 500),
+    ("google-gemini", 429)])
+def test_new_provider_ambiguous_submit_holds(client, monkeypatch,
+                                             key, status):
+    """5xx (and 429→release only via documented none_confirmed — here
+    429 is a refusal so it releases; keep the two hold cases honest) —
+    server-error submissions hold exposure for reconciliation."""
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=_submit_status_transport(key, status)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    detail = _detail(client, job["id"])
+    if status >= 500:
+        assert detail["remote_outcome"] == "ambiguous"
+        assert _reservation(client, job["id"]).status == "open"
+    else:
+        assert detail["remote_outcome"] == "provider_rejected"
+        assert _reservation(client, job["id"]).status == "released"
+
+
+def test_gemini_timeout_submit_holds(client, monkeypatch):
+    def h(req):
+        raise httpx.ConnectTimeout("simulated timeout")
+    _swap(client, monkeypatch, "google-gemini",
+          make_provider("google-gemini",
+                        transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _detail(client, job["id"])["error_kind"] == "transport"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_gemini_error_object_holds(client, monkeypatch):
+    """A 200 carrying a documented Gemini error object means the
+    outcome is unverifiable → provider_failed hold, never release."""
+    def h(req):
+        return httpx.Response(200, content=json.dumps(
+            {"error": {"code": 500, "status": "INTERNAL",
+                       "message": "backend error"}}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "google-gemini",
+          make_provider("google-gemini",
+                        transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_gemini_no_candidates_malformed_holds(client, monkeypatch):
+    """A 200 with no candidates is unparseable — the request may have
+    been processed → malformed, hold."""
+    def h(req):
+        return httpx.Response(200, content=json.dumps(
+            {"modelVersion": "m"}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "google-gemini",
+          make_provider("google-gemini",
+                        transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _detail(client, job["id"])["error_kind"] == "malformed"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+@pytest.mark.parametrize("key", ["deepseek", "xai"])
+def test_chat_compat_no_choices_malformed_holds(client, monkeypatch, key):
+    def h(req):
+        return httpx.Response(200, content=json.dumps(
+            {"id": "c1", "choices": []}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, key,
+          make_provider(key, transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key=key))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _detail(client, job["id"])["error_kind"] == "malformed"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_new_provider_single_submit_no_retry(client, monkeypatch):
+    """Ambiguous submit on a new provider hits the wire exactly once —
+    idempotency is 'none' so there is no safe automatic resubmit."""
+    calls = {"n": 0}
+    def h(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, content=b'{"error":{"status":"INTERNAL"}}',
+                              headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "google-gemini",
+          make_provider("google-gemini",
+                        transport=httpx.MockTransport(h)))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert calls["n"] == 1
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_new_provider_provenance_stays_simulated(client):
+    """A Gemini-shaped response with usage + modelVersion can never
+    promote provenance — no verified_remote anywhere."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "succeeded"
+    with _sf(client)() as s:
+        assets = s.execute(select(Asset).where(
+            Asset.project_id == pid)).scalars().all()
+    gen = [a for a in assets
+           if a.provenance_json.get("adapter_id") == "cloud.text.rest"]
+    assert gen
+    prov = gen[0].provenance_json
+    assert prov["provenance_confidence"] == "simulated"
+    assert prov["remote_id_synthetic"] is True
+    assert "verified_remote" not in str(prov)
+
+
+def test_new_provider_credentials_never_logged(client, monkeypatch):
+    key = "x-goog-sim-AAAA-secret"
+    _swap(client, monkeypatch, "google-gemini",
+          make_provider("google-gemini",
+                        transport=simulated_transport("google-gemini"),
+                        api_key=key))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload(provider_key="google-gemini"))
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "succeeded"
+    blob = json.dumps(job, default=str)
+    assert key not in blob
+    with _sf(client)() as s:
+        audits = s.execute(select(AuditEvent).where(
+            AuditEvent.project_id == pid)).scalars().all()
+    audit_blob = json.dumps([a.payload_json for a in audits], default=str)
+    assert key not in audit_blob
+    assert "x-goog-api-key" not in audit_blob
+
+
 # ---------- synchronous crash window ----------
 
-def test_sync_crash_window_reservation_held(client):
-    """Anthropic sync: provider returned success but the app crashed
-    before result+settlement were durable. Startup recovery must mark
-    needs_reconciliation, KEEP the reservation open, and never resubmit."""
+@pytest.mark.parametrize("key,remote_id", [
+    ("anthropic", "msg_sim_0001"),
+    ("google-gemini", None),          # generateContent returns no id
+    ("deepseek", "deepseek-sim-0001"),
+    ("xai", "xai-sim-0001")])
+def test_sync_crash_window_reservation_held(client, key, remote_id):
+    """Sync providers return success in the submit response — if the
+    app crashes before result+settlement are durable, startup recovery
+    must mark needs_reconciliation, KEEP the reservation open, and
+    never resubmit (idempotency 'none' → no safe retry)."""
     from app.db.models import GenerationJob
     from app.domain import spend as _spend
     pid = make_project(client)["id"]
-    job_id = "crash-sync-1"
+    job_id = f"crash-sync-{key}"
     with _sf(client)() as s:
-        # Mid-flight snapshot: submit succeeded (msg id recorded in the
-        # last persisted progress), settlement never reached.
+        # Mid-flight snapshot: submit succeeded (last persisted progress
+        # carries the response id where one exists), settlement never
+        # reached.
         job = GenerationJob(
             id=job_id, project_id=pid, adapter_id="cloud.text.rest",
             kind="text.generate", status="running",
-            request_json={"provider_key": "anthropic",
+            request_json={"provider_key": key,
                           "command_type": "generate.text.cloud"},
-            idempotency_key="crash-sync-key-1",
+            idempotency_key=f"crash-sync-key-{key}",
             progress_json={
-                "remote_intent": {"provider_key": "anthropic",
-                                  "idempotency_key": "crash-sync-key-1",
+                "remote_intent": {"provider_key": key,
+                                  "idempotency_key": f"crash-sync-key-{key}",
                                   "lifecycle": "sync", "simulated": True},
-                "remote_job_id": "msg_sim_0001",
+                "remote_job_id": remote_id,
                 "remote_status": "succeeded"},
             execution_scope="remote", resumable=False)
         s.add(job)
         res = _spend.admit(s, job_id=job_id, command_id=None,
-                           project_id=pid, provider_key="anthropic",
+                           project_id=pid, provider_key=key,
                            environment="simulated",
                            est_usd=0.001, max_usd=0.001)
         res_id = res.id

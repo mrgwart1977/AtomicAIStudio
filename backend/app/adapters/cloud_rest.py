@@ -5,11 +5,12 @@ Drives the same durable remote-job contract as the mock adapter —
 intent persisted before submit → remote id where the provider's
 lifecycle produces one → bounded poll only where documented → output →
 CAS — but the request/response shapes are REAL provider contracts
-(OpenAI Responses background mode; Anthropic Messages sync) executed
-against httpx.MockTransport. Zero egress: providers refuse non-mock
-transports at construction; provenance stays "simulated" because
-provider_verified evidence requires a real authorized transport that
-does not exist here.
+(OpenAI Responses background mode; Anthropic Messages, Gemini
+generateContent, DeepSeek and xAI chat completions — all sync)
+executed against httpx.MockTransport. Zero egress: providers refuse
+non-mock transports at construction; provenance stays "simulated"
+because provider_verified evidence requires a real authorized
+transport that does not exist here.
 
 Spend integration is identical to the mock path EXCEPT settlement data:
 usage is parsed from the provider-shaped response (simulated fixture
@@ -101,9 +102,10 @@ class RestCloudTextAdapter:
         lane="gen", needs_gpu=False,
         worker_model="remote",
         execution_scope="remote",
-        notes=("Documented OpenAI Responses (background+poll+cancel) and "
-               "Anthropic Messages (sync) contracts exercised over "
-               "httpx.MockTransport — zero egress, dummy credentials, "
+        notes=("Documented contracts exercised over httpx.MockTransport: "
+               "OpenAI Responses (background+poll+cancel); Anthropic "
+               "Messages, Gemini generateContent, DeepSeek and xAI chat "
+               "completions (sync) — zero egress, dummy credentials, "
                "simulated accounting; verified_remote unreachable."),
     )
 

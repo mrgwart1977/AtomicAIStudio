@@ -52,9 +52,9 @@ def _adapter(client):
 
 
 def _payload(**kw):
-    # google-gemini has a T1 strategy but no REST contract impl, so it
-    # keeps routing to the in-memory mock adapter (C2.0c routing).
-    return {"provider_key": "google-gemini", "prompt": "Write a scene beat.",
+    # rytr has a T1 strategy but no REST contract impl, so it keeps
+    # routing to the in-memory mock adapter.
+    return {"provider_key": "rytr", "prompt": "Write a scene beat.",
             "execution_target": "cloud", **kw}
 
 
@@ -104,7 +104,7 @@ def test_preview_warns_data_out_estimate_and_mock(client):
     r = _preview(client, pid, _payload())
     assert r.status_code == 200
     warns = " ".join(r.json()["warnings"]).lower()
-    assert "sends" in warns and "gemini" in warns          # data-out
+    assert "sends" in warns and "rytr" in warns            # data-out
     assert "estimate" in warns                            # cost honesty
     assert "mock" in warns and "simulated" in warns       # simulated label
     assert "verified_remote" in warns                     # honest limit

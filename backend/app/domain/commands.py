@@ -1642,9 +1642,9 @@ def _job_kind(command_type: str) -> str:
 
 
 def _cloud_adapter_id(registry, provider_key: str) -> str:
-    """C2.0c — route cloud text jobs by provider: documented REST
-    contract impls (OpenAI/Anthropic) run through cloud.text.rest;
-    every other catalog provider keeps the in-memory mock contract."""
+    """Route cloud text jobs by provider: documented REST contract
+    impls (REST_PROVIDER_KEYS) run through cloud.text.rest; every
+    other catalog provider keeps the in-memory mock contract."""
     rest = registry.get("cloud.text.rest")
     if rest is not None and getattr(rest, "supports_provider",
                                    lambda k: False)(provider_key):

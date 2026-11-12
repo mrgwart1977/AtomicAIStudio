@@ -63,6 +63,37 @@ def anthropic_message_obj(*, msg_id: str, text: str = SIMULATED_TEXT,
             "usage": usage or {"input_tokens": 11, "output_tokens": 7}}
 
 
+def gemini_generate_obj(*, model: str, text: str = SIMULATED_TEXT,
+                        usage: dict | None = None) -> dict:
+    """Documented generateContent response shape (subset) — note the
+    absence of any response id, matching the real contract."""
+    u = usage or {"promptTokenCount": 19, "candidatesTokenCount": 31,
+                  "totalTokenCount": 50}
+    return {"candidates": [{
+                "content": {"role": "model",
+                            "parts": [{"text": text}]},
+                "finishReason": "STOP", "index": 0}],
+            "usageMetadata": u, "modelVersion": model}
+
+
+def chat_completion_obj(*, comp_id: str, model: str,
+                        text: str = SIMULATED_TEXT,
+                        usage: dict | None = None) -> dict:
+    """Documented OpenAI-compatible chat.completion shape (subset) —
+    shared by DeepSeek and xAI fixtures."""
+    u = usage or {"prompt_tokens": 21, "completion_tokens": 29,
+                  "total_tokens": 50}
+    return {"id": comp_id, "object": "chat.completion",
+            "created": 1739301120, "model": model,
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant",
+                                     "content": text,
+                                     "refusal": None},
+                         "logprobs": None,
+                         "finish_reason": "stop"}],
+            "usage": u, "system_fingerprint": "fp_simulated"}
+
+
 def simulated_handler(provider_key: str,
                       overrides: dict[str, Callable] | None = None):
     """Default in-memory handler for a provider's documented routes.
@@ -122,6 +153,41 @@ def simulated_handler(provider_key: str,
                                     "message": "route"}}, 404)
         return handler
 
+    if provider_key == "google-gemini":
+        def submit(req: httpx.Request) -> httpx.Response:
+            # Model id is the last path segment before :generateContent.
+            model = req.url.path.split("/")[-1].split(":")[0]
+            return _json(gemini_generate_obj(model=model))
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if (req.method == "POST" and req.url.path.startswith("/v1beta/models/")
+                    and req.url.path.endswith(":generateContent")):
+                return routes["submit"](req)
+            return _json({"error": {"code": 404, "status": "NOT_FOUND",
+                                    "message": "route"}}, 404)
+        return handler
+
+    if provider_key in ("deepseek", "xai"):
+        path = "/chat/completions" if provider_key == "deepseek" \
+            else "/v1/chat/completions"
+
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            model = json.loads(req.content).get("model") or provider_key
+            return _json(chat_completion_obj(
+                comp_id=f"{provider_key}-sim-{seq['n']:04d}", model=model))
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "POST" and req.url.path == path:
+                return routes["submit"](req)
+            return _json({"error": {"message": "route", "type": "not_found",
+                                    "code": "404"}}, 404)
+        return handler
+
     raise KeyError(f"no simulated transport for {provider_key!r}")
 
 
@@ -135,6 +201,7 @@ def build_simulated_providers(
         *, api_key: str = "simulated-no-credential") -> dict:
     """Providers for the app runtime — every transport is a MockTransport
     emitting documented shapes with synthetic data."""
+    from app.domain.workers.rest_providers import REST_PROVIDER_KEYS
     return {key: make_provider(key, transport=simulated_transport(key),
                                api_key=api_key)
-            for key in ("openai", "anthropic")}
+            for key in REST_PROVIDER_KEYS}

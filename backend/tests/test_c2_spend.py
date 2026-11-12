@@ -45,9 +45,11 @@ def _commit(client, pid, ctype, payload, key_prefix="c2spend"):
 
 
 def _cloud(client, pid, **kw):
-    # google-gemini routes to the mock adapter (no REST impl) — these
-    # tests exercise ledger mechanics on the mock lifecycle.
-    payload = {"provider_key": "google-gemini", "prompt": "Write a beat.",
+    # rytr routes to the mock adapter (no REST impl) — these tests
+    # exercise ledger mechanics on the mock lifecycle. Default
+    # max_cost_usd keeps a nonzero reservation (rytr has no cost_table).
+    kw.setdefault("max_cost_usd", 0.10)
+    payload = {"provider_key": "rytr", "prompt": "Write a beat.",
                "execution_target": "cloud", **kw}
     return _commit(client, pid, "generate.text.cloud", payload)
 
@@ -580,11 +582,15 @@ def test_session_rotation_isolates_scope(client):
                 assert used_new == used_old == 1_500_000
 
 
-def test_summary_endpoint_environments(client):
-    pid = make_project(client)["id"]
+def test_summary_endpoint_environments(client, monkeypatch):
+    pid, job_id = _held_job(client, monkeypatch)   # ambiguous → open hold
     _set_budget(client, pid, "lifetime", 5.0)
-    r = _cloud(client, pid)
-    wait_for_job(client, pid, r.json()["job_id"])
+    # A nonzero simulated charge via the reconcile path — rytr has no
+    # cost_table so the mock settle would record zero; the point here
+    # is environment separation, not the charge source.
+    _commit(client, pid, "spend.reconcile",
+            {"job_id": job_id, "outcome": "confirmed_charge",
+             "actual_usd": 0.01})
     live = client.get(
         f"/api/projects/{pid}/spend/summary").json()
     sim = client.get(
@@ -762,7 +768,7 @@ def test_reservations_endpoint_open_first_and_fields(client, monkeypatch):
     assert rows and rows[0]["job_id"] == job_id
     row = rows[0]
     assert row["status"] == "open"
-    assert row["provider_key"] == "google-gemini"
+    assert row["provider_key"] == "rytr"
     assert row["environment"] == "simulated"
     assert row["reserved_micro"] > 0
     # Reconcile → row becomes terminal but stays listed.
