@@ -33,6 +33,16 @@ this project uses semver once public releases begin.
   Test-only: validated entirely through `httpx.MockTransport` + dummy
   vault secrets; `transport_is_live` is False for injected transports so
   no `verified_remote` artifact can be produced in B1.
+  Review hardening: the real inner transport (`_SecureHTTPTransport`)
+  pins its connection pool to `_ValidatedBackend`, an httpcore network
+  backend that dials only `resolve_public()`-validated IP literals —
+  the hostname never reaches the socket layer, closing the DNS
+  TOCTOU/rebinding gap while TLS verification + SNI remain bound to
+  the allowlisted hostname (httpcore passes `server_hostname` to
+  `start_tls` independently). Streaming-body enforcement proven across
+  chunked responses, mid-stream failures, and post-refusal cleanup;
+  oversized/unusable responses after send stay ambiguous — never
+  truncated to success.
 
 ### Added (earlier)
 - C2 exit gate Stage A — live-connectivity safety infrastructure,

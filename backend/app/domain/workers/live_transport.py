@@ -38,6 +38,8 @@ import socket
 from typing import Any, Callable
 
 import httpx
+import httpcore
+from httpcore._backends.auto import AutoBackend
 from sqlalchemy.orm import Session
 
 from app.domain import live_gate as lg
@@ -134,27 +136,91 @@ class _BoundedStream(httpx.AsyncByteStream):
 
 
 # ------------------------------------------------------------------
+# DNS TOCTOU control — the socket connects to the VALIDATED IP,
+# never to the hostname. TLS cert verification + SNI still use the
+# original hostname (httpcore passes it to start_tls separately).
+# ------------------------------------------------------------------
+
+class _ValidatedBackend(httpcore.AsyncNetworkBackend):
+    """Network backend pinning every TCP connection to a
+    resolve_public()-validated IP literal.
+
+    A hostname is never passed to the real connect — the resolver's
+    output IS the destination, so a DNS answer that flips private
+    between the preflight check and connect-time cannot reach the
+    wire. httpcore performs start_tls with server_hostname=<origin
+    host> on the returned stream, so certificate verification and SNI
+    are bound to the allowlisted hostname, not the IP."""
+
+    def __init__(self, *, base=None, resolver: Callable | None = None):
+        self._base = base or AutoBackend()
+        self._resolver = resolver
+
+    async def connect_tcp(self, host, port, timeout=None,
+                          local_address=None, socket_options=None):
+        ips = resolve_public(host, port, self._resolver)
+        last: Exception | None = None
+        for ip in ips:  # try each validated address, in order
+            try:
+                return await self._base.connect_tcp(
+                    ip, port, timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options)
+            except OSError as exc:  # connect refused/timeout on this IP
+                last = exc
+        raise last if last is not None else LiveTransportRefused(
+            "dns", f"{host}: no validated addresses",
+            charge_evidence="none_confirmed")
+
+    async def connect_unix_socket(self, *a, **kw):
+        return await self._base.connect_unix_socket(*a, **kw)
+
+    async def sleep(self, seconds):
+        return await self._base.sleep(seconds)
+
+
+class _SecureHTTPTransport(httpx.AsyncHTTPTransport):
+    """The REAL egress inner transport — its connection pool is pinned
+    to ``_ValidatedBackend`` so sockets can only ever open to
+    pre-validated public IPs. trust_env=False: proxy env vars, netrc,
+    and SSL env overrides are never honored. No proxy is configured —
+    and none can be injected later because the pool is built here."""
+
+    def __init__(self, *, resolver: Callable | None = None,
+                 base_backend=None):
+        super().__init__(trust_env=False)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=self._pool._ssl_context,
+            max_connections=4, max_keepalive_connections=2,
+            keepalive_expiry=5.0, http1=True, http2=False, retries=0,
+            network_backend=_ValidatedBackend(
+                base=base_backend, resolver=resolver))
+
+
+# ------------------------------------------------------------------
 # the transport itself
 # ------------------------------------------------------------------
 
 class LiveHTTPTransport(httpx.AsyncBaseTransport):
     """httpx transport enforcing the complete egress security stack.
 
-    ``inner`` does the actual IO: default is a REAL
-    httpx.AsyncHTTPTransport (trust_env=False — proxy env vars and
-    netrc are never honored); tests inject httpx.MockTransport so the
-    entire stack is exercised with zero egress. ``is_real`` records
-    which was wired — provenance evidence can only validate when the
-    transport truly reached a provider (Stage B2 only)."""
+    ``inner`` does the actual IO: default is ``_SecureHTTPTransport``
+    (real egress, IP-pinned, trust_env=False); tests inject
+    httpx.MockTransport so the entire stack is exercised with zero
+    egress. ``is_real`` records which was wired — provenance evidence
+    can only validate when the transport truly reached a provider
+    (Stage B2 only)."""
 
     is_live_transport = True  # marker for RestRemoteProvider.__init__
 
     def __init__(self, *, provider_key: str, inner=None,
                  resolver: Callable | None = None,
-                 timeout_s: float | None = None):
+                 timeout_s: float | None = None,
+                 base_backend=None):
         self.provider_key = provider_key
         self.is_real = inner is None
-        self._inner = inner or httpx.AsyncHTTPTransport(trust_env=False)
+        self._inner = inner or _SecureHTTPTransport(
+            resolver=resolver, base_backend=base_backend)
         self._resolver = resolver
         cfg = lg.LIVE_TIMEOUTS.get(provider_key, {})
         self._total_s = timeout_s or cfg.get("total_s", 60.0)
@@ -206,7 +272,8 @@ async def live_dispatch(
         project_id: str, max_cost_usd: Any, vault: Any,
         app_state: Any | None = None,
         inner: Any | None = None, resolver: Callable | None = None,
-        gate_probe: Callable | None = None) -> dict[str, Any]:
+        gate_probe: Callable | None = None,
+        base_backend: Any | None = None) -> dict[str, Any]:
     """The ONE path a real provider request could ever take.
 
     Ordered invariants:
@@ -249,7 +316,8 @@ async def live_dispatch(
     fields = vault.get_fields(entry["credential_ref"])
     api_key = fields.get("api_key") or next(iter(fields.values()), "")
     transport = LiveHTTPTransport(
-        provider_key=provider_key, inner=inner, resolver=resolver)
+        provider_key=provider_key, inner=inner, resolver=resolver,
+        base_backend=base_backend)
     provider = make_provider(provider_key, transport=transport,
                              api_key=api_key)
     try:

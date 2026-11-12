@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 
 import httpx
 import pytest
@@ -18,6 +19,7 @@ from app.db.models import GenerationJob, SpendReservation, new_id
 from app.domain import live_gate as lg
 from app.domain import spend
 from app.domain.workers import live_transport as lt
+from app.domain.workers import rest_providers as rp
 from tests.conftest import make_project, wait_for_job
 
 _KEYS = itertools.count(1)
@@ -121,6 +123,38 @@ class TestUnreachableBoundary:
         paths = [getattr(r, "path", "") for r in api_router.routes]
         assert not any("dispatch" in p for p in paths)
 
+    def test_no_shipped_code_calls_or_configs_it(self):
+        """Static sweep: nothing under app/ references live_dispatch or
+        LiveHTTPTransport outside its own module; the module itself
+        reads no environment variable, settings object, or adapter
+        registry — no env/config/job path can reach it."""
+        import pathlib
+        import app as app_pkg
+        root = pathlib.Path(app_pkg.__file__).parent
+        # rest_providers.py may *mention* the boundary (the
+        # is_live_transport marker seam) but must never CALL it —
+        # scan for real usage patterns, not name references.
+        hits = []
+        callers = ("live_dispatch(", "import live_transport",
+                   "from app.domain.workers.live_transport",
+                   "LiveHTTPTransport(")
+        for f in root.rglob("*.py"):
+            # live_transport.py is the module itself; rest_providers.py
+            # is the marker-seam file — it names the boundary in
+            # comments but only ever getattr's the is_live_transport
+            # flag, never calls into it.
+            if f.name in ("live_transport.py", "rest_providers.py"):
+                continue
+            src = f.read_text(encoding="utf-8")
+            if any(c in src for c in callers):
+                hits.append(str(f.relative_to(root)))
+        assert hits == []
+        src = (root / "domain" / "workers" / "live_transport.py"
+               ).read_text(encoding="utf-8")
+        for banned in ("os.environ", "os.getenv", "settings.",
+                       "adapter_registry"):
+            assert banned not in src, banned
+
     def test_inner_default_marks_real_injected_marks_controlled(self):
         assert lt.LiveHTTPTransport(
             provider_key="deepseek", inner=None).is_real is True
@@ -216,6 +250,167 @@ class TestTransportSecurity:
         with pytest.raises(Exception):
             make_provider("deepseek",
                           transport=httpx.AsyncHTTPTransport(), api_key="x")
+
+
+# ---------------- DNS TOCTOU: socket binds to validated IP ----------------
+
+class _SpyBackend:
+    """connect_tcp spy — records the literal the socket would dial."""
+    def __init__(self, fail=None):
+        self.calls: list[tuple[str, int]] = []
+        self._fail = fail or {}
+
+    async def connect_tcp(self, host, port, **kw):
+        self.calls.append((host, port))
+        if host in self._fail:
+            raise self._fail[host]
+        return object()  # callers asserting binding never use the stream
+
+    async def connect_unix_socket(self, *a, **k):
+        raise AssertionError("unix sockets must be unreachable")
+
+    async def sleep(self, seconds):
+        pass
+
+
+class _Chunks(httpx.AsyncByteStream):
+    """Scripted async byte stream — chunk list + optional mid-iter failure."""
+    def __init__(self, chunks, *, fail_at=None):
+        self._chunks, self._fail_at = list(chunks), fail_at
+        self.closed = False
+
+    async def __aiter__(self):
+        for i, c in enumerate(self._chunks):
+            if i == self._fail_at:
+                raise httpx.ReadError("mid-stream read failure")
+            yield c
+
+    async def aclose(self):
+        self.closed = True
+
+
+class TestSocketBinding:
+    """The real path must dial the VALIDATED IP — never re-resolve the
+    hostname at connect time (DNS-rebinding/TOCTOU defense)."""
+
+    def test_socket_binds_to_validated_ip_never_hostname(self):
+        spy = _SpyBackend()
+        b = lt._ValidatedBackend(
+            base=spy, resolver=lambda h, p: ["93.184.216.34"])
+        asyncio.run(b.connect_tcp("api.deepseek.com", 443))
+        assert spy.calls == [("93.184.216.34", 443)]
+        assert all(h != "api.deepseek.com" for h, _ in spy.calls)
+
+    def test_connect_falls_through_validated_ips_in_order(self):
+        spy = _SpyBackend(fail={"93.184.216.34": OSError("refused")})
+        b = lt._ValidatedBackend(
+            base=spy,
+            resolver=lambda h, p: ["93.184.216.34", "8.8.8.8"])
+        asyncio.run(b.connect_tcp("api.deepseek.com", 443))
+        assert spy.calls == [("93.184.216.34", 443), ("8.8.8.8", 443)]
+
+    def test_private_loopback_substitution_refused_at_socket(self):
+        """Even if preflight saw public space, a connect-time answer of
+        loopback/private/link-local/v6-loopback is refused before the
+        socket opens."""
+        for ips in (["127.0.0.1"], ["10.10.0.2"], ["169.254.9.9"],
+                    ["::1"], ["fe80::1"], ["192.168.0.10"]):
+            spy = _SpyBackend()
+            b = lt._ValidatedBackend(
+                base=spy, resolver=lambda h, p, ips=ips: ips)
+            with pytest.raises(lt.LiveTransportRefused) as ei:
+                asyncio.run(b.connect_tcp("api.deepseek.com", 443))
+            assert ei.value.code == "dns"
+            assert ei.value.charge_evidence == "none_confirmed"
+            assert spy.calls == []
+
+    def test_public_v6_binds(self):
+        spy = _SpyBackend()
+        b = lt._ValidatedBackend(
+            base=spy, resolver=lambda h, p: ["2606:4700:4700::1111"])
+        asyncio.run(b.connect_tcp("api.deepseek.com", 443))
+        assert spy.calls == [("2606:4700:4700::1111", 443)]
+
+    def test_dns_flip_between_preflight_and_connect_refused(self):
+        """End-to-end TOCTOU through the real transport: the preflight
+        resolve returns public; the connect-time resolve flips to
+        loopback → refused at the socket layer, spy never dialed."""
+        calls = itertools.count()
+        def flipper(h, p):
+            return ["93.184.216.34"] if next(calls) == 0 else ["127.0.0.1"]
+        spy = _SpyBackend()
+        t = lt.LiveHTTPTransport(provider_key="deepseek", inner=None,
+                                 resolver=flipper, base_backend=spy)
+        req = httpx.Request(
+            "POST", "https://api.deepseek.com/chat/completions",
+            json={"x": 1})
+        with pytest.raises(lt.LiveTransportRefused) as ei:
+            asyncio.run(t.handle_async_request(req))
+        assert ei.value.code == "dns"
+        assert spy.calls == []
+
+
+# ---------------- streaming response limits ----------------
+
+class TestStreamingLimits:
+    def _t(self, handler):
+        return lt.LiveHTTPTransport(
+            provider_key="deepseek", inner=httpx.MockTransport(handler),
+            resolver=GOOD_RESOLVER)
+
+    def _req(self):
+        return httpx.Request(
+            "POST", "https://api.deepseek.com/chat/completions", json={})
+
+    async def _drain(self, resp):
+        out = bytearray()
+        async for c in resp.stream:
+            out += c
+        return bytes(out)
+
+    def test_multi_chunk_under_limit_drains_fully(self):
+        chunks = [b"a" * (1024 * 1024), b"b" * (1024 * 1024 - 1)]
+        t = self._t(lambda r: httpx.Response(200, stream=_Chunks(chunks)))
+        resp = asyncio.run(t.handle_async_request(self._req()))
+        got = asyncio.run(self._drain(resp))
+        assert len(got) == sum(len(c) for c in chunks)
+        assert got == b"".join(chunks)
+
+    def test_chunk_crossing_limit_raises_mid_stream(self):
+        chunks = [b"a" * lt.MAX_RESPONSE_BYTES, b"x"]
+        t = self._t(lambda r: httpx.Response(200, stream=_Chunks(chunks)))
+        resp = asyncio.run(t.handle_async_request(self._req()))
+        got = []
+        async def drain():
+            async for c in resp.stream:
+                got.append(len(c))
+        with pytest.raises(lt.ResponseTooLarge):
+            asyncio.run(drain())
+        # the crossing chunk is never yielded — no silent truncation
+        assert got == [lt.MAX_RESPONSE_BYTES]
+
+    def test_single_oversized_chunk_raises_immediately(self):
+        t = self._t(lambda r: httpx.Response(
+            200, stream=_Chunks([b"x" * (lt.MAX_RESPONSE_BYTES + 1)])))
+        resp = asyncio.run(t.handle_async_request(self._req()))
+        with pytest.raises(lt.ResponseTooLarge):
+            asyncio.run(self._drain(resp))
+
+    def test_mid_stream_failure_propagates(self):
+        t = self._t(lambda r: httpx.Response(
+            200, stream=_Chunks([b"ok", b"never"], fail_at=1)))
+        resp = asyncio.run(t.handle_async_request(self._req()))
+        with pytest.raises(httpx.ReadError):
+            asyncio.run(self._drain(resp))
+
+    def test_stream_close_after_refusal(self):
+        inner_stream = _Chunks([b"x" * (lt.MAX_RESPONSE_BYTES + 1)])
+        t = self._t(lambda r: httpx.Response(200, stream=inner_stream))
+        resp = asyncio.run(t.handle_async_request(self._req()))
+        with pytest.raises(lt.ResponseTooLarge):
+            asyncio.run(self._drain(resp))
+        asyncio.run(resp.aclose())
+        assert inner_stream.closed is True
 
 
 # ---------------- orchestration: admission → send ----------------
@@ -398,6 +593,23 @@ class TestDispatchOrchestration:
         assert out["outcome"] == "ambiguous"
         assert _reservation(client, out["job_id"]).status == "open"
 
+    def test_oversized_streamed_body_is_ambiguous_never_truncated(
+            self, client, vault):
+        """A realistically streamed body crossing the cap mid-flight:
+        the response is unusable AFTER the request was sent — the
+        reservation stays open (ambiguous), never truncated to a
+        'successful' partial parse."""
+        body = (json.dumps(DEEPSEEK_OK).encode()
+                + b" " * lt.MAX_RESPONSE_BYTES)
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        out = _dispatch(client, pid, vault=vault, inner=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, stream=_Chunks([body[:1024], body[1024:]]))))
+        assert out["outcome"] == "ambiguous"
+        assert _reservation(client, out["job_id"]).status == "open"
+
     def test_malformed_success_body_is_ambiguous(self, client, vault):
         pid = make_project(client)["id"]
         _budget(client, pid)
@@ -456,6 +668,86 @@ class TestLifecycle:
         assert lg.retry_after_s({"retry-after": "999"}) == 60
         assert lg.retry_after_s({"retry-after": "garbage"}) is None
         assert lg.retry_after_s({}) is None
+
+
+# ---------------- phase-aware billing classification ----------------
+
+class TestBillingClassification:
+    """charge_evidence is the billing judgment — regression coverage
+    that each phase maps to the correct release/hold decision and that
+    NOTHING downstream can turn an ambiguous outcome into a free pass."""
+
+    def _provider(self, key, handler):
+        t = lt.LiveHTTPTransport(provider_key=key,
+            inner=httpx.MockTransport(handler), resolver=GOOD_RESOLVER)
+        return rp.make_provider(key, transport=t, api_key="dummy")
+
+    def test_pre_send_refusals_carry_none_confirmed(self):
+        """Egress/DNS refusals happen before the socket — nothing was
+        sent, so releasing the reservation is provably safe."""
+        for code, maker in (
+            ("scheme", lambda: lt.LiveHTTPTransport(
+                provider_key="deepseek", inner=_ok_inner(),
+                resolver=GOOD_RESOLVER)),
+            ("dns", lambda: lt.LiveHTTPTransport(
+                provider_key="deepseek", inner=_ok_inner(),
+                resolver=lambda h, p: ["10.0.0.1"])),
+        ):
+            t = maker()
+            url = ("http://api.deepseek.com/chat/completions"
+                   if code == "scheme"
+                   else "https://api.deepseek.com/chat/completions")
+            with pytest.raises(lt.LiveTransportRefused) as ei:
+                asyncio.run(t.handle_async_request(
+                    httpx.Request("POST", url)))
+            assert ei.value.charge_evidence == "none_confirmed"
+
+    def test_documented_rejections_are_none_confirmed(self, client, vault):
+        """4xx provider rejections (auth/validation/rate-limit) refused
+        before processing — release is safe."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        for status, code in ((400, "validation"), (401, "authentication"),
+                             (429, "rate_limited")):
+            out = _dispatch(client, pid, vault=vault,
+                inner=httpx.MockTransport(lambda req: httpx.Response(
+                    status, json={"error": {"message": "x"}})))
+            assert out["outcome"] == "failed", (status, out)
+            assert out["code"] == code
+            assert out["reservation"] == "released"
+
+    def test_post_send_transport_failure_stays_ambiguous(
+            self, client, vault):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        out = _dispatch(client, pid, vault=vault, inner=httpx.MockTransport(
+            lambda req: (_ for _ in ()).throw(
+                httpx.ReadError("connection reset mid-response"))))
+        assert out["outcome"] == "ambiguous"
+        assert _reservation(client, out["job_id"]).status == "open"
+
+    def test_query_error_never_proves_non_execution(self):
+        """A failed poll says nothing about billing — query() returns
+        None (unknown), never a 'not executed' verdict."""
+        p = self._provider("openai", lambda req: httpx.Response(
+            500, json={"error": {"message": "x"}}))
+        assert asyncio.run(p.query("resp_123")) is None
+
+    def test_cancel_http_error_is_ambiguous_never_no_billing(self):
+        """Cancellation failure doesn't establish non-billing — the
+        provider may already have processed the work."""
+        p = self._provider("openai", lambda req: httpx.Response(
+            500, json={"error": {"message": "x"}}))
+        with pytest.raises(rp.RemoteError) as ei:
+            asyncio.run(p.cancel("resp_123"))
+        assert ei.value.charge_evidence == "unknown"
+
+    def test_cancel_unsupported_never_invents_endpoint(self):
+        p = self._provider("deepseek", lambda req: None)
+        with pytest.raises(rp.UnsupportedRemoteOp):
+            asyncio.run(p.cancel("anything"))
 
 
 # ---------------- simulated/live isolation ----------------
