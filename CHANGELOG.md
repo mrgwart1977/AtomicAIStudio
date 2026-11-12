@@ -16,7 +16,13 @@ this project uses semver once public releases begin.
   presence in the local vault (value never read), project/global live
   budgets, and per-provider/global spend caps ($0.10/req, $0.15/provider,
   $0.75 total proposed — enforced as admission checks, not provider
-  billing guarantees). Egress allowlist (`validate_request_url`) +
+  billing guarantees). The complete financial gate is additionally
+  enforced inside `spend.admit()` under the BEGIN IMMEDIATE write lock,
+  so concurrent independent connections cannot overbook caps and no
+  stored opt-in, restored database, env var, config, or payload can book
+  live exposure without the gate. `generate.text.cloud` routes any
+  future live-reporting adapter through `dispatch_admission` before
+  booking — the independent execution boundary. Egress allowlist (`validate_request_url`) +
   per-provider timeout/retry policy constants + `verified_remote`
   evidence contract prepared for Stage B; the global kill switch and
   per-provider disable refuse all future live dispatch, survive

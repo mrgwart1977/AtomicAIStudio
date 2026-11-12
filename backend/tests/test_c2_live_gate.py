@@ -8,17 +8,19 @@ touched anywhere in this file.
 from __future__ import annotations
 
 import itertools
+import threading
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.db.models import AppSetting, SpendReservation, SpendCharge, new_id
 from app.domain import live_gate as lg
+from app.domain import spend
 from app.domain.providers import registry
 from app.domain.spend import usd_to_micro
 from app.domain.workers.remote import provenance_confidence
-from tests.conftest import make_project
+from tests.conftest import make_project, wait_for_job
 
 _KEYS = itertools.count(1)
 
@@ -443,3 +445,227 @@ class TestStatusEndpoint:
         body = client.get(f"/api/projects/{p['id']}/cloud/live-status").json()
         assert body["global_disabled"] is True
         assert body["providers"]["deepseek"]["blocked_reason"] == "global_kill"
+
+
+# ---------------- independent execution boundary ----------------
+# cloud.live.enable configures eligibility ONLY. Nothing — stored
+# opt-in, restored DB, env var, config, or client payload — can make a
+# job account as "live" or reach a transport. The flip below simulates
+# a hypothetical live adapter to prove the independent gate engages.
+
+class TestExecutionBoundary:
+    def _rest_payload(self, **kw):
+        return {"provider_key": "deepseek", "model_id": "deepseek-chat",
+                "prompt": "Write a scene beat.",
+                "execution_target": "cloud", **kw}
+
+    def _res_env(self, client, job_id):
+        with _sf(client)() as s:
+            return s.execute(select(SpendReservation).where(
+                SpendReservation.job_id == job_id)).scalar_one().environment
+
+    def test_enable_does_not_unlock_live_accounting(self, client, vault):
+        """Full opt-in granted; the all-mock adapter still books
+        environment='simulated' — eligibility is not dispatch."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        assert _commit(client, pid, "cloud.live.enable", EN).status_code == 200
+        r = _commit(client, pid, "generate.text.cloud",
+                    self._rest_payload(max_cost_usd="0.05"))
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+        assert self._res_env(client, job["id"]) == "simulated"
+
+    def test_payload_cannot_force_live_environment(self, client, vault):
+        """Client-supplied environment/spend_environment keys are
+        ignored — environment derives from the wired transports only."""
+        pid = make_project(client)["id"]
+        r = _commit(client, pid, "generate.text.cloud",
+                    self._rest_payload(environment="live",
+                                       spend_environment="live",
+                                       simulated=False,
+                                       max_cost_usd="0.05"))
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert self._res_env(client, job["id"]) == "simulated"
+
+    def test_live_reporting_adapter_refused_without_optin(self, client,
+                                                        vault, monkeypatch):
+        """A hypothetical live transport alone cannot book: the
+        independent gate refuses with not_enabled."""
+        adapter = client.app.state.adapter_registry.get("cloud.text.rest")
+        prov = adapter.providers["deepseek"]
+        monkeypatch.setattr(type(prov), "transport_is_simulated",
+                            property(lambda s: False))
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        r = _commit(client, pid, "generate.text.cloud",
+                    self._rest_payload(max_cost_usd="0.05"))
+        assert r.status_code == 422, r.text
+        assert "not_enabled" in r.text
+
+    def test_live_reporting_adapter_full_gate_then_mock_run(self, client,
+                                                          vault, monkeypatch):
+        """Opt-in + live flag: admission passes inside the caps and the
+        reservation books env='live' — but the job still executes
+        against MockTransport (zero egress) and provenance stays
+        simulated. Nothing dispatched for real."""
+        adapter = client.app.state.adapter_registry.get("cloud.text.rest")
+        prov = adapter.providers["deepseek"]
+        monkeypatch.setattr(type(prov), "transport_is_simulated",
+                            property(lambda s: False))
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        assert _commit(client, pid, "cloud.live.enable", EN).status_code == 200
+        r = _commit(client, pid, "generate.text.cloud",
+                    self._rest_payload(max_cost_usd="0.05"))
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+        assert self._res_env(client, job["id"]) == "live"
+        with _sf(client)() as s:
+            from app.db.models import GenerationJob
+            detail = (s.get(GenerationJob, job["id"]).progress_json or {})
+        assert provenance_confidence(detail) == "simulated"
+
+
+# ---------------- atomic financial admission ----------------
+# The caps are enforced inside spend.admit under BEGIN IMMEDIATE — the
+# write lock serializes check-then-act so no race overbooks exposure.
+
+class TestAtomicFinancialAdmission:
+    def _live_admit(self, s, pid, usd="0.05"):
+        return spend.admit(s, job_id=f"lg-{new_id()[:8]}",
+                           command_id=None, project_id=pid,
+                           provider_key="deepseek", environment="live",
+                           est_usd=usd, max_usd=usd)
+
+    def test_booking_layer_enforces_gate(self, client, vault):
+        """spend.admit(environment='live') refuses without a grant, while
+        one is in flight, and under the kill switch — independent of any
+        upstream pre-flight."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        with _sf(client)() as s:
+            with pytest.raises(spend.BudgetError) as ei:
+                self._live_admit(s, pid)
+            assert ei.value.detail["error"] == "not_enabled"
+        assert _commit(client, pid, "cloud.live.enable", EN).status_code == 200
+        with _sf(client)() as s:
+            self._live_admit(s, pid)          # books an OPEN reservation
+            s.commit()
+        with _sf(client)() as s:
+            with pytest.raises(spend.BudgetError) as ei:
+                self._live_admit(s, pid)      # one in flight → refused
+            assert ei.value.detail["error"] == "concurrency"
+        _commit(client, pid, "cloud.live.disable_all", {})
+        with _sf(client)() as s:
+            with pytest.raises(spend.BudgetError) as ei:
+                self._live_admit(s, pid)
+            assert ei.value.detail["error"] == "global_kill"
+
+    def test_admit_caps_atomic(self, client, vault):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        _seed_live_exposure(client, "deepseek",
+                            charged_micro=usd_to_micro("0.12"))
+        with _sf(client)() as s:
+            with pytest.raises(spend.BudgetError) as ei:
+                self._live_admit(s, pid, usd="0.11")  # > $0.10/request
+            assert ei.value.detail["error"] == "cap_per_request"
+            with pytest.raises(spend.BudgetError) as ei:
+                self._live_admit(s, pid)              # 0.12+0.05 > $0.15
+            assert ei.value.detail["error"] == "cap_per_provider"
+
+    def test_concurrent_independent_connections(self, client, vault):
+        """Two separate DB connections race the remaining provider cap:
+        BEGIN IMMEDIATE serializes them — exactly one books, the loser
+        re-reads post-commit consumption and is refused. Session ids
+        rotate per connection yet exposure is all-time: rotation cannot
+        discount the cap."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        _seed_live_exposure(client, "deepseek",
+                            charged_micro=usd_to_micro("0.07"))
+        barrier = threading.Barrier(2)
+        results: dict[str, str] = {}
+
+        def attempt(tag: str):
+            with _sf(client)() as s:
+                barrier.wait(timeout=10)
+                # Winner commits fast; loser's BEGIN retries under
+                # busy_timeout, then sees post-commit consumption.
+                s.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    self._live_admit(s, pid)          # 0.07+0.05 ≤ 0.15
+                    s.commit()
+                    results[tag] = "admitted"
+                except spend.BudgetError as exc:
+                    s.rollback()
+                    results[tag] = exc.detail["error"]
+
+        threads = [threading.Thread(target=attempt, args=(t,), daemon=True)
+                   for t in ("a", "b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        # Loser: 0.07 settled + 0.05 open + 0.05 requested > $0.15 cap.
+        assert sorted(results.values()) == ["admitted", "cap_per_provider"]
+
+
+# ---------------- durable authorization state ----------------
+
+class TestDurabilityBoundaries:
+    def test_catalog_refresh_preserves_gate_state(self, client, vault):
+        """Registry config writes share the app_settings table but a
+        different key — a catalog refresh/merge cannot reset the kill
+        switch or resurrect a revoked grant."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        _commit(client, pid, "cloud.live.disable_all", {})
+        with _sf(client)() as s:
+            registry.set_provider_config(s, "deepseek",
+                                         {"enabled": True,
+                                          "settings": {"x": 1}})
+            registry.set_default(s, "text", "deepseek")
+            s.commit()
+        with _sf(client)() as s:
+            st = lg.state(s)
+        assert st["global_disabled"] is True
+        entry = st["providers"]["deepseek"]
+        assert entry["enabled"] is False
+        assert entry["revoked_reason"] == "kill_switch"
+
+    def test_credential_removal_invalidates_eligibility(self, client, vault):
+        """Deleting the referenced credential leaves the grant row but
+        blocks all future admission — eligibility, never dispatch."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        vault._c = False  # credential deleted underneath the grant
+        with _sf(client)() as s:
+            allowed, code = lg.dispatch_admission(
+                s, provider_key="deepseek", model_id="deepseek-chat",
+                max_cost_usd="0.05", vault=vault)
+        assert (allowed, code) == (False, "credential")
+        body = client.get(f"/api/projects/{pid}/cloud/live-status").json()
+        ds = body["providers"]["deepseek"]
+        assert ds["credential_configured"] is False
+        assert ds["blocked_reason"] == "credential"
+
+    def test_backup_cannot_carry_authorization(self):
+        """Project export/import whitelists entity tables only —
+        app_settings (gate + billing session), spend rows and provider
+        config never ride a package, so restoring or importing a project
+        cannot grant or resurrect live authorization."""
+        from app.domain import backup
+        from app.db import models as m
+        exported = set(backup.ENTITY_TABLES.values())
+        for forbidden in (m.AppSetting, m.SpendReservation, m.SpendCharge,
+                          m.SpendBudget):
+            assert forbidden not in exported

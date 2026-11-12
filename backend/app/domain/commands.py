@@ -1551,6 +1551,23 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             env = getattr(adapter, "spend_environment", None) or (
                 "simulated" if adapter is not None
                 and adapter.profile.adapter_kind == "mock" else "live")
+            if env == "live":
+                # Independent execution boundary: even a future adapter
+                # reporting a live transport must pass the complete
+                # policy gate (opt-in + model grant + credential +
+                # evidence freshness) before financial booking. No
+                # stored state, env var, config, or payload can skip it.
+                from app.domain import live_gate as _lg
+                if vault is None:
+                    raise CommandError(500, "credential vault unavailable")
+                allowed, code = _lg.dispatch_admission(
+                    session, provider_key=request["provider_key"],
+                    model_id=request.get("model_id") or "",
+                    max_cost_usd=payload.get("max_cost_usd"), vault=vault)
+                if not allowed:
+                    raise CommandError(422, {
+                        "error": code,
+                        "detail": "live dispatch admission refused"})
             try:
                 res = _spend.admit(
                     session, job_id=job.id, command_id=command.id,
