@@ -24,6 +24,9 @@ const store: Record<string, unknown> = {
   currentProjectId: "p1",
   currentProject: () => PROJECT,
   jobs: {},
+  entities: { character: [], world: [], location: [] },
+  storyboard: [],
+  refreshAssets: vi.fn(),
 };
 vi.mock("../../stores/appStore", () => ({
   useApp: (sel: (s: unknown) => unknown) => sel(store),
