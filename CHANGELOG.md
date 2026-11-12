@@ -7,6 +7,16 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 Bridge UI + desktop integration: Settings → AI Providers now shows
+  the per-feature capability report (`catalog_documented` honesty labels,
+  stale/`needs_recheck` warnings, required user actions, prohibited and
+  T1-unimplemented states) and the canonical T2 assisted workflow —
+  prepare-and-copy prompt, validated site link with exact destination
+  display, explicit click-to-open via the Tauri Opener plugin
+  (`opener:allow-open-url` scoped to `https://*`, no execute/path
+  permissions), and file/clipboard import with user-reported external
+  provenance. Browser open is desktop-only, gesture-only; the backend
+  remains side-effect-free.
 - C1.5 Access Bridge dispatch + capability reporting: `GET
   /api/providers/{key}/capabilities` (per-feature tier/method/strategy,
   `catalog_documented` verification label, dispatch vs blocked actions),
