@@ -263,7 +263,10 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
     Imported lazily by commands.py to avoid an import cycle."""
     from app.domain.commands import CommandError
 
-    action = command_type.rsplit(".", 1)[1]
+    # watch.scan gates on the import path — candidates are only useful when
+    # the provider has a documented user-driven import strategy.
+    action = ("import" if command_type == "bridge.watch.scan"
+              else command_type.rsplit(".", 1)[1])
     provider = get_provider(payload.get("provider_key"))
     if provider is None:
         raise CommandError(404, "provider not found in catalog")
@@ -315,4 +318,124 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
             raise CommandError(422, "note must be a string")
         warnings.append("Provenance is user-reported — ADE does not verify "
                         "the file actually came from this provider")
+    elif command_type == "bridge.watch.scan":
+        # Stage A ImportWatcher — explicit "check folder" only, no polling.
+        cfg = registry.get_config(session).get(provider["key"], {})
+        folder, ferr = validate_watch_folder(cfg)
+        if ferr:
+            raise CommandError(422, ferr)
+        warnings.append(
+            "Read-only scan of the folder you designated — candidates are "
+            "untrusted local files; ADE does not verify provider origin, "
+            "never reads their contents, and never imports without your "
+            "per-file confirmation")
     return warnings, provider, strat
+
+
+# ---- ImportWatcher (slice 4, Stage A — manual candidate scan only) ---------
+# Opt-in by construction: nothing scans until the user designates a folder in
+# the provider's settings (``import_dir``) AND clicks "check folder". The
+# scan is a bounded, non-recursive, stat-only enumeration — file contents are
+# never read here. Background polling (Stage B) stays separately gated.
+WATCH_SETTING = "import_dir"
+WATCH_MAX_CANDIDATES = 200
+WATCH_MAX_ENTRIES = 5000  # hard bound on raw directory enumeration
+
+KIND_EXTENSIONS = {
+    "image": {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"},
+    "video": {".mp4", ".mov", ".webm", ".mkv", ".avi"},
+    "audio": {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"},
+    "text": {".txt", ".md", ".srt", ".vtt", ".json", ".docx", ".pdf", ".rtf"},
+}
+_PREFIX_KIND = {"image": "image", "video": "video", "media": "video",
+                "audio": "audio", "text": "text"}
+
+
+def watch_eligible_exts(provider: dict) -> dict[str, str]:
+    """extension → asset kind, restricted to the provider's documented
+    capability prefixes. A provider with no usable capabilities still
+    scans for media — the folder designation is the gate, not caps."""
+    prefixes = {c.split(".", 1)[0]
+                for s in provider.get("strategies") or []
+                for c in (s.get("capabilities") or [])}
+    kinds = {_PREFIX_KIND.get(p) for p in prefixes}
+    kinds.discard(None)
+    if not kinds:
+        kinds = set(KIND_EXTENSIONS)
+    return {e: k for k in kinds for e in KIND_EXTENSIONS[k]}
+
+
+def validate_watch_folder(cfg: dict) -> tuple[Path | None, str | None]:
+    """Resolve + gate the designated import folder. Returns (path, error).
+    Read-only — never creates, writes, or follows out-of-folder links."""
+    raw = (cfg.get("settings") or {}).get(WATCH_SETTING)
+    if not raw or not str(raw).strip():
+        return None, ("no import folder designated — pick one in provider "
+                      "settings before scanning")
+    raw = str(raw).strip()
+    p = Path(raw).expanduser()
+    if ".." in p.parts:
+        return None, ("folder path must not contain '..' — give the "
+                      "absolute path to the folder itself")
+    if p.is_symlink():
+        return None, "designated folder is a symlink — refused"
+    _is_junction = getattr(p, "is_junction", None)
+    if callable(_is_junction) and _is_junction():
+        return None, "designated folder is a junction — refused"
+    try:
+        rp = p.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, f"designated folder does not exist: {p}"
+    if not rp.is_dir():
+        return None, f"designated path is not a directory: {rp}"
+    return rp, None
+
+
+def scan_watch_folder(folder: Path, ext_map: dict[str, str],
+                      imported_norm: set[str],
+                      limit: int | None = None
+                      ) -> tuple[list[dict], bool]:
+    """Bounded, non-recursive, stat-only enumeration of `folder`. Skips
+    symlinks/junctions, anything that resolves outside `folder`, and paths
+    already imported into the project (`imported_norm`, normcased). Never
+    opens a file — contents are untrusted and read only at import time by
+    the ingest adapter."""
+    import os
+    if limit is None:
+        limit = WATCH_MAX_CANDIDATES
+    cands: list[dict] = []
+    truncated = False
+    count = 0
+    try:
+        it = folder.iterdir()
+    except OSError:
+        return [], False
+    for f in it:
+        count += 1
+        if count > WATCH_MAX_ENTRIES:
+            truncated = True
+            break
+        try:
+            if not f.is_file() or f.is_symlink():
+                continue
+            _is_junction = getattr(f, "is_junction", None)
+            if callable(_is_junction) and _is_junction():
+                continue
+            kind = ext_map.get(f.suffix.lower())
+            if kind is None:
+                continue
+            rp = f.resolve(strict=True)
+            if rp.parent != folder:
+                continue
+            if os.path.normcase(str(rp)) in imported_norm:
+                continue
+            st = f.stat()
+            cands.append({"name": f.name, "path": str(rp),
+                          "size": st.st_size, "mtime": st.st_mtime,
+                          "kind": kind})
+        except OSError:
+            continue
+    cands.sort(key=lambda c: -c["mtime"])
+    if len(cands) > limit:
+        cands, truncated = cands[:limit], True
+    return cands, truncated

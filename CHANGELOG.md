@@ -7,6 +7,14 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 ImportWatcher Stage A — manual candidate scanning: providers can
+  designate an `import_dir` in settings; `bridge.watch.scan` performs an
+  audited, bounded, non-recursive, stat-only enumeration (never reads
+  file contents, rejects symlink/junction/traversal paths, skips
+  anything resolving outside the folder, dedupes already-imported
+  files). Candidates display with "provider origin unverified" labeling
+  and import only via per-file explicit clicks through `bridge.import`.
+  Background polling (Stage B) is not implemented — no watch loop exists.
 - C1.5 Bridge UI + desktop integration: Settings → AI Providers now shows
   the per-feature capability report (`catalog_documented` honesty labels,
   stale/`needs_recheck` warnings, required user actions, prohibited and

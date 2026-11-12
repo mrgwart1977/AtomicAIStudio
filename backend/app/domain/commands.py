@@ -55,6 +55,7 @@ SUPPORTED_COMMANDS = {
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
     # C1.5 access bridge — user-driven external dispatch only
     "bridge.prepare", "bridge.launch", "bridge.import",
+    "bridge.watch.scan",
     # backups
     "backup.export", "backup.import", "backup.restore",
     # scenes & storyboard (M2)
@@ -1227,6 +1228,39 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 "strategy_id": strat["strategy_id"], "method": strat["method"],
                 "url": url, "open_via": _bridge.OPEN_VIA,
             }
+
+    elif command_type == "bridge.watch.scan":
+        # Stage A ImportWatcher — audited read-only enumeration. Candidates
+        # live only in the response; nothing is imported until a separate
+        # bridge.import command confirms each file.
+        import os
+        from pathlib import Path
+        from app.domain import bridge as _bridge
+        from app.domain.providers import registry as _preg
+        provider = _bridge.get_provider(payload["provider_key"])
+        cfg = _preg.get_config(session).get(provider["key"], {})
+        folder, _ferr = _bridge.validate_watch_folder(cfg)
+        if folder is None:
+            raise CommandError(422, _ferr)
+        imported_norm: set[str] = set()
+        for a in session.query(Asset).filter(
+                Asset.project_id == project.id,
+                Asset.origin == "external"):
+            sp = ((a.provenance_json or {}).get("request") or {}) \
+                .get("source_path")
+            if sp:
+                try:
+                    imported_norm.add(
+                        os.path.normcase(str(Path(sp).resolve(strict=False))))
+                except OSError:
+                    pass
+        cands, truncated = _bridge.scan_watch_folder(
+            folder, _bridge.watch_eligible_exts(provider), imported_norm)
+        audit["after"]["bridge"] = {
+            "action": "watch_scan", "provider_key": provider["key"],
+            "folder": str(folder), "candidates": cands,
+            "truncated": truncated,
+        }
 
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])

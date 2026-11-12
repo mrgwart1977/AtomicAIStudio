@@ -14,9 +14,11 @@ const writeText = vi.fn();
 const readText = vi.fn();
 
 vi.mock("../api/client", () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
+const pickDirectory = vi.fn();
 vi.mock("../api/commands", () => ({
   commitCommand: (...a: unknown[]) => commitCommand(...a),
   pickFile: (...a: unknown[]) => pickFile(...a),
+  pickDirectory: (...a: unknown[]) => pickDirectory(...a),
   previewCommand: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: (...a: unknown[]) => openUrl(...a) }));
@@ -38,6 +40,9 @@ const SUMMARY = {
   capabilities: ["image_generation"], is_mock_only: false, status_reason: "",
 };
 
+// Mutable per-test — watch tests flip import_dir on/off.
+const detailSettings: Record<string, unknown> = {};
+
 const DETAIL = {
   ...SUMMARY,
   auth_methods: [], credential_fields: [], base_url: null,
@@ -49,7 +54,7 @@ const DETAIL = {
   }],
   models: [], docs_url: "https://testprov.example/docs", tos_url: null,
   privacy_summary: "", notes: "", aliases: [], shared_credential_with: [],
-  settings: {}, region: null,
+  settings: detailSettings, region: null,
   credential: { configured: false, fields: [], set_at: null, readable: false, unreadable_reason: null },
 };
 
@@ -104,9 +109,20 @@ beforeEach(() => {
         open_via: "client_shell",
       },
     };
+    if (type === "bridge.watch.scan") return {
+      ...base, bridge: {
+        action: "watch_scan", provider_key: "testprov", folder: "C:\\watch",
+        truncated: false,
+        candidates: [
+          { name: "out1.png", path: "C:\\watch\\out1.png", size: 2048, mtime: 1, kind: "image" },
+          { name: "out2.png", path: "C:\\watch\\out2.png", size: 1024, mtime: 0, kind: "image" },
+        ],
+      },
+    };
     return { ...base, job_id: "j9", bridge: { action: "import", job_id: "j9", provider_key: "testprov" } };
   });
   pickFile.mockResolvedValue("C:\\out\\result.png");
+  for (const k of Object.keys(detailSettings)) delete detailSettings[k];
   writeText.mockResolvedValue(undefined);
   readText.mockResolvedValue("generated output text");
   (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
@@ -185,5 +201,46 @@ describe("ProvidersPage — assisted workflow (mocked end-to-end)", () => {
     expect(screen.getByText(/Open a project to use assisted workflows/)).toBeTruthy();
     expect(screen.queryByText("Prepare & copy prompt")).toBeNull();
     expect(screen.queryByText("Get provider site link")).toBeNull();
+  });
+});
+
+describe("ProvidersPage — ImportWatcher Stage A", () => {
+  it("offers folder designation when none is set", async () => {
+    await openProvider();
+    pickDirectory.mockResolvedValue("C:\\watch");
+    fireEvent.click(screen.getByText("Designate folder…"));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith("/api/providers/testprov/config",
+        expect.objectContaining({
+          method: "PUT",
+          body: expect.stringContaining('"import_dir":"C:\\\\watch"'),
+        })));
+    expect(commitCommand).not.toHaveBeenCalled(); // designation alone scans nothing
+  });
+
+  it("manual check lists candidates; per-file click imports", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    await openProvider();
+    expect(screen.getByText("C:\\watch")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Check folder"));
+    await screen.findByText("out1.png");
+    expect(commitCommand).toHaveBeenCalledWith(
+      "p1", 3, "bridge.watch.scan", { provider_key: "testprov" });
+    expect(screen.getByText(/does not verify these came from/)).toBeTruthy();
+
+    // per-file explicit import — the only path from candidate to asset
+    const btns = screen.getAllByText("Import");
+    fireEvent.click(btns[0]);
+    await waitFor(() =>
+      expect(commitCommand).toHaveBeenCalledWith(
+        "p1", 3, "bridge.import",
+        expect.objectContaining({
+          provider_key: "testprov", source_path: "C:\\watch\\out1.png",
+          kind: "image", name: "out1.png",
+        })));
+    await screen.findByText(/provenance: user-reported external/);
+    await waitFor(() => expect(screen.queryByText("out1.png")).toBeNull());
+    expect(screen.getByText("out2.png")).toBeTruthy();
   });
 });

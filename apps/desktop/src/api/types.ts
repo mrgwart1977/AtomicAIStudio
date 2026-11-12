@@ -150,8 +150,16 @@ export interface CommitResult {
   bridge?: BridgeResult | null;
 }
 
+export interface WatchCandidate {
+  name: string;
+  path: string;
+  size: number;
+  mtime: number;
+  kind: string;
+}
+
 export interface BridgeResult {
-  action: "prepare" | "launch" | "import";
+  action: "prepare" | "launch" | "import" | "watch_scan";
   provider_key: string;
   strategy_id?: string;
   method?: string;
@@ -163,6 +171,10 @@ export interface BridgeResult {
   template_applied?: boolean;
   job_id?: string;
   external_source?: Record<string, unknown>;
+  // watch_scan results — candidates are read-only listings, never auto-imported
+  folder?: string;
+  candidates?: WatchCandidate[];
+  truncated?: boolean;
 }
 
 export interface Job {
