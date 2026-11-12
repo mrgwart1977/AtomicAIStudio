@@ -45,7 +45,9 @@ def _commit(client, pid, ctype, payload, key_prefix="c2spend"):
 
 
 def _cloud(client, pid, **kw):
-    payload = {"provider_key": "openai", "prompt": "Write a beat.",
+    # google-gemini routes to the mock adapter (no REST impl) — these
+    # tests exercise ledger mechanics on the mock lifecycle.
+    payload = {"provider_key": "google-gemini", "prompt": "Write a beat.",
                "execution_target": "cloud", **kw}
     return _commit(client, pid, "generate.text.cloud", payload)
 
