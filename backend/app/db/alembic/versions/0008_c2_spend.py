@@ -17,8 +17,9 @@ remain attributable, so project/job/command refs are snapshot values.
 reservation_id keeps a real FK — reservations are never deleted.
 
 DB-level guards (triggers): terminal reservation states are immutable;
-charges reject UPDATE/DELETE. Partial unique index blocks a second
-non-adjustment charge per (reservation, source).
+charges reject UPDATE/DELETE. Partial unique index enforces exactly one
+primary (non-adjustment) settlement charge per reservation — engine and
+manual reconciliation can never both land a charge.
 
 NOTE: migration 0001 creates tables from live metadata, so on a FRESH
 database these tables/indexes/triggers already exist (the models emit
@@ -104,8 +105,11 @@ _INDEXES = (
     " ON spend_budgets(scope) WHERE project_id IS NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_spend_budget_project"
     " ON spend_budgets(project_id, scope) WHERE project_id IS NOT NULL",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chg_res_source"
-    " ON spend_charges(reservation_id, source)"
+    # Renamed during review: drop the older (reservation_id, source)
+    # variant so re-running on a dev DB lands the stricter index.
+    "DROP INDEX IF EXISTS uq_chg_res_source",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chg_res_primary"
+    " ON spend_charges(reservation_id)"
     " WHERE spend_charges.source <> 'adjustment'",
     "CREATE INDEX IF NOT EXISTS ix_res_scope"
     " ON spend_reservations(environment, status, project_id)",
@@ -148,7 +152,8 @@ def downgrade() -> None:
                  "trg_spend_chg_no_delete"):
         conn.execute(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
     for name in ("uq_spend_budget_global", "uq_spend_budget_project",
-                 "uq_chg_res_source", "ix_res_scope", "ix_res_day",
+                 "uq_chg_res_primary", "uq_chg_res_source", "ix_res_scope",
+                 "ix_res_day",
                  "ix_res_month", "ix_res_session", "ix_chg_project",
                  "ix_chg_day", "ix_chg_month", "ix_chg_session"):
         conn.execute(sa.text(f"DROP INDEX IF EXISTS {name}"))

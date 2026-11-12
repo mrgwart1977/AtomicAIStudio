@@ -27,19 +27,25 @@ this project uses semver once public releases begin.
   input; simulated and live consumption are summed separately against
   the same limits. `environment='live'` admission with no
   `max_cost_usd` bound is refused. Billing session id rotates per app
-  run (persisted for attribution); day/month keys are UTC. Financial
-  rows deliberately use snapshot (non-FK) project/job references so
-  history survives `project.delete` — the documented exception to the
-  FK rule. `GET .../spend/summary` reports per-scope limits vs
-  consumption, environments segregated.
+  run (persisted for attribution); day/month keys are UTC — a charge
+  inherits its reservation's accounting period so a later settlement
+  never migrates consumption. Exactly one primary settlement charge
+  per reservation is enforced by partial unique index (engine and
+  manual reconcile can never both land); adjustments unrestricted.
+  `project.delete` is refused while open spend reservations exist —
+  an orphaned hold would count against global budgets forever with no
+  reconcile route. Financial rows deliberately use snapshot (non-FK)
+  project/job references so history survives `project.delete` — the
+  documented exception to the FK rule. `GET .../spend/summary` reports
+  per-scope limits vs consumption, environments segregated.
 - C2.0a Mock Cloud Text Generation Lifecycle — the remote-job contract
   exercised end-to-end on `MockRemoteProvider` with ZERO network egress
   and zero credentials. `generate.text.cloud` (audited command,
   `provider_key` + explicit `execution_target: "cloud"` — local stays
   the default) is eligibility-gated on a documented T1 official-API
   text strategy; preview warns with the data-out surface, a clearly
-  labeled cost ESTIMATE (catalog `cost_table`, `checked` dates — no
-  spend ledger/budget enforcement exists yet and none is claimed), and
+  labeled cost ESTIMATE (catalog `cost_table`, `checked` dates —
+  enforced by the C2.0b ledger/budgets added above), and
   the mock/simulated limitation. `MockCloudTextAdapter`
   (`adapter_kind="mock"`, `execution_scope="remote"`) persists the
   submission intent to `progress_json` BEFORE submitting, records

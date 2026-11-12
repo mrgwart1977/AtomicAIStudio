@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -28,6 +28,7 @@ from app.db.models import (
     ProjectRevision,
     PromptDraft,
     SharedAssetLink,
+    SpendReservation,
     StorageLocation,
     new_id,
     utcnow,
@@ -84,6 +85,11 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
 SPEND_GUARDED_COMMANDS = {
     "generate.text.cloud",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
+    # project.delete checks for unresolved spend holds — the check must
+    # hold the write lock or a concurrent admission could slip an open
+    # reservation between check and delete (unreconcilable hold left
+    # counting against global budgets forever).
+    "project.delete",
 }
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
@@ -329,6 +335,14 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
     if command_type == "project.delete":
         if (payload.get("confirm_name") or "") != project.name:
             raise CommandError(422, "type the project name to confirm deletion")
+        open_holds = session.execute(
+            select(func.count()).select_from(SpendReservation).where(
+                SpendReservation.project_id == project.id,
+                SpendReservation.status == "open")).scalar_one()
+        if open_holds:
+            warnings.append(
+                f"{open_holds} unresolved spend reservation(s) — "
+                "deletion will be refused until they are reconciled")
         warnings.append("Permanent — assets and history are removed; only backups survive")
     if command_type == "project.update_settings":
         for k in payload:
@@ -1288,6 +1302,19 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         audit["after"]["duplicate_project_id"] = clone.id
 
     elif command_type == "project.delete":
+        # Open spend reservations must be reconciled first: deleting
+        # now would orphan the hold — it would keep counting against
+        # global budgets forever with no reachable reconcile route
+        # (financial rows deliberately outlive the project).
+        open_holds = session.execute(
+            select(func.count()).select_from(SpendReservation).where(
+                SpendReservation.project_id == project.id,
+                SpendReservation.status == "open")).scalar_one()
+        if open_holds:
+            raise CommandError(
+                422, f"cannot delete: {open_holds} spend reservation(s) "
+                     "still open — reconcile them (spend.reconcile) or "
+                     "wait for the jobs to finish first")
         audit["before"]["name"] = project.name
         audit["before"]["status"] = project.status
         # Hard delete: FK cascades remove child rows; blobs are immutable

@@ -661,11 +661,10 @@ Index("uq_spend_budget_global", SpendBudget.scope, unique=True,
       sqlite_where=SpendBudget.project_id.is_(None))
 Index("uq_spend_budget_project", SpendBudget.project_id, SpendBudget.scope,
       unique=True, sqlite_where=SpendBudget.project_id.isnot(None))
-# A reservation produces at most one charge per non-adjustment source —
-# blocks duplicate settlement charges while allowing multiple
-# adjustment/refund rows.
-Index("uq_chg_res_source", SpendCharge.reservation_id, SpendCharge.source,
-      unique=True,
+# Exactly ONE primary settlement charge per reservation, regardless of
+# source — a simulated engine settle and a manual 'reconciled' settle
+# can never both exist. Adjustment/refund rows are unrestricted.
+Index("uq_chg_res_primary", SpendCharge.reservation_id, unique=True,
       sqlite_where=text("spend_charges.source <> 'adjustment'"))
 
 # Hard DB-level guards (also emitted by migration 0008 for existing DBs):

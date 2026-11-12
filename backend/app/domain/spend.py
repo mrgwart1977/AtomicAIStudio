@@ -264,14 +264,19 @@ def settle(session: Session, *, job_id: str, micro: int, source: str,
         return res  # nothing to settle — replay or never reserved
     if micro < 0:
         raise ValueError("settlement micro must be nonnegative")
-    day_key, month_key = period_keys()
+    # The charge inherits the reservation's accounting period — settling
+    # on a later date must not shift consumption into a different
+    # day/month/session. The reservation's hold is replaced by the
+    # charge inside the SAME period keys, so per-period totals are
+    # unchanged by settlement.
     session.add(SpendCharge(
         id=new_id(), reservation_id=res.id, job_id=job_id,
         project_id=res.project_id, provider_key=res.provider_key,
         environment=res.environment, source=source, micro=micro,
         overage_micro=overage_micro, usage_json=usage or {},
         remote_job_id=remote_job_id or res.remote_job_id,
-        session_id=res.session_id, day_key=day_key, month_key=month_key,
+        session_id=res.session_id, day_key=res.day_key,
+        month_key=res.month_key,
     ))
     session.flush()
     return res

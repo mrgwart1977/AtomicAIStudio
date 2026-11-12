@@ -106,7 +106,7 @@ def test_spend_tables_indexes_triggers(client):
     assert {"ix_res_scope", "ix_res_day", "ix_res_month",
             "ix_res_session"} <= res_idx
     assert {"ix_chg_project", "ix_chg_day", "ix_chg_month",
-            "ix_chg_session", "uq_chg_res_source"} <= chg_idx
+            "ix_chg_session", "uq_chg_res_primary"} <= chg_idx
     with client.app.state.engine.connect() as conn:
         trigs = {r[0] for r in conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
@@ -174,19 +174,64 @@ def test_trigger_guards(client):
 
 
 def test_charge_settlement_unique(client):
-    """A second non-adjustment charge for the same reservation+source
-    is rejected at the index level."""
+    """Exactly one primary settlement charge per reservation — a second
+    non-adjustment charge is index-rejected even with a DIFFERENT
+    source (simulated settle + reconciled settle cannot coexist).
+    Adjustment rows remain unrestricted."""
     res = _reservation(client, _commit_cloud_and_wait(client))
     with _sf(client)() as s:
         dup = SpendCharge(
             id="dup", reservation_id=res.id, job_id=res.job_id,
             project_id=res.project_id, provider_key=res.provider_key,
-            environment=res.environment, source="simulated", micro=1,
+            environment=res.environment, source="reconciled", micro=1,
             usage_json={}, session_id=res.session_id,
             day_key=res.day_key, month_key=res.month_key)
         s.add(dup)
         with pytest.raises(Exception):
             s.flush()
+        s.rollback()
+        # Multiple adjustment/refund rows on the same reservation are
+        # legitimate — the partial unique index does not cover them.
+        adj = spend.add_adjustment(s, reservation_id=res.id, micro=-100,
+                                   note="partial refund")
+        s.commit()
+        assert adj.source == "adjustment" and adj.micro == -100
+
+
+def test_settle_inherits_reservation_period(client):
+    """Settling on a later date must NOT transfer consumption into the
+    settlement's day/month — the charge inherits the reservation's
+    accounting period so per-period totals are unchanged."""
+    pid = make_project(client)["id"]
+    from datetime import datetime, timezone, timedelta
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    with _sf(client)() as s:
+        sid = spend.billing_session_id(s)
+        res = spend.admit(s, job_id="period-1", command_id=None,
+                          project_id=pid, provider_key="openai",
+                          environment="simulated",
+                          est_usd=0.4, max_usd=0.5, now=yesterday)
+        spend.settle(s, job_id="period-1", micro=400_000,
+                     source="simulated")
+        res_d, res_m = res.day_key, res.month_key
+        s.commit()
+    with _sf(client)() as s:
+        chg = s.execute(select(SpendCharge).where(
+            SpendCharge.job_id == "period-1")).scalar_one()
+        assert chg.day_key == res_d              # reservation's period,
+        assert chg.month_key == res_m            # not settlement date's
+        today_d, today_m = spend.period_keys()
+        # Today's day-scope consumption does NOT include the settled
+        # charge — it stayed attributed to the reservation's day.
+        today_used = spend.consumed_micro(
+            s, environment="simulated", scope="day", project_id=pid,
+            session_id=sid, day_key=today_d, month_key=today_m)
+        res_day_used = spend.consumed_micro(
+            s, environment="simulated", scope="day", project_id=pid,
+            session_id=sid, day_key=res_d, month_key=res_m)
+        assert today_used == 0 or res_d == today_d
+        assert res_day_used == 400_000           # charge replaced hold,
+                                                  # same period, no double
 
 
 def _commit_cloud_and_wait(client):
@@ -501,25 +546,36 @@ def test_day_month_keys_utc(client):
 
 
 def test_session_rotation_isolates_scope(client):
+    """Restart rotates billing.session: ONLY the session scope resets.
+    Day/month/lifetime budgets keep counting the prior run's charges
+    and open reservations — rows stay attributed to their original
+    session for history."""
     pid = make_project(client)["id"]
     with _sf(client)() as s:
         old_sid = spend.billing_session_id(s)
         spend.admit(s, job_id="sess-1", command_id=None, project_id=pid,
                     provider_key="openai", environment="simulated",
                     est_usd=2.0, max_usd=2.0)
+        spend.settle(s, job_id="sess-1", micro=1_500_000,
+                     source="simulated")
         s.commit()
         # Restart = new session id; old rows stay attributed to old sid.
         new_sid = spend.rotate_billing_session(s)
         s.commit()
         assert new_sid != old_sid
-        used_old = spend.consumed_micro(
-            s, environment="simulated", scope="session",
-            project_id=pid, session_id=old_sid)
-        used_new = spend.consumed_micro(
-            s, environment="simulated", scope="session",
-            project_id=pid, session_id=new_sid)
-        assert used_old == 2_000_000
-        assert used_new == 0                    # session scope reset
+        for scope in ("session", "day", "month", "lifetime"):
+            used_old = spend.consumed_micro(
+                s, environment="simulated", scope=scope,
+                project_id=pid, session_id=old_sid)
+            used_new = spend.consumed_micro(
+                s, environment="simulated", scope=scope,
+                project_id=pid, session_id=new_sid)
+            if scope == "session":
+                assert used_old == 1_500_000 and used_new == 0
+            else:
+                # Only the current session id is passed to the query —
+                # non-session scopes ignore it and keep counting.
+                assert used_new == used_old == 1_500_000
 
 
 def test_summary_endpoint_environments(client):
@@ -593,3 +649,83 @@ def test_budget_commands_audited(client):
     cmds = client.get(f"/api/projects/{pid}/commands").json()
     spend_cmds = [c for c in cmds if c["command_type"].startswith("spend.")]
     assert spend_cmds and spend_cmds[0]["status"] == "committed"
+
+
+# ---------- settlement concurrency ----------
+
+def test_settle_vs_reconcile_race_exactly_one_charge(client, monkeypatch):
+    """Engine-path settle and a manual spend.reconcile race on the same
+    open reservation from INDEPENDENT connections. The guarded
+    transition + single-writer lock mean exactly one settlement lands;
+    the loser observes the terminal state and inserts nothing. The
+    partial unique index is the last line of defense."""
+    pid, job_id = _held_job(client, monkeypatch)   # open hold, failed job
+    sf = _sf(client)
+    barrier = threading.Barrier(2)
+    outcome: dict[str, object] = {}
+
+    def engine_path():
+        # Engine settle runs in a DEFERRED txn — the guarded UPDATE is
+        # its first write and takes the lock there.
+        with sf() as s:
+            barrier.wait(timeout=10)
+            spend.settle(s, job_id=job_id, micro=1_000_000,
+                         source="simulated")
+            s.commit()
+            outcome["engine"] = "committed"
+
+    def reconcile_path():
+        # Command path holds BEGIN IMMEDIATE from before its reads.
+        with sf() as s:
+            barrier.wait(timeout=10)
+            s.execute(text("BEGIN IMMEDIATE"))
+            try:
+                r = spend.reconcile(
+                    s, project_id=pid, job_id=job_id,
+                    outcome="confirmed_charge", actual_usd=2.0,
+                    accept_overage=True)
+                s.commit()
+                outcome["reconcile"] = r.get("status")
+            except Exception as exc:                # busy-timeout or
+                s.rollback()                        # guard — still safe
+                outcome["reconcile"] = f"error:{type(exc).__name__}"
+
+    threads = [threading.Thread(target=engine_path, daemon=True),
+               threading.Thread(target=reconcile_path, daemon=True)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    charges = _charges(client, job_id)
+    assert len(charges) == 1                        # exactly one settle
+    assert charges[0].source in ("simulated", "reconciled")
+    assert _reservation(client, job_id).status == "settled"
+
+
+# ---------- delete safety ----------
+
+def test_project_delete_refused_with_open_reservation(client, monkeypatch):
+    """Deleting a project with an unresolved spend hold is refused —
+    the financial rows outlive the project, so the hold would count
+    against global budgets forever with no reconcile route."""
+    pid, job_id = _held_job(client, monkeypatch)   # open hold
+    name = client.get(f"/api/projects/{pid}").json()["name"]
+    r = client.post(f"/api/projects/{pid}/commands/commit",
+                    json={"command_type": "project.delete",
+                          "payload": {"confirm_name": name},
+                          "scope": "project",
+                          "expected_revision": _rev(client, pid),
+                          "idempotency_key": f"delhold-{next(_KEYS)}"})
+    assert r.status_code == 422
+    assert "spend reservation" in r.json()["detail"]
+    # Reconcile the hold away → deletion proceeds.
+    r2 = _commit(client, pid, "spend.reconcile",
+                 {"job_id": job_id, "outcome": "confirmed_no_charge"})
+    assert r2.status_code == 200
+    r3 = client.post(f"/api/projects/{pid}/commands/commit",
+                     json={"command_type": "project.delete",
+                           "payload": {"confirm_name": name},
+                           "scope": "project",
+                           "expected_revision": _rev(client, pid),
+                           "idempotency_key": f"delok-{next(_KEYS)}"})
+    assert r3.status_code == 200, r3.text
