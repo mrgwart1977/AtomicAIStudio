@@ -56,6 +56,7 @@ SUPPORTED_COMMANDS = {
     # C1.5 access bridge — user-driven external dispatch only
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
+    "bridge.cli.detect",
     # backups
     "backup.export", "backup.import", "backup.restore",
     # scenes & storyboard (M2)
@@ -1290,6 +1291,23 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             "provider_key": key,
         }
         bridge_response = dict(audit["after"]["bridge"])
+
+    elif command_type == "bridge.cli.detect":
+        # C1.5 §5 — read-only executable-path discovery. The binary is
+        # never executed (no subprocess, no --version); a detected path is
+        # unauthenticated and unverified. Paths go to the live response
+        # only — the durable audit keeps status/counts, no filesystem data.
+        from app.domain import bridge as _bridge
+        from app.domain.cli_detect import detect_cli
+        provider = _bridge.get_provider(payload["provider_key"])
+        result = detect_cli(provider)
+        audit["after"]["bridge"] = {
+            "action": "cli_detect", "provider_key": provider["key"],
+            "status": result["status"], "platform": result["platform"],
+            "found_count": len(result["candidates"]),
+            "skipped_untrusted": result["skipped_untrusted"],
+        }
+        bridge_response = {"action": "cli_detect", **result}
 
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])

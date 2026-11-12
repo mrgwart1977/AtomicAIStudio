@@ -83,11 +83,32 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
   privacy_summary: string;
   notes: string;
   aliases: string[];
+  // C1.5 §5 — documented local-CLI surface; null when none is documented.
+  cli: {
+    executables: string[];
+    platforms: string[];
+    install_hint_dirs: string[];
+    docs_url: string;
+    note: string;
+  } | null;
   shared_credential_with: string[];
   settings: Record<string, unknown>;
   region: string | null;
   credential: CredentialStatus;
   capabilities: string[];
+}
+
+// bridge.cli.detect live response (C1.5 §5) — unauthenticated paths only;
+// the durable audit keeps status/counts, never these filesystem details.
+export interface CliDetectResult {
+  action: string;
+  status: "detected" | "not_found" | "unsupported_platform";
+  provider_key: string;
+  platform: string;
+  candidates: Array<{ name: string; path: string; via: string }>;
+  skipped_untrusted: number;
+  verified: false; // every detected path is explicitly unverified
+  reason?: string;
 }
 
 export interface ProviderTestResult {

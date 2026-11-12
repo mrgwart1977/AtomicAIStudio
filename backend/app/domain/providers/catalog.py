@@ -13,6 +13,8 @@ import_export | external_info. tier: T1 direct programmatic · T2 assisted
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 CATEGORIES = ("text", "image", "video", "audio")
 ACCESS_CLASSES = ("A", "B", "C", "D", "E")
 TIERS = ("T1", "T2", "T3", "T4")
@@ -59,7 +61,7 @@ _COST_MAP = {"per_token": "per_credit", "per_image": "per_credit",
 def _p(key, label, category, cls, account, *, auth=(), creds=(),
        base_url=None, region=False, job_model=None, pricing=None,
        status_reason="", strategies=(), models=(), docs=None, tos=None,
-       privacy="", notes="", aliases=()):
+       privacy="", notes="", aliases=(), cli=None):
     p = {
         "key": key, "label": label, "category": category,
         "access_class": cls, "account": account,
@@ -71,6 +73,10 @@ def _p(key, label, category, cls, account, *, auth=(), creds=(),
         "models": list(models), "docs_url": docs, "tos_url": tos,
         "privacy_summary": privacy, "notes": notes,
         "aliases": list(aliases),
+        # C1.5 §5 — optional documented local-CLI surface. Presence means
+        # "a CLI is documented to exist", never that it is installed,
+        # authentic, or executable by ADE. None = no documented CLI.
+        "cli": dict(cli) if cli else None,
     }
     # Post-fill C1.5 §3 AccessStrategy fields that follow from context:
     # strategy_id/provider_id, evidence URL default (provider ToS > docs),
@@ -137,7 +143,11 @@ TEXT = [
        privacy="Sends prompt + attached references to OpenAI (US).",
        notes="ChatGPT subscription ≠ API access; per-token billing.",
        models=[{"id": "gpt-5", "capability": "text"}, {"id": "gpt-5-mini", "capability": "text"}],
-       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured"])]),
+       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured"])],
+       cli={"executables": ["openai"], "platforms": ["windows", "linux", "macos"],
+            "install_hint_dirs": [],
+            "docs_url": "https://github.com/openai/openai-python",
+            "note": "Official openai-python package ships an `openai` CLI."}),
     _p("anthropic", "Anthropic / Claude", "text", "A", "anthropic",
        auth=["api_key", "oauth"], creds=_key_credential("console.anthropic.com API key"),
        base_url="https://api.anthropic.com", job_model="sync", pricing="per_token",
@@ -146,7 +156,11 @@ TEXT = [
        notes="Claude subscription ≠ API access.",
        models=[{"id": "claude-opus-4-1", "capability": "text"},
                {"id": "claude-sonnet-4-5", "capability": "text"}],
-       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured", "text.reasoning"])]),
+       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured", "text.reasoning"])],
+       cli={"executables": ["claude"], "platforms": ["windows", "linux", "macos"],
+            "install_hint_dirs": [],
+            "docs_url": "https://docs.anthropic.com/en/docs/claude-code/overview",
+            "note": "Official Claude Code CLI (`claude`), npm @anthropic-ai/claude-code."}),
     _p("google-gemini", "Google / Gemini", "text", "A", "google",
        auth=["api_key"], creds=_key_credential("AI Studio or Vertex credential"),
        base_url="https://generativelanguage.googleapis.com", job_model="sync",
@@ -156,7 +170,11 @@ TEXT = [
        notes="Shared Google credential also covers Gemini Images and Veo.",
        models=[{"id": "gemini-2.5-pro", "capability": "text"},
                {"id": "gemini-2.5-flash", "capability": "text"}],
-       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured"])]),
+       strategies=[_s(_API, "T1", ["text.generate", "text.stream", "text.structured"])],
+       cli={"executables": ["gemini"], "platforms": ["windows", "linux", "macos"],
+            "install_hint_dirs": [],
+            "docs_url": "https://github.com/google-gemini/gemini-cli",
+            "note": "Official Gemini CLI (`gemini`), npm @google/gemini-cli."}),
     _p("deepseek", "DeepSeek", "text", "A", "deepseek",
        auth=["api_key"], creds=_key_credential("platform.deepseek.com API key"),
        base_url="https://api.deepseek.com", job_model="sync", pricing="per_token",
@@ -670,4 +688,27 @@ def validate_catalog() -> list[str]:
                 if not ev.get("url") or not ev.get("checked"):
                     errs.append(f"{sid}: tos_evidence needs url+checked "
                                 "on non-official_api strategies")
+        cli = p.get("cli")
+        if cli is not None:
+            exes = cli.get("executables") or []
+            plats = cli.get("platforms") or []
+            if not exes:
+                errs.append(f"{p['key']}: cli record needs executables")
+            for name in exes:
+                if (not isinstance(name, str) or not name or
+                        "/" in name or "\\" in name or
+                        name in (".", "..")):
+                    errs.append(f"{p['key']}: unsafe cli executable name "
+                                f"{name!r}")
+            if not plats or any(pl not in ("windows", "linux", "macos")
+                                for pl in plats):
+                errs.append(f"{p['key']}: cli record needs valid platforms")
+            if not (cli.get("docs_url") or "").startswith("https://"):
+                errs.append(f"{p['key']}: cli record needs https docs_url "
+                            "evidence")
+            for d in cli.get("install_hint_dirs") or []:
+                if (not isinstance(d, str) or not d or "\x00" in d or
+                        ".." in PurePosixPath(d.replace("\\", "/")).parts):
+                    errs.append(f"{p['key']}: unsafe cli install_hint_dir "
+                                f"{d!r}")
     return errs

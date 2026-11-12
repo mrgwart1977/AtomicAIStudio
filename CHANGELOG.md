@@ -7,6 +7,26 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 §5 Desktop CLI Detection, Phase 1 — read-only discovery only.
+  Providers with officially documented local CLIs (`openai`,
+  `anthropic`/`claude`, `google-gemini`/`gemini`) now carry a catalog
+  `cli{}` record: executable names, supported platforms, install-hint
+  directories, and a `https` docs_url as evidence. `validate_catalog`
+  enforces safe basename-only executable names, valid platform tokens,
+  no-traversal hint dirs, and mandatory evidence. The audited
+  `bridge.cli.detect` command (explicit user action — never automatic)
+  performs `shutil.which` PATH lookup plus exact-filename checks in
+  catalog-declared hint dirs, one level deep, no recursion. Symlinks and
+  Windows reparse points are rejected, not followed; results report
+  `detected` / `not_found` / `unsupported_platform` with an
+  `skipped_untrusted` count. **Nothing is ever executed** — no
+  subprocess, no shell, no `--version`; a found path is unauthenticated
+  and unverified. Durable audit keeps only provider/status/platform/
+  counts — absolute paths exist only in the live response. Detection
+  resolves no strategy and promotes no tier; `verified_remote` remains
+  deferred. Providers UI gains a "Local CLI" section (visible only when
+  a CLI is documented) with a "Check installation" button, found-path
+  display, and a standing honesty warning.
 - C1.5 ImportWatcher Stage B — opt-in background polling: a single
   app-level `ImportWatchService` runs one shared asyncio task (default
   60 s interval, 30 s floor) over providers whose persisted
