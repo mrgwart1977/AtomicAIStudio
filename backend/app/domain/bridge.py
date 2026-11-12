@@ -307,6 +307,34 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
             from pathlib import Path
             if not Path(src).is_file():
                 raise CommandError(422, f"file not found: {src}")
+            if payload.get("from_watch"):
+                # Scan→import revalidation — the earlier candidate list is
+                # NOT trusted. Between scan and import the file may have
+                # been deleted, replaced, swapped for a link, or moved;
+                # re-check everything against the CURRENT filesystem and
+                # the CURRENT designated folder.
+                cfg = registry.get_config(session).get(provider["key"], {})
+                folder, ferr = validate_watch_folder(cfg)
+                if ferr:
+                    raise CommandError(422, ferr)
+                p = Path(src)
+                if p.is_symlink():
+                    raise CommandError(422, "candidate is a symlink — refused")
+                _ij = getattr(p, "is_junction", None)
+                if callable(_ij) and _ij():
+                    raise CommandError(422, "candidate is a junction — refused")
+                try:
+                    rp = p.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    raise CommandError(422, "candidate no longer exists")
+                if not rp.is_file():
+                    raise CommandError(422, "candidate is not a regular file")
+                if rp.parent != folder:
+                    raise CommandError(
+                        422, "candidate is outside the designated folder")
+                if rp.suffix.lower() not in watch_eligible_exts(provider):
+                    raise CommandError(
+                        422, "candidate type is not eligible for this provider")
         else:
             if not isinstance(content, str) or not content.strip():
                 raise CommandError(422, "content must be non-empty text")

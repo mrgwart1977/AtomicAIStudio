@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_project
+from app.db.models import AuditEvent
 from app.domain.providers import registry
 from app.domain.providers.credentials import CredentialVault, VaultError
 from app.domain.providers import catalog
@@ -115,7 +116,25 @@ def set_provider_config(key: str, body: ProviderConfigUpdate,
         if not prov["region_selectable"]:
             raise HTTPException(422, f"{key} does not support region selection")
         patch["region"] = body.region
+    old_dir = ((registry.get_config(db).get(key, {}).get("settings") or {})
+               .get("import_dir"))
     registry.set_provider_config(db, key, patch)
+    new_dir = ((registry.get_config(db).get(key, {}).get("settings") or {})
+               .get("import_dir"))
+    if old_dir != new_dir:
+        # C1.5 ImportWatcher — folder (re)designation is security-relevant:
+        # it's the boundary the scanner is allowed inside. Audit the action
+        # (app-level row, project_id=None) WITHOUT the absolute path — a
+        # folder name answers "was the boundary moved?" without persisting
+        # the user's directory layout.
+        from pathlib import Path as _P
+        db.add(AuditEvent(
+            project_id=None, event_type="provider.import_dir_changed",
+            payload_json={
+                "provider_key": key,
+                "action": "designated" if new_dir else "cleared",
+                "folder_name": _P(str(new_dir)).name if new_dir else None,
+            }))
     db.commit()
     return registry.provider_detail(db, _vault(request), key)
 

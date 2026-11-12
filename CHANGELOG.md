@@ -13,7 +13,11 @@ this project uses semver once public releases begin.
   file contents, rejects symlink/junction/traversal paths, skips
   anything resolving outside the folder, dedupes already-imported
   files). Candidates display with "provider origin unverified" labeling
-  and import only via per-file explicit clicks through `bridge.import`.
+  and import only via per-file explicit clicks through `bridge.import`
+  (`from_watch` revalidates against the live filesystem at import time —
+  symlink swaps, deletions, folder escapes, and ineligible extensions are
+  re-rejected). Folder (re)designation writes a path-minimized app-level
+  audit event; scan audit records carry candidate counts, never paths.
   Background polling (Stage B) is not implemented — no watch loop exists.
 - C1.5 Bridge UI + desktop integration: Settings → AI Providers now shows
   the per-feature capability report (`catalog_documented` honesty labels,

@@ -1125,6 +1125,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     before_revision = project.revision
     audit: dict[str, Any] = {"before": {}, "after": {}, "warnings": warnings}
     job: GenerationJob | None = None
+    # Full bridge payloads may be richer than the durable audit record —
+    # e.g. watch.scan returns candidate paths to the live session while the
+    # audit keeps only counts (data minimization).
+    bridge_response: dict | None = None
 
     command = CreativeCommand(
         id=new_id(),
@@ -1256,7 +1260,15 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     pass
         cands, truncated = _bridge.scan_watch_folder(
             folder, _bridge.watch_eligible_exts(provider), imported_norm)
+        # Audit minimization: the durable record keeps only what answers
+        # "a scan happened, how much did it find?" — full paths and the
+        # candidate list go to the live response only, never to disk.
         audit["after"]["bridge"] = {
+            "action": "watch_scan", "provider_key": provider["key"],
+            "candidate_count": len(cands), "truncated": truncated,
+            "folder_name": folder.name,
+        }
+        bridge_response = {
             "action": "watch_scan", "provider_key": provider["key"],
             "folder": str(folder), "candidates": cands,
             "truncated": truncated,
@@ -1341,7 +1353,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     if command_type == "project.duplicate":
         out["duplicate_project_id"] = audit["after"].get("duplicate_project_id")
     if command_type.startswith("bridge."):
-        out["bridge"] = audit["after"].get("bridge")
+        out["bridge"] = bridge_response or audit["after"].get("bridge")
     return out
 
 

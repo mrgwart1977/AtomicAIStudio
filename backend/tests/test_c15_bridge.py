@@ -763,3 +763,158 @@ class TestWatchScan:
         p = make_project(client)
         r = self._scan(client, p["id"])
         assert r.status_code == 422
+
+
+class TestWatchImportRevalidation:
+    """bridge.import from_watch — the scan result is NEVER trusted at import
+    time; the file is re-checked against the live filesystem + folder."""
+
+    def _watch_import(self, client, pid, path):
+        return _commit(client, pid, "bridge.import",
+                       {"provider_key": "midjourney",
+                        "source_path": str(path), "from_watch": True})
+
+    def test_legit_candidate_imports(self, client, tmp_path):
+        f = tmp_path / "cand.png"; f.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(tmp_path))
+        p = make_project(client)
+        r = self._watch_import(client, p["id"], f)
+        assert r.status_code == 200, r.text
+        wait_for_job(client, p["id"], r.json()["job_id"])
+        assert f.is_file()
+
+    def test_outside_folder_rejected(self, client, tmp_path):
+        watch = tmp_path / "watch"; watch.mkdir()
+        out = tmp_path / "elsewhere.png"; out.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(watch))
+        p = make_project(client)
+        r = self._watch_import(client, p["id"], out)
+        assert r.status_code == 422
+        assert "outside the designated folder" in r.json()["detail"]
+
+    def test_traversal_path_rejected(self, client, tmp_path):
+        watch = tmp_path / "watch"; watch.mkdir()
+        out = tmp_path / "secret.png"; out.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(watch))
+        p = make_project(client)
+        r = self._watch_import(client, p["id"],
+                               str(watch / ".." / "secret.png"))
+        assert r.status_code == 422
+
+    def test_deleted_candidate_rejected(self, client, tmp_path):
+        f = tmp_path / "gone.png"; f.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(tmp_path))
+        p = make_project(client)
+        f.unlink()                                        # deleted post-scan
+        r = self._watch_import(client, p["id"], f)
+        assert r.status_code == 422
+
+    def test_replaced_by_symlink_rejected(self, client, tmp_path):
+        """The key TOCTOU case: a real candidate is swapped for a symlink
+        pointing outside the folder between scan and import."""
+        real = tmp_path / "watch"; real.mkdir()
+        cand = real / "cand.png"; cand.write_bytes(b"\x89PNG")
+        outside = tmp_path / "outside.png"; outside.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(real))
+        p = make_project(client)
+        cand.unlink()
+        try:
+            cand.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+        r = self._watch_import(client, p["id"], cand)
+        assert r.status_code == 422
+        assert "symlink" in r.json()["detail"].lower()
+
+    def test_symlink_to_inside_also_rejected(self, client, tmp_path):
+        real = tmp_path / "watch"; real.mkdir()
+        target = real / "t.png"; target.write_bytes(b"\x89PNG")
+        link = real / "link.png"
+        _designate(client, "midjourney", str(real))
+        p = make_project(client)
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+        r = self._watch_import(client, p["id"], link)
+        assert r.status_code == 422                      # no exceptions
+
+    def test_ineligible_extension_rejected(self, client, tmp_path):
+        f = tmp_path / "clip.mp4"; f.write_bytes(b"....")   # midjourney = image only
+        _designate(client, "midjourney", str(tmp_path))
+        p = make_project(client)
+        r = self._watch_import(client, p["id"], f)
+        assert r.status_code == 422
+        assert "not eligible" in r.json()["detail"]
+
+    def test_subdirectory_candidate_rejected(self, client, tmp_path):
+        sub = tmp_path / "sub"; sub.mkdir()
+        f = sub / "nested.png"; f.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(tmp_path))
+        p = make_project(client)
+        r = self._watch_import(client, p["id"], f)
+        assert r.status_code == 422
+        assert "outside the designated folder" in r.json()["detail"]
+
+    def test_picker_import_without_flag_still_works(self, client, tmp_path):
+        """from_watch only tightens the watch path — an explicit user file
+        pick outside the folder remains a legitimate import."""
+        f = tmp_path / "picked.png"; f.write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(tmp_path / "elsewhere"))
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "midjourney", "source_path": str(f)})
+        assert r.status_code == 200, r.text
+
+
+class TestWatchAuditMinimization:
+    """Durable records carry counts, not paths; the live response carries
+    the candidates. Folder designation writes an app-level audit row."""
+
+    def test_scan_audit_has_no_paths_or_candidate_list(self, client, tmp_path):
+        (tmp_path / "a.png").write_bytes(b"\x89PNG")
+        (tmp_path / "b.png").write_bytes(b"\x89PNG")
+        _designate(client, "midjourney", str(tmp_path))
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.watch.scan",
+                    {"provider_key": "midjourney"})
+        assert r.status_code == 200
+        # live response still carries everything the UI needs
+        assert len(r.json()["bridge"]["candidates"]) == 2
+        sf = client.app.state.session_factory
+        from app.db.models import CommandTransaction
+        with sf() as s:
+            tx = (s.query(CommandTransaction)
+                  .order_by(CommandTransaction.id.desc()).first())
+        b = tx.audit_json["after"]["bridge"]
+        assert b["candidate_count"] == 2
+        assert b["truncated"] is False
+        assert "candidates" not in b
+        assert "folder" not in b                    # no absolute path persisted
+        assert b["folder_name"] == tmp_path.name
+        assert str(tmp_path) not in str(tx.audit_json)
+
+    def test_designation_writes_minimal_audit_event(self, client, tmp_path):
+        from app.db.models import AuditEvent
+        sf = client.app.state.session_factory
+        _designate(client, "midjourney", str(tmp_path))
+        with sf() as s:
+            ev = (s.query(AuditEvent)
+                  .filter_by(event_type="provider.import_dir_changed")
+                  .order_by(AuditEvent.created_at.desc()).first())
+        assert ev is not None
+        assert ev.project_id is None                # app-level audit row
+        assert ev.payload_json["provider_key"] == "midjourney"
+        assert ev.payload_json["action"] == "designated"
+        assert ev.payload_json["folder_name"] == tmp_path.name
+        assert str(tmp_path) not in str(ev.payload_json)   # no absolute path
+
+    def test_unchanged_designation_writes_no_event(self, client, tmp_path):
+        from app.db.models import AuditEvent
+        sf = client.app.state.session_factory
+        _designate(client, "midjourney", str(tmp_path))
+        _designate(client, "midjourney", str(tmp_path))   # same value again
+        with sf() as s:
+            n = (s.query(AuditEvent)
+                 .filter_by(event_type="provider.import_dir_changed").count())
+        assert n == 1                                  # only the real change

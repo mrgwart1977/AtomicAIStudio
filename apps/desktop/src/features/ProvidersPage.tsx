@@ -311,7 +311,7 @@ export function ProvidersPage() {
     try {
       const res = await bridgeCommit("bridge.import", {
         provider_key: selected.key, source_path: c.path,
-        kind: c.kind, name: c.name,
+        kind: c.kind, name: c.name, from_watch: true,
         note: "watch folder candidate — origin user-reported, unverified",
       });
       setWatchCandidates((prev) => prev?.filter((x) => x.path !== c.path) ?? null);
