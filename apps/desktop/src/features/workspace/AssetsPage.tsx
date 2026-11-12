@@ -24,6 +24,15 @@ function isSimulated(a: Asset): boolean {
     || src.includes("simulat") || src.includes("mock");
 }
 
+/** C1.5 assisted workflow — user-reported external provenance via
+ * bridge.import. Distinct from simulated (no mock transport involved)
+ * and never confused with verified remote API output. */
+function isAssisted(a: Asset): boolean {
+  const p = a.provenance_json ?? {};
+  return p.provenance_confidence === "user_reported"
+    || (p.external_provider != null && !isSimulated(a));
+}
+
 export function AssetsPage() {
   const project = useApp((s) => s.currentProject());
   const page = useApp((s) => s.assetsPage);
@@ -178,6 +187,7 @@ export function AssetsPage() {
                 {a.status === "missing" && <span className="text-[10px] uppercase text-danger">missing</span>}
                 {a.scope === "shared" && <span className="text-[10px] uppercase text-violet">shared</span>}
                 {isSimulated(a) && <span className="text-[10px] uppercase text-amber">simulated</span>}
+                {isAssisted(a) && <span className="text-[10px] uppercase text-sky">assisted</span>}
               </div>
               <div className="mt-0.5 text-[10px] text-faint">
                 {a.origin} · {fmtBytes(a.byte_size)}
@@ -208,6 +218,9 @@ export function AssetsPage() {
                     <div className="flex justify-between"><dt className="text-faint">provenance</dt><dd className="text-muted">{String(a.provenance_json?.provenance_confidence ?? a.origin)}</dd></div>
                     {a.provenance_json?.remote != null && (
                       <div className="flex justify-between"><dt className="text-faint">remote id</dt><dd className="text-muted">{String((a.provenance_json.remote as Record<string, unknown>)?.remote_job_id ?? "—")} (synthetic)</dd></div>
+                    )}
+                    {isAssisted(a) && (
+                      <div className="flex justify-between"><dt className="text-faint">external source</dt><dd className="text-muted">{String(a.provenance_json?.external_provider ?? "—")} · {String(a.provenance_json?.external_method ?? "import")} (user-reported)</dd></div>
                     )}
                     <div className="flex justify-between"><dt className="text-faint">adapter</dt><dd className="text-muted">{String(a.provenance_json?.adapter_id ?? "—")}</dd></div>
                     <div className="flex justify-between"><dt className="text-faint">sha256</dt><dd className="truncate pl-2 text-muted" title={a.sha256}>{a.sha256.slice(0, 16)}…</dd></div>

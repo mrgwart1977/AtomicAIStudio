@@ -7,6 +7,26 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 assisted text workflows in Cloud Studio — a dedicated
+  "Assisted text — no API integration" panel
+  (`features/workspace/AssistedPanel.tsx`) for catalog providers whose
+  only documented text path is user-driven (T2 `assisted_workflow` /
+  T3 `import_export`, `automation_permission != "prohibited"`):
+  Sudowrite, QuillBot, Jasper, Copy.ai, Writesonic, Notion AI,
+  Anyword, Hemingway. Guided rail (Prepare → Review & copy → Open
+  provider → Create externally → Return & import); optional
+  character/world/location/scene context is composed locally and shown
+  verbatim before anything is copied. All steps are explicit user
+  gestures riding the existing audited bridge commands
+  (`bridge.prepare` / `bridge.launch` / `bridge.import` /
+  `bridge.watch.scan`) — the backend only validates launch
+  destinations; the client shell opens HTTPS URLs itself. Capability
+  reports gate every control; stale evidence refuses dispatch; T3-only
+  providers degrade honestly to the manual paste/file-import path.
+  Imports remain `provenance_confidence="user_reported"` external
+  assets — never simulated REST output, never verified remote.
+  AssetsPage now labels those assets "assisted" and shows the external
+  provider/method in details.
 - C2 text provider completion — the remaining documented A-class text
   providers now carry REST contract implementations over
   `httpx.MockTransport` only (no live transports, no egress):

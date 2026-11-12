@@ -67,6 +67,11 @@ export interface ProviderStrategy {
   automation_permission: string;
   user_interaction: string;
   note: string;
+  strategy_id?: string;
+  /** User-driven strategies may document a launch surface. */
+  connection?: { launch_url?: string | null } | null;
+  last_verified?: string | null;
+  tos_evidence?: { url?: string | null; checked?: string | null } | null;
 }
 
 export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
