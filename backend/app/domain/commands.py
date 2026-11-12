@@ -1754,6 +1754,7 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
     if command_type == "bridge.import":
         import os
         import tempfile
+        from pathlib import Path
         from app.domain import bridge as _bridge
         provider = _bridge.get_provider(payload["provider_key"])
         strat, _err = _bridge.resolve_strategy(
@@ -1770,6 +1771,21 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
                 "note": (payload.get("note") or "")[:200],
             },
         }
+        if req["kind"] == "text" and req["source_path"]:
+            # Honest plain-text gate: ingest stores bytes verbatim — there
+            # is no document extraction, so binary containers must never
+            # be labeled readable text. BOM-prefixed files stay decodable.
+            try:
+                head = Path(req["source_path"]).read_bytes()[:4096]
+            except OSError:
+                head = b""  # missing files are reported by job validation
+            is_bin = head.startswith((b"PK\x03\x04", b"%PDF-")) or (
+                b"\x00" in head
+                and not head.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")))
+            if is_bin:
+                raise CommandError(
+                    422, "not a plain-text file — export Word/PDF documents "
+                         "to .txt or .md before importing")
         if payload.get("content") is not None:
             # Clipboard payload → temp file the ops adapter ingests, then
             # deletes. The frontend passes content the user explicitly

@@ -57,6 +57,10 @@ const STEPS = [
   "Create externally", "Return & import",
 ];
 
+/** Binary containers the plain-text import gate refuses — kept in sync
+ * with the backend sniff in commands.py bridge.import. */
+const BINARY_DOC_EXTS = [".docx", ".pdf"];
+
 // Stable empty refs — selectors must never allocate `?? []`/`?? {}`.
 const NO_ENTITIES = { character: [], world: [], location: [] } as const;
 const NO_STORYBOARD: never[] = [];
@@ -202,8 +206,11 @@ export function AssistedPanel({ pid, revision, providers, details,
   };
 
   const onImportFile = () => {
-    void pickFile("Import provider output", [
-      { name: "Text", extensions: ["txt", "md", "rtf", "docx", "pdf", "srt", "vtt", "json"] },
+    // Plain-text formats only — the import pipeline stores bytes
+    // verbatim (no extraction), so binary containers like .docx/.pdf
+    // must be exported to text by the user first.
+    void pickFile("Import provider output — plain text only", [
+      { name: "Plain text", extensions: ["txt", "md", "rtf", "srt", "vtt", "json"] },
     ]).then((path) => {
       if (!path) return;
       void bridgeCommit("bridge.import", {
@@ -424,11 +431,15 @@ export function AssistedPanel({ pid, revision, providers, details,
                   </span>
                 )}
               </div>
-              {watchCands !== null && (
+              {watchCands !== null && (() => {
+                const usable = watchCands.filter((c) =>
+                  !BINARY_DOC_EXTS.some((e) => c.name.toLowerCase().endsWith(e)));
+                const hidden = watchCands.length - usable.length;
+                return (
                 <ul className="mt-2 space-y-1" data-testid="assist-watch-candidates">
-                  {watchCands.length === 0 && (
+                  {usable.length === 0 && (
                     <li className="text-xs text-faint">No new files found.</li>)}
-                  {watchCands.map((c) => (
+                  {usable.map((c) => (
                     <li key={c.path} className="flex items-center justify-between gap-2 text-xs">
                       <span className="truncate text-muted">{c.name}</span>
                       <button className={ghostBtn} disabled={busy}
@@ -437,11 +448,20 @@ export function AssistedPanel({ pid, revision, providers, details,
                       </button>
                     </li>
                   ))}
+                  {hidden > 0 && (
+                    <li className="text-[11px] text-faint">
+                      {hidden} binary document file(s) skipped — export Word/PDF
+                      documents to .txt or .md first.
+                    </li>
+                  )}
                 </ul>
-              )}
+                );
+              })()}
               <p className="mt-2 text-[11px] text-faint">
-                Imports are recorded as <b>user-reported external</b> provenance —
-                never simulated API output, never verified remote.
+                Plain-text files only (.txt/.md/.rtf/.srt/.vtt/.json) —
+                export Word/PDF documents to text first. Imports are recorded
+                as <b>user-reported external</b> provenance — never simulated
+                API output, never verified remote.
               </p>
             </div>
           )}

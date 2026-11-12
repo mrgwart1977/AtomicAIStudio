@@ -307,6 +307,12 @@ describe("AssistedPanel — return & import", () => {
     await select("sudowrite");
     fireEvent.click(await screen.findByTestId("assist-import-file"));
     await waitFor(() => expect(commitCommand).toHaveBeenCalled());
+    // the picker offers only plain-text formats — no binary containers
+    const exts = pickFile.mock.calls[0][1][0].extensions as string[];
+    expect(exts).not.toContain("docx");
+    expect(exts).not.toContain("pdf");
+    expect(exts).toContain("txt");
+    expect(exts).toContain("md");
     expect(commitCommand.mock.calls[0][3]).toMatchObject(
       { provider_key: "sudowrite", source_path: "D:/exports/result.txt", kind: "text" });
   });
@@ -316,13 +322,19 @@ describe("AssistedPanel — return & import", () => {
       if (ct === "bridge.watch.scan")
         return Promise.resolve({ job_id: null, bridge: {
           action: "watch_scan", provider_key: "watchcfg",
-          candidates: [{ name: "out.txt", path: "D:/exports/out.txt", size: 5, mtime: 1, kind: "text" }] } });
+          candidates: [
+            { name: "out.txt", path: "D:/exports/out.txt", size: 5, mtime: 1, kind: "text" },
+            { name: "essay.docx", path: "D:/exports/essay.docx", size: 9, mtime: 1, kind: "text" },
+          ] } });
       return Promise.resolve({ job_id: "j9", bridge: null });
     });
     render(createElement(AssistedPanel, PROPS));
     await select("watchcfg");
     fireEvent.click(await screen.findByTestId("assist-watch-scan"));
     await waitFor(() => screen.getByText("out.txt"));
+    // binary documents are not offered — the backend gate refuses them
+    expect(screen.queryByText("essay.docx")).toBeNull();
+    expect(screen.getByText(/binary document file\(s\) skipped/)).toBeTruthy();
     fireEvent.click(screen.getByText("Import"));
     await waitFor(() => expect(commitCommand.mock.calls.length).toBe(2));
     const p = commitCommand.mock.calls[1];
@@ -338,6 +350,12 @@ describe("AssistedPanel — return & import", () => {
     expect(screen.queryByTestId("assist-prepare")).toBeNull();
     expect(screen.queryByTestId("assist-open")).toBeNull();
     expect(screen.getByTestId("assist-import-paste")).toBeTruthy();
+    // no bridge.prepare / bridge.launch dispatch is possible for a
+    // T3-only provider — the only commands the panel may ever send are
+    // import + watch.scan.
+    const dispatched = commitCommand.mock.calls.map((c) => c[2]);
+    expect(dispatched).not.toContain("bridge.prepare");
+    expect(dispatched).not.toContain("bridge.launch");
   });
 
   it("surfaces commit errors without importing", async () => {

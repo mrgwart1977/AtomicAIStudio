@@ -513,6 +513,51 @@ class TestBridgeImport:
         jobs = client.get(f"/api/projects/{p['id']}/jobs").json()
         assert jobs == []
 
+    # ---- plain-text gate: binary containers are never labeled text ----
+
+    def test_text_import_rejects_binary_containers(self, client, tmp_path):
+        p = make_project(client)
+        for name, data in (
+            ("essay.docx", b"PK\x03\x04" + b"\x00" * 60),
+            ("report.pdf", b"%PDF-1.7 fake-body"),
+            ("blob.txt", b"\x89\x00\x01\x02" * 32),  # NULs → binary
+        ):
+            f = tmp_path / name
+            f.write_bytes(data)
+            r = _commit(client, p["id"], "bridge.import",
+                        {"provider_key": "quillbot",
+                         "source_path": str(f), "kind": "text"})
+            assert r.status_code == 422, (name, r.text)
+            assert "plain-text" in r.json()["detail"]
+        jobs = client.get(f"/api/projects/{p['id']}/jobs").json()
+        assert jobs == []
+
+    def test_text_import_allows_utf16_bom(self, client, tmp_path):
+        # Word "Unicode text" exports are UTF-16 with BOM — decodable,
+        # legitimately text despite containing NUL bytes.
+        f = tmp_path / "u16.txt"
+        f.write_bytes("héllo wörld".encode("utf-16"))
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "quillbot",
+                     "source_path": str(f), "kind": "text"})
+        assert r.status_code == 200, r.text
+        job = wait_for_job(client, p["id"], r.json()["job_id"])
+        assert job["status"] == "succeeded", job
+        assets = client.get(f"/api/projects/{p['id']}/assets").json()["items"]
+        assert assets[0]["provenance_json"]["provenance_confidence"] == "user_reported"
+
+    def test_binary_gate_scoped_to_text_kind(self, client, tmp_path):
+        # kind != "text" is untouched — a .docx is a legitimate binary
+        # asset, just never presented as readable text.
+        f = tmp_path / "essay.docx"
+        f.write_bytes(b"PK\x03\x04" + b"\x00" * 60)
+        p = make_project(client)
+        r = _commit(client, p["id"], "bridge.import",
+                    {"provider_key": "quillbot",
+                     "source_path": str(f), "kind": "other"})
+        assert r.status_code == 200, r.text
+
 
 # ---------------- isolation + honesty ----------------
 
