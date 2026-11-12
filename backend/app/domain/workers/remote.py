@@ -77,17 +77,26 @@ class RemoteProvider(Protocol):
 
 
 def provenance_confidence(remote: dict | None) -> str:
-    """C2.0a — verified_remote eligibility contract.
+    """C2.0a/B1 — verified_remote eligibility contract.
 
-    `verified_remote` may be claimed ONLY when a remote_job_id exists
-    AND `provider_verified` evidence was established by an authorized
-    real provider transport (C2.0c+). Simulated/mocked results — and
-    anything lacking explicit verification evidence — can never claim
-    it. This is the single decision point; adapters must not set the
-    label directly."""
+    `verified_remote` may be claimed ONLY when `provider_verified` was
+    stamped AND the accompanying evidence validates through
+    live_gate.verification_evidence_valid on a genuinely live transport:
+    authenticated round trip + approved endpoint identity + job/request
+    correlation + response fingerprint + evidence URL + audit linkage.
+    A remote_job_id is recorded when the provider supplies one but is
+    neither required nor sufficient — legitimate sync responses may not
+    expose one, and none is ever fabricated. Simulated/mocked results
+    can never claim it. This is the single decision point; adapters
+    must not set the label directly."""
     rem = remote or {}
-    if rem.get("remote_job_id") and rem.get("provider_verified") is True:
-        return "verified_remote"
+    if rem.get("provider_verified") is True:
+        from app.domain import live_gate as _lg
+        if _lg.verification_evidence_valid(
+                rem.get("verification_evidence"),
+                transport_is_live=bool(rem.get("transport_is_live")),
+                provider_key=rem.get("provider_key")):
+            return "verified_remote"
     return "simulated"
 
 
