@@ -18,6 +18,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | C1.5 foundation | Strategy evidence records (strategy_id, ToS evidence + checked dates, auth/cost/reliability), `validate_catalog()`, staleness demotion → `needs_recheck` + enable-block, `cloud-assisted`/`cloud-external` adapter kinds, `external_source` import provenance (`user_reported`) |
 | C1.5 slice 2 | Bridge dispatch (`bridge.prepare`/`launch`/`import` commands — user-driven only, no programmatic calls, no browser automation) + `GET /api/providers/{key}/capabilities` per-feature report (`catalog_documented` honesty label; T1 always `t1_not_implemented`) |
 | C1.5 slice 3 | Bridge UI + desktop integration: Tauri Opener launch consumer (host-scoped `opener:allow-open-url`, 47 catalog hosts, sync-tested), Settings → Providers capability report + canonical T2 assisted workflow (prepare→copy→confirm→open→import), gesture-only clipboard — see docs/plans/C1_5_ACCESS_BRIDGE.md |
+| C1.5 slice 4 | ImportWatcher: `import_dir` designation (path-minimized audit), `bridge.watch.scan` (bounded non-recursive stat-only), `from_watch` import revalidation, Stage B opt-in polling — `ImportWatchService` single task + daemon worker, `bridge.watch.enable`/`.disable` audited opt-in, gen/fingerprint stale-result guard, degraded/paused states, `GET /api/providers/{k}/watch` |
 | Tooling | `scripts/validate.ps1` local validation, optimized CI (path-gating, caching, timeouts, concurrency) |
 
 ## In progress / next
@@ -30,7 +31,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 
 | Item | Notes |
 |---|---|
-| C1.5 remaining | ImportWatcher folder watching (opt-in, candidate-only, confirmation-gated); §5 desktop CLI/plugin integrations; `verified_remote` provenance for T1 remote job ids (blocked on C2+ T1 dispatch) |
+| C1.5 remaining | §5 desktop CLI/plugin integrations (per-provider local tool detection + proc_guard); `verified_remote` provenance for T1 remote job ids (blocked on C2+ T1 dispatch) |
 | C2–C7 | Provider connectivity phases: prompt preparation, site launchers (user-driven), MCP connector clients for T1 providers — all behind consent + mock-first testing |
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
