@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import ipaddress
 import json
 import socket
@@ -179,22 +180,78 @@ class _ValidatedBackend(httpcore.AsyncNetworkBackend):
         return await self._base.sleep(seconds)
 
 
+class DependencyContractError(RuntimeError):
+    """A pinned httpx/httpcore internal this module relies on changed —
+    the live path refuses to build rather than silently weaken socket
+    validation. Raised at transport construction; impossible to miss."""
+
+
+def _assert_pool_internals() -> None:
+    """Compatibility contract for the pinned internals we use.
+
+    Checked at EVERY _SecureHTTPTransport construction — an incompatible
+    httpx/httpcore upgrade fails loudly here instead of quietly
+    reintroducing default DNS resolution or an unpinned pool:
+      * AsyncConnectionPool accepts ``network_backend`` (the pin point).
+      * Pool stores it as ``_network_backend`` — create_connection()
+        passes it to every new (and therefore every reused) connection.
+      * httpx.AsyncHTTPTransport.handle_async_request/aclose still
+        route exclusively through ``self._pool`` — the single
+        egress pool this class installs.
+    Pinned: httpx 0.28.1 / httpcore 1.0.9.
+    """
+    problems = []
+    if "network_backend" not in inspect.signature(
+            httpcore.AsyncConnectionPool.__init__).parameters:
+        problems.append(
+            "httpcore.AsyncConnectionPool lost the network_backend "
+            "parameter — validated socket binding cannot be installed")
+    for meth in ("handle_async_request", "aclose"):
+        try:
+            src = inspect.getsource(getattr(httpx.AsyncHTTPTransport, meth))
+        except (OSError, TypeError) as exc:
+            problems.append(
+                f"cannot verify httpx.AsyncHTTPTransport.{meth} "
+                f"routing: {exc}")
+            continue
+        if "self._pool" not in src:
+            problems.append(
+                f"httpx.AsyncHTTPTransport.{meth} no longer routes via "
+                "self._pool — alternate egress path suspected")
+    if problems:
+        raise DependencyContractError(
+            "live-transport dependency contract broken: "
+            + "; ".join(problems))
+
+
 class _SecureHTTPTransport(httpx.AsyncHTTPTransport):
-    """The REAL egress inner transport — its connection pool is pinned
-    to ``_ValidatedBackend`` so sockets can only ever open to
-    pre-validated public IPs. trust_env=False: proxy env vars, netrc,
-    and SSL env overrides are never honored. No proxy is configured —
-    and none can be injected later because the pool is built here."""
+    """The REAL egress inner transport — single pool, single backend.
+
+    Deliberately does NOT call super().__init__: that constructor would
+    allocate a DEFAULT AsyncConnectionPool (unvalidated backend) that is
+    then discarded — an unused pool object and a wasted ssl_context, and
+    a moment where ``self._pool`` is unpinned. Instead the ONLY pool
+    ever assigned is built here with ``network_backend=
+    _ValidatedBackend``: every connection the pool creates — and every
+    connection it later REUSES — was necessarily established through the
+    validated socket path. trust_env=False SSL context; no proxy param
+    exists on this class at all, so no proxy can bypass validation."""
 
     def __init__(self, *, resolver: Callable | None = None,
                  base_backend=None):
-        super().__init__(trust_env=False)
+        _assert_pool_internals()
+        from httpx._config import create_ssl_context
+        backend = _ValidatedBackend(base=base_backend, resolver=resolver)
         self._pool = httpcore.AsyncConnectionPool(
-            ssl_context=self._pool._ssl_context,
+            ssl_context=create_ssl_context(
+                verify=True, cert=None, trust_env=False),
             max_connections=4, max_keepalive_connections=2,
             keepalive_expiry=5.0, http1=True, http2=False, retries=0,
-            network_backend=_ValidatedBackend(
-                base=base_backend, resolver=resolver))
+            network_backend=backend)
+        if getattr(self._pool, "_network_backend", None) is not backend:
+            raise DependencyContractError(
+                "installed pool does not hold the validated backend — "
+                "refusing to build an unvalidated egress path")
 
 
 # ------------------------------------------------------------------

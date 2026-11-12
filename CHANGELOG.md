@@ -42,7 +42,13 @@ this project uses semver once public releases begin.
   `start_tls` independently). Streaming-body enforcement proven across
   chunked responses, mid-stream failures, and post-refusal cleanup;
   oversized/unusable responses after send stay ambiguous — never
-  truncated to success.
+  truncated to success. Merge hardening: `_SecureHTTPTransport` now
+  installs exactly one `AsyncConnectionPool` (no unused default pool
+  ever allocated, no proxy path exists), `_assert_pool_internals()`
+  verifies the pinned httpx/httpcore private-internal contract at
+  construction and raises `DependencyContractError` on any incompatible
+  upgrade, and unlisted 4xx responses stay ambiguous — only documented
+  refusal statuses release reservations.
 
 ### Added (earlier)
 - C2 exit gate Stage A — live-connectivity safety infrastructure,

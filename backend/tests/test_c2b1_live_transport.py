@@ -12,6 +12,7 @@ import itertools
 import json
 
 import httpx
+import httpcore
 import pytest
 from sqlalchemy import select, text
 
@@ -348,6 +349,60 @@ class TestSocketBinding:
             asyncio.run(t.handle_async_request(req))
         assert ei.value.code == "dns"
         assert spy.calls == []
+
+
+# ---------------- connection-pool lifecycle ----------------
+
+class TestPoolLifecycle:
+    """The real-egress inner must have exactly ONE pool, pinned to
+    _ValidatedBackend — no unvalidated pool ever allocated, no proxy
+    path, every new AND reused connection established through the
+    validated backend, and shutdown closing everything."""
+
+    def test_single_pool_pinned_to_validated_backend(self):
+        t = lt._SecureHTTPTransport(resolver=GOOD_RESOLVER)
+        assert type(t._pool) is httpcore.AsyncConnectionPool
+        assert isinstance(t._pool._network_backend, lt._ValidatedBackend)
+        # no proxy object exists anywhere on this pool
+        assert getattr(t._pool, "_proxy", None) is None
+        # exactly one attribute — the pool. No unused default pool was
+        # ever allocated (super().__init__ deliberately not called).
+        assert list(vars(t)) == ["_pool"]
+
+    def test_reused_connections_share_validated_backend(self):
+        """httpcore.create_connection hands pool._network_backend to
+        every connection it builds — so a pooled keep-alive connection
+        could only ever have been established through the validated
+        backend (structural invariant, asserted against real source)."""
+        import inspect
+        src = inspect.getsource(
+            httpcore.AsyncConnectionPool.create_connection)
+        assert "self._network_backend" in src
+        t = lt._SecureHTTPTransport(resolver=GOOD_RESOLVER)
+        assert t._pool._network_backend._resolver is GOOD_RESOLVER
+        assert t._pool._connections == []
+
+    def test_aclose_closes_every_connection(self):
+        class _Conn:
+            def __init__(self):
+                self.closed = False
+            async def aclose(self):
+                self.closed = True
+        t = lt._SecureHTTPTransport(resolver=GOOD_RESOLVER)
+        conns = [_Conn(), _Conn(), _Conn()]
+        t._pool._connections.extend(conns)
+        asyncio.run(t.aclose())
+        assert all(c.closed for c in conns)
+        assert t._pool._connections == []
+
+    def test_dependency_contract_guard_fails_visibly(self, monkeypatch):
+        """If a future httpx stops routing aclose through self._pool,
+        construction must raise — never silently weaken validation."""
+        async def _noop(self):
+            return None
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", _noop)
+        with pytest.raises(lt.DependencyContractError):
+            lt._SecureHTTPTransport(resolver=GOOD_RESOLVER)
 
 
 # ---------------- streaming response limits ----------------
@@ -716,6 +771,29 @@ class TestBillingClassification:
             assert out["outcome"] == "failed", (status, out)
             assert out["code"] == code
             assert out["reservation"] == "released"
+
+    def test_unlisted_4xx_is_ambiguous_never_released(
+            self, client, vault):
+        """Only the documented refusal statuses release. Any other 4xx
+        (410 Gone, 418, oddball codes) means provider-side processing
+        state is uncertain → ambiguous, reservation HELD."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        for status in (410, 418, 451):
+            out = _dispatch(client, pid, vault=vault,
+                inner=httpx.MockTransport(lambda req: httpx.Response(
+                    status, json={"error": {"message": "x"}})))
+            assert out["outcome"] == "ambiguous", (status, out)
+            assert out["reservation"] == "open"
+            assert _reservation(
+                client, out["job_id"]).status == "open"
+            # held reservations block the next dispatch (one in-flight
+            # per provider) — release explicitly to run the next case
+            with _sf(client)() as s:
+                spend.release(s, job_id=out["job_id"],
+                              reason="test: next case")
+                s.commit()
 
     def test_post_send_transport_failure_stays_ambiguous(
             self, client, vault):
