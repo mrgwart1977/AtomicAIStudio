@@ -31,7 +31,8 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 
 | Item | Notes |
 |---|---|
-| C1.5 remaining | §5 desktop CLI/plugin integrations (per-provider local tool detection + proc_guard); `verified_remote` provenance for T1 remote job ids (blocked on C2+ T1 dispatch) |
+| C1.5 slice 5a | §5 CLI detection Phase 1 (merged): catalog `cli{}` metadata for documented CLIs only (openai/claude/gemini), audited `bridge.cli.detect` — PATH + declared-dir lookup, no execution/subprocess/version probing, suffix + ancestor reparse validation, `verified: false` labeling, path-minimized audit |
+| C1.5 remaining | §5 follow-ups — CLI operational integration (execution/version probing — **not yet authorized**), additional documented-CLI catalog entries, plugin surfaces; `verified_remote` provenance for T1 remote job ids (blocked on C2+ T1 dispatch) |
 | C2–C7 | Provider connectivity phases: prompt preparation, site launchers (user-driven), MCP connector clients for T1 providers — all behind consent + mock-first testing |
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
