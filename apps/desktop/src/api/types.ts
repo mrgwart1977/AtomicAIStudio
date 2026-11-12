@@ -112,6 +112,31 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
   capabilities: string[];
 }
 
+// ---------- C2 exit gate (Stage A) ----------
+
+export interface LiveProviderStatus {
+  enabled: boolean;
+  model_id: string | null;
+  credential_ref: string | null;
+  granted_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: string | null;
+  credential_configured: boolean;
+  dispatch_ready: boolean;
+  blocked_reason: string | null;
+  live_exposure_usd: number;
+}
+
+export interface LiveStatus {
+  stage: string;
+  global_disabled: boolean;
+  global_disabled_at: string | null;
+  caps_usd: Record<string, string>;
+  global_exposure_usd: number;
+  timeouts: Record<string, Record<string, number>>;
+  providers: Record<string, LiveProviderStatus>;
+}
+
 // bridge.cli.detect live response (C1.5 §5) — unauthenticated paths only;
 // the durable audit keeps status/counts, never these filesystem details.
 export interface CliDetectResult {

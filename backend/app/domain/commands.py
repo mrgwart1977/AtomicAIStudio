@@ -62,6 +62,9 @@ SUPPORTED_COMMANDS = {
     "backup.export", "backup.import", "backup.restore",
     # C2.0b spend ledger — budget config + explicit reconciliation
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
+    # C2 exit gate — Stage A live-connectivity safety controls
+    "cloud.live.enable", "cloud.live.disable",
+    "cloud.live.disable_all", "cloud.live.resume",
     # scenes & storyboard (M2)
     "scene.create", "scene.update", "scene.archive", "scene.unarchive",
     "scene.revert", "scene.duplicate", "scene.move",
@@ -85,6 +88,9 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
 SPEND_GUARDED_COMMANDS = {
     "generate.text.cloud",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
+    # live-gate mutations check-then-act on budgets + gate state
+    "cloud.live.enable", "cloud.live.disable",
+    "cloud.live.disable_all", "cloud.live.resume",
     # project.delete checks for unresolved spend holds — the check must
     # hold the write lock or a concurrent admission could slip an open
     # reservation between check and delete (unreconcilable hold left
@@ -205,6 +211,15 @@ def _summary(command_type: str, payload: dict) -> str:
         return (f"Reconcile remote spend for job "
                 f"{(payload.get('job_id') or '')[:8]} — "
                 f"{payload.get('outcome', '?')}")
+    if command_type == "cloud.live.enable":
+        return (f"Enable live lane for {payload.get('provider_key', '?')} / "
+                f"{payload.get('model_id', '?')} (Stage A — no dispatch)")
+    if command_type == "cloud.live.disable":
+        return f"Disable live lane for {payload.get('provider_key', '?')}"
+    if command_type == "cloud.live.disable_all":
+        return "Disable ALL live execution (kill switch)"
+    if command_type == "cloud.live.resume":
+        return "Lift the global live kill switch"
     if command_type.startswith("scene."):
         if command_type == "scene.create":
             return f"Create scene '{payload.get('title', '')}'"
@@ -328,6 +343,28 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                 "Removing a budget leaves that scope unconstrained")
         if payload.get("target") == "global":
             warnings.append("Global budgets apply to ALL projects")
+    if command_type == "cloud.live.enable":
+        for f in ("provider_key", "model_id", "credential_ref"):
+            if not str(payload.get(f) or "").strip():
+                raise CommandError(422, f"{f} is required")
+        warnings.append(
+            "Stage A — this grants only the opt-in flag. No live "
+            "transport exists in this build; dispatch is unreachable.")
+    if command_type == "cloud.live.disable":
+        if not payload.get("provider_key"):
+            raise CommandError(422, "provider_key is required")
+        warnings.append(
+            "Open financial reservations are never released by "
+            "disabling — they settle or reconcile normally")
+    if command_type == "cloud.live.disable_all":
+        warnings.append(
+            "Kills ALL live dispatch and revokes every provider grant. "
+            "Already-submitted provider work cannot be un-submitted — "
+            "open reservations stay until settled or reconciled")
+    if command_type == "cloud.live.resume":
+        warnings.append(
+            "Lifting the kill switch does not re-enable providers — "
+            "each must be granted again explicitly")
     if command_type == "spend.reconcile":
         if not payload.get("job_id"):
             raise CommandError(422, "job_id is required")
@@ -1229,7 +1266,7 @@ def _link_asset(session: Session, project: Project, asset: Asset, mode: str, aud
 def commit(session: Session, project: Project, *, command_type: str, payload: dict,
            scope: str, origin: str, target_type: str | None, target_id: str | None,
            expected_revision: int, idempotency_key: str,
-           job_engine=None, storage=None) -> dict:
+           job_engine=None, storage=None, vault=None) -> dict:
     existing = session.execute(
         select(CreativeCommand).where(CreativeCommand.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
@@ -1589,6 +1626,41 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 audit["after"]["budget"] = None
                 audit["warnings"].append(
                     "Budget removed — that scope is now unconstrained")
+
+    elif command_type.startswith("cloud.live."):
+        # C2 exit gate Stage A — durable enablement state only. These
+        # commands never dispatch, never touch a transport, and never
+        # read secret material (vault.status() metadata only).
+        from app.domain import live_gate as _lg
+        if vault is None:
+            raise CommandError(500, "credential vault unavailable")
+        try:
+            if command_type == "cloud.live.enable":
+                entry = _lg.enable(
+                    session, provider_key=payload["provider_key"],
+                    model_id=payload["model_id"],
+                    credential_ref=payload["credential_ref"], vault=vault)
+            elif command_type == "cloud.live.disable":
+                entry = _lg.disable(
+                    session, provider_key=payload["provider_key"],
+                    reason=str(payload.get("reason") or "user"))
+            elif command_type == "cloud.live.disable_all":
+                _lg.disable_all(
+                    session, reason=str(payload.get("reason") or "kill_switch"))
+                entry = {"global_disabled": True}
+            else:  # cloud.live.resume
+                _lg.resume_global(session)
+                entry = {"global_disabled": False}
+        except _lg.LiveGateRefused as exc:
+            raise CommandError(
+                422, {"error": exc.code, "detail": str(exc)}) from exc
+        audit["after"]["live"] = {
+            "action": command_type.rsplit(".", 1)[1],
+            "provider_key": payload.get("provider_key"),
+            "model_id": payload.get("model_id"),
+            "credential_ref": payload.get("credential_ref"),
+            "stage": "A",
+        }
 
     else:
         raise CommandError(422, f"unsupported command_type '{command_type}'")

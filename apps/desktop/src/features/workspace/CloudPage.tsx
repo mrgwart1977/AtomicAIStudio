@@ -11,6 +11,7 @@ import type {
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { AssistedPanel } from "./AssistedPanel";
+import { LiveGatePanel } from "./LiveGatePanel";
 
 const SIM_BANNER = "SIMULATION — No external AI provider contacted.";
 const SCOPES = ["session", "day", "month", "lifetime"] as const;
@@ -331,6 +332,10 @@ export function CloudPage() {
       {/* ---------- C1.5 assisted text workflows ---------- */}
       <AssistedPanel pid={pid} revision={project.revision}
         providers={providers} details={details} onCommitted={reload} />
+
+      {/* ---------- C2 exit gate (Stage A — no live dispatch) ---------- */}
+      <LiveGatePanel pid={pid} revision={project.revision}
+        details={details} onCommitted={reload} />
 
       {/* ---------- budgets ---------- */}
       <section className="mt-4 rounded-md border border-line bg-card p-4">
