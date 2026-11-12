@@ -307,7 +307,11 @@ class JobEngine:
             # when the estimate can't fit with OS headroom; flag unknowns.
             profile = getattr(adapter, "profile", None)
             if (profile is not None and getattr(profile, "lane", "") == "gen"
-                    and getattr(profile, "adapter_kind", "") != "mock"):
+                    and getattr(profile, "adapter_kind", "") != "mock"
+                    # Remote-scope jobs run on a provider's hardware —
+                    # no local weights/RAM to preflight (C2.0c).
+                    and getattr(profile, "execution_scope", "local")
+                    != "remote"):
                 mem_gate = _memory_preflight(job.request_json, profile, job.id)
                 if mem_gate["decision"] == "block":
                     job.status = "failed"

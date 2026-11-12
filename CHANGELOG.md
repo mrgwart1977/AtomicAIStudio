@@ -7,6 +7,32 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2.0c REST Provider Adapter Contracts — documented provider HTTP
+  contracts behind injected, in-memory transports ONLY:
+  `domain/workers/rest_providers.py` declares per-provider
+  `EndpointSpec`s (OpenAI Responses `background` mode → real `resp_*`
+  operation id → documented `GET` poll + `POST` cancel; Anthropic
+  Messages → synchronous completion with `msg_*` response id — no
+  poll/cancel invented) plus a classified `RemoteError` taxonomy
+  (validation/authentication/forbidden/rate_limited/conflict/
+  server_error/transport/malformed → `none_confirmed` release vs
+  `unknown` hold — never auto-resubmitted). `rest_simulated.py`
+  provides `httpx.MockTransport` fixtures emitting documented response
+  shapes. `RestCloudTextAdapter` (`cloud.text.rest`) drives the same
+  durable remote-job contract as the mock; `generate.text.cloud`
+  routes by `provider_key` (openai/anthropic → REST contract, all
+  others → in-memory mock). Provider-reported usage is priced
+  locally at catalog rates (exact integer tokens → Decimal → micro-USD
+  ceiling), always `source='simulated'` with
+  `cost_is_provider_billed=False` — never a provider invoice. HARD
+  EGRESS BOUNDARY: transports are required constructor arguments and
+  only `httpx.MockTransport` is accepted — no production transport
+  factory, default client, or real network path exists; all outputs
+  remain `simulated` provenance (`verified_remote` unreachable without
+  a real authorized transport, which C2.0c deliberately omits).
+  Remote-scope jobs now skip the local-RAM weights preflight (no local
+  weights to estimate — watchdog/RAM admission for local work
+  unchanged).
 - C2.0b Durable Spend Ledger + Budget Gates — migration `0008_c2` adds
   `spend_budgets` (per-project/global caps over session|day|month|
   lifetime scopes), `spend_reservations` (one open hold per remote job;

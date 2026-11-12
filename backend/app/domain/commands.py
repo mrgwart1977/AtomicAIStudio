@@ -98,6 +98,8 @@ JOB_COMMANDS = {
     "generate.image": "gen.image.sdcpp",
     "generate.image.persistent": "gen.image.sdcpp-server",
     "generate.video": "gen.video.sdcpp",
+    # Default cloud-text adapter — generate.text.cloud resolves per
+    # provider_key (REST contract impls route to cloud.text.rest).
     "generate.text.cloud": "cloud.text.mock",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
@@ -301,8 +303,15 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             f"Cost is an ESTIMATE only ({cost_txt}) — no durable spend "
             "ledger or budget enforcement exists yet, and no billable "
             "execution happens in this slice")
-        warnings.append("Runs on the MOCK remote provider — simulated "
-                        "lifecycle only; output can never be verified_remote")
+        from app.domain.workers.rest_providers import REST_PROVIDER_KEYS
+        if provider.get("key") in REST_PROVIDER_KEYS:
+            warnings.append(
+                "Runs through the REST contract adapter over a SIMULATED "
+                "transport — documented request/response shapes with no "
+                "network egress; output can never be verified_remote")
+        else:
+            warnings.append("Runs on the MOCK remote provider — simulated "
+                            "lifecycle only; output can never be verified_remote")
     if command_type in ("spend.budget_set", "spend.budget_remove"):
         if payload.get("target", "project") not in ("project", "global"):
             raise CommandError(422, "target must be 'project' or 'global'")
@@ -1446,11 +1455,17 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         if job_engine is None:
             raise CommandError(500, "job engine unavailable")
         request = _job_request(session, project, command_type, payload)
+        # C2.0c — provider-key routing for cloud text; all other
+        # command types keep their JOB_COMMANDS mapping.
+        _adapter_id = (_cloud_adapter_id(job_engine._registry,
+                                         payload["provider_key"])
+                       if command_type == "generate.text.cloud"
+                       else JOB_COMMANDS[command_type])
         try:
             job = job_engine.enqueue(
                 session,
                 project_id=project.id,
-                adapter_id=JOB_COMMANDS[command_type],
+                adapter_id=_adapter_id,
                 kind=_job_kind(command_type),
                 request=request,
                 idempotency_key=f"job:{idempotency_key}",
@@ -1490,12 +1505,15 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             }
             # C2.0b — budget gate + open reservation in THIS transaction:
             # admission, reservation insert and job enqueue are atomic.
-            # Environment is derived from the trusted adapter profile,
-            # never from client input.
+            # Environment is derived from the trusted adapter/runtime,
+            # never from client input: adapters that can state their
+            # transport truth (cloud.text.rest — all-mocked transports)
+            # report it; otherwise adapter_kind decides (mock → simulated).
             from app.domain import spend as _spend
-            adapter = job_engine._registry.get(JOB_COMMANDS[command_type])
-            env = ("simulated" if adapter is not None
-                   and adapter.profile.adapter_kind == "mock" else "live")
+            adapter = job_engine._registry.get(_adapter_id)
+            env = getattr(adapter, "spend_environment", None) or (
+                "simulated" if adapter is not None
+                and adapter.profile.adapter_kind == "mock" else "live")
             try:
                 res = _spend.admit(
                     session, job_id=job.id, command_id=command.id,
@@ -1623,6 +1641,17 @@ def _job_kind(command_type: str) -> str:
     }[command_type]
 
 
+def _cloud_adapter_id(registry, provider_key: str) -> str:
+    """C2.0c — route cloud text jobs by provider: documented REST
+    contract impls (OpenAI/Anthropic) run through cloud.text.rest;
+    every other catalog provider keeps the in-memory mock contract."""
+    rest = registry.get("cloud.text.rest")
+    if rest is not None and getattr(rest, "supports_provider",
+                                   lambda k: False)(provider_key):
+        return "cloud.text.rest"
+    return JOB_COMMANDS["generate.text.cloud"]
+
+
 def _job_request(session: Session, project: Project, command_type: str, payload: dict) -> dict:
     req: dict[str, Any] = {"command_type": command_type, **payload}
     if command_type == "generate.image.mock":
@@ -1674,6 +1703,10 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "execution_target": "cloud",
             "est_cost_usd": est["est_cost_usd"],
             "est_input_tokens": est["est_input_tokens"],
+            # Catalog rates for the REST adapter's usage→cost map —
+            # a locally calculated basis, never provider billing.
+            "cost_table": model.get("cost_table"),
+            "max_output_tokens": payload.get("max_output_tokens"),
             "cost_is_estimate": True,
             "data_out": _cc.data_out_summary(provider, payload["prompt"]),
             "simulated": True,

@@ -34,6 +34,13 @@ class AdapterRegistry:
         # an in-memory provider. Zero egress, honest "mock" kind.
         from app.adapters.cloud_mock import MockCloudTextAdapter
         self.register(MockCloudTextAdapter())
+        # C2.0c — documented REST contracts (OpenAI Responses bg+poll+
+        # cancel, Anthropic Messages sync) over httpx.MockTransport
+        # fixtures only. Construction refuses any real transport —
+        # there is no live egress path.
+        from app.adapters.cloud_rest import RestCloudTextAdapter
+        from app.domain.workers.rest_simulated import build_simulated_providers
+        self.register(RestCloudTextAdapter(build_simulated_providers()))
         # M4.1 mock persistent adapter — dev/test only. Its worker is a
         # Python script spawned via sys.executable, which doesn't exist
         # as a usable interpreter in a frozen build (sys.executable is
