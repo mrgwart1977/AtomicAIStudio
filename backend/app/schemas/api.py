@@ -100,6 +100,7 @@ CommandType = Literal[
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
+    "spend.budget_set", "spend.budget_remove", "spend.reconcile",
 ]
 
 

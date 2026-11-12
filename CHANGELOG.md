@@ -7,6 +7,31 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2.0b Durable Spend Ledger + Budget Gates — migration `0008_c2` adds
+  `spend_budgets` (per-project/global caps over session|day|month|
+  lifetime scopes), `spend_reservations` (one open hold per remote job;
+  open → settled | released, terminal states trigger-locked), and
+  `spend_charges` (append-only; corrections are signed `adjustment`
+  rows; UPDATE/DELETE aborted by trigger). All money is INTEGER
+  micro-USD; USD crosses the boundary once via Decimal CEILING —
+  no float arithmetic in admission. `generate.text.cloud` commits now
+  run budget-check + reservation + job enqueue atomically inside a
+  scoped `BEGIN IMMEDIATE` transaction (spend commands only — all
+  other commits stay deferred); concurrent independent connections
+  serialize on SQLite's writer lock + busy_timeout. Ambiguous remote
+  outcomes hold the reservation open at worst-case exposure — release
+  only via confirmed no-charge paths or the audited `spend.reconcile`
+  command (confirmed_charge / confirmed_no_charge / still_unknown;
+  overage requires `accept_overage` and is recorded uncapped).
+  Environment is adapter-derived (`mock` → `simulated`), never client
+  input; simulated and live consumption are summed separately against
+  the same limits. `environment='live'` admission with no
+  `max_cost_usd` bound is refused. Billing session id rotates per app
+  run (persisted for attribution); day/month keys are UTC. Financial
+  rows deliberately use snapshot (non-FK) project/job references so
+  history survives `project.delete` — the documented exception to the
+  FK rule. `GET .../spend/summary` reports per-scope limits vs
+  consumption, environments segregated.
 - C2.0a Mock Cloud Text Generation Lifecycle — the remote-job contract
   exercised end-to-end on `MockRemoteProvider` with ZERO network egress
   and zero credentials. `generate.text.cloud` (audited command,

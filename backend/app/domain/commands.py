@@ -59,6 +59,8 @@ SUPPORTED_COMMANDS = {
     "bridge.cli.detect",
     # backups
     "backup.export", "backup.import", "backup.restore",
+    # C2.0b spend ledger — budget config + explicit reconciliation
+    "spend.budget_set", "spend.budget_remove", "spend.reconcile",
     # scenes & storyboard (M2)
     "scene.create", "scene.update", "scene.archive", "scene.unarchive",
     "scene.revert", "scene.duplicate", "scene.move",
@@ -74,6 +76,15 @@ SUPPORTED_COMMANDS = {
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
                        "generate.text.cloud"}
+
+# Commands whose commit transaction must begin BEGIN IMMEDIATE — they
+# check-then-act on financial state, so the budget-check SELECT must
+# run after the write lock is held (scoped; see api/routers.py
+# _spend_isolation). Everything else stays deferred.
+SPEND_GUARDED_COMMANDS = {
+    "generate.text.cloud",
+    "spend.budget_set", "spend.budget_remove", "spend.reconcile",
+}
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
@@ -175,6 +186,17 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Import package '{payload.get('package_path', '')}'"
     if command_type == "backup.restore":
         return "Restore project from a backup run"
+    if command_type == "spend.budget_set":
+        return (f"Set {payload.get('target', 'project')} "
+                f"{payload.get('scope', '?')} spend budget to "
+                f"${payload.get('limit_usd', '?')}")
+    if command_type == "spend.budget_remove":
+        return (f"Remove {payload.get('target', 'project')} "
+                f"{payload.get('scope', '?')} spend budget")
+    if command_type == "spend.reconcile":
+        return (f"Reconcile remote spend for job "
+                f"{(payload.get('job_id') or '')[:8]} — "
+                f"{payload.get('outcome', '?')}")
     if command_type.startswith("scene."):
         if command_type == "scene.create":
             return f"Create scene '{payload.get('title', '')}'"
@@ -275,6 +297,33 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             "execution happens in this slice")
         warnings.append("Runs on the MOCK remote provider — simulated "
                         "lifecycle only; output can never be verified_remote")
+    if command_type in ("spend.budget_set", "spend.budget_remove"):
+        if payload.get("target", "project") not in ("project", "global"):
+            raise CommandError(422, "target must be 'project' or 'global'")
+        if payload.get("scope") not in ("session", "day", "month", "lifetime"):
+            raise CommandError(422, "scope must be session, day, month, or lifetime")
+        if command_type == "spend.budget_set":
+            if payload.get("limit_usd") is None:
+                raise CommandError(422, "limit_usd is required")
+            warnings.append(
+                "Budget edits are forward-only — existing open "
+                "reservations are never reduced or released")
+        else:
+            warnings.append(
+                "Removing a budget leaves that scope unconstrained")
+        if payload.get("target") == "global":
+            warnings.append("Global budgets apply to ALL projects")
+    if command_type == "spend.reconcile":
+        if not payload.get("job_id"):
+            raise CommandError(422, "job_id is required")
+        if payload.get("outcome") not in ("confirmed_charge",
+                                          "confirmed_no_charge",
+                                          "still_unknown"):
+            raise CommandError(422, "outcome must be confirmed_charge, "
+                                    "confirmed_no_charge, or still_unknown")
+        warnings.append(
+            "Reconciliation is your attestation about remote billing — "
+            "ambiguous exposure stays reserved until confirmed")
     if command_type in {"project.archive", "project.restore", "project.duplicate"}:
         warnings.append("Applies to the whole project")
     if command_type == "project.delete":
@@ -1412,12 +1461,89 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 "est_cost_usd": request.get("est_cost_usd"),
                 "is_estimate": True, "simulated": True,
             }
+            # C2.0b — budget gate + open reservation in THIS transaction:
+            # admission, reservation insert and job enqueue are atomic.
+            # Environment is derived from the trusted adapter profile,
+            # never from client input.
+            from app.domain import spend as _spend
+            adapter = job_engine._registry.get(JOB_COMMANDS[command_type])
+            env = ("simulated" if adapter is not None
+                   and adapter.profile.adapter_kind == "mock" else "live")
+            try:
+                res = _spend.admit(
+                    session, job_id=job.id, command_id=command.id,
+                    project_id=project.id,
+                    provider_key=request["provider_key"], environment=env,
+                    est_usd=request.get("est_cost_usd"),
+                    max_usd=payload.get("max_cost_usd"),
+                    app_state=getattr(job_engine, "_app_state", None))
+            except _spend.BudgetError as exc:
+                raise CommandError(422, exc.detail) from exc
+            audit["after"]["cloud"]["reservation_id"] = res.id
+            audit["after"]["cloud"]["reserved_micro"] = res.reserved_micro
+            audit["after"]["cloud"]["environment"] = env
         if command_type == "bridge.import":
             audit["after"]["bridge"] = {
                 "action": "import", "job_id": job.id,
                 "provider_key": payload.get("provider_key"),
                 "external_source": request.get("external_source"),
             }
+
+    elif command_type in ("spend.budget_set", "spend.budget_remove",
+                          "spend.reconcile"):
+        # C2.0b — budget config and explicit reconciliation go through
+        # the same preview→commit→audit path. Amounts in audit are
+        # micro-USD integers; nothing sensitive is stored.
+        from app.domain import spend as _spend
+        target = payload.get("target", "project")
+        if command_type == "spend.reconcile":
+            try:
+                outcome = _spend.reconcile(
+                    session, project_id=project.id,
+                    job_id=payload["job_id"], outcome=payload["outcome"],
+                    actual_usd=payload.get("actual_usd"),
+                    accept_overage=bool(payload.get("accept_overage")),
+                    note=payload.get("note"))
+            except _spend.BudgetError as exc:
+                raise CommandError(422, exc.detail) from exc
+            audit["after"]["reconcile"] = {
+                "job_id": outcome["job_id"], "outcome": payload["outcome"],
+                "status": outcome["status"],
+                "environment": outcome.get("environment"),
+            }
+        else:
+            if target not in ("project", "global"):
+                raise CommandError(422, "target must be 'project' or 'global'")
+            budget_pid = project.id if target == "project" else None
+            if command_type == "spend.budget_set":
+                row, old = _spend.set_budget(
+                    session, project_id=budget_pid,
+                    scope=payload.get("scope", ""),
+                    limit_usd=payload.get("limit_usd"),
+                    label=payload.get("label", ""))
+                audit["before"]["budget"] = {
+                    "limit_micro": old, "scope": row.scope,
+                    "target": target}
+                audit["after"]["budget"] = {
+                    "limit_micro": row.limit_micro, "scope": row.scope,
+                    "target": target}
+                if old is not None and row.limit_micro < old:
+                    audit["warnings"].append(
+                        "Budget lowered — existing open reservations are "
+                        "unchanged; new admissions refuse until "
+                        "consumption drops below the new limit")
+            else:
+                row = _spend.remove_budget(
+                    session, project_id=budget_pid,
+                    scope=payload.get("scope", ""))
+                if row is None:
+                    raise CommandError(404, "no such budget")
+                audit["before"]["budget"] = {
+                    "limit_micro": row.limit_micro, "scope": row.scope,
+                    "target": target}
+                audit["after"]["budget"] = None
+                audit["warnings"].append(
+                    "Budget removed — that scope is now unconstrained")
 
     else:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
