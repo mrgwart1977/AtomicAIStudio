@@ -148,6 +148,15 @@ export function CloudPage() {
     [jobs],
   );
   const reconcileJobs = useMemo(() => remoteJobs.filter(needsReconcile), [remoteJobs]);
+  // Open holds whose job row is unavailable (outside the visible job
+  // window or otherwise missing). They stay visible — never silently
+  // released, hidden, or auto-reconciled — and still count into the
+  // Reserved totals above.
+  const orphans = useMemo(
+    () => reservations.filter((r) => r.status === "open"
+      && !reconcileJobs.some((j) => j.id === r.job_id)),
+    [reservations, reconcileJobs],
+  );
 
   /** Stage a mutation: preview must succeed before the commit control
    * appears — approval is never skipped. */
@@ -207,6 +216,16 @@ export function CloudPage() {
         <section className="mt-4 rounded-md border border-amber/60 bg-card p-4" data-testid="command-approval">
           <h2 className="text-sm font-semibold">Review — {pending.title}</h2>
           <SimBadge className="mt-2" />
+          {pending.commandType === "generate.text.cloud" && (
+            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 rounded border border-line bg-panel p-2.5 text-xs" data-testid="gen-approval-detail">
+              <div className="flex justify-between"><dt className="text-faint">Provider</dt><dd className="text-fg">{String(pending.payload.provider_key)}</dd></div>
+              <div className="flex justify-between"><dt className="text-faint">Model</dt><dd className="text-fg">{String(pending.payload.model_id ?? "provider default")}</dd></div>
+              <div className="flex justify-between"><dt className="text-faint">Simulation status</dt><dd className="text-amber">simulated — mocked transport</dd></div>
+              <div className="flex justify-between"><dt className="text-faint">Max estimated cost</dt><dd className="text-fg">${String(pending.payload.max_cost_usd)}</dd></div>
+              <div className="flex justify-between"><dt className="text-faint">Execution target</dt><dd className="text-fg">execution_target=&quot;{String(pending.payload.execution_target)}&quot;</dd></div>
+              <div className="flex justify-between"><dt className="text-faint">Data out</dt><dd className="text-fg">prompt text (~{String(pending.payload.prompt ?? "").length} chars) — nothing else sent</dd></div>
+            </dl>
+          )}
           <p className="mt-2 text-sm text-fg">{pending.proposal.summary}</p>
           {pending.proposal.warnings.length > 0 && (
             <ul className="mt-2 list-inside list-disc text-xs text-amber">
@@ -321,6 +340,14 @@ export function CloudPage() {
           onPreview={(title, ctype, payload, after) => preview(title, ctype, payload, after)}
           busy={busy}
         />
+        {orphans.length > 0 && (
+          <p className="mt-3 rounded border border-amber/40 bg-amber/10 p-2 text-xs text-amber" data-testid="orphan-spend-note">
+            {orphans.length} open hold{orphans.length > 1 ? "s" : ""} totaling{" "}
+            {fmtMicro(orphans.reduce((a, r) => a + r.reserved_micro, 0))} (synthetic)
+            {" "}whose job row is unavailable — included in Reserved above;
+            see the Reconciliation queue. These holds are never released automatically.
+          </p>
+        )}
       </section>
 
       {/* ---------- reconciliation ---------- */}
@@ -337,16 +364,30 @@ export function CloudPage() {
         <ul className="mt-3 space-y-2">
           {reconcileJobs.map((j) => (
             <ReconcileRow key={j.id} job={j}
-              reservation={reservations.find((r) => r.job_id === j.id && r.status === "open")}
+              reservation={reservations.find((r) => r.job_id === j.id)}
               onPreview={preview} busy={busy} />
           ))}
         </ul>
-        {reservations.filter((r) => r.status === "open"
-            && !reconcileJobs.some((j) => j.id === r.job_id)).map((r) => (
-          <div key={r.id} className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted">
-            Open hold with no visible job row — reservation {r.id.slice(0, 8)}
-            · {r.provider_key} · {fmtMicro(r.reserved_micro)}
-            {r.environment === "simulated" ? " (synthetic)" : ""}
+        {orphans.map((r) => (
+          <div key={r.id}
+            className="mt-2 rounded border border-amber/50 bg-amber/5 p-3 text-xs"
+            data-testid={`orphan-${r.id}`}>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="text-fg"><b>{r.provider_key}</b></span>
+              <span className="text-muted">job {r.job_id.slice(0, 8)}</span>
+              <span className="text-muted">
+                held exposure: <b>{fmtMicro(r.reserved_micro)}</b>
+                {r.environment === "simulated" ? " (synthetic)" : ""}
+              </span>
+              <span className="text-amber">hold open{ r.reconcile_count ? ` · reconciled ×${r.reconcile_count}` : ""}</span>
+            </div>
+            <p className="mt-1.5 text-faint">
+              The associated job is unavailable — this hold cannot be inspected
+              here and <b>requires manual recovery</b>. It is not released or
+              reconciled automatically; recovery uses the existing
+              <code> spend.reconcile</code> command with the full job id
+              <code> {r.job_id}</code>.
+            </p>
           </div>
         ))}
       </section>
@@ -597,7 +638,10 @@ function ReconcileRow({ job, reservation, onPreview, busy }:
   const env = reservation?.environment ?? "simulated";
   // Live billing confirmation is out of scope for C2.0d — simulated
   // rows only; a live row (shouldn't exist) renders read-only.
-  const actionable = env === "simulated";
+  // Terminal reservations offer no actions: the money question is
+  // settled and further reconcile calls only replay idempotently.
+  const resolved = reservation != null && reservation.status !== "open";
+  const actionable = env === "simulated" && !resolved;
   const actualNum = parseFloat(actualUsd);
 
   const go = (outcome: "confirmed_charge" | "confirmed_no_charge" | "still_unknown") => {
@@ -625,9 +669,15 @@ function ReconcileRow({ job, reservation, onPreview, busy }:
           {reservation?.reconcile_count ? ` · reconciled ×${reservation.reconcile_count}` : ""}
         </span>
       </div>
-      {!actionable && (
+      {env !== "simulated" && (
         <p className="mt-2 text-[10px] text-faint">
           Live-environment row — reconciliation disabled in this build (no live billing workflows).
+        </p>
+      )}
+      {env === "simulated" && resolved && (
+        <p className="mt-2 text-[10px] text-faint">
+          Reservation {reservation!.status} — resolved; further reconcile
+          attempts would replay idempotently (no new action needed).
         </p>
       )}
       {actionable && (

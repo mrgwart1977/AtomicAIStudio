@@ -82,6 +82,28 @@ const RESERVATIONS = [
     reserved_micro: 12500, remote_job_id: "resp_x", reconcile_count: 0,
     reconcile_note: null, created_at: "2026-01-01T00:00:00Z",
   },
+  {
+    // Orphan: open hold whose job row is unavailable — must stay
+    // visible with its exposure, never silently released.
+    id: "res-orphan", job_id: "job-gone-00000000", command_id: null, project_id: "p1",
+    provider_key: "anthropic", environment: "simulated", status: "open",
+    reserved_micro: 25000, remote_job_id: "msg_gone", reconcile_count: 0,
+    reconcile_note: null, created_at: "2026-01-01T00:00:30Z",
+  },
+  {
+    // Terminal: already settled — no actions should be offered.
+    id: "res-set", job_id: "job-set", command_id: null, project_id: "p1",
+    provider_key: "openai", environment: "simulated", status: "settled",
+    reserved_micro: 8000, remote_job_id: "resp_s", reconcile_count: 1,
+    reconcile_note: "ok", created_at: "2026-01-01T00:00:10Z",
+  },
+  {
+    // Live env (cannot exist today) — must render read-only.
+    id: "res-live", job_id: "job-live", command_id: null, project_id: "p1",
+    provider_key: "openai", environment: "live", status: "open",
+    reserved_micro: 4000, remote_job_id: "resp_l", reconcile_count: 0,
+    reconcile_note: null, created_at: "2026-01-01T00:00:20Z",
+  },
 ];
 
 const JOBS: Record<string, unknown> = {
@@ -116,6 +138,28 @@ const JOBS: Record<string, unknown> = {
     created_at: "2026-01-01T00:03:00Z", completed_at: null,
     progress_json: {
       remote_intent: { provider_key: "anthropic", model_id: "claude-opus-4-1", lifecycle: "sync", simulated: true },
+    },
+  },
+  "job-set": {
+    id: "job-set", project_id: "p1", adapter_id: "cloud.text.rest", kind: "generate",
+    status: "failed", progress: 0, message: "", error: "interrupted",
+    execution_scope: "remote", recovery_state: "needs_reconciliation",
+    cancel_requested: false,
+    created_at: "2026-01-01T00:01:30Z", completed_at: null,
+    progress_json: {
+      remote_intent: { provider_key: "openai", model_id: "gpt-5", lifecycle: "async_poll", simulated: true },
+      remote_job_id: "resp_s", remote_outcome: "ambiguous", reconcile_required: true,
+    },
+  },
+  "job-live": {
+    id: "job-live", project_id: "p1", adapter_id: "cloud.text.rest", kind: "generate",
+    status: "failed", progress: 0, message: "", error: "interrupted",
+    execution_scope: "remote", recovery_state: "needs_reconciliation",
+    cancel_requested: false,
+    created_at: "2026-01-01T00:01:40Z", completed_at: null,
+    progress_json: {
+      remote_intent: { provider_key: "openai", model_id: "gpt-5", lifecycle: "async_poll", simulated: true },
+      remote_job_id: "resp_l", remote_outcome: "ambiguous", reconcile_required: true,
     },
   },
   "job-local": {
@@ -376,6 +420,20 @@ describe("CloudPage — reconciliation queue", () => {
       expect.objectContaining({ job_id: "job-amb", outcome: "still_unknown" })));
   });
 
+  it("shows the generation recap in the approval preview (provider/model/sim/max cost/data-out/target)", async () => {
+    await fillForm();
+    fireEvent.click(screen.getByTestId("cloud-target"));
+    fireEvent.click(screen.getByText("Preview request"));
+    await waitFor(() => screen.getByTestId("gen-approval-detail"));
+    const d = screen.getByTestId("gen-approval-detail");
+    expect(d.textContent).toContain("openai");
+    expect(d.textContent).toContain("gpt-5");
+    expect(d.textContent).toContain("simulated — mocked transport");
+    expect(d.textContent).toContain("$0.1");
+    expect(d.textContent).toContain('execution_target="cloud"');
+    expect(d.textContent).toContain("prompt text (~13 chars)");
+  });
+
   it("confirmed_charge collects actual_usd and accept_overage", async () => {
     render(createElement(CloudPage));
     await waitFor(() => screen.getByText("Confirm charge…"));
@@ -389,5 +447,49 @@ describe("CloudPage — reconciliation queue", () => {
         job_id: "job-amb", outcome: "confirmed_charge",
         actual_usd: 0.0099, accept_overage: true,
       }));
+  });
+
+  it("offers no actions on an already-resolved reservation", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByTestId("reconcile-job-set"));
+    const row = screen.getByTestId("reconcile-job-set");
+    expect(row.textContent).toContain("settled");
+    expect(row.textContent).toContain("replay idempotently");
+    expect(row.querySelector("button")).toBeNull();
+  });
+
+  it("keeps live-environment rows read-only — no live billing confirmation", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByTestId("reconcile-job-live"));
+    const row = screen.getByTestId("reconcile-job-live");
+    expect(row.textContent).toContain("reconciliation disabled");
+    expect(row.textContent).toContain("no live billing workflows");
+    expect(row.querySelector("button")).toBeNull();
+  });
+});
+
+describe("CloudPage — orphaned reservations", () => {
+  it("keeps open holds with unavailable jobs visible with exposure and manual-recovery guidance", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByTestId("orphan-res-orphan"));
+    const row = screen.getByTestId("orphan-res-orphan");
+    expect(row.textContent).toContain("anthropic");
+    expect(row.textContent).toContain("job-gone".slice(0, 8));
+    expect(row.textContent).toContain("$0.0250");
+    expect(row.textContent).toContain("(synthetic)");
+    expect(row.textContent).toContain("requires manual recovery");
+    expect(row.textContent).toContain("not released or reconciled automatically");
+    // No buttons — nothing silently releases the hold from this surface.
+    expect(row.querySelector("button")).toBeNull();
+  });
+
+  it("surfaces orphan holds in the spend view as included in Reserved", async () => {
+    render(createElement(CloudPage));
+    await waitFor(() => screen.getByTestId("orphan-spend-note"));
+    const note = screen.getByTestId("orphan-spend-note");
+    expect(note.textContent).toContain("1 open hold");
+    expect(note.textContent).toContain("$0.0250");
+    expect(note.textContent).toContain("included in Reserved above");
+    expect(note.textContent).toContain("never released automatically");
   });
 });
