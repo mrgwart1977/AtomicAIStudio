@@ -270,6 +270,15 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
     provider = get_provider(payload.get("provider_key"))
     if provider is None:
         raise CommandError(404, "provider not found in catalog")
+    if command_type == "bridge.cli.detect":
+        # §5 detection is not a dispatch — the catalog cli{} block IS the
+        # documented surface; no strategy is resolved and no tier applies.
+        if not provider.get("cli"):
+            raise CommandError(422, "no documented CLI for this provider")
+        return (["Detection checks for the documented executable only — a "
+                 "path found on disk is not authenticated, versioned, or "
+                 "proof this is the genuine provider CLI."],
+                provider, {})
     strat, err = resolve_strategy(provider, action,
                                   payload.get("strategy_id"))
     if strat is None:

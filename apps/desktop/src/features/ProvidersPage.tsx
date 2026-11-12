@@ -4,7 +4,7 @@ import { commitCommand, pickDirectory, pickFile } from "../api/commands";
 import { openBridgeResult, capabilityDisplay } from "../api/bridge";
 import { useApp } from "../stores/appStore";
 import type {
-  BridgeResult, CommitResult, Project, ProviderCapabilitiesReport,
+  BridgeResult, CliDetectResult, CommitResult, Project, ProviderCapabilitiesReport,
   ProviderDetail, ProviderSummary, ProviderTestResult, WatchCandidate,
   WatchStatus,
 } from "../api/types";
@@ -73,6 +73,7 @@ export function ProvidersPage() {
   const [watchCandidates, setWatchCandidates] = useState<WatchCandidate[] | null>(null);
   const [watchTruncated, setWatchTruncated] = useState(false);
   const [watchStatus, setWatchStatus] = useState<WatchStatus | null>(null);
+  const [cliResult, setCliResult] = useState<CliDetectResult | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -97,6 +98,7 @@ export function ProvidersPage() {
     setBridgeNote(null);
     setWatchCandidates(null);
     setWatchStatus(null);
+    setCliResult(null);
     setBridgePrompt("");
     try {
       const [d, c] = await Promise.all([
@@ -339,6 +341,21 @@ export function ProvidersPage() {
       setWatchCandidates(b?.candidates ?? []);
       setWatchTruncated(Boolean(b?.truncated));
       if (!b?.candidates?.length) setBridgeNote("No new eligible files found.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // C1.5 §5 — explicit user-triggered detection only. The result lists raw
+  // paths for display; nothing is executed, authenticated, or persisted.
+  async function onCheckCli() {
+    if (!selected) return;
+    setBusy(true); setErr(null); setCliResult(null);
+    try {
+      const res = await bridgeCommit("bridge.cli.detect", { provider_key: selected.key });
+      setCliResult((res.bridge ?? null) as CliDetectResult | null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -775,6 +792,52 @@ export function ProvidersPage() {
                           )}
                         </div>
                       </>
+                    )}
+                    {selected.cli && (
+                      <div className="mt-2 border-t border-line/40 pt-2">
+                        <div className="mb-1 flex items-center justify-between">
+                          <span className="text-[11px] font-medium text-muted">Local CLI</span>
+                          <button
+                            onClick={onCheckCli}
+                            disabled={busy}
+                            className="rounded-md border border-action/50 px-3 py-1 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
+                          >
+                            Check installation
+                          </button>
+                        </div>
+                        <p className="mb-1 text-[10px] text-faint">
+                          Documented tool: <code className="text-fg">{selected.cli.executables.join(", ")}</code>
+                          {selected.cli.note ? ` — ${selected.cli.note}` : ""}
+                        </p>
+                        {cliResult && (
+                          <div className="mb-1 rounded-md border border-line bg-ink p-2">
+                            {cliResult.status === "detected" ? (
+                              <>
+                                {cliResult.candidates.map((c) => (
+                                  <p key={c.path} className="mb-0.5 truncate text-[11px] text-fg" title={c.path}>
+                                    <span className="text-teal">found</span> {c.name}
+                                    <span className="ml-1.5 text-faint">via {c.via}</span>
+                                    <span className="ml-1.5 text-faint">{c.path}</span>
+                                  </p>
+                                ))}
+                                {cliResult.skipped_untrusted > 0 && (
+                                  <p className="text-[10px] text-amber">
+                                    {cliResult.skipped_untrusted} link/reparse-path candidate(s) skipped as untrusted.
+                                  </p>
+                                )}
+                              </>
+                            ) : cliResult.status === "unsupported_platform" ? (
+                              <p className="text-[11px] text-faint">This CLI is not documented for your platform.</p>
+                            ) : (
+                              <p className="text-[11px] text-faint">Not found on PATH or documented install locations.</p>
+                            )}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-faint">
+                          Detection checks for the executable only — nothing is run, authenticated, or
+                          version-checked. A found path is not proof this is the genuine provider tool.
+                        </p>
+                      </div>
                     )}
                     {bridgeNote && (
                       <p className="mt-2 rounded-md bg-teal/10 px-2 py-1.5 text-[11px] text-teal">{bridgeNote}</p>

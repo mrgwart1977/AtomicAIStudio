@@ -77,6 +77,9 @@ const CAPS = {
   ],
 };
 
+// Mutable per-test — documented CLI surface (null = no documented CLI).
+let detailCli: unknown = null;
+
 // Mutable per-test — watch polling status fixture.
 const watchFixture = {
   enabled: false, status: "off" as string, reason: null as string | null,
@@ -87,7 +90,7 @@ const watchFixture = {
 function routedFetch(url: string) {
   if (url.startsWith("/api/providers/defaults")) return { defaults: {} };
   if (url === "/api/providers/testprov/capabilities") return CAPS;
-  if (url === "/api/providers/testprov") return DETAIL;
+  if (url === "/api/providers/testprov") return { ...DETAIL, cli: detailCli };
   if (url.startsWith("/api/providers/testprov/watch")) return watchFixture;
   if (url.startsWith("/api/providers")) return [SUMMARY];
   if (url === "/api/projects/p1") return { id: "p1", revision: 3 };
@@ -117,6 +120,13 @@ beforeEach(() => {
         open_via: "client_shell",
       },
     };
+    if (type === "bridge.cli.detect") return {
+      ...base, bridge: {
+        action: "cli_detect", provider_key: "testprov", platform: "windows",
+        status: "detected", skipped_untrusted: 0,
+        candidates: [{ name: "fakecli", path: "C:/Tools/fakecli.exe", via: "PATH" }],
+      },
+    };
     if (type === "bridge.watch.scan") return {
       ...base, bridge: {
         action: "watch_scan", provider_key: "testprov", folder: "C:\\watch",
@@ -135,6 +145,7 @@ beforeEach(() => {
     enabled: false, status: "off", reason: null, folder_name: null,
     candidates: [], last_poll: null, paused_reason: null,
   });
+  detailCli = null;
   writeText.mockResolvedValue(undefined);
   readText.mockResolvedValue("generated output text");
   (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
@@ -325,5 +336,36 @@ describe("ProvidersPage — ImportWatcher Stage A", () => {
     await openProvider();
     await screen.findByText(/Auto-check paused/);
     expect(screen.getByText(/unavailable or no longer valid/)).toBeTruthy();
+  });
+});
+
+describe("C1.5 §5 — local CLI detection", () => {
+  it("shows Local CLI block only when the catalog documents one", async () => {
+    await openProvider();
+    expect(screen.queryByText("Local CLI")).toBeNull();
+    cleanup();
+    detailCli = {
+      executables: ["fakecli"], platforms: ["windows"],
+      install_hint_dirs: [], docs_url: "https://x.example/cli",
+      note: "test cli",
+    };
+    await openProvider();
+    expect(screen.getByText("Local CLI")).toBeTruthy();
+    expect(screen.getByText(/fakecli/)).toBeTruthy();
+  });
+
+  it("check installation commits bridge.cli.detect and shows unverified result", async () => {
+    detailCli = {
+      executables: ["fakecli"], platforms: ["windows"],
+      install_hint_dirs: [], docs_url: "https://x.example/cli",
+      note: "test cli",
+    };
+    await openProvider();
+    fireEvent.click(screen.getByText("Check installation"));
+    await waitFor(() =>
+      expect(commitCommand).toHaveBeenCalledWith(
+        "p1", 3, "bridge.cli.detect", { provider_key: "testprov" }));
+    await screen.findByText(/fakecli\.exe/);
+    expect(screen.getByText(/not proof this is the genuine provider tool/)).toBeTruthy();
   });
 });

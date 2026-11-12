@@ -53,6 +53,9 @@ class ProviderDetailOut(BaseModel):
     privacy_summary: str
     notes: str
     aliases: list[str]
+    # C1.5 §5 — documented local-CLI surface (detection metadata only;
+    # null when the provider has no documented CLI).
+    cli: dict[str, Any] | None = None
     shared_credential_with: list[str]
     enabled: bool
     settings: dict[str, Any]
