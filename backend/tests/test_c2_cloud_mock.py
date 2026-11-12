@@ -329,11 +329,27 @@ def test_adapter_imports_no_transport():
 
 
 def test_provenance_confidence_contract():
-    assert remote_mod.provenance_confidence(
-        {"remote_job_id": "r1", "provider_verified": True}) == "verified_remote"
+    # verified_remote needs BOTH provider_verified and durable live-transport
+    # evidence; neither alone suffices, and remote_job_id alone never did.
+    _ev = {"transport": "live", "environment": "live",
+           "authenticated": True, "endpoint_host": "api.deepseek.com",
+           "correlation": {"job_id": "job-1"},
+           "response_fingerprint": "f" * 64, "evidence_url": "e" * 64}
+    good = {"provider_key": "deepseek", "remote_job_id": "r1",
+            "provider_verified": True, "transport_is_live": True,
+            "verification_evidence": _ev}
+    assert remote_mod.provenance_confidence(good) == "verified_remote"
+    # A remote_job_id is optional — synchronous providers may not return one.
+    no_id = dict(good); no_id.pop("remote_job_id")
+    assert remote_mod.provenance_confidence(no_id) == "verified_remote"
     for missing in ({}, {"remote_job_id": "r1"},
                     {"provider_verified": True},
+                    {"provider_verified": True, "transport_is_live": True,
+                     "verification_evidence": _ev},
+                    {**good, "transport_is_live": False},
+                    {**good, "provider_key": "openai"},
                     {"remote_job_id": "r1", "provider_verified": False},
+                    good | {"verification_evidence": _ev | {"authenticated": False}},
                     None):
         assert remote_mod.provenance_confidence(missing) == "simulated", missing
 

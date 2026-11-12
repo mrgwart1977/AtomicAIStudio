@@ -7,6 +7,34 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2 exit gate Stage B1 — production-capable live transport
+  infrastructure, still unreachable from every shipped surface
+  (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the
+  full egress stack per request: https + exact documented host +
+  no-userinfo allowlist, public-IP-only DNS resolution (loopback,
+  private, link-local, multicast, reserved all refused), redirects
+  refused outright with credentials never forwarded, `trust_env=False`
+  proxy/netrc isolation, provider-scoped connect/total deadlines, and a
+  bounded response stream (2 MiB cap). `live_dispatch()` is the sole
+  orchestration path — no command, router, env var, or config reaches it:
+  `dispatch_admission` → atomic `spend.admit` commit BEFORE transport
+  construction → gate re-check (kill/disable between admission and send
+  leaves the reservation open for reconcile) → `vault.get_fields` read
+  only inside the boundary → submit → classify → settle on confirmed
+  success / release only on confirmed refusal / HOLD on any ambiguous
+  outcome (never auto-resubmitted; explicit `spend.reconcile` only).
+  `RestRemoteProvider` accepts the marked live wrapper while keeping
+  refusal of every other transport — the simulated Cloud Studio path is
+  unchanged. Provenance contract corrected: `verified_remote` now
+  requires authenticated transport evidence + approved endpoint identity
+  + job/request correlation + response fingerprint + audit linkage on a
+  genuinely live transport — `remote_job_id` is recorded when supplied
+  but is neither required nor sufficient, and is never fabricated.
+  Test-only: validated entirely through `httpx.MockTransport` + dummy
+  vault secrets; `transport_is_live` is False for injected transports so
+  no `verified_remote` artifact can be produced in B1.
+
+### Added (earlier)
 - C2 exit gate Stage A — live-connectivity safety infrastructure,
   mock-only, no live transport wired (`domain/live_gate.py`). Durable,
   audited provider+model-scoped opt-ins via new commands

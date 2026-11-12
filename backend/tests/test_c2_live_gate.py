@@ -367,33 +367,59 @@ class TestEgress:
 # ---------------- provenance isolation ----------------
 
 class TestProvenanceGate:
+    # B1 corrected contract: endpoint_host + correlation + fingerprint +
+    # evidence_url required; remote_job_id OPTIONAL (recorded when the
+    # provider supplies one, never fabricated).
     FULL_EV = {"transport": "live", "authenticated": True,
-               "environment": "live", "remote_job_id": "resp_1",
+               "environment": "live", "endpoint_host": "api.deepseek.com",
+               "correlation": {"job_id": "j1", "command_id": "c1",
+                               "remote_job_id": "resp_1"},
                "response_fingerprint": "ab12", "evidence_url": "https://x"}
 
     def test_evidence_never_valid_on_non_live_transport(self):
         # Stage A: transport_is_live is always False — unreachable.
         assert not lg.verification_evidence_valid(
-            self.FULL_EV, transport_is_live=False)
+            self.FULL_EV, transport_is_live=False, provider_key="deepseek")
         assert not lg.verification_evidence_valid(
-            self.FULL_EV, transport_is_live=False)
+            self.FULL_EV, transport_is_live=False, provider_key="deepseek")
 
     def test_evidence_contract(self):
         assert lg.verification_evidence_valid(
-            self.FULL_EV, transport_is_live=True)
+            self.FULL_EV, transport_is_live=True, provider_key="deepseek")
+        # remote_job_id absent entirely — still valid (sync responses
+        # may expose none).
+        ev = {**self.FULL_EV,
+              "correlation": {"job_id": "j1", "command_id": "c1"}}
+        assert lg.verification_evidence_valid(
+            ev, transport_is_live=True, provider_key="deepseek")
         for missing in ("authenticated", "response_fingerprint",
-                        "remote_job_id", "evidence_url"):
+                        "evidence_url", "endpoint_host"):
             ev = {**self.FULL_EV, missing: None}
             assert not lg.verification_evidence_valid(
-                ev, transport_is_live=True)
+                ev, transport_is_live=True, provider_key="deepseek")
+        # job correlation is mandatory — an unattributed response can't
+        # be verified.
+        ev = {**self.FULL_EV,
+              "correlation": {"command_id": "c1"}}
+        assert not lg.verification_evidence_valid(
+            ev, transport_is_live=True, provider_key="deepseek")
+        # Host must be the documented endpoint — a foreign host fails.
+        ev = {**self.FULL_EV, "endpoint_host": "api.evil.example"}
+        assert not lg.verification_evidence_valid(
+            ev, transport_is_live=True, provider_key="deepseek")
 
     def test_simulated_remote_never_verified(self):
         assert provenance_confidence({"remote_job_id": "r1"}) == "simulated"
         assert provenance_confidence(None) == "simulated"
-        # provider_verified is the only path — and only the gate above
-        # may ever set it (nothing does in Stage A).
+        # provider_verified alone proves nothing — valid live evidence
+        # on a real transport is mandatory.
         assert provenance_confidence(
             {"remote_job_id": "r1", "provider_verified": True}
+        ) == "simulated"
+        assert provenance_confidence(
+            {"provider_key": "deepseek", "provider_verified": True,
+             "transport_is_live": True,
+             "verification_evidence": self.FULL_EV}
         ) == "verified_remote"
 
 

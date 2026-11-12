@@ -363,31 +363,48 @@ def retry_after_s(headers: dict[str, str]) -> float | None:
 # ------------------------------------------------------------------
 
 # What a real transport MUST attach to a remote result before
-# provenance_confidence() may see provider_verified=True. A bare
-# response id or response hash is NOT evidence — authenticity requires
-# an authorized, authenticated live-transport round trip.
+# provenance_confidence() may see provider_verified=True.
+#
+# B1 provenance correction: a remote_job_id is NOT required — some
+# legitimate synchronous provider responses expose no remote operation
+# id, and none may be fabricated. What is required instead:
+#   authenticated transport + approved endpoint identity +
+#   request/job correlation + response integrity evidence + durable
+#   audit linkage. remote_job_id is recorded when the provider supplies
+#   one, inside correlation only.
 VERIFIED_REMOTE_EVIDENCE = {
-    "transport": "live",            # never "mock"/"simulated"
+    "transport": "live",            # never "mock"/"simulated"/"controlled"
     "authenticated": True,          # credential was actually applied
     "environment": "live",
-    "remote_job_id": "<provider-assigned id or response id>",
-    "response_fingerprint": "<sha256 of canonical response bytes>",
+    "endpoint_host": "<allowlisted host the request was sent to>",
+    "correlation": {"job_id": "<durable local job>",
+                    "command_id": "<audited command or none>",
+                    "remote_job_id": "<provider id when documented>"},
+    "response_fingerprint": "<sha256 of canonical response body>",
     "evidence_url": "<official API doc URL for the endpoint used>",
+    "audit_command_id": "<command row backing this dispatch>",
 }
 
 
 def verification_evidence_valid(ev: dict | None, *,
-                                transport_is_live: bool) -> bool:
-    """Gate for stamping provider_verified. In Stage A
-    transport_is_live is ALWAYS False — no live transports exist — so
-    this can never return True and verified_remote stays unreachable."""
+                                transport_is_live: bool,
+                                provider_key: str | None = None) -> bool:
+    """Gate for stamping provider_verified. In Stage A transport_is_live
+    is ALWAYS False — no live transports exist — so this can never
+    return True and verified_remote stays unreachable. In B1 the flag
+    is True only when the transport's inner client was the real one —
+    injected controlled transports can never produce it."""
     if not transport_is_live:
         return False
     ev = ev or {}
+    host = ev.get("endpoint_host")
+    corr = ev.get("correlation") or {}
+    host_ok = bool(provider_key) and host == _allowed_host(provider_key)
     return (ev.get("transport") == "live"
             and ev.get("authenticated") is True
             and ev.get("environment") == "live"
-            and bool(ev.get("remote_job_id"))
+            and host_ok
+            and bool(corr.get("job_id"))
             and bool(ev.get("response_fingerprint"))
             and bool(ev.get("evidence_url")))
 

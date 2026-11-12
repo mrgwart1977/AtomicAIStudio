@@ -40,6 +40,7 @@ default client, and no code path that can reach a real endpoint.
 from __future__ import annotations
 
 import enum
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -55,6 +56,14 @@ REST_PROVIDER_KEYS = ("openai", "anthropic", "google-gemini",
                       "deepseek", "xai")
 
 _TIMEOUT_S = 30.0
+
+
+def lg_timeouts(provider_key: str) -> dict:
+    """Live deadline policy for the hardened client — lazy import:
+    live_gate depends on this module's SPECS, so the reverse edge must
+    not exist at module load."""
+    from app.domain import live_gate as _lg
+    return _lg.LIVE_TIMEOUTS.get(provider_key, {})
 
 
 class EgressRefused(Exception):
@@ -256,23 +265,39 @@ class RestRemoteProvider:
         # Transport is REQUIRED and must be an in-memory mock in C2.0c —
         # any real transport class (or None, which lets httpx pick a
         # live default) is refused. This is the egress boundary.
+        # Stage B1 adds ONE alternative: an object marked
+        # is_live_transport (the hardened LiveHTTPTransport wrapper) —
+        # reachable only through live_dispatch(), never a shipped path.
         if transport is None:
             raise EgressRefused(
                 "explicit transport required — a default client would "
                 "create a real network egress path")
-        if not isinstance(transport, httpx.MockTransport):
+        if isinstance(transport, httpx.MockTransport):
+            self._client = httpx.AsyncClient(
+                transport=transport, base_url=spec.base_url,
+                timeout=httpx.Timeout(_TIMEOUT_S))
+        elif getattr(transport, "is_live_transport", False):
+            # Hardened client for the live boundary: trust_env=False so
+            # proxy env vars and netrc are never honored; redirects are
+            # never auto-followed (the transport refuses them outright);
+            # provider-scoped live deadlines replace the default.
+            cfg = lg_timeouts(spec.provider_key)
+            self._client = httpx.AsyncClient(
+                transport=transport, base_url=spec.base_url,
+                timeout=httpx.Timeout(
+                    cfg.get("total_s", _TIMEOUT_S),
+                    connect=cfg.get("connect_s", 10.0)),
+                follow_redirects=False, trust_env=False)
+        else:
             raise EgressRefused(
-                f"C2.0c transports must be httpx.MockTransport "
-                f"(got {type(transport).__name__}) — no live transport "
-                "wiring exists")
+                f"transports must be httpx.MockTransport or the marked "
+                f"live wrapper (got {type(transport).__name__}) — no "
+                "default/live client wiring exists")
         self.spec = spec
         self.name = f"rest-{spec.provider_key}"
         self.idempotency = spec.idempotency
         self._transport = transport
         self._api_key = api_key
-        self._client = httpx.AsyncClient(
-            transport=transport, base_url=spec.base_url,
-            timeout=httpx.Timeout(_TIMEOUT_S))
 
     @property
     def transport_is_simulated(self) -> bool:
@@ -322,6 +347,10 @@ class RestRemoteProvider:
                 f"{op}: non-object JSON response — outcome unknown",
                 charge_evidence="unknown",
                 http_status=resp.status_code)
+        # Canonical form of the last 2xx body — the live boundary
+        # fingerprints this for provenance evidence (B1+).
+        self._last_body_canonical = json.dumps(body, sort_keys=True,
+                                               default=str)
         return body, resp.headers
 
     async def submit(self, intent: SubmissionIntent) -> RemoteHandle:
