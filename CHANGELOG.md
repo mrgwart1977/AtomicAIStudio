@@ -7,6 +7,42 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 ImportWatcher Stage B — opt-in background polling: a single
+  app-level `ImportWatchService` runs one shared asyncio task (default
+  60 s interval, 30 s floor) over providers whose persisted
+  `settings.import_behavior == "poll"`. Opt-in only via audited
+  `bridge.watch.enable` / `bridge.watch.disable` commands (enable
+  requires a currently-valid designated folder). All filesystem work
+  runs on one worker thread off the event loop; one scan per provider in
+  flight — a still-running scan is never overlapped. Each poll
+  re-validates the ORIGINAL designated folder with the same Stage A
+  logic (symlink/junction/traversal rejection, containment, extension
+  gating, entry/candidate bounds); an invalid folder marks the watcher
+  `degraded` with a reason, stops scanning it, and only resumes when
+  that same folder validates again — never silently re-anchors. Polling
+  pauses under critical memory pressure and while a `gen.*` inference
+  job runs. Candidates live in a bounded in-memory cache (200/provider,
+  2000 global, newest-first eviction) surfaced read-only via
+  `GET /api/providers/{key}/watch` with per-project dedup; they can
+  never become assets without an explicit per-file `bridge.import`.
+  Polling ticks write no durable audit rows; enable/disable are audited
+  commands carrying no absolute paths. Every pending scan is tagged
+  with its session's (generation, folder fingerprint): disable,
+  re-enable, or folder redesignation orphans the in-flight scan —
+  tracked to completion but its results are discarded and can never
+  publish into a newer session's cache. Shutdown cancels the task,
+  waits a bounded grace (5 s) for in-flight scans, cancels queued work,
+  and lets any wedged filesystem call finish on the worker — a raw
+  daemon `threading.Thread` + FIFO queue rather than
+  `ThreadPoolExecutor`, because `concurrent.futures._python_exit` joins
+  pool workers at interpreter shutdown regardless of daemon flags.
+  Verified by a subprocess-level exit probe: with a stalled worker the
+  backend process exits in bounded time, not just `stop()`. Entry and
+  candidate bounds limit work items, not wall-clock; a stalled syscall
+  is documented as beyond cooperative cancellation. The Providers page refreshes watch status every ~12 s
+  while auto-check is enabled (read-only GET, one request in flight,
+  never triggers a scan, silent on transient backend errors). Still
+  stat-only, non-recursive, and never auto-imports.
 - C1.5 ImportWatcher Stage A — manual candidate scanning: providers can
   designate an `import_dir` in settings; `bridge.watch.scan` performs an
   audited, bounded, non-recursive, stat-only enumeration (never reads

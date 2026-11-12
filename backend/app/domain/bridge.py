@@ -263,9 +263,9 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
     Imported lazily by commands.py to avoid an import cycle."""
     from app.domain.commands import CommandError
 
-    # watch.scan gates on the import path — candidates are only useful when
+    # watch.* gates on the import path — candidates are only useful when
     # the provider has a documented user-driven import strategy.
-    action = ("import" if command_type == "bridge.watch.scan"
+    action = ("import" if command_type.startswith("bridge.watch.")
               else command_type.rsplit(".", 1)[1])
     provider = get_provider(payload.get("provider_key"))
     if provider is None:
@@ -346,6 +346,20 @@ def validate_dispatch(session, project, command_type: str, payload: dict,
             raise CommandError(422, "note must be a string")
         warnings.append("Provenance is user-reported — ADE does not verify "
                         "the file actually came from this provider")
+    elif command_type == "bridge.watch.enable":
+        # Opt-in requires a designated, currently-valid folder — enabling
+        # polling against nothing would just produce degraded noise.
+        cfg = registry.get_config(session).get(provider["key"], {})
+        _folder, ferr = validate_watch_folder(cfg)
+        if ferr:
+            raise CommandError(422, ferr)
+        warnings.append(
+            "Background polling enabled — off by default and opt-in. Files "
+            "it surfaces still need your per-file import click; ADE never "
+            "auto-imports")
+    elif command_type == "bridge.watch.disable":
+        warnings.append(
+            "Background polling disabled — no further scans will run")
     elif command_type == "bridge.watch.scan":
         # Stage A ImportWatcher — explicit "check folder" only, no polling.
         cfg = registry.get_config(session).get(provider["key"], {})

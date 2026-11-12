@@ -32,6 +32,7 @@ from app.db.session import create_engine_for, session_factory
 from app.domain.events import EventBus
 from app.domain.instance_lock import acquire_data_dir_lock
 from app.domain.jobs import JobEngine
+from app.domain.watch_service import ImportWatchService
 from app.logging_config import configure_logging
 from app.security import require_token
 
@@ -184,8 +185,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     run.error = "interrupted by application stop"
                 s.commit()
             await job_engine.start()
+            # C1.5 stage B — one shared polling task for opted-in providers
+            # (settings.import_behavior == "poll"). In-memory candidates
+            # only; every filesystem touch stays on its single worker
+            # thread. Disabled by default — persisted opt-in re-arms after
+            # restart but never implies files were monitored while stopped.
+            app.state.watch_service = ImportWatchService(sf)
+            await app.state.watch_service.start()
             log.info("backend ready on %s:%s (data: %s)", settings.host, settings.port, settings.data_dir)
             yield
+            await app.state.watch_service.stop()
             await job_engine.stop()
             # Workers are drained after the engine stops so no adapter
             # still holds a lease; Job Objects cover abrupt deaths anyway.

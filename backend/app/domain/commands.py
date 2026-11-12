@@ -55,7 +55,7 @@ SUPPORTED_COMMANDS = {
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
     # C1.5 access bridge — user-driven external dispatch only
     "bridge.prepare", "bridge.launch", "bridge.import",
-    "bridge.watch.scan",
+    "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     # backups
     "backup.export", "backup.import", "backup.restore",
     # scenes & storyboard (M2)
@@ -1273,6 +1273,23 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             "folder": str(folder), "candidates": cands,
             "truncated": truncated,
         }
+
+    elif command_type in ("bridge.watch.enable", "bridge.watch.disable"):
+        # Persisted opt-in/out — the flag lives in provider settings and is
+        # re-read by the polling service every tick. Audited here as a
+        # command; the command row IS the audit record (no path stored).
+        from app.domain.providers import registry as _preg
+        key = payload["provider_key"]
+        cur = _preg.get_config(session).get(key, {})
+        settings = dict(cur.get("settings") or {})
+        enable = command_type.endswith("enable")
+        settings["import_behavior"] = "poll" if enable else "manual"
+        _preg.set_provider_config(session, key, {"settings": settings})
+        audit["after"]["bridge"] = {
+            "action": "watch_enable" if enable else "watch_disable",
+            "provider_key": key,
+        }
+        bridge_response = dict(audit["after"]["bridge"])
 
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])

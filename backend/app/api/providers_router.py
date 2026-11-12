@@ -139,6 +139,50 @@ def set_provider_config(key: str, body: ProviderConfigUpdate,
     return registry.provider_detail(db, _vault(request), key)
 
 
+# ---------- import watcher (C1.5 stage B) ----------
+
+@providers_router.get("/api/providers/{key}/watch")
+def watch_status(key: str, request: Request,
+                 project_id: str | None = None,
+                 db: Session = Depends(get_db)):
+    """Polling status + cached candidates for one provider. Read-only —
+    candidates are in-memory service state, deduped per project when
+    project_id is supplied. Enabling/disabling is a bridge command, never
+    a direct write here."""
+    if catalog.get_provider(key) is None:
+        raise HTTPException(404, "provider not found")
+    svc = getattr(request.app.state, "watch_service", None)
+    st = svc.status(key) if svc is not None else {
+        "enabled": False, "status": "off", "reason": None,
+        "folder_name": None, "candidates": [], "last_poll": None,
+        "paused_reason": None}
+    cfg = registry.get_config(db).get(key, {})
+    enabled = (cfg.get("settings") or {}).get("import_behavior") == "poll"
+    cands = list(st.get("candidates") or [])
+    if project_id and cands:
+        # Dedup against this project's external imports (same rule the
+        # manual scan applies) — candidates a project already imported
+        # do not resurface for it.
+        import os
+        from pathlib import Path
+        from app.db.models import Asset
+        imported: set[str] = set()
+        for a in db.query(Asset).filter(Asset.project_id == project_id,
+                                        Asset.origin == "external"):
+            sp = ((a.provenance_json or {}).get("request") or {}) \
+                .get("source_path")
+            if sp:
+                try:
+                    imported.add(
+                        os.path.normcase(str(Path(sp).resolve(strict=False))))
+                except OSError:
+                    pass
+        if imported:
+            cands = [c for c in cands
+                     if os.path.normcase(c["path"]) not in imported]
+    return {**st, "enabled": enabled, "candidates": cands}
+
+
 # ---------- credentials (write-only secrets) ----------
 
 @providers_router.get("/api/providers/{key}/credential", response_model=CredentialStatusOut)
