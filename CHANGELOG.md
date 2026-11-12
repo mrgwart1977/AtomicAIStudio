@@ -7,6 +7,31 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2 text provider completion — the remaining documented A-class text
+  providers now carry REST contract implementations over
+  `httpx.MockTransport` only (no live transports, no egress):
+  - `google-gemini` — Gemini `generateContent`
+    (`POST /v1beta/models/{model}:generateContent`, `x-goog-api-key`
+    header auth): synchronous; `candidates[].content.parts[].text` +
+    `usageMetadata` parsed; the documented response carries NO id so
+    `remote_job_id` stays honestly `None`.
+    https://ai.google.dev/api/generate-content
+  - `deepseek` — chat completions (`POST /chat/completions`, Bearer):
+    synchronous OpenAI-compatible shape; `choices[0].message.content`
+    + `usage`. https://api-docs.deepseek.com/api/create-chat-completion
+  - `xai` — chat completions (`POST /v1/chat/completions`, Bearer):
+    synchronous; xAI's deferred-completion retrieval applies only to
+    requests explicitly made deferred, so no poll/cancel is wired.
+    https://docs.x.ai/developers/rest-api-reference/inference/chat-completions
+  All three declare `idempotency="none"` (no documented server-side
+  dedupe) and `lifecycle="sync"` — `query()` returns None and
+  `cancel()` raises `UnsupportedRemoteOp`, never invented endpoints.
+  Shared error taxonomy: 4xx refusal classes release the reservation
+  (confirmed pre-processing), 5xx/409/transport/malformed outcomes
+  hold it for explicit `spend.reconcile`. Simulated fixtures in
+  `rest_simulated.py` emit the documented response shapes with
+  synthetic usage; Cloud Studio surfaces all three via the existing
+  catalog-driven selectors — no UI redesign.
 - C2.0d Cloud Text Generation UI — new project workspace "Cloud" tab
   (`features/workspace/CloudPage.tsx`, "Cloud Studio" in the left nav):
   catalog-driven provider/model pickers (A-class + documented T1

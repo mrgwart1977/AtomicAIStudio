@@ -1,7 +1,7 @@
-"""C2.0c — REST RemoteProvider implementations over injected transports.
+"""C2.0c+ — REST RemoteProvider implementations over injected transports.
 
-Two documented A-class text shapes, chosen because their lifecycles are
-genuinely different and both hold a catalog T1 official-API strategy:
+Documented A-class text API contracts — each lifecycle implemented
+exactly as documented, nothing invented:
 
 - ``openai`` — OpenAI Responses API (``POST /v1/responses`` with
   ``background: true``): asynchronous submission returning a real remote
@@ -14,9 +14,23 @@ genuinely different and both hold a catalog T1 official-API strategy:
   (``msg_*`` id, content, usage). No documented poll or cancel exists
   for single messages (the Batches API is a different surface).
   https://platform.claude.com/docs/en/api/messages/create
+- ``google-gemini`` — Gemini ``generateContent``
+  (``POST /v1beta/models/{model}:generateContent``): synchronous, model
+  in the URL, ``x-goog-api-key`` header auth. Response carries
+  candidates + usageMetadata and NO response id (remote_id stays None —
+  honest, not fabricated). Batch generation is a different surface.
+  https://ai.google.dev/api/generate-content
+- ``deepseek`` — DeepSeek chat completions (``POST /chat/completions``):
+  OpenAI-compatible synchronous shape, Bearer auth,
+  ``choices[0].message.content`` + ``usage``. No documented poll/cancel.
+  https://api-docs.deepseek.com/api/create-chat-completion
+- ``xai`` — xAI chat completions (``POST /v1/chat/completions``):
+  OpenAI-compatible synchronous shape, Bearer auth. Deferred-completion
+  retrieval exists only for explicitly deferred requests — not this
+  contract. https://docs.x.ai/developers/rest-api-reference/inference/chat-completions
 
 HARD EGRESS BOUNDARY: every provider requires an explicitly injected
-``httpx`` transport, and in C2.0c the ONLY sanctioned transport is
+``httpx`` transport, and the ONLY sanctioned transport is
 ``httpx.MockTransport``. Passing None (which would let httpx build a
 real network transport) or any live transport class raises
 ``EgressRefused`` — there is no production transport factory, no
@@ -37,7 +51,8 @@ from app.domain.workers.remote import (RemoteHandle, RemoteStatus,
 #: Provider keys with a REST contract implementation. generate.text.cloud
 #: routes these to the REST adapter; everything else stays on the pure
 #: in-memory mock.
-REST_PROVIDER_KEYS = ("openai", "anthropic")
+REST_PROVIDER_KEYS = ("openai", "anthropic", "google-gemini",
+                      "deepseek", "xai")
 
 _TIMEOUT_S = 30.0
 
@@ -142,8 +157,53 @@ ANTHROPIC_MESSAGES_SPEC = EndpointSpec(
     docs="https://platform.claude.com/docs/en/api/messages/create",
 )
 
+GEMINI_GENERATE_SPEC = EndpointSpec(
+    provider_key="google-gemini",
+    base_url="https://generativelanguage.googleapis.com",
+    lifecycle="sync",
+    # Model travels in the path (:generateContent verb), unlike any
+    # other provider here — submit() formats {model}.
+    submit_path="/v1beta/models/{model}:generateContent",
+    # Single-request generateContent is synchronous; batchGenerateContent
+    # is a different API surface (not this contract). No documented
+    # poll/cancel exists for single requests.
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={},
+    idempotency="none",
+    docs="https://ai.google.dev/api/generate-content",
+)
+
+DEEPSEEK_CHAT_SPEC = EndpointSpec(
+    provider_key="deepseek",
+    base_url="https://api.deepseek.com",
+    lifecycle="sync",
+    submit_path="/chat/completions",
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={"stream": False},
+    idempotency="none",
+    docs="https://api-docs.deepseek.com/api/create-chat-completion",
+)
+
+XAI_CHAT_SPEC = EndpointSpec(
+    provider_key="xai",
+    base_url="https://api.x.ai",
+    lifecycle="sync",
+    submit_path="/v1/chat/completions",
+    # xAI documents a deferred-completion retrieval path, but only for
+    # requests explicitly made deferred — our requests are synchronous,
+    # so no retrieval applies. No documented cancel for completions.
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={"stream": False},
+    idempotency="none",
+    docs="https://docs.x.ai/developers/rest-api-reference/inference/chat-completions",
+)
+
 SPECS = {s.provider_key: s for s in
-         (OPENAI_RESPONSES_SPEC, ANTHROPIC_MESSAGES_SPEC)}
+         (OPENAI_RESPONSES_SPEC, ANTHROPIC_MESSAGES_SPEC,
+          GEMINI_GENERATE_SPEC, DEEPSEEK_CHAT_SPEC, XAI_CHAT_SPEC)}
 
 # HTTP status → (kind, charge_evidence). 4xx classes are NOT lumped:
 # validation/auth/forbidden/rate-limit rejections mean the request was
@@ -265,8 +325,12 @@ class RestRemoteProvider:
         return body, resp.headers
 
     async def submit(self, intent: SubmissionIntent) -> RemoteHandle:
+        # Paths without placeholders format to themselves; Gemini
+        # embeds the model in the URL ({model}:generateContent).
+        path = self.spec.submit_path.format(
+            model=intent.request.get("model_id") or "")
         body, headers = await self._call(
-            "POST", self.spec.submit_path, op="submit",
+            "POST", path, op="submit",
             json_body={**self._submit_body(intent.request),
                        **self.spec.submit_extra})
         try:
@@ -423,14 +487,129 @@ class AnthropicMessagesProvider(RestRemoteProvider):
                             detail=detail)
 
 
+# ---------- Google Gemini generateContent ----------
+
+class GeminiGenerateProvider(RestRemoteProvider):
+    """Gemini ``generateContent`` — synchronous, model in the URL.
+
+    submit → finished response (candidates + usageMetadata). The
+    documented response carries NO request/response id — remote_id is
+    deliberately None rather than a fabricated value.
+    query  → None always (no single-request retrieval)
+    cancel → UnsupportedRemoteOp
+    """
+
+    def _auth_headers(self) -> dict[str, str]:
+        # x-goog-api-key header per docs (never a ?key= URL param —
+        # query strings leak into proxy/server logs).
+        return {"x-goog-api-key": self._api_key,
+                "Content-Type": "application/json"}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "contents": [{"role": "user",
+                          "parts": [{"text": req.get("prompt") or ""}]}],
+            "generationConfig": {
+                "maxOutputTokens": int(req.get("max_output_tokens") or 1024)},
+        }
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        err = body.get("error")
+        if isinstance(err, dict):
+            # A documented error object inside the JSON body — billing
+            # outcome unverifiable from here → provider failure (hold).
+            raise RemoteError(
+                RemoteErrorKind.PROVIDER_FAILED,
+                f"provider reported error status={err.get('status')!r}",
+                charge_evidence="unknown")
+        candidates = body.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise RemoteError(
+                RemoteErrorKind.MALFORMED,
+                "generateContent response has no candidates — outcome unknown",
+                charge_evidence="unknown")
+        text = "".join(
+            p.get("text") or ""
+            for p in (candidates[0].get("content") or {}).get("parts") or [])
+        usage_meta = body.get("usageMetadata") or {}
+        detail = {
+            "transport_simulated": True,
+            "text": text,
+            "finish_reason": candidates[0].get("finishReason"),
+            "model_version": body.get("modelVersion"),
+            "no_remote_id": True,  # generateContent returns no response id
+            "usage": {"input_tokens": int(usage_meta.get("promptTokenCount") or 0),
+                      "output_tokens": int(usage_meta.get("candidatesTokenCount") or 0)},
+        }
+        return RemoteHandle(self.name, None, RemoteStatus.SUCCEEDED,
+                            detail=detail)
+
+
+# ---------- OpenAI-compatible chat completions (DeepSeek, xAI) ----------
+
+class OpenAICompatChatProvider(RestRemoteProvider):
+    """Shared shape for documented OpenAI-compatible chat-completions
+    APIs — DeepSeek ``/chat/completions`` and xAI ``/v1/chat/completions``.
+
+    Both are synchronous: submit → ``chat.completion`` object with an
+    ``id``, ``choices[0].message.content`` and ``usage``. Neither
+    documents retrieval or cancellation for a completed request —
+    compatible request shape does NOT imply identical lifecycle or
+    billing semantics; only documented operations are wired.
+    """
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json"}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        return {"model": req.get("model_id"),
+                "messages": [{"role": "user",
+                              "content": req.get("prompt") or ""}],
+                "max_tokens": int(req.get("max_output_tokens") or 1024)}
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            err = body.get("error")
+            if isinstance(err, dict):
+                raise RemoteError(
+                    RemoteErrorKind.PROVIDER_FAILED,
+                    f"provider reported error type={err.get('type')!r}",
+                    charge_evidence="unknown")
+            raise RemoteError(
+                RemoteErrorKind.MALFORMED,
+                "chat.completion response has no choices — outcome unknown",
+                charge_evidence="unknown")
+        message = choices[0].get("message") or {}
+        usage = body.get("usage") or {}
+        detail = {
+            "transport_simulated": True,
+            "text": message.get("content") or "",
+            "finish_reason": choices[0].get("finish_reason"),
+            "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
+                      "output_tokens": int(usage.get("completion_tokens") or 0)},
+        }
+        return RemoteHandle(self.name, body.get("id"),
+                            RemoteStatus.SUCCEEDED, detail=detail)
+
+
+_PROVIDER_CLS = {
+    "openai": (OpenAIResponsesProvider, OPENAI_RESPONSES_SPEC),
+    "anthropic": (AnthropicMessagesProvider, ANTHROPIC_MESSAGES_SPEC),
+    "google-gemini": (GeminiGenerateProvider, GEMINI_GENERATE_SPEC),
+    "deepseek": (OpenAICompatChatProvider, DEEPSEEK_CHAT_SPEC),
+    "xai": (OpenAICompatChatProvider, XAI_CHAT_SPEC),
+}
+
+
 def make_provider(provider_key: str, *, transport: Any,
                   api_key: str = "") -> RestRemoteProvider:
     """Construct the documented provider impl for a catalog key.
     Transport must be httpx.MockTransport (enforced)."""
-    if provider_key == "openai":
-        return OpenAIResponsesProvider(
-            OPENAI_RESPONSES_SPEC, transport=transport, api_key=api_key)
-    if provider_key == "anthropic":
-        return AnthropicMessagesProvider(
-            ANTHROPIC_MESSAGES_SPEC, transport=transport, api_key=api_key)
-    raise KeyError(f"no REST contract implementation for {provider_key!r}")
+    try:
+        cls, spec = _PROVIDER_CLS[provider_key]
+    except KeyError:
+        raise KeyError(
+            f"no REST contract implementation for {provider_key!r}") from None
+    return cls(spec, transport=transport, api_key=api_key)
