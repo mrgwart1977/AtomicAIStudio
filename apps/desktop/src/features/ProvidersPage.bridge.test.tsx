@@ -77,10 +77,18 @@ const CAPS = {
   ],
 };
 
+// Mutable per-test — watch polling status fixture.
+const watchFixture = {
+  enabled: false, status: "off" as string, reason: null as string | null,
+  folder_name: null as string | null, candidates: [] as unknown[],
+  last_poll: null as string | null, paused_reason: null as string | null,
+};
+
 function routedFetch(url: string) {
   if (url.startsWith("/api/providers/defaults")) return { defaults: {} };
   if (url === "/api/providers/testprov/capabilities") return CAPS;
   if (url === "/api/providers/testprov") return DETAIL;
+  if (url.startsWith("/api/providers/testprov/watch")) return watchFixture;
   if (url.startsWith("/api/providers")) return [SUMMARY];
   if (url === "/api/projects/p1") return { id: "p1", revision: 3 };
   throw new Error(`unexpected fetch ${url}`);
@@ -123,6 +131,10 @@ beforeEach(() => {
   });
   pickFile.mockResolvedValue("C:\\out\\result.png");
   for (const k of Object.keys(detailSettings)) delete detailSettings[k];
+  Object.assign(watchFixture, {
+    enabled: false, status: "off", reason: null, folder_name: null,
+    candidates: [], last_poll: null, paused_reason: null,
+  });
   writeText.mockResolvedValue(undefined);
   readText.mockResolvedValue("generated output text");
   (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
@@ -242,5 +254,45 @@ describe("ProvidersPage — ImportWatcher Stage A", () => {
     await screen.findByText(/provenance: user-reported external/);
     await waitFor(() => expect(screen.queryByText("out1.png")).toBeNull());
     expect(screen.getByText("out2.png")).toBeTruthy();
+  });
+
+  it("auto-check toggle sends audited bridge.watch.enable", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    await openProvider();
+    fireEvent.click(screen.getByText("Auto-check"));
+    await waitFor(() =>
+      expect(commitCommand).toHaveBeenCalledWith(
+        "p1", 3, "bridge.watch.enable", { provider_key: "testprov" }));
+  });
+
+  it("enabled polling shows status + candidates; stop sends disable", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    Object.assign(watchFixture, {
+      enabled: true, status: "ok", folder_name: "watch",
+      last_poll: "2026-01-01T00:00:00+00:00",
+      candidates: [
+        { name: "polled.png", path: "C:\\watch\\polled.png",
+          size: 512, mtime: 1, kind: "image" },
+      ],
+    });
+    await openProvider();
+    await screen.findByText(/Auto-checking about once a minute/);
+    await screen.findByText("polled.png");
+
+    fireEvent.click(screen.getByText("Stop auto-check"));
+    await waitFor(() =>
+      expect(commitCommand).toHaveBeenCalledWith(
+        "p1", 3, "bridge.watch.disable", { provider_key: "testprov" }));
+  });
+
+  it("degraded folder surfaces the reason honestly", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    Object.assign(watchFixture, {
+      enabled: true, status: "degraded",
+      reason: "designated folder is unavailable or no longer valid",
+    });
+    await openProvider();
+    await screen.findByText(/Auto-check paused/);
+    expect(screen.getByText(/unavailable or no longer valid/)).toBeTruthy();
   });
 });

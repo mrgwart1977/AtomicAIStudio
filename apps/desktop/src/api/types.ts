@@ -158,8 +158,22 @@ export interface WatchCandidate {
   kind: string;
 }
 
+/** C1.5 stage B — live polling state for one provider's watch folder.
+ * Candidates are in-memory only; enabling/disabling is an audited
+ * bridge.watch.enable/disable command, never a direct settings write. */
+export interface WatchStatus {
+  enabled: boolean;
+  status: "ok" | "degraded" | "off";
+  reason: string | null;
+  folder_name: string | null;
+  candidates: WatchCandidate[];
+  last_poll: string | null;
+  paused_reason: string | null;
+}
+
 export interface BridgeResult {
-  action: "prepare" | "launch" | "import" | "watch_scan";
+  action: "prepare" | "launch" | "import" | "watch_scan"
+    | "watch_enable" | "watch_disable";
   provider_key: string;
   strategy_id?: string;
   method?: string;

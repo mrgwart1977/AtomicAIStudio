@@ -7,6 +7,28 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C1.5 ImportWatcher Stage B — opt-in background polling: a single
+  app-level `ImportWatchService` runs one shared asyncio task (default
+  60 s interval, 30 s floor) over providers whose persisted
+  `settings.import_behavior == "poll"`. Opt-in only via audited
+  `bridge.watch.enable` / `bridge.watch.disable` commands (enable
+  requires a currently-valid designated folder). All filesystem work
+  runs on one worker thread off the event loop; one scan per provider in
+  flight — a still-running scan is never overlapped. Each poll
+  re-validates the ORIGINAL designated folder with the same Stage A
+  logic (symlink/junction/traversal rejection, containment, extension
+  gating, entry/candidate bounds); an invalid folder marks the watcher
+  `degraded` with a reason, stops scanning it, and only resumes when
+  that same folder validates again — never silently re-anchors. Polling
+  pauses under critical memory pressure and while a `gen.*` inference
+  job runs. Candidates live in a bounded in-memory cache (200/provider,
+  2000 global, newest-first eviction) surfaced read-only via
+  `GET /api/providers/{key}/watch` with per-project dedup; they can
+  never become assets without an explicit per-file `bridge.import`.
+  Polling ticks write no durable audit rows; enable/disable are audited
+  commands carrying no absolute paths. The service is cancelled at app
+  shutdown and waits for any in-flight scan (bounded) rather than
+  orphaning it. Still stat-only, non-recursive, and never auto-imports.
 - C1.5 ImportWatcher Stage A — manual candidate scanning: providers can
   designate an `import_dir` in settings; `bridge.watch.scan` performs an
   audited, bounded, non-recursive, stat-only enumeration (never reads

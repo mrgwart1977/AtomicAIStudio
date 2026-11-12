@@ -6,6 +6,7 @@ import { useApp } from "../stores/appStore";
 import type {
   BridgeResult, CommitResult, Project, ProviderCapabilitiesReport,
   ProviderDetail, ProviderSummary, ProviderTestResult, WatchCandidate,
+  WatchStatus,
 } from "../api/types";
 
 const CATEGORIES = [
@@ -68,9 +69,10 @@ export function ProvidersPage() {
   const [prepared, setPrepared] = useState<BridgeResult | null>(null);
   const [launchRes, setLaunchRes] = useState<CommitResult | null>(null);
   const [bridgeNote, setBridgeNote] = useState<string | null>(null);
-  // Stage A ImportWatcher — manual candidate scan only (no polling)
+  // ImportWatcher — manual candidate scan + optional background polling
   const [watchCandidates, setWatchCandidates] = useState<WatchCandidate[] | null>(null);
   const [watchTruncated, setWatchTruncated] = useState(false);
+  const [watchStatus, setWatchStatus] = useState<WatchStatus | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -94,6 +96,7 @@ export function ProvidersPage() {
     setLaunchRes(null);
     setBridgeNote(null);
     setWatchCandidates(null);
+    setWatchStatus(null);
     setBridgePrompt("");
     try {
       const [d, c] = await Promise.all([
@@ -105,8 +108,28 @@ export function ProvidersPage() {
       setCaps(c);
       setSettingsDraft(d.settings || {});
       setCredValues({});
+      void refreshWatch(key);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Stage B — polling state comes from the app's watch service (read-only).
+  // Candidates the service surfaces flow into the same list as a manual
+  // scan; importing is still a per-file audited command.
+  async function refreshWatch(key?: string) {
+    const k = key ?? selected?.key;
+    if (!k) return;
+    try {
+      const qs = currentProjectId ? `?project_id=${currentProjectId}` : "";
+      const st = await apiFetch<WatchStatus>(`/api/providers/${k}/watch${qs}`);
+      setWatchStatus(st);
+      if (st.enabled && st.candidates.length) {
+        setWatchCandidates(st.candidates);
+        setWatchTruncated(false);
+      }
+    } catch {
+      setWatchStatus(null);
     }
   }
 
@@ -305,6 +328,27 @@ export function ProvidersPage() {
     }
   }
 
+  async function onToggleWatch() {
+    if (!selected) return;
+    const cmd = watchStatus?.enabled
+      ? "bridge.watch.disable" : "bridge.watch.enable";
+    setBusy(true); setErr(null); setBridgeNote(null);
+    try {
+      await bridgeCommit(cmd, { provider_key: selected.key });
+      const d = await apiFetch<ProviderDetail>(`/api/providers/${selected.key}`);
+      setSelected(d);
+      setSettingsDraft(d.settings || {});
+      await refreshWatch();
+      setBridgeNote(watchStatus?.enabled
+        ? "Auto-check stopped — the folder will not be scanned again."
+        : "Auto-check on — the folder is polled about once a minute while the app runs. Nothing is imported automatically.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onImportCandidate(c: WatchCandidate) {
     if (!selected) return;
     setBusy(true); setErr(null); setBridgeNote(null);
@@ -315,6 +359,7 @@ export function ProvidersPage() {
         note: "watch folder candidate — origin user-reported, unverified",
       });
       setWatchCandidates((prev) => prev?.filter((x) => x.path !== c.path) ?? null);
+      void refreshWatch();
       setBridgeNote(`Imported ${c.name} (job ${res.job_id ?? res.bridge?.job_id ?? "?"}) — provenance: user-reported external.`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -627,6 +672,16 @@ export function ProvidersPage() {
                                   Check folder
                                 </button>
                                 <button
+                                  onClick={onToggleWatch}
+                                  disabled={busy}
+                                  className={`rounded-md border px-2 py-1 text-[10px] disabled:opacity-40 ${
+                                    watchStatus?.enabled
+                                      ? "border-amber/60 text-amber hover:bg-amber/10"
+                                      : "border-line text-muted hover:bg-card"}`}
+                                >
+                                  {watchStatus?.enabled ? "Stop auto-check" : "Auto-check"}
+                                </button>
+                                <button
                                   onClick={onDesignateFolder}
                                   disabled={busy}
                                   className="rounded-md border border-line px-2 py-1 text-[10px] text-muted hover:bg-card disabled:opacity-40"
@@ -644,6 +699,15 @@ export function ProvidersPage() {
                               </button>
                             )}
                           </div>
+                          {watchStatus?.enabled && (
+                            <p className={`mb-1 text-[10px] ${watchStatus.status === "degraded" ? "text-amber" : "text-faint"}`}>
+                              {watchStatus.status === "degraded"
+                                ? `Auto-check paused — ${watchStatus.reason ?? "folder unavailable"}`
+                                : watchStatus.paused_reason
+                                  ? `Auto-check idle — ${watchStatus.paused_reason}`
+                                  : `Auto-checking about once a minute${watchStatus.last_poll ? ` — last check ${new Date(watchStatus.last_poll).toLocaleTimeString()}` : " — first check pending"}`}
+                            </p>
+                          )}
                           {selected.settings?.import_dir ? (
                             <p className="mb-1 truncate text-[10px] text-faint" title={String(selected.settings.import_dir)}>
                               {String(selected.settings.import_dir)}
@@ -651,7 +715,8 @@ export function ProvidersPage() {
                           ) : (
                             <p className="mb-1 text-[10px] text-faint">
                               Pick a folder where you save this provider's outputs. Nothing is
-                              watched or scanned until you click "Check folder".
+                              watched or scanned until you click "Check folder" or turn on
+                              auto-check (off by default — still never auto-imports).
                             </p>
                           )}
                           {watchCandidates && (
