@@ -127,6 +127,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if swept["tmp_removed"] or staging_removed:
                     log.info("storage sweep: %d tmp blobs, %d staging dirs removed",
                              swept["tmp_removed"], staging_removed)
+                # C2.0b — rotate the billing session every app run so a
+                # 'session' budget scopes to this launch. The id is
+                # persisted for historical attribution of ledger rows.
+                from app.domain import spend as _spend
+                app.state.billing_session_id = _spend.rotate_billing_session(s)
                 s.commit()
 
             from app.domain import gpu_sched, hardware

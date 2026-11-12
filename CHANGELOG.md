@@ -7,14 +7,45 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2.0b Durable Spend Ledger + Budget Gates — migration `0008_c2` adds
+  `spend_budgets` (per-project/global caps over session|day|month|
+  lifetime scopes), `spend_reservations` (one open hold per remote job;
+  open → settled | released, terminal states trigger-locked), and
+  `spend_charges` (append-only; corrections are signed `adjustment`
+  rows; UPDATE/DELETE aborted by trigger). All money is INTEGER
+  micro-USD; USD crosses the boundary once via Decimal CEILING —
+  no float arithmetic in admission. `generate.text.cloud` commits now
+  run budget-check + reservation + job enqueue atomically inside a
+  scoped `BEGIN IMMEDIATE` transaction (spend commands only — all
+  other commits stay deferred); concurrent independent connections
+  serialize on SQLite's writer lock + busy_timeout. Ambiguous remote
+  outcomes hold the reservation open at worst-case exposure — release
+  only via confirmed no-charge paths or the audited `spend.reconcile`
+  command (confirmed_charge / confirmed_no_charge / still_unknown;
+  overage requires `accept_overage` and is recorded uncapped).
+  Environment is adapter-derived (`mock` → `simulated`), never client
+  input; simulated and live consumption are summed separately against
+  the same limits. `environment='live'` admission with no
+  `max_cost_usd` bound is refused. Billing session id rotates per app
+  run (persisted for attribution); day/month keys are UTC — a charge
+  inherits its reservation's accounting period so a later settlement
+  never migrates consumption. Exactly one primary settlement charge
+  per reservation is enforced by partial unique index (engine and
+  manual reconcile can never both land); adjustments unrestricted.
+  `project.delete` is refused while open spend reservations exist —
+  an orphaned hold would count against global budgets forever with no
+  reconcile route. Financial rows deliberately use snapshot (non-FK)
+  project/job references so history survives `project.delete` — the
+  documented exception to the FK rule. `GET .../spend/summary` reports
+  per-scope limits vs consumption, environments segregated.
 - C2.0a Mock Cloud Text Generation Lifecycle — the remote-job contract
   exercised end-to-end on `MockRemoteProvider` with ZERO network egress
   and zero credentials. `generate.text.cloud` (audited command,
   `provider_key` + explicit `execution_target: "cloud"` — local stays
   the default) is eligibility-gated on a documented T1 official-API
   text strategy; preview warns with the data-out surface, a clearly
-  labeled cost ESTIMATE (catalog `cost_table`, `checked` dates — no
-  spend ledger/budget enforcement exists yet and none is claimed), and
+  labeled cost ESTIMATE (catalog `cost_table`, `checked` dates —
+  enforced by the C2.0b ledger/budgets added above), and
   the mock/simulated limitation. `MockCloudTextAdapter`
   (`adapter_kind="mock"`, `execution_scope="remote"`) persists the
   submission intent to `progress_json` BEFORE submitting, records

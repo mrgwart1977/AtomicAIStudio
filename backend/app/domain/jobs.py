@@ -132,6 +132,16 @@ class JobEngine:
             # shutdown must not keep an attempt that reads as still
             # in-flight; it was interrupted, not completed.
             _attempts_mod.close_open_attempts(session, job, "interrupted")
+            if job.execution_scope == "remote":
+                # C2.0b — an interrupted remote job is an ambiguous
+                # outcome: its reservation stays OPEN at worst-case
+                # exposure until explicit user reconciliation.
+                from app.domain import spend as _spend
+                _spend.hold_note(
+                    session, job_id=job.id,
+                    note="interrupted by application stop — remote "
+                         "outcome unknown; exposure held pending "
+                         "reconciliation")
             if job.resumable:
                 job.status = "queued"
                 job.message = "re-queued after restart"
@@ -359,6 +369,13 @@ class JobEngine:
                         merged.update({k: v for k, v in detail.items()
                                        if k != "attempts"})
                         job.progress_json = merged
+                        # C2.0b — adapter spend markers settle/release/hold
+                        # the job's reservation in the same commit as the
+                        # progress update. Ambiguous outcomes hold the
+                        # reservation open; there is no silent release.
+                        if sa_action := detail.get("spend_action"):
+                            from app.domain import spend as _spend
+                            _spend.apply_action(s, job=job, action=sa_action)
                     if update.get("done"):
                         final_output = update.get("output")
                     s.commit()

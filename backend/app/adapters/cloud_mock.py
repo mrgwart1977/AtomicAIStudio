@@ -104,6 +104,13 @@ class MockCloudTextAdapter:
                               # read this as a provider refusal.
                               "remote_outcome": "ambiguous",
                               "reconcile_required": True,
+                              # C2.0b — reservation stays open: submit
+                              # outcome unknown → possible charge.
+                              "spend_action": {
+                                  "type": "hold",
+                                  "note": "submission outcome unknown — "
+                                          "remote may have accepted; "
+                                          "exposure held"},
                               "simulated": True}}
             raise RuntimeError(
                 f"remote submission outcome unknown ({exc}) — not resubmitted")
@@ -121,10 +128,30 @@ class MockCloudTextAdapter:
             try:
                 handle.check_cancel()
             except JobCancelled:
+                # User cancel → best-effort remote cancel. A CONFIRMED
+                # remote cancel releases the reservation (mock contract:
+                # cancelled-before-billing); an unreachable remote keeps
+                # it open — the charge state is then genuinely unknown.
+                released = False
                 try:
-                    await self._remote.cancel(rh.remote_id)
+                    released = bool(await self._remote.cancel(rh.remote_id))
                 except Exception:
-                    pass  # best-effort remote cancel; local cancel stands
+                    released = False
+                yield {"progress": 0.95, "message": "cancelled",
+                       "detail": {"remote_job_id": rh.remote_id,
+                                  "remote_outcome": ("cancelled" if released
+                                                     else "ambiguous"),
+                                  "spend_action": (
+                                      {"type": "release",
+                                       "reason": "remote cancel confirmed "
+                                                 "(mock: no charge)"}
+                                      if released else
+                                      {"type": "hold",
+                                       "note": "cancel requested but remote "
+                                               "cancel unconfirmed — "
+                                               "exposure held"}),
+                                  "reconcile_required": not released,
+                                  "simulated": True}}
                 raise
             h = await self._remote.query(rh.remote_id)
             if h is None:
@@ -133,6 +160,10 @@ class MockCloudTextAdapter:
                                   "remote_job_id": rh.remote_id,
                                   "remote_outcome": "ambiguous",
                                   "reconcile_required": True,
+                                  "spend_action": {
+                                      "type": "hold",
+                                      "note": "remote job unreachable — "
+                                              "outcome unknown; exposure held"},
                                   "simulated": True}}
                 raise RuntimeError(
                     f"remote job {rh.remote_id} unreachable — outcome "
@@ -141,16 +172,33 @@ class MockCloudTextAdapter:
                 break
             if h.status == RemoteStatus.FAILED:
                 # Confirmed provider-side failure — recorded distinctly
-                # from ambiguous outcomes before the job fails.
+                # from ambiguous outcomes before the job fails. Billing
+                # outcome is NOT thereby confirmed (provider may bill
+                # partial usage) — the reservation stays open.
                 yield {"progress": 0.9, "message": "remote job failed",
                        "detail": {"remote_status": "failed",
                                   "remote_job_id": rh.remote_id,
                                   "remote_outcome": "provider_failed",
+                                  "spend_action": {
+                                      "type": "hold",
+                                      "note": "provider reported failure — "
+                                              "billing outcome unknown; "
+                                              "exposure held"},
                                   "simulated": True}}
                 raise RuntimeError(
                     f"remote job {rh.remote_id} failed "
                     f"({(h.detail or {}).get('error', 'provider error')})")
             if h.status == RemoteStatus.CANCELLED:
+                # Provider-side cancel confirmed → confirmed no-charge.
+                yield {"progress": 0.95, "message": "remote job cancelled",
+                       "detail": {"remote_status": "cancelled",
+                                  "remote_job_id": rh.remote_id,
+                                  "remote_outcome": "cancelled",
+                                  "spend_action": {
+                                      "type": "release",
+                                      "reason": "remote job confirmed "
+                                                "cancelled (mock: no charge)"},
+                                  "simulated": True}}
                 raise JobCancelled()
             if waited >= _POLL_BUDGET_S:
                 yield {"progress": 0.9, "message": "poll timeout",
@@ -158,6 +206,10 @@ class MockCloudTextAdapter:
                                   "remote_job_id": rh.remote_id,
                                   "remote_outcome": "ambiguous",
                                   "reconcile_required": True,
+                                  "spend_action": {
+                                      "type": "hold",
+                                      "note": "poll timeout — remote may "
+                                              "still bill; exposure held"},
                                   "simulated": True}}
                 raise TimeoutError(
                     f"remote job {rh.remote_id} still running after "
@@ -190,7 +242,17 @@ class MockCloudTextAdapter:
             "detail": {"remote_job_id": rh.remote_id,
                        "remote_status": "succeeded", "simulated": True,
                        "cost_reported": h.cost_usd,
-                       "cost_is_simulated": True},
+                       "cost_is_simulated": True,
+                       # C2.0b — settle the reservation with a SIMULATED
+                       # charge (est amount, honestly labeled; never
+                       # presented as real provider billing).
+                       "spend_action": {
+                           "type": "settle",
+                           "usd": req.get("est_cost_usd"),
+                           "source": "simulated",
+                           "remote_job_id": rh.remote_id,
+                           "usage": {"simulated_units": 1,
+                                     "note": "mock usage — synthetic"}},},
             "output": {
                 "path": str(out_path), "sha256": sha, "kind": "text",
                 "name": f"cloud-mock-{handle.job_id[:8]}.txt",

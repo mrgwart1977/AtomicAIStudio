@@ -11,7 +11,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (DDL, JSON, Boolean, CheckConstraint, DateTime, Float,
+                        ForeignKey, Index, Integer, String, Text,
+                        UniqueConstraint, event, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -534,6 +536,152 @@ class AuditEvent(Base):
     event_type: Mapped[str] = mapped_column(String(60), index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------- C2.0b spend ledger ----------
+# Financial rows are the DOCUMENTED EXCEPTION to the project_id-FK rule:
+# spend history must survive `project.delete` (which cascades
+# generation_jobs) and remain attributable. project_id / job_id /
+# command_id / remote_job_id are therefore plain snapshot values —
+# isolation is still enforced at the query layer (values are present and
+# indexed). Internal link reservation_id stays a real FK because
+# reservations are never deleted.
+#
+# Monetary authority is INTEGER micro-USD (1 USD = 1_000_000 µUSD).
+# No floating-point arithmetic anywhere in admission or consumption.
+
+class SpendBudget(Base):
+    """A budget cap for one scope. project_id NULL = global (all cloud
+    spend); set = per-project. Scope semantics live in domain/spend.py —
+    day/month are UTC calendar periods, session is the app-run billing
+    session stored on ledger rows. Edits are forward-only and never
+    mutate open reservations."""
+
+    __tablename__ = "spend_budgets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(12))          # session|day|month|lifetime
+    limit_micro: Mapped[int] = mapped_column(Integer)       # CHECK >= 0
+    label: Mapped[str] = mapped_column(String(160), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __table_args__ = (
+        CheckConstraint("limit_micro >= 0", name="ck_budget_limit_nonneg"),
+        CheckConstraint("scope IN ('session','day','month','lifetime')",
+                        name="ck_budget_scope"),
+    )
+
+
+class SpendReservation(Base):
+    """One budget hold per remote job. open → settled | released (terminal,
+    trigger-locked). Ambiguous remote outcomes stay open — worst-case
+    exposure is held until explicit reconciliation."""
+
+    __tablename__ = "spend_reservations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)   # snapshot
+    command_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_key: Mapped[str] = mapped_column(String(60))
+    environment: Mapped[str] = mapped_column(String(12), default="live")       # live|simulated
+    status: Mapped[str] = mapped_column(String(10), default="open", index=True)  # open|settled|released
+    reserved_micro: Mapped[int] = mapped_column(Integer)    # CHECK >= 0 — ceiling of est, capped by max
+    remote_job_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    day_key: Mapped[str] = mapped_column(String(10), index=True)   # YYYY-MM-DD UTC
+    month_key: Mapped[str] = mapped_column(String(7), index=True)  # YYYY-MM UTC
+    reconcile_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reconcile_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        CheckConstraint("reserved_micro >= 0", name="ck_res_reserved_nonneg"),
+        CheckConstraint("status IN ('open','settled','released')", name="ck_res_status"),
+        CheckConstraint("environment IN ('live','simulated')", name="ck_res_env"),
+        CheckConstraint("reconcile_count >= 0", name="ck_res_reconcile_nonneg"),
+    )
+
+
+class SpendCharge(Base):
+    """Append-only settled/actual charges. Corrections are NEW rows with
+    source='adjustment' (may be negative — refunds); everything else is
+    nonnegative. usage_json carries counters only — never prompts or
+    secrets. UPDATE/DELETE are trigger-aborted."""
+
+    __tablename__ = "spend_charges"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    reservation_id: Mapped[str] = mapped_column(
+        ForeignKey("spend_reservations.id"), index=True)
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_key: Mapped[str] = mapped_column(String(60))
+    environment: Mapped[str] = mapped_column(String(12), default="live")
+    source: Mapped[str] = mapped_column(String(20))         # provider_reported|estimate_at_settle|reconciled|simulated|adjustment
+    micro: Mapped[int] = mapped_column(Integer)             # >=0 unless source='adjustment'
+    overage_micro: Mapped[int] = mapped_column(Integer, default=0)  # charged above reserved
+    usage_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    remote_job_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    day_key: Mapped[str] = mapped_column(String(10), index=True)
+    month_key: Mapped[str] = mapped_column(String(7), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        CheckConstraint("environment IN ('live','simulated')", name="ck_chg_env"),
+        CheckConstraint("source IN ('provider_reported','estimate_at_settle',"
+                        "'reconciled','simulated','adjustment')", name="ck_chg_source"),
+        # Refunds/credits are negative ONLY via explicit adjustment rows.
+        CheckConstraint("micro >= 0 OR source = 'adjustment'",
+                        name="ck_chg_micro_sign"),
+        CheckConstraint("overage_micro >= 0", name="ck_chg_overage_nonneg"),
+    )
+
+
+# Consumption indexes — sums are always (environment, <period key>)
+# filtered; keep them composite so every scope query is covered.
+Index("ix_res_scope", SpendReservation.environment, SpendReservation.status,
+      SpendReservation.project_id)
+Index("ix_res_day", SpendReservation.environment, SpendReservation.status,
+      SpendReservation.day_key)
+Index("ix_res_month", SpendReservation.environment, SpendReservation.status,
+      SpendReservation.month_key)
+Index("ix_res_session", SpendReservation.environment, SpendReservation.status,
+      SpendReservation.session_id)
+Index("ix_chg_project", SpendCharge.environment, SpendCharge.project_id)
+Index("ix_chg_day", SpendCharge.environment, SpendCharge.day_key)
+Index("ix_chg_month", SpendCharge.environment, SpendCharge.month_key)
+Index("ix_chg_session", SpendCharge.environment, SpendCharge.session_id)
+# One spend budget per scope per target — NULL project_id (global) needs
+# a separate partial unique since SQL NULLs never compare equal.
+Index("uq_spend_budget_global", SpendBudget.scope, unique=True,
+      sqlite_where=SpendBudget.project_id.is_(None))
+Index("uq_spend_budget_project", SpendBudget.project_id, SpendBudget.scope,
+      unique=True, sqlite_where=SpendBudget.project_id.isnot(None))
+# Exactly ONE primary settlement charge per reservation, regardless of
+# source — a simulated engine settle and a manual 'reconciled' settle
+# can never both exist. Adjustment/refund rows are unrestricted.
+Index("uq_chg_res_primary", SpendCharge.reservation_id, unique=True,
+      sqlite_where=text("spend_charges.source <> 'adjustment'"))
+
+# Hard DB-level guards (also emitted by migration 0008 for existing DBs):
+# terminal reservation states never transition; charges are append-only.
+for _tbl, _ddl in (
+    (SpendReservation.__table__,
+     "CREATE TRIGGER trg_spend_res_terminal BEFORE UPDATE ON spend_reservations"
+     " WHEN OLD.status <> 'open' AND NEW.status <> OLD.status"
+     " BEGIN SELECT RAISE(ABORT, 'settled/released reservations are terminal'); END"),
+    (SpendCharge.__table__,
+     "CREATE TRIGGER trg_spend_chg_no_update BEFORE UPDATE ON spend_charges"
+     " BEGIN SELECT RAISE(ABORT, 'spend charges are append-only'); END"),
+    (SpendCharge.__table__,
+     "CREATE TRIGGER trg_spend_chg_no_delete BEFORE DELETE ON spend_charges"
+     " BEGIN SELECT RAISE(ABORT, 'spend charges are append-only'); END"),
+):
+    event.listen(_tbl, "after_create", DDL(_ddl))
 
 
 project_children = relationship  # silence unused-import linters for future relationships

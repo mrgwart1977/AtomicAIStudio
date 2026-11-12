@@ -490,10 +490,26 @@ def preview_command(
         raise HTTPException(exc.status_code, exc.detail) from exc
 
 
+def _spend_isolation(body: CommandCommitRequest, db: Session = Depends(get_db)):
+    """Scoped locking for spend-guarded commands (C2.0b): these commits
+    check-then-act on financial state, so the whole transaction must
+    BEGIN IMMEDIATE — the write lock is held before the first SELECT,
+    and concurrent admissions serialize on SQLite's single-writer lock
+    plus busy_timeout. Resolved BEFORE get_project so the project's
+    own SELECT lands inside the immediate transaction. All other
+    commands keep the default deferred behavior. If a transaction is
+    somehow already open, sqlite raises rather than silently degrading
+    to a racy deferred read."""
+    if body.command_type in cmd.SPEND_GUARDED_COMMANDS:
+        from sqlalchemy import text as _text
+        db.execute(_text("BEGIN IMMEDIATE"))
+
+
 @api_router.post("/api/projects/{project_id}/commands/commit")
 async def commit_command(
     request: Request,
     body: CommandCommitRequest,
+    _spend_lock: None = Depends(_spend_isolation),
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ):
@@ -527,6 +543,23 @@ async def commit_command(
         "warnings": result.get("warnings", []),
         "bridge": result.get("bridge"),
     }
+
+
+@api_router.get("/api/projects/{project_id}/spend/summary")
+def spend_summary(
+    request: Request,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+    environment: str = Query("live"),
+):
+    """Per-scope consumption vs budget limits. environment is a
+    reporting filter — 'simulated' rows never mix into 'live' sums."""
+    from app.domain import spend as _spend
+    if environment not in ("live", "simulated"):
+        raise HTTPException(422, "environment must be live or simulated")
+    return _spend.summary(db, project_id=project.id,
+                          environment=environment,
+                          app_state=request.app.state)
 
 
 @api_router.get("/api/projects/{project_id}/commands", response_model=list[CommandOut])
