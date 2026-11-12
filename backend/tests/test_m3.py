@@ -546,7 +546,8 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
     assert job is not None
     assert job["project_id"] is None  # app-level job
     assert job["model_key"] == "sd15.q8"
-    assert job["status"] == "succeeded", job
+    assert job["status"] == "succeeded", \
+        f"job failed: {job.get('error') or job.get('error_message') or job}"
 
     models = {m["key"]: m for m in client.get("/api/models").json()}
     assert models["sd15.q8"]["install"]["status"] == "installed"
