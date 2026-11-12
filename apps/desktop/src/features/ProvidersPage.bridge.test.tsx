@@ -1,7 +1,7 @@
 // C1.5 assisted-workflow UI tests — capability display honesty, staleness
 // warnings, exact-destination display, and the mocked end-to-end T2 flow.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { ProvidersPage } from "./ProvidersPage";
 
@@ -283,6 +283,37 @@ describe("ProvidersPage — ImportWatcher Stage A", () => {
     await waitFor(() =>
       expect(commitCommand).toHaveBeenCalledWith(
         "p1", 3, "bridge.watch.disable", { provider_key: "testprov" }));
+  });
+
+  it("auto-refresh polls watch status ~12s while enabled — never scans", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    Object.assign(watchFixture, { enabled: true, status: "ok" });
+    const spy = vi.spyOn(globalThis, "setInterval");
+    await openProvider();
+    // exactly one refresh interval in the 10–15s band once auto-check is on
+    const ticks = spy.mock.calls
+      .map((c) => ({ cb: c[0] as () => void, ms: c[1] as number }))
+      .filter((c) => c.ms >= 10000 && c.ms <= 15000);
+    expect(ticks.length).toBe(1);
+    apiFetch.mockClear();
+    await act(async () => { ticks[0].cb(); });
+    const gets = apiFetch.mock.calls.filter(
+      (c) => String(c[0]).includes("/watch"));
+    expect(gets.length).toBe(1);
+    // read-only GET — the refresh must never trigger a scan command
+    expect(commitCommand).not.toHaveBeenCalledWith(
+      "p1", 3, "bridge.watch.scan", expect.anything());
+    spy.mockRestore();
+  });
+
+  it("no background refresh while auto-check is off", async () => {
+    detailSettings.import_dir = "C:\\watch";
+    const spy = vi.spyOn(globalThis, "setInterval");
+    await openProvider();
+    const ticks = spy.mock.calls.filter(
+      (c) => typeof c[1] === "number" && c[1] >= 10000 && c[1] <= 15000);
+    expect(ticks.length).toBe(0);
+    spy.mockRestore();
   });
 
   it("degraded folder surfaces the reason honestly", async () => {

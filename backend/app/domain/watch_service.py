@@ -4,8 +4,7 @@ One shared asyncio task polls every provider whose persisted
 ``settings.import_behavior == "poll"`` (set only via the audited
 ``bridge.watch.enable`` command — off by default). All filesystem work
 runs on a single worker thread, never on the FastAPI event loop, and one
-scan per provider may be in flight at a time (fire-and-collect: a tick
-never overlaps a still-running previous scan).
+scan per provider may be in flight at a time.
 
 Safety invariants (all Stage A logic reused):
 - validate_watch_folder gates EVERY poll — symlink/junction/traversal
@@ -15,17 +14,34 @@ Safety invariants (all Stage A logic reused):
 - Folder invalid/missing/inaccessible → ``degraded`` + skip; it resumes
   only when the ORIGINAL designated folder validates again — the service
   never follows a moved or replaced path.
+- Each watch session carries a (generation, fingerprint) pair — the
+  resolved designated folder. A scan scheduled for an older generation
+  or a different folder is discarded at collect time and can never
+  publish into a newer session's cache. Disabled or reconfigured
+  providers' in-flight scans are moved to ``_orphans`` and tracked to
+  completion even though their results are dead.
 - Pauses under critical memory pressure (resources.pressure_state) and
   while a generation job is running.
 - Candidates are in-memory only and can never become assets without an
   explicit per-file bridge.import — polling changes nothing on disk.
+
+Shutdown: entry/candidate bounds limit WORK ITEMS, not wall-clock — a
+wedged filesystem syscall (e.g. a dead network mount) is beyond
+cooperative cancellation. stop() therefore waits a bounded grace for
+in-flight scans, cancels queued ones (cancel_futures), and lets any
+still-running syscall finish on the worker thread — which is spawned
+daemon-side so it can never wedge interpreter exit. This is the
+practical bound short of process isolation; per Stage A the watched
+surface is one user-designated directory, so the residual risk is a
+stalled local stat, not runaway work.
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -37,39 +53,57 @@ POLL_INTERVAL_S = 60.0
 POLL_MIN_INTERVAL_S = 30.0
 CACHE_MAX_PER_PROVIDER = 200
 CACHE_MAX_TOTAL = 2000
+SHUTDOWN_SCAN_GRACE_S = 5.0
 
 _OFF = {"enabled": False, "status": "off", "reason": None,
         "folder_name": None, "candidates": {}, "last_poll": None,
-        "paused_reason": None}
+        "paused_reason": None, "fingerprint": None, "gen": 0}
 
 
 class ImportWatchService:
     def __init__(self, session_factory, *,
                  interval_s: float = POLL_INTERVAL_S,
+                 shutdown_grace_s: float = SHUTDOWN_SCAN_GRACE_S,
                  pressure: Callable[[], str] = resources.pressure_state):
         self._sf = session_factory
         self._interval = max(float(interval_s), POLL_MIN_INTERVAL_S)
+        self._grace = float(shutdown_grace_s)
         self._pressure = pressure
         self._stop = asyncio.Event()
+        self._stopping = False
         self._task: asyncio.Task | None = None
         # One worker thread for ALL filesystem access — scans serialize by
-        # construction, so two scans can never run concurrently.
+        # construction, so two scans can never run concurrently. Executor
+        # workers inherit the daemon flag of the thread that first submits,
+        # so the pool is warmed from a daemon thread: a permanently stalled
+        # filesystem syscall can then never wedge interpreter exit.
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="watch-scan")
-        self._pending: dict[str, asyncio.Future] = {}
+        threading.Thread(
+            target=lambda: self._executor.submit(lambda: None).result(),
+            name="watch-scan-warm", daemon=True).start()
+        # provider_key -> (future, gen, fingerprint). Results publish only
+        # if gen+fingerprint still match the live state at collect time.
+        self._pending: dict[str, tuple[Any, int, str]] = {}
+        # Scans orphaned by disable/reconfigure — tracked to completion
+        # even though their results are never published.
+        self._orphans: set[Any] = set()
         self._state: dict[str, dict] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
+            self._stopping = False
             self._stop.clear()
             self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
-        """Cancel the loop and let any in-flight filesystem op finish on
-        its thread — an asyncio cancel cannot stop a running os call, so
-        we wait it out (bounded by WATCH_MAX_ENTRIES) rather than leak it."""
+        """Cancel the loop, wait a bounded grace for in-flight scans, then
+        cancel anything still queued. An asyncio cancel cannot stop a
+        running os call — scans that outlive the grace finish on the
+        daemon worker with results discarded."""
+        self._stopping = True
         self._stop.set()
         if self._task is not None:
             self._task.cancel()
@@ -77,10 +111,15 @@ class ImportWatchService:
                 await self._task
             except BaseException:
                 # CancelledError is BaseException on modern Python — a
-                # cancelled task is the EXPECTED outcome here, not a failure.
+                # cancelled task is the EXPECTED outcome here.
                 pass
             self._task = None
-        self._executor.shutdown(wait=True)
+        inflight = ([f for f, _g, _p in self._pending.values()]
+                    + list(self._orphans))
+        self._pending.clear()
+        if inflight:
+            wait(inflight, timeout=self._grace)
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     # ---- status / candidate surface --------------------------------------
 
@@ -88,11 +127,21 @@ class ImportWatchService:
         st = self._state.get(provider_key)
         if st is None:
             return dict(_OFF, candidates=[])
-        return {**st, "candidates": list(st["candidates"].values())}
+        out = {**st, "candidates": list(st["candidates"].values())}
+        out.pop("fingerprint", None)
+        out.pop("gen", None)
+        return out
+
+    def _orphan_pending(self, key: str) -> None:
+        pend = self._pending.pop(key, None)
+        if pend is not None:
+            fut = pend[0]
+            self._orphans.add(fut)
+            fut.add_done_callback(self._orphans.discard)
 
     def _drop(self, key: str) -> None:
         self._state.pop(key, None)
-        self._pending.pop(key, None)
+        self._orphan_pending(key)
 
     # ---- poll loop --------------------------------------------------------
 
@@ -132,7 +181,8 @@ class ImportWatchService:
                     continue
                 live.add(key)
                 st = self._state.setdefault(
-                    key, {**_OFF, "enabled": True, "candidates": {}})
+                    key, {**_OFF, "enabled": True, "candidates": {},
+                          "gen": 1, "fingerprint": None})
                 st["enabled"] = True
                 st["paused_reason"] = paused
                 if paused is not None:
@@ -144,12 +194,22 @@ class ImportWatchService:
                                      "or no longer valid",
                               folder_name=None)
                     continue
+                fp = str(folder)
+                if st["fingerprint"] != fp:
+                    # Folder (re)designated — everything cached or
+                    # in-flight under the old folder is void.
+                    self._orphan_pending(key)
+                    st.update(fingerprint=fp, candidates={},
+                              gen=st["gen"] + 1)
                 st["folder_name"] = folder.name
-                fut = self._pending.get(key)
-                if fut is not None:
+                pend = self._pending.get(key)
+                if pend is not None:
+                    fut, gen, pfp = pend
                     if not fut.done():
-                        continue  # previous scan still running — no overlap
+                        continue        # scan still running — no overlap
                     self._pending.pop(key)
+                    if gen != st["gen"] or pfp != fp:
+                        continue        # stale session — result discarded
                     try:
                         cands, trunc = fut.result()
                         items = {c["path"]: c for c in cands}
@@ -170,9 +230,13 @@ class ImportWatchService:
                 # A plain concurrent future is used (not run_in_executor):
                 # it is never awaited, only polled — so it is loop-agnostic
                 # and thread-safe across ticks.
+                if self._stopping:
+                    continue
                 ext_map = bridge.watch_eligible_exts(prov)
-                self._pending[key] = self._executor.submit(
-                    bridge.scan_watch_folder, folder, ext_map, set())
+                self._pending[key] = (
+                    self._executor.submit(
+                        bridge.scan_watch_folder, folder, ext_map, set()),
+                    st["gen"], fp)
             for key in list(self._state):
                 if key not in live:
                     self._drop(key)

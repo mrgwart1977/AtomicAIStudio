@@ -129,9 +129,27 @@ export function ProvidersPage() {
         setWatchTruncated(false);
       }
     } catch {
-      setWatchStatus(null);
+      // Transient backend unavailability — keep the last known status.
+      // The 12s refresh tick retries slowly rather than storming, and
+      // the next successful poll re-syncs state.
     }
   }
+
+  // Stage B — light status refresh while auto-check is enabled and this
+  // page is mounted. Read-only GET only: it NEVER schedules a scan (the
+  // service owns the poll loop; this just mirrors its state). One
+  // request in flight at most; stops on unmount or disable.
+  useEffect(() => {
+    if (!selected?.key || !watchStatus?.enabled) return;
+    let cancelled = false, inFlight = false;
+    const t = setInterval(() => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      void refreshWatch().finally(() => { inFlight = false; });
+    }, 12000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.key, watchStatus?.enabled]);
 
   // Every bridge mutation is an audited project command — a fresh revision is
   // fetched per call so stale store state can't cause a 409.

@@ -421,6 +421,164 @@ class TestWatchEndpoint:
         assert len(st2["candidates"]) == 1
 
 
+class _ScanStub:
+    """Controllable stand-in for bridge.scan_watch_folder. Records every
+    call, optionally blocks on a per-folder gate, and returns queued
+    results so a test can distinguish an orphan's result from a fresh
+    session's."""
+
+    def __init__(self):
+        from collections import deque
+        self.calls: list[str] = []
+        self.gates: dict[str, threading.Event] = {}
+        self.results: deque = deque()
+        self.started = threading.Event()
+
+    def __call__(self, folder, ext_map, imported):
+        self.calls.append(str(folder))
+        self.started.set()
+        gate = self.gates.get(str(folder))
+        if gate is not None:
+            gate.wait(60)
+        if len(self.results) > 1:
+            return self.results.popleft()
+        return self.results[0] if self.results else ([], False)
+
+
+def _cand(folder: Path, name: str, mtime: float = 1.0) -> dict:
+    return {"name": name, "path": str(folder / name),
+            "size": 1, "mtime": mtime, "kind": "image"}
+
+
+class TestDisableReenableRace:
+    """A scan that outlives its watch session must never publish. The
+    service orphans in-flight scans on disable/reconfigure, tracks them
+    to completion, and tags every pending scan with the (gen, folder
+    fingerprint) it was scheduled under — a stale result is discarded at
+    collect time."""
+
+    def test_disable_mid_scan_orphans_result(self, client, tmp_path,
+                                             monkeypatch):
+        stub = _ScanStub()
+        stub.gates[str(tmp_path.resolve())] = threading.Event()
+        stub.results.append(([_cand(tmp_path, "old.png")], False))
+        stub.results.append(([_cand(tmp_path, "new.png")], False))
+        monkeypatch.setattr(bridge, "scan_watch_folder", stub)
+        _configure(client, folder=tmp_path, behavior="poll")
+        svc = ImportWatchService(_sf(client))
+        _tick(svc)
+        assert stub.started.wait(2)                    # scan 1 in flight
+        _configure(client, folder=tmp_path, behavior="manual")
+        _tick(svc)                                     # disable → orphan
+        assert svc.status("midjourney")["status"] == "off"
+        assert len(svc._orphans) == 1                  # still tracked
+        _configure(client, folder=tmp_path, behavior="poll")
+        _tick(svc)                                     # re-enable → gen 2
+        stub.gates[str(tmp_path.resolve())].set()      # release scan 1
+        _collect(svc)                                  # scan 2 + collect
+        st = svc.status("midjourney")
+        assert st["status"] == "ok"
+        # orphan + fresh scan ran (a third may be scheduled by the collect
+        # tick — normal polling); ONLY the fresh session's result was
+        # published — the orphan's "old.png" was discarded.
+        assert stub.calls.count(str(tmp_path.resolve())) >= 2
+        assert {c["name"] for c in st["candidates"]} == {"new.png"}
+        deadline = time.time() + 2
+        while svc._orphans and time.time() < deadline:
+            time.sleep(0.01)
+        assert not svc._orphans                        # fully drained
+
+    def test_folder_change_invalidates_inflight_and_cache(self, client,
+                                                          tmp_path,
+                                                          monkeypatch):
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        stub = _ScanStub()
+        stub.gates[str(dir_a.resolve())] = threading.Event()
+        stub.results.append(([_cand(dir_a, "from_a.png")], False))
+        stub.results.append(([_cand(dir_b, "from_b.png")], False))
+        monkeypatch.setattr(bridge, "scan_watch_folder", stub)
+        _configure(client, folder=dir_a, behavior="poll")
+        svc = ImportWatchService(_sf(client))
+        _tick(svc)
+        assert stub.started.wait(2)
+        # Redesignate to B while the A scan is blocked — A's candidates
+        # and in-flight scan are now void, even though it will complete.
+        _configure(client, folder=dir_b, behavior="poll")
+        _tick(svc)
+        stub.gates[str(dir_a.resolve())].set()
+        _collect(svc)
+        st = svc.status("midjourney")
+        assert st["status"] == "ok"
+        assert st["folder_name"] == dir_b.name
+        assert {c["name"] for c in st["candidates"]} == {"from_b.png"}
+        assert not any("from_a" in c["path"] for c in st["candidates"])
+
+    def test_no_overlap_across_disable_reenable(self, client, tmp_path,
+                                                monkeypatch):
+        order: list[str] = []
+
+        def serial(folder, *_a):
+            order.append(f"start:{len(order)}")
+            time.sleep(0.05)
+            order.append(f"end:{len(order)}")
+            return [], False
+
+        monkeypatch.setattr(bridge, "scan_watch_folder", serial)
+        _configure(client, folder=tmp_path, behavior="poll")
+        svc = ImportWatchService(_sf(client))
+        _tick(svc)
+        _configure(client, folder=tmp_path, behavior="manual")
+        _tick(svc)                                     # orphan mid-run
+        _configure(client, folder=tmp_path, behavior="poll")
+        _tick(svc)                                     # schedule fresh
+        deadline = time.time() + 5
+        while len(order) < 4 and time.time() < deadline:
+            time.sleep(0.01)
+        _tick(svc)
+        # single-worker executor → strictly serialized, never concurrent
+        assert order[0].startswith("start") and order[1].startswith("end")
+        assert order[2].startswith("start")
+
+    def test_bounded_shutdown_on_stalled_scan(self, client, tmp_path,
+                                              monkeypatch):
+        never = threading.Event()                      # never released
+
+        def stalled(*_a, **_k):
+            never.wait(60)                             # simulates a wedged
+            return [], False                           # filesystem call
+
+        monkeypatch.setattr(bridge, "scan_watch_folder", stalled)
+        _configure(client, folder=tmp_path, behavior="poll")
+        svc = ImportWatchService(_sf(client), shutdown_grace_s=0.5)
+        _tick(svc)
+        deadline = time.time() + 2
+        while not svc._pending and time.time() < deadline:
+            time.sleep(0.01)
+        t0 = time.monotonic()
+        asyncio.run(svc.stop())
+        elapsed = time.monotonic() - t0
+        # bounded grace — stop() does not wait out a wedged syscall
+        assert elapsed < 4
+        assert svc._pending == {}
+        # after stop, a tick schedules nothing new
+        asyncio.run(svc._tick())
+        assert svc._pending == {}
+
+    def test_worker_thread_is_daemon(self, client, tmp_path):
+        _configure(client, folder=tmp_path, behavior="poll")
+        svc = ImportWatchService(_sf(client))
+        _collect(svc)
+        deadline = time.time() + 2
+        workers = [t for t in threading.enumerate()
+                   if t.name.startswith("watch-scan")]
+        while not workers and time.time() < deadline:
+            time.sleep(0.01)
+            workers = [t for t in threading.enumerate()
+                       if t.name.startswith("watch-scan")]
+        assert workers and all(t.daemon for t in workers)
+
+
 class TestLifecycle:
     def test_start_stop_cancels_task(self, client):
         svc = ImportWatchService(_sf(client), interval_s=POLL_MIN_INTERVAL_S)

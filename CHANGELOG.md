@@ -26,9 +26,19 @@ this project uses semver once public releases begin.
   `GET /api/providers/{key}/watch` with per-project dedup; they can
   never become assets without an explicit per-file `bridge.import`.
   Polling ticks write no durable audit rows; enable/disable are audited
-  commands carrying no absolute paths. The service is cancelled at app
-  shutdown and waits for any in-flight scan (bounded) rather than
-  orphaning it. Still stat-only, non-recursive, and never auto-imports.
+  commands carrying no absolute paths. Every pending scan is tagged
+  with its session's (generation, folder fingerprint): disable,
+  re-enable, or folder redesignation orphans the in-flight scan —
+  tracked to completion but its results are discarded and can never
+  publish into a newer session's cache. Shutdown cancels the task,
+  waits a bounded grace (5 s) for in-flight scans, cancels queued work,
+  and lets any wedged filesystem call finish on the daemon worker
+  thread — entry/candidate bounds limit work items, not wall-clock,
+  and a stalled syscall is documented as beyond cooperative
+  cancellation. The Providers page refreshes watch status every ~12 s
+  while auto-check is enabled (read-only GET, one request in flight,
+  never triggers a scan, silent on transient backend errors). Still
+  stat-only, non-recursive, and never auto-imports.
 - C1.5 ImportWatcher Stage A — manual candidate scanning: providers can
   designate an `import_dir` in settings; `bridge.watch.scan` performs an
   audited, bounded, non-recursive, stat-only enumeration (never reads
