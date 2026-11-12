@@ -77,7 +77,16 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
   job_model: string | null;
   pricing_model: string | null;
   strategies: ProviderStrategy[];
-  models: Array<{ id: string; capability: string }>;
+  models: Array<{
+    id: string;
+    capability: string;
+    cost_table?: {
+      input_per_mtok?: number;
+      output_per_mtok?: number;
+      currency?: string;
+      checked?: string;
+    } | null;
+  }>;
   docs_url: string | null;
   tos_url: string | null;
   privacy_summary: string;
@@ -229,6 +238,9 @@ export interface Job {
   result_json?: Record<string, unknown> | null;
   progress_json?: JobProgressDetail | null;
   cancel_requested?: boolean;
+  attempt_no?: number;
+  execution_scope?: string; // "local" | "remote"
+  recovery_state?: string | null; // e.g. "needs_reconciliation"
   created_at: string;
   completed_at: string | null;
 }
@@ -240,6 +252,22 @@ export interface JobProgressDetail {
   rate_bps: number;
   eta_seconds: number | null;
   elapsed_seconds: number;
+  // ---- remote lifecycle fields (C2 cloud jobs; absent on local jobs) ----
+  remote_intent?: {
+    provider_key?: string;
+    model_id?: string | null;
+    lifecycle?: string; // "sync" | "async_poll" | "mock"
+    simulated?: boolean;
+    data_out?: string;
+  } | null;
+  remote_job_id?: string | null;   // provider op id — synthetic under simulation
+  remote_status?: string | null;   // last observed provider status
+  remote_outcome?: string | null;  // succeeded | provider_rejected | ambiguous | ...
+  reconcile_required?: boolean;
+  transport_simulated?: boolean;
+  remote_note?: string | null;
+  remote_polls?: number;
+  usage_json?: Record<string, unknown> | null;
 }
 
 export interface Asset {
@@ -598,4 +626,44 @@ export interface WsEvent {
   resource_id: string | null;
   ts: number;
   payload: Record<string, unknown>;
+}
+
+// ---------- cloud spend reporting (C2.0d; read-only views) ----------
+
+export interface SpendScopeRow {
+  scope: "session" | "day" | "month" | "lifetime";
+  limit_micro: number | null;
+  consumed_micro: number;
+  open_micro: number;    // reserved exposure (open holds)
+  charged_micro: number; // settled/recorded charges
+}
+
+export interface SpendBudgetRow {
+  id: string;
+  target: "project" | "global";
+  scope: string;
+  limit_micro: number;
+  label: string;
+}
+
+export interface SpendSummary {
+  environment: "live" | "simulated";
+  session_id: string;
+  scopes: SpendScopeRow[];
+  budgets: SpendBudgetRow[];
+}
+
+export interface SpendReservation {
+  id: string;
+  job_id: string;
+  command_id: string | null;
+  project_id: string;
+  provider_key: string;
+  environment: "live" | "simulated";
+  status: "open" | "settled" | "released";
+  reserved_micro: number;
+  remote_job_id: string | null;
+  reconcile_count: number;
+  reconcile_note: string | null;
+  created_at: string | null;
 }

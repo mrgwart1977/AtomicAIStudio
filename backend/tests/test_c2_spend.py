@@ -731,3 +731,52 @@ def test_project_delete_refused_with_open_reservation(client, monkeypatch):
                            "expected_revision": _rev(client, pid),
                            "idempotency_key": f"delok-{next(_KEYS)}"})
     assert r3.status_code == 200, r3.text
+
+
+# ---------- read-only reporting surface (C2.0d UI) ----------
+
+def test_summary_lists_budget_rows_with_target(client):
+    """The UI needs to distinguish a project cap from the global
+    baseline it overrides — summary carries raw budget rows."""
+    pid = make_project(client)["id"]
+    assert _set_budget(client, pid, "day", 1.5).status_code == 200
+    assert _set_budget(client, pid, "month", 9.0,
+                       target="global").status_code == 200
+    s = client.get(f"/api/projects/{pid}/spend/summary"
+                   "?environment=simulated").json()
+    by_key = {(b["target"], b["scope"]): b for b in s["budgets"]}
+    assert by_key[("project", "day")]["limit_micro"] == 1_500_000
+    assert by_key[("global", "month")]["limit_micro"] == 9_000_000
+    # Effective limits: project day overrides nothing global, global
+    # month applies as baseline.
+    scopes = {r["scope"]: r for r in s["scopes"]}
+    assert scopes["day"]["limit_micro"] == 1_500_000
+    assert scopes["month"]["limit_micro"] == 9_000_000
+
+
+def test_reservations_endpoint_open_first_and_fields(client, monkeypatch):
+    """Read-only reservation listing for the reconciliation queue —
+    open holds sort first and carry job/provider/exposure."""
+    pid, job_id = _held_job(client, monkeypatch)     # ambiguous → open hold
+    rows = client.get(f"/api/projects/{pid}/spend/reservations").json()
+    assert rows and rows[0]["job_id"] == job_id
+    row = rows[0]
+    assert row["status"] == "open"
+    assert row["provider_key"] == "google-gemini"
+    assert row["environment"] == "simulated"
+    assert row["reserved_micro"] > 0
+    # Reconcile → row becomes terminal but stays listed.
+    _commit(client, pid, "spend.reconcile",
+            {"job_id": job_id, "outcome": "confirmed_no_charge"})
+    rows2 = client.get(f"/api/projects/{pid}/spend/reservations").json()
+    assert rows2[0]["status"] == "released"
+
+
+def test_reservations_endpoint_project_isolated(client):
+    """Reservations never leak across projects."""
+    pid1 = make_project(client)["id"]
+    pid2 = make_project(client)["id"]
+    r = _cloud(client, pid1)
+    wait_for_job(client, pid1, r.json()["job_id"])
+    rows2 = client.get(f"/api/projects/{pid2}/spend/reservations").json()
+    assert rows2 == []

@@ -7,6 +7,33 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2.0d Cloud Text Generation UI — new project workspace "Cloud" tab
+  (`features/workspace/CloudPage.tsx`, "Cloud Studio" in the left nav):
+  catalog-driven provider/model pickers (A-class + documented T1
+  `official_api` text strategies only), prompt editor, required
+  `max_cost_usd` cap, explicit `execution_target="cloud"` opt-in,
+  heuristic cost estimate labeled as an estimate, and a data-out
+  disclosure. Every mutation — `generate.text.cloud`, `spend.budget_set`,
+  `spend.budget_remove`, `spend.reconcile` — flows through
+  preview → approve → commit → audit; nothing bypasses the command
+  system. A persistent `SIMULATION — No external AI provider
+  contacted.` banner renders on the page, in the approval panel, on
+  every remote job card, and in asset details for simulated
+  provenance; OpenAI/Anthropic are labeled simulated API integrations.
+  Remote job cards show the honest lifecycle (intent → submission →
+  polling only where documented → outcome / needs reconciliation) with
+  no invented progress; cancellation is offered only where the provider
+  documents it (sync lifecycles explain reconcile-instead). Spend views
+  separate simulated (synthetic) from live accounting across
+  session/day/month/lifetime scopes — limit, reserved exposure,
+  recorded charges, and available capacity. The reconciliation queue
+  lists ambiguous/interrupted jobs with per-job reserved exposure and
+  drives `spend.reconcile` outcomes through the same approval flow.
+  Minimal read-only backend additions: `spend.summary` now returns raw
+  budget rows (project vs global targets) and a new
+  `GET /api/projects/{id}/spend/reservations` endpoint lists per-job
+  holds. No credential fields, no live transports, no verified_remote
+  UI state.
 - C2.0c REST Provider Adapter Contracts — documented provider HTTP
   contracts behind injected, in-memory transports ONLY:
   `domain/workers/rest_providers.py` declares per-provider

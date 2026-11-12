@@ -3,6 +3,7 @@ import { useApp, type WorkspaceTab } from "../../stores/appStore";
 import { AssetsPage } from "./AssetsPage";
 import { BackupsPage } from "./BackupsPage";
 import { EntityPage } from "./EntityPage";
+import { CloudPage } from "./CloudPage";
 import { GeneratePage } from "./GeneratePage";
 import { OverviewPage } from "./OverviewPage";
 import { SettingsPage } from "./SettingsPage";
@@ -12,6 +13,7 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "storyboard", label: "Storyboard" },
   { id: "generate", label: "Generate" },
+  { id: "cloud", label: "Cloud" },
   { id: "cast", label: "Cast" },
   { id: "worlds", label: "Worlds" },
   { id: "locations", label: "Locations" },
@@ -76,6 +78,7 @@ export function ProjectWorkspace() {
         {tab === "overview" && <OverviewPage />}
         {tab === "storyboard" && <StoryboardPage />}
         {tab === "generate" && <GeneratePage />}
+        {tab === "cloud" && <CloudPage />}
         {tab === "cast" && <EntityPage etype="character" title="Cast" />}
         {tab === "worlds" && <EntityPage etype="world" title="Worlds" />}
         {tab === "locations" && <EntityPage etype="location" title="Locations" />}

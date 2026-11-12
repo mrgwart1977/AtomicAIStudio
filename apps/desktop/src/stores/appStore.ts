@@ -20,7 +20,7 @@ import type {
 export type Page = "home" | "projects" | "models" | "providers" | "project";
 export type WorkspaceTab =
   | "overview" | "storyboard" | "cast" | "worlds" | "locations"
-  | "generate" | "assets" | "backups" | "settings";
+  | "generate" | "cloud" | "assets" | "backups" | "settings";
 export type WorkspaceMode = "guided" | "standard" | "advanced";
 
 interface AppState {

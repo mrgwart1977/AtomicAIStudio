@@ -44,18 +44,33 @@ export function JobsPanel() {
           const d = j.progress_json;
           return (
             <li key={j.id} className="rounded-md border border-line bg-card p-3">
+              {j.execution_scope === "remote" && (
+                <p className="mb-2 rounded border border-amber/50 bg-amber/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber">
+                  SIMULATION — No external AI provider contacted.
+                </p>
+              )}
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted">{j.adapter_id}</span>
                 <span className={STATUS_STYLE[j.status] ?? "text-muted"}>
-                  {j.cancel_requested && running ? "cancelling" : j.status}
+                  {j.recovery_state === "needs_reconciliation"
+                    ? "needs reconciliation"
+                    : j.cancel_requested && running ? "cancelling" : j.status}
                 </span>
               </div>
-              <div className="mt-2 h-1.5 rounded-full bg-line">
-                <div
-                  className="h-full rounded-full bg-teal transition-all"
-                  style={{ width: `${Math.round(j.progress * 100)}%` }}
-                />
-              </div>
+              {j.execution_scope !== "remote" && (
+                <div className="mt-2 h-1.5 rounded-full bg-line">
+                  <div
+                    className="h-full rounded-full bg-teal transition-all"
+                    style={{ width: `${Math.round(j.progress * 100)}%` }}
+                  />
+                </div>
+              )}
+              {j.progress_json?.remote_outcome && (
+                <p className="mt-1 text-[10px] text-faint">
+                  remote outcome: {j.progress_json.remote_outcome}
+                  {j.progress_json.remote_job_id ? ` · remote id ${j.progress_json.remote_job_id} (synthetic)` : ""}
+                </p>
+              )}
               <p className="mt-1.5 text-xs text-muted">{j.message || j.error || "queued"}</p>
               {running && d && (
                 <p className="mt-1 text-xs text-faint">
@@ -65,22 +80,35 @@ export function JobsPanel() {
                 </p>
               )}
               {running && (
-                <button
-                  onClick={() =>
-                    void apiFetch(`/api/jobs/${j.id}/cancel`, { method: "POST" }).catch(() => {})
-                  }
-                  disabled={j.cancel_requested}
-                  className="mt-2 rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-danger disabled:opacity-40"
-                >
-                  {j.cancel_requested ? "Cancelling…" : "Cancel"}
-                </button>
+                j.execution_scope === "remote"
+                && j.progress_json?.remote_intent?.lifecycle === "sync" ? (
+                  <p className="mt-2 text-[10px] text-faint">
+                    Provider documents no cancellation — reconcile instead.
+                  </p>
+                ) : (
+                  <button
+                    onClick={() =>
+                      void apiFetch(`/api/jobs/${j.id}/cancel`, { method: "POST" }).catch(() => {})
+                    }
+                    disabled={j.cancel_requested}
+                    className="mt-2 rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-danger disabled:opacity-40"
+                  >
+                    {j.cancel_requested ? "Cancelling…" : "Cancel"}
+                  </button>
+                )
               )}
               {asset && base && pid && (
-                <img
-                  src={assetFileUrl(pid, asset.id, base)}
-                  alt="Generated output"
-                  className="mt-2 w-full rounded border border-line"
-                />
+                asset.kind === "image" ? (
+                  <img
+                    src={assetFileUrl(pid, asset.id, base)}
+                    alt="Generated output"
+                    className="mt-2 w-full rounded border border-line"
+                  />
+                ) : (
+                  <p className="mt-2 rounded border border-line px-2 py-1 text-[10px] text-faint">
+                    {asset.kind} asset · {asset.name}
+                  </p>
+                )
               )}
             </li>
           );

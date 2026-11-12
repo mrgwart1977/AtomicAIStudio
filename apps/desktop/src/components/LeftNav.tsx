@@ -21,6 +21,7 @@ const NAV: NavItem[] = [
   { id: "storyboard", label: "Storyboard", tab: "storyboard" },
   { id: "scene", label: "Scene Builder", milestone: "M5" },
   { id: "image", label: "Image Studio", tab: "generate" },
+  { id: "cloud", label: "Cloud Studio", tab: "cloud" },
   { id: "video", label: "Video Studio", milestone: "M4" },
   { id: "audio", label: "Audio Studio", milestone: "M6" },
   { id: "training", label: "Training", milestone: "M3" },

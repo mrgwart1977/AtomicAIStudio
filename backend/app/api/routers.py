@@ -562,6 +562,17 @@ def spend_summary(
                           app_state=request.app.state)
 
 
+@api_router.get("/api/projects/{project_id}/spend/reservations")
+def spend_reservations(
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+):
+    """Reservations for this project's remote jobs — open holds first.
+    Read-only; all mutations stay on the command path."""
+    from app.domain import spend as _spend
+    return _spend.reservation_list(db, project_id=project.id)
+
+
 @api_router.get("/api/projects/{project_id}/commands", response_model=list[CommandOut])
 def list_commands(project: Project = Depends(get_project), db: Session = Depends(get_db)):
     return db.execute(
