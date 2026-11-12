@@ -13,6 +13,17 @@ function fmtBytes(n: number): string {
 
 const KINDS = ["", "image", "video", "audio", "document", "model"] as const;
 
+/** Simulated provenance (mock + C2 cloud adapters) — honest labeling,
+ * never shown as genuine provider output. */
+function isSimulated(a: Asset): boolean {
+  const p = a.provenance_json ?? {};
+  const src = String(a.media_json?.source ?? "");
+  return p.provenance_confidence === "simulated"
+    || p.simulated === true
+    || a.media_json?.is_mock === true
+    || src.includes("simulat") || src.includes("mock");
+}
+
 export function AssetsPage() {
   const project = useApp((s) => s.currentProject());
   const page = useApp((s) => s.assetsPage);
@@ -28,6 +39,7 @@ export function AssetsPage() {
   const [importPath, setImportPath] = useState("");
   const [shared, setShared] = useState<SharedAsset[] | null>(null);
   const [missingOnly, setMissingOnly] = useState(false);
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   useEffect(() => {
     void getBackendInfo().then(setInfo);
@@ -165,6 +177,7 @@ export function AssetsPage() {
                 <span className="truncate text-xs font-medium" title={a.name}>{a.name}</span>
                 {a.status === "missing" && <span className="text-[10px] uppercase text-danger">missing</span>}
                 {a.scope === "shared" && <span className="text-[10px] uppercase text-violet">shared</span>}
+                {isSimulated(a) && <span className="text-[10px] uppercase text-amber">simulated</span>}
               </div>
               <div className="mt-0.5 text-[10px] text-faint">
                 {a.origin} · {fmtBytes(a.byte_size)}
@@ -179,7 +192,28 @@ export function AssetsPage() {
                     Share
                   </button>
                 )}
+                <button onClick={() => setDetailId(detailId === a.id ? null : a.id)}
+                  className="rounded border border-line px-2 py-0.5 text-[10px] text-muted hover:text-fg">
+                  Details
+                </button>
               </div>
+              {detailId === a.id && (
+                <div className="mt-2 rounded border border-line bg-panel p-2" data-testid={`asset-detail-${a.id}`}>
+                  {isSimulated(a) && (
+                    <p className="mb-1.5 rounded border border-amber/50 bg-amber/10 px-1.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber">
+                      SIMULATION — No external AI provider contacted.
+                    </p>
+                  )}
+                  <dl className="space-y-0.5 text-[10px]">
+                    <div className="flex justify-between"><dt className="text-faint">provenance</dt><dd className="text-muted">{String(a.provenance_json?.provenance_confidence ?? a.origin)}</dd></div>
+                    {a.provenance_json?.remote != null && (
+                      <div className="flex justify-between"><dt className="text-faint">remote id</dt><dd className="text-muted">{String((a.provenance_json.remote as Record<string, unknown>)?.remote_job_id ?? "—")} (synthetic)</dd></div>
+                    )}
+                    <div className="flex justify-between"><dt className="text-faint">adapter</dt><dd className="text-muted">{String(a.provenance_json?.adapter_id ?? "—")}</dd></div>
+                    <div className="flex justify-between"><dt className="text-faint">sha256</dt><dd className="truncate pl-2 text-muted" title={a.sha256}>{a.sha256.slice(0, 16)}…</dd></div>
+                  </dl>
+                </div>
+              )}
             </div>
           </div>
         ))}

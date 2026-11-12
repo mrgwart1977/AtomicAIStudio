@@ -538,4 +538,31 @@ def summary(session: Session, *, project_id: str | None,
                      "consumed_micro": open_m + chg_m,
                      "open_micro": open_m, "charged_micro": chg_m})
     return {"environment": environment, "session_id": sid,
-            "scopes": rows}
+            "scopes": rows,
+            # Raw budget rows so callers can distinguish a project cap
+            # from the global baseline it overrides (read-only view).
+            "budgets": [{"id": b.id,
+                         "target": "project" if b.project_id else "global",
+                         "scope": b.scope, "limit_micro": b.limit_micro,
+                         "label": b.label} for b in budgets]}
+
+
+def reservation_list(session: Session, *, project_id: str,
+                     limit: int = 200) -> list[dict]:
+    """Spend reservations for one project — open holds first, then
+    newest. Read-only; powers the reconciliation queue."""
+    rows = session.execute(
+        select(SpendReservation)
+        .where(SpendReservation.project_id == project_id)
+        .order_by(SpendReservation.status != "open",
+                  SpendReservation.created_at.desc())
+        .limit(limit)).scalars().all()
+    return [{"id": r.id, "job_id": r.job_id, "command_id": r.command_id,
+             "project_id": r.project_id, "provider_key": r.provider_key,
+             "environment": r.environment, "status": r.status,
+             "reserved_micro": r.reserved_micro,
+             "remote_job_id": r.remote_job_id,
+             "reconcile_count": r.reconcile_count,
+             "reconcile_note": r.reconcile_note,
+             "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows]
