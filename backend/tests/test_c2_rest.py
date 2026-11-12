@@ -403,10 +403,67 @@ def test_anthropic_error_taxonomy(client, monkeypatch):
 
 def test_poll_404_holds(client, monkeypatch):
     """Retrieval 404 after a confirmed submit: the remote may exist but
-    is unreachable — ambiguous, exposure held."""
+    is unreachable — ambiguous, exposure held. A poll error must NEVER
+    be treated as evidence that no remote work happened."""
     _swap(client, monkeypatch, "openai",
           make_provider("openai", transport=simulated_transport(
               "openai", {"retrieve": _status_handler(404)})))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+@pytest.mark.parametrize("mode", ["status500", "timeout"])
+def test_poll_error_holds(client, monkeypatch, mode):
+    """Any retrieval failure — 5xx or transport — is 'unreachable',
+    never 'confirmed gone': the reservation is held either way."""
+    if mode == "timeout":
+        def retrieve(req):
+            raise httpx.ConnectTimeout("simulated")
+    else:
+        retrieve = _status_handler(500)
+    _swap(client, monkeypatch, "openai",
+          make_provider("openai", transport=simulated_transport(
+              "openai", {"retrieve": retrieve})))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_submit_unknown_status_holds(client, monkeypatch):
+    """A 2xx whose status field isn't a documented value is malformed —
+    the request may have been processed → hold, never release."""
+    def bogus(req):
+        return httpx.Response(200, content=json.dumps(
+            {"id": "resp_x", "status": "bogus_state"}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "openai",
+          make_provider("openai", transport=simulated_transport(
+              "openai", {"submit": bogus})))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    assert job["status"] == "failed"
+    assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job["id"]).status == "open"
+
+
+def test_submit_missing_remote_id_holds(client, monkeypatch):
+    """An async submit without a remote operation id is ambiguous —
+    no fabricated id is ever polled."""
+    def noid(req):
+        return httpx.Response(200, content=json.dumps(
+            {"status": "queued"}).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "openai",
+          make_provider("openai", transport=simulated_transport(
+              "openai", {"submit": noid})))
     pid = make_project(client)["id"]
     r = _commit(client, pid, _payload())
     job = wait_for_job(client, pid, r.json()["job_id"])
@@ -499,6 +556,70 @@ def test_cancel_with_usage_settles_partial(client, monkeypatch):
     assert len(chg) == 1 and chg[0].micro == 625
 
 
+@pytest.mark.parametrize("cancel_status", [404, 500])
+def test_cancel_error_holds(client, monkeypatch, cancel_status):
+    """A failed cancel — even 404 — must not establish that the remote
+    operation didn't run or won't bill: outcome stays ambiguous, held."""
+    def running(req):
+        rid = req.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, content=json.dumps(openai_response_obj(
+            resp_id=rid, status="in_progress")).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "openai",
+          make_provider("openai", transport=simulated_transport(
+              "openai", {"retrieve": running,
+                         "cancel": _status_handler(cancel_status)})))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job_id = r.json()["job_id"]
+    import time as _t
+    for _ in range(40):
+        j = next((x for x in client.get(
+            f"/api/projects/{pid}/jobs").json() if x["id"] == job_id), {})
+        if j.get("status") == "running":
+            break
+        _t.sleep(0.05)
+    client.post(f"/api/jobs/{job_id}/cancel")
+    job = wait_for_job(client, pid, job_id)
+    assert job["status"] == "cancelled"
+    assert _detail(client, job_id)["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job_id).status == "open"
+
+
+def test_cancel_reports_completed_holds(client, monkeypatch):
+    """Cancel answered 'completed' — the operation ran to term; billing
+    outcome is unknown, never auto-released (hold for reconcile)."""
+    def running(req):
+        rid = req.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, content=json.dumps(openai_response_obj(
+            resp_id=rid, status="in_progress")).encode(),
+            headers={"Content-Type": "application/json"})
+    def cancel_completed(req):
+        rid = req.url.path.split("/")[-2]
+        return httpx.Response(200, content=json.dumps(openai_response_obj(
+            resp_id=rid, status="completed")).encode(),
+            headers={"Content-Type": "application/json"})
+    _swap(client, monkeypatch, "openai",
+          make_provider("openai", transport=simulated_transport(
+              "openai", {"retrieve": running,
+                         "cancel": cancel_completed})))
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job_id = r.json()["job_id"]
+    import time as _t
+    for _ in range(40):
+        j = next((x for x in client.get(
+            f"/api/projects/{pid}/jobs").json() if x["id"] == job_id), {})
+        if j.get("status") == "running":
+            break
+        _t.sleep(0.05)
+    client.post(f"/api/jobs/{job_id}/cancel")
+    job = wait_for_job(client, pid, job_id)
+    assert job["status"] == "cancelled"
+    assert _detail(client, job_id)["remote_outcome"] == "ambiguous"
+    assert _reservation(client, job_id).status == "open"
+
+
 def test_cancel_unconfirmed_holds(client, monkeypatch):
     """Cancel endpoint errors → outcome stays ambiguous, held."""
     def running(req):
@@ -525,6 +646,99 @@ def test_cancel_unconfirmed_holds(client, monkeypatch):
     assert job["status"] == "cancelled"
     assert _detail(client, job["id"])["remote_outcome"] == "ambiguous"
     assert _reservation(client, job_id).status == "open"
+
+
+@pytest.mark.asyncio
+async def test_openai_submit_body_is_background():
+    """Poll/cancel are documented ONLY for background responses — the
+    submit body must carry background:true so every subsequent GET/cancel
+    targets a documented lifecycle."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, content=json.dumps(
+            openai_response_obj(resp_id="r1", status="queued")).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider("openai", transport=httpx.MockTransport(h))
+    await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": "gpt-5", "prompt": "hi"}))
+    assert seen["body"]["background"] is True
+    assert seen["body"]["model"] == "gpt-5"
+    assert seen["body"]["input"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_submit_body_shape():
+    """Messages contract: {model, max_tokens, messages:[user]} — no
+    background flag, no invented async params."""
+    seen = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, content=json.dumps(
+            anthropic_message_obj(msg_id="m1")).encode(),
+            headers={"Content-Type": "application/json"})
+    p = make_provider("anthropic", transport=httpx.MockTransport(h))
+    await p.submit(remote_mod.SubmissionIntent(
+        job_id="j", idempotency_key="k", adapter_id="a",
+        request={"model_id": "claude-sonnet-4-5", "prompt": "hi"}))
+    body = seen["body"]
+    assert body["model"] == "claude-sonnet-4-5"
+    assert body["max_tokens"] == 1024
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert "background" not in body
+
+
+# ---------- synchronous crash window ----------
+
+def test_sync_crash_window_reservation_held(client):
+    """Anthropic sync: provider returned success but the app crashed
+    before result+settlement were durable. Startup recovery must mark
+    needs_reconciliation, KEEP the reservation open, and never resubmit."""
+    from app.db.models import GenerationJob
+    from app.domain import spend as _spend
+    pid = make_project(client)["id"]
+    job_id = "crash-sync-1"
+    with _sf(client)() as s:
+        # Mid-flight snapshot: submit succeeded (msg id recorded in the
+        # last persisted progress), settlement never reached.
+        job = GenerationJob(
+            id=job_id, project_id=pid, adapter_id="cloud.text.rest",
+            kind="text.generate", status="running",
+            request_json={"provider_key": "anthropic",
+                          "command_type": "generate.text.cloud"},
+            idempotency_key="crash-sync-key-1",
+            progress_json={
+                "remote_intent": {"provider_key": "anthropic",
+                                  "idempotency_key": "crash-sync-key-1",
+                                  "lifecycle": "sync", "simulated": True},
+                "remote_job_id": "msg_sim_0001",
+                "remote_status": "succeeded"},
+            execution_scope="remote", resumable=False)
+        s.add(job)
+        res = _spend.admit(s, job_id=job_id, command_id=None,
+                           project_id=pid, provider_key="anthropic",
+                           environment="simulated",
+                           est_usd=0.001, max_usd=0.001)
+        res_id = res.id
+        s.commit()
+        n = client.app.state.job_engine.reconcile_interrupted(s)
+        s.flush()
+        s.refresh(job)
+        assert job.recovery_state == "needs_reconciliation"
+        assert job.status == "failed"      # terminal, ambiguous — never re-queued
+        s.commit()
+    assert n == 0                           # nothing resubmitted
+    res = _reservation(client, job_id)
+    assert res.id == res_id and res.status == "open"   # exposure held
+    # The held reservation stays open until explicit reconciliation.
+    r = _commit(client, pid, {"job_id": job_id,
+                              "outcome": "confirmed_charge",
+                              "actual_usd": 0.001,
+                              "accept_overage": True}, "c2crash",
+                ctype="spend.reconcile")
+    assert r.status_code == 200
+    assert _reservation(client, job_id).status == "settled"
 
 
 # ---------- usage→cost precision ----------

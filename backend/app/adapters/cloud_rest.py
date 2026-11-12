@@ -208,6 +208,21 @@ class RestCloudTextAdapter:
                           "lifecycle": provider.spec.lifecycle,
                           "transport_simulated": True}}
 
+        if provider.spec.lifecycle == "async_poll" and not rh.remote_id:
+            # A poll lifecycle without a remote operation id is a
+            # malformed submission — the remote MAY exist; hold and
+            # reconcile rather than poll a fabricated id.
+            yield {"progress": 0.12, "message": "remote outcome unknown",
+                   "detail": self._fail_detail(
+                       None, "ambiguous",
+                       spend_action={"type": "hold",
+                                     "note": "submit returned no remote "
+                                             "operation id — outcome "
+                                             "unknown; exposure held"})}
+            raise RuntimeError(
+                "async submission returned no remote operation id — "
+                "outcome unknown, not resubmitted")
+
         if provider.spec.lifecycle == "sync":
             # Documented synchronous completion — the handle IS the
             # finished response. No polling exists to drive.
