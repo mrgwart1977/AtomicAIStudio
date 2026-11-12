@@ -98,6 +98,7 @@ CommandType = Literal[
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
     "bridge.prepare", "bridge.launch", "bridge.import",
+    "bridge.watch.scan",
 ]
 
 

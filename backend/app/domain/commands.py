@@ -55,6 +55,7 @@ SUPPORTED_COMMANDS = {
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
     # C1.5 access bridge — user-driven external dispatch only
     "bridge.prepare", "bridge.launch", "bridge.import",
+    "bridge.watch.scan",
     # backups
     "backup.export", "backup.import", "backup.restore",
     # scenes & storyboard (M2)
@@ -1124,6 +1125,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     before_revision = project.revision
     audit: dict[str, Any] = {"before": {}, "after": {}, "warnings": warnings}
     job: GenerationJob | None = None
+    # Full bridge payloads may be richer than the durable audit record —
+    # e.g. watch.scan returns candidate paths to the live session while the
+    # audit keeps only counts (data minimization).
+    bridge_response: dict | None = None
 
     command = CreativeCommand(
         id=new_id(),
@@ -1228,6 +1233,47 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 "url": url, "open_via": _bridge.OPEN_VIA,
             }
 
+    elif command_type == "bridge.watch.scan":
+        # Stage A ImportWatcher — audited read-only enumeration. Candidates
+        # live only in the response; nothing is imported until a separate
+        # bridge.import command confirms each file.
+        import os
+        from pathlib import Path
+        from app.domain import bridge as _bridge
+        from app.domain.providers import registry as _preg
+        provider = _bridge.get_provider(payload["provider_key"])
+        cfg = _preg.get_config(session).get(provider["key"], {})
+        folder, _ferr = _bridge.validate_watch_folder(cfg)
+        if folder is None:
+            raise CommandError(422, _ferr)
+        imported_norm: set[str] = set()
+        for a in session.query(Asset).filter(
+                Asset.project_id == project.id,
+                Asset.origin == "external"):
+            sp = ((a.provenance_json or {}).get("request") or {}) \
+                .get("source_path")
+            if sp:
+                try:
+                    imported_norm.add(
+                        os.path.normcase(str(Path(sp).resolve(strict=False))))
+                except OSError:
+                    pass
+        cands, truncated = _bridge.scan_watch_folder(
+            folder, _bridge.watch_eligible_exts(provider), imported_norm)
+        # Audit minimization: the durable record keeps only what answers
+        # "a scan happened, how much did it find?" — full paths and the
+        # candidate list go to the live response only, never to disk.
+        audit["after"]["bridge"] = {
+            "action": "watch_scan", "provider_key": provider["key"],
+            "candidate_count": len(cands), "truncated": truncated,
+            "folder_name": folder.name,
+        }
+        bridge_response = {
+            "action": "watch_scan", "provider_key": provider["key"],
+            "folder": str(folder), "candidates": cands,
+            "truncated": truncated,
+        }
+
     elif command_type == "asset.link":
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
@@ -1307,7 +1353,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     if command_type == "project.duplicate":
         out["duplicate_project_id"] = audit["after"].get("duplicate_project_id")
     if command_type.startswith("bridge."):
-        out["bridge"] = audit["after"].get("bridge")
+        out["bridge"] = bridge_response or audit["after"].get("bridge")
     return out
 
 

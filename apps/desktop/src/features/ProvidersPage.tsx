@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../api/client";
-import { commitCommand, pickFile } from "../api/commands";
+import { commitCommand, pickDirectory, pickFile } from "../api/commands";
 import { openBridgeResult, capabilityDisplay } from "../api/bridge";
 import { useApp } from "../stores/appStore";
 import type {
   BridgeResult, CommitResult, Project, ProviderCapabilitiesReport,
-  ProviderDetail, ProviderSummary, ProviderTestResult,
+  ProviderDetail, ProviderSummary, ProviderTestResult, WatchCandidate,
 } from "../api/types";
 
 const CATEGORIES = [
@@ -68,6 +68,9 @@ export function ProvidersPage() {
   const [prepared, setPrepared] = useState<BridgeResult | null>(null);
   const [launchRes, setLaunchRes] = useState<CommitResult | null>(null);
   const [bridgeNote, setBridgeNote] = useState<string | null>(null);
+  // Stage A ImportWatcher — manual candidate scan only (no polling)
+  const [watchCandidates, setWatchCandidates] = useState<WatchCandidate[] | null>(null);
+  const [watchTruncated, setWatchTruncated] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -90,6 +93,7 @@ export function ProvidersPage() {
     setPrepared(null);
     setLaunchRes(null);
     setBridgeNote(null);
+    setWatchCandidates(null);
     setBridgePrompt("");
     try {
       const [d, c] = await Promise.all([
@@ -264,6 +268,54 @@ export function ProvidersPage() {
         provider_key: selected.key, content,
       });
       setBridgeNote(`Clipboard import queued (job ${res.job_id ?? res.bridge?.job_id ?? "?"}) — provenance recorded as user-reported external.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---- ImportWatcher Stage A — designate + explicit scan + per-file import
+
+  async function onDesignateFolder() {
+    if (!selected) return;
+    setErr(null); setBridgeNote(null);
+    const dir = await pickDirectory(`Designate ${selected.label} import folder`);
+    if (!dir) return;
+    // Folder designation goes through the existing provider config path —
+    // every scan itself is an audited project command.
+    await saveConfig({ settings: { ...settingsDraft, import_dir: dir } });
+    setBridgeNote(`Import folder set: ${dir}`);
+  }
+
+  async function onCheckFolder() {
+    if (!selected) return;
+    setBusy(true); setErr(null); setBridgeNote(null); setWatchCandidates(null);
+    try {
+      const res = await bridgeCommit("bridge.watch.scan",
+        { provider_key: selected.key });
+      const b = res.bridge;
+      setWatchCandidates(b?.candidates ?? []);
+      setWatchTruncated(Boolean(b?.truncated));
+      if (!b?.candidates?.length) setBridgeNote("No new eligible files found.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImportCandidate(c: WatchCandidate) {
+    if (!selected) return;
+    setBusy(true); setErr(null); setBridgeNote(null);
+    try {
+      const res = await bridgeCommit("bridge.import", {
+        provider_key: selected.key, source_path: c.path,
+        kind: c.kind, name: c.name, from_watch: true,
+        note: "watch folder candidate — origin user-reported, unverified",
+      });
+      setWatchCandidates((prev) => prev?.filter((x) => x.path !== c.path) ?? null);
+      setBridgeNote(`Imported ${c.name} (job ${res.job_id ?? res.bridge?.job_id ?? "?"}) — provenance: user-reported external.`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -544,22 +596,102 @@ export function ProvidersPage() {
                       </div>
                     )}
                     {caps.capabilities.some((c) => c.dispatch.includes("import")) && (
-                      <div className="mb-1 flex gap-2">
-                        <button
-                          onClick={onImportFile}
-                          disabled={busy}
-                          className="rounded-md border border-action/50 px-3 py-1.5 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
-                        >
-                          Import file…
-                        </button>
-                        <button
-                          onClick={onImportClipboard}
-                          disabled={busy}
-                          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-card disabled:opacity-40"
-                        >
-                          Import clipboard text
-                        </button>
-                      </div>
+                      <>
+                        <div className="mb-1 flex gap-2">
+                          <button
+                            onClick={onImportFile}
+                            disabled={busy}
+                            className="rounded-md border border-action/50 px-3 py-1.5 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
+                          >
+                            Import file…
+                          </button>
+                          <button
+                            onClick={onImportClipboard}
+                            disabled={busy}
+                            className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-card disabled:opacity-40"
+                          >
+                            Import clipboard text
+                          </button>
+                        </div>
+                        {/* ImportWatcher Stage A — designated folder + manual check */}
+                        <div className="mt-2 border-t border-line/40 pt-2">
+                          <div className="mb-1 flex items-center justify-between">
+                            <span className="text-[11px] font-medium text-muted">Import folder</span>
+                            {selected.settings?.import_dir ? (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={onCheckFolder}
+                                  disabled={busy}
+                                  className="rounded-md border border-action/50 px-3 py-1 text-xs text-teal hover:bg-action/20 disabled:opacity-40"
+                                >
+                                  Check folder
+                                </button>
+                                <button
+                                  onClick={onDesignateFolder}
+                                  disabled={busy}
+                                  className="rounded-md border border-line px-2 py-1 text-[10px] text-muted hover:bg-card disabled:opacity-40"
+                                >
+                                  Change
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={onDesignateFolder}
+                                disabled={busy}
+                                className="rounded-md border border-line px-3 py-1 text-xs text-muted hover:bg-card disabled:opacity-40"
+                              >
+                                Designate folder…
+                              </button>
+                            )}
+                          </div>
+                          {selected.settings?.import_dir ? (
+                            <p className="mb-1 truncate text-[10px] text-faint" title={String(selected.settings.import_dir)}>
+                              {String(selected.settings.import_dir)}
+                            </p>
+                          ) : (
+                            <p className="mb-1 text-[10px] text-faint">
+                              Pick a folder where you save this provider's outputs. Nothing is
+                              watched or scanned until you click "Check folder".
+                            </p>
+                          )}
+                          {watchCandidates && (
+                            <div className="rounded-md border border-line bg-ink p-2">
+                              {watchCandidates.length === 0 ? (
+                                <p className="text-[11px] text-faint">No new eligible files.</p>
+                              ) : (
+                                <>
+                                  {watchCandidates.map((c) => (
+                                    <div key={c.path} className="mb-1 flex items-center justify-between gap-2 text-[11px]">
+                                      <span className="min-w-0 truncate text-fg" title={c.path}>
+                                        {c.name}
+                                        <span className="ml-1.5 text-faint">
+                                          {c.kind} · {(c.size / 1024).toFixed(0)} KB
+                                        </span>
+                                      </span>
+                                      <button
+                                        onClick={() => onImportCandidate(c)}
+                                        disabled={busy}
+                                        className="shrink-0 rounded border border-action/50 px-2 py-0.5 text-[10px] text-teal hover:bg-action/20 disabled:opacity-40"
+                                      >
+                                        Import
+                                      </button>
+                                    </div>
+                                  ))}
+                                  <p className="mt-1 text-[10px] text-faint">
+                                    Found in your folder — ADE does not verify these came from{" "}
+                                    {selected.label}. Each import needs your click.
+                                  </p>
+                                  {watchTruncated && (
+                                    <p className="text-[10px] text-amber">
+                                      Showing the newest 200 candidates — folder contains more.
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </>
                     )}
                     {bridgeNote && (
                       <p className="mt-2 rounded-md bg-teal/10 px-2 py-1.5 text-[11px] text-teal">{bridgeNote}</p>
