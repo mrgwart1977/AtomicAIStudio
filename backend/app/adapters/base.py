@@ -52,6 +52,10 @@ class CapabilityProfile:
     worker_model: str = "subprocess-per-job"
     resumable: bool = False
     recoverable_outputs: str = "commit-on-success"
+    # Durable execution scope stamped on the job row at enqueue — "remote"
+    # jobs reconcile via the remote contract on restart (unknown remote
+    # state is never resubmitted); "local" marks interrupted.
+    execution_scope: str = "local"
     notes: str = ""
 
 

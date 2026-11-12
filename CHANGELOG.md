@@ -7,6 +7,41 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2.0a Mock Cloud Text Generation Lifecycle — the remote-job contract
+  exercised end-to-end on `MockRemoteProvider` with ZERO network egress
+  and zero credentials. `generate.text.cloud` (audited command,
+  `provider_key` + explicit `execution_target: "cloud"` — local stays
+  the default) is eligibility-gated on a documented T1 official-API
+  text strategy; preview warns with the data-out surface, a clearly
+  labeled cost ESTIMATE (catalog `cost_table`, `checked` dates — no
+  spend ledger/budget enforcement exists yet and none is claimed), and
+  the mock/simulated limitation. `MockCloudTextAdapter`
+  (`adapter_kind="mock"`, `execution_scope="remote"`) persists the
+  submission intent to `progress_json` BEFORE submitting, records
+  `remote_job_id`, polls with a bounded budget, honors cancel via
+  best-effort remote cancel, and treats every UNKNOWN outcome
+  (ambiguous submit, unreachable, timeout) as `reconcile_required` —
+  never an automatic resubmit (the durable `idempotency_key` is the
+  dedupe key, injected by the engine). Ambiguous outcomes
+  (`remote_outcome: "ambiguous"`) are durably distinguished from
+  confirmed provider failure (`"provider_failed"`) in `progress_json` —
+  the UI and reconciliation tooling can never read an unknown outcome
+  as a provider refusal. Remote-scoped jobs reconcile as
+  `needs_reconciliation` on restart and are non-resumable — a crashed
+  remote job can never silently re-bill. Output lands through the
+  normal CAS pipeline as kind="text" with `provenance_confidence:
+  "simulated"` + `remote_id_synthetic: true`; `verified_remote` is
+  decided centrally by `remote.provenance_confidence()` and is
+  structurally unreachable without `provider_verified` evidence from a
+  real authorized transport (C2.0c+). `RemoteProvider.idempotency`
+  declares the dedupe contract (`native | request_id | none`) —
+  per-provider mappings land in C2.0c. `CapabilityProfile` gains
+  `execution_scope`; `JobEngine.enqueue` stamps it from the adapter
+  profile; engine injects `job_idempotency_key` into adapter requests.
+  Catalog `ModelSpec.cost_table` added for the five A-class text
+  providers (openai/anthropic/google-gemini/deepseek/xai — estimate
+  rates with checked dates). No new migrations — remote intent/ids
+  live in existing `progress_json`/`execution_scope` columns.
 - C1.5 §5 Desktop CLI Detection, Phase 1 — read-only discovery only.
   Providers with officially documented local CLIs (`openai`,
   `anthropic`/`claude`, `google-gemini`/`gemini`) now carry a catalog

@@ -30,6 +30,10 @@ class AdapterRegistry:
                  worker_pool=None) -> None:
         self._adapters: dict[str, ProviderAdapter] = {}
         self.register(MockImageAdapter())
+        # C2.0a — mock cloud text: exercises the remote-job contract on
+        # an in-memory provider. Zero egress, honest "mock" kind.
+        from app.adapters.cloud_mock import MockCloudTextAdapter
+        self.register(MockCloudTextAdapter())
         # M4.1 mock persistent adapter — dev/test only. Its worker is a
         # Python script spawned via sys.executable, which doesn't exist
         # as a usable interpreter in a frozen build (sys.executable is

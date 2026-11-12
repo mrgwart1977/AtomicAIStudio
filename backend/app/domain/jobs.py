@@ -100,6 +100,7 @@ class JobEngine:
                     f"a {family} operation is already {busy.status} for this project — "
                     "wait for it to finish or cancel it first"
                 )
+        adapter = self._registry.get(adapter_id)
         job = GenerationJob(
             id=new_id(),
             project_id=project_id,
@@ -111,6 +112,10 @@ class JobEngine:
             command_id=command_id,
             resumable=resumable,
             model_key=model_key,
+            # Remote-scoped jobs reconcile through the remote contract on
+            # restart instead of being marked merely "interrupted".
+            execution_scope=(getattr(adapter.profile, "execution_scope", "local")
+                             if adapter is not None else "local"),
         )
         session.add(job)
         return job
@@ -327,9 +332,14 @@ class JobEngine:
             self._cancel_events[job.id] = cancel_ev
             if job.cancel_requested:
                 cancel_ev.set()
+            request = dict(job.request_json)
+            # The engine owns the durable dedupe key — adapters use it
+            # verbatim for remote submission intents so a resubmission
+            # can never duplicate (billable or simulated) work.
+            request["job_idempotency_key"] = job.idempotency_key
             handle = JobHandle(
                 job_id=job.id, project_id=job.project_id or "",
-                request=dict(job.request_json), work_dir=str(work_dir),
+                request=request, work_dir=str(work_dir),
                 cancel_event=cancel_ev,
             )
             await self._publish(job)
@@ -470,6 +480,20 @@ class JobEngine:
         provenance = {"adapter_id": job.adapter_id, "job_id": job.id,
                       "model_key": job.model_key, "gpu_index": job.gpu_index,
                       "request": job.request_json}
+        rem = output.get("remote")
+        if rem:
+            # C2.0a — remote-job provenance. `provenance_confidence` is
+            # decided centrally by workers/remote: `verified_remote` is
+            # reachable ONLY with provider_verified evidence (a real,
+            # authorized transport) — mock/simulated results degrade to
+            # "simulated" and can never spoof verification.
+            from app.domain.workers.remote import provenance_confidence
+            provenance.update({
+                "remote_job_id": rem.get("remote_job_id"),
+                "remote_provider": rem.get("provider_key"),
+                "remote_id_synthetic": bool(rem.get("remote_id_synthetic")),
+                "provenance_confidence": provenance_confidence(rem),
+            })
         ext = output.get("external_source")
         if ext:
             # C1.5 §4 ProvenanceTagger — user-reported external origin.

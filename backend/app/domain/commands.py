@@ -46,7 +46,7 @@ SUPPORTED_COMMANDS = {
     "project.delete",
     # generation (mock + real local inference since M3)
     "generate.image.mock", "generate.image", "generate.image.persistent",
-    "generate.video",
+    "generate.video", "generate.text.cloud",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -72,7 +72,8 @@ SUPPORTED_COMMANDS = {
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
-                       "generate.image.persistent", "generate.video"}
+                       "generate.image.persistent", "generate.video",
+                       "generate.text.cloud"}
 
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
@@ -80,6 +81,7 @@ JOB_COMMANDS = {
     "generate.image": "gen.image.sdcpp",
     "generate.image.persistent": "gen.image.sdcpp-server",
     "generate.video": "gen.video.sdcpp",
+    "generate.text.cloud": "cloud.text.mock",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -148,6 +150,9 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate image via persistent worker ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.video":
         return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
+    if command_type == "generate.text.cloud":
+        return (f"Simulate cloud text job for {payload.get('provider_key', '?')} "
+                f"— '{(payload.get('prompt') or '')[:60]}'")
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
     if command_type == "bridge.prepare":
@@ -228,6 +233,48 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             "not yet validated for production use")
     if command_type == "generate.video":
         _check_video_generation(session, project, payload)
+    if command_type == "generate.text.cloud":
+        # C2.0a — simulated remote lifecycle. Eligibility is catalog-
+        # driven: the provider must document a T1 official-API text path;
+        # execution_target must be explicitly "cloud" (local stays the
+        # default). No credentials are read and nothing billable runs —
+        # the adapter is a mock. Estimates are labeled estimates.
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        provider = _bridge.get_provider(payload.get("provider_key"))
+        if provider is None:
+            raise CommandError(404, "provider not found in catalog")
+        if payload.get("execution_target") != "cloud":
+            raise CommandError(422, "cloud generation requires explicit "
+                                    "execution_target 'cloud' — local is "
+                                    "the default and must be opted out of")
+        prompt = (payload.get("prompt") or "").strip()
+        if not prompt:
+            raise CommandError(422, "prompt is required")
+        if len(prompt) > 8000:
+            raise CommandError(422, "prompt exceeds 8000 characters")
+        strat = _cc.t1_text_strategy(provider)
+        if strat is None:
+            raise CommandError(422, "no documented T1 text API path — "
+                                    "provider not eligible for cloud text")
+        if _bridge.record_stale(strat):
+            warnings.append("Documented strategy evidence needs re-check — "
+                            "this simulation proceeds on stale evidence only")
+        model = _cc.pick_text_model(provider, payload.get("model_id"))
+        if payload.get("model_id") and model is None:
+            raise CommandError(422, f"unknown text model '{payload['model_id']}'")
+        if model is None:
+            raise CommandError(422, "no text-capable model for this provider")
+        est = _cc.estimate_text_cost(model, prompt)
+        cost_txt = (f"~${est['est_cost_usd']:.4f}" if est["est_cost_usd"]
+                    is not None else "unknown (no catalog rates)")
+        warnings.append(f"Cloud execution sends: {_cc.data_out_summary(provider, prompt)}")
+        warnings.append(
+            f"Cost is an ESTIMATE only ({cost_txt}) — no durable spend "
+            "ledger or budget enforcement exists yet, and no billable "
+            "execution happens in this slice")
+        warnings.append("Runs on the MOCK remote provider — simulated "
+                        "lifecycle only; output can never be verified_remote")
     if command_type in {"project.archive", "project.restore", "project.duplicate"}:
         warnings.append("Applies to the whole project")
     if command_type == "project.delete":
@@ -1336,7 +1383,11 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 # Generation has no mid-flight checkpoints — an interrupted
                 # gen job restarts from scratch (bounded, user-initiated).
                 resumable=command_type not in (
-                    "generate.image", "generate.image.persistent", "generate.video"),
+                    "generate.image", "generate.image.persistent",
+                    "generate.video",
+                    # Remote-scoped jobs reconcile, never auto-resubmit —
+                    # a resubmit could duplicate (simulated) billable work.
+                    "generate.text.cloud"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1351,6 +1402,16 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 raise CommandError(409, str(exc)) from exc
             raise
         audit["after"]["job_id"] = job.id
+        if command_type == "generate.text.cloud":
+            # Minimized durable record — the prompt body lives in the job
+            # request (like local generation), never re-echoed to audit.
+            audit["after"]["cloud"] = {
+                "provider_key": payload.get("provider_key"),
+                "model_id": request.get("model_id"),
+                "execution_target": "cloud",
+                "est_cost_usd": request.get("est_cost_usd"),
+                "is_estimate": True, "simulated": True,
+            }
         if command_type == "bridge.import":
             audit["after"]["bridge"] = {
                 "action": "import", "job_id": job.id,
@@ -1398,6 +1459,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image": "image",
         "generate.image.persistent": "image",
         "generate.video": "video",
+        "generate.text.cloud": "text",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -1442,6 +1504,26 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
                 int(payload.get("batch", 1)), payload.get("residency_mode")) if spec else None,
             # models without a CPU path must stay queued (honest), not burn CPU
             "allow_cpu": bool(spec.capabilities.get("cpu_fallback")) if spec else True,
+        }
+    elif command_type == "generate.text.cloud":
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        provider = _bridge.get_provider(payload["provider_key"])
+        model = _cc.pick_text_model(provider, payload.get("model_id"))
+        strat = _cc.t1_text_strategy(provider)
+        est = _cc.estimate_text_cost(model, payload["prompt"])
+        req = {
+            "command_type": command_type,
+            "provider_key": provider["key"],
+            "model_id": model["id"],
+            "strategy_id": strat["strategy_id"],
+            "prompt": payload["prompt"],
+            "execution_target": "cloud",
+            "est_cost_usd": est["est_cost_usd"],
+            "est_input_tokens": est["est_input_tokens"],
+            "cost_is_estimate": True,
+            "data_out": _cc.data_out_summary(provider, payload["prompt"]),
+            "simulated": True,
         }
     elif command_type == "generate.video":
         from app.domain import compatibility, model_catalog
