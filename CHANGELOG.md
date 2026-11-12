@@ -22,7 +22,11 @@ this project uses semver once public releases begin.
   best-effort remote cancel, and treats every UNKNOWN outcome
   (ambiguous submit, unreachable, timeout) as `reconcile_required` —
   never an automatic resubmit (the durable `idempotency_key` is the
-  dedupe key, injected by the engine). Remote-scoped jobs reconcile as
+  dedupe key, injected by the engine). Ambiguous outcomes
+  (`remote_outcome: "ambiguous"`) are durably distinguished from
+  confirmed provider failure (`"provider_failed"`) in `progress_json` —
+  the UI and reconciliation tooling can never read an unknown outcome
+  as a provider refusal. Remote-scoped jobs reconcile as
   `needs_reconciliation` on restart and are non-resumable — a crashed
   remote job can never silently re-bill. Output lands through the
   normal CAS pipeline as kind="text" with `provenance_confidence:

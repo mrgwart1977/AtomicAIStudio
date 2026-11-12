@@ -385,3 +385,94 @@ def test_adapter_profile_is_honest_mock():
     assert p.requires_cloud is False
     assert p.cost_model == "free"
     assert p.execution_scope == "remote"
+
+
+# ---------- persistence & reconciliation review (pre-merge) ----------
+
+class _IntentGate(MockRemoteProvider):
+    """Asserts the submission intent is COMMITTED (visible from an
+    independent session) before submit() is ever invoked."""
+    def __init__(self, sf):
+        super().__init__()
+        self._sf = sf
+
+    async def submit(self, intent):
+        with self._sf() as s:
+            row = s.query(GenerationJob).filter(
+                GenerationJob.idempotency_key
+                == intent.idempotency_key).one_or_none()
+            pj = (row.progress_json or {}) if row else {}
+            ri = pj.get("remote_intent") or {}
+            assert ri.get("idempotency_key") == intent.idempotency_key, (
+                "submit invoked before intent was durable — pending "
+                "transaction or missing commit")
+            assert ri.get("simulated") is True
+        return await super().submit(intent)
+
+
+def test_intent_is_committed_before_submit(client, monkeypatch):
+    pid = make_project(client)["id"]
+    monkeypatch.setattr(_adapter(client), "_remote",
+                        _IntentGate(_sf(client)))
+    r = _commit(client, pid, _payload())
+    job = wait_for_job(client, pid, r.json()["job_id"])
+    # The gate raised inside submit if the intent weren't durable.
+    assert job["status"] == "succeeded"
+
+
+def test_crash_window_ambiguous_reconcile_no_resubmit(client):
+    """Crash between submit() success and remote_job_id persistence:
+    intent durable, no remote id — reconcile marks it ambiguous, and
+    NOTHING resubmits (adapter never re-runs for the row)."""
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, _payload())
+    job_id = r.json()["job_id"]
+    wait_for_job(client, pid, job_id)
+    with _sf(client)() as s:
+        row = s.get(GenerationJob, job_id)
+        # Simulate the crash window: intent persisted, remote id lost.
+        pj = dict(row.progress_json or {})
+        assert pj.get("remote_intent")
+        pj.pop("remote_job_id", None)
+        pj.pop("remote_status", None)
+        row.progress_json = pj
+        row.status = "running"
+        s.commit()
+        n = client.app.state.job_engine.reconcile_interrupted(s)
+        s.flush(); s.refresh(row)
+        assert row.recovery_state == "needs_reconciliation"
+        assert row.status == "failed"        # terminal, but ambiguous
+        assert (row.progress_json or {}).get("remote_job_id") is None
+        assert (row.progress_json or {}).get("remote_intent") \
+            ["idempotency_key"] == row.idempotency_key
+    assert n == 0  # nothing re-queued — no resubmission possible
+
+
+def test_ambiguous_vs_confirmed_failure_distinguished(client, monkeypatch):
+    # Confirmed provider failure records a distinct durable outcome.
+    monkeypatch.setattr(_adapter(client), "_remote", _Failing())
+    r = _commit(client, make_project(client)["id"], _payload())
+    job = wait_for_job(client, r.json()["project_id"]
+                     if "project_id" in r.json() else
+                     _latest_project(client), r.json()["job_id"])
+    assert job["status"] == "failed"
+    with _sf(client)() as s:
+        pj = s.get(GenerationJob, job["id"]).progress_json or {}
+        assert pj["remote_outcome"] == "provider_failed"
+        assert pj.get("reconcile_required") is not True
+
+    # Ambiguous outcome records ambiguity — never reads as provider fail.
+    prov = _LostSubmit()
+    monkeypatch.setattr(_adapter(client), "_remote", prov)
+    r2 = _commit(client, make_project(client)["id"], _payload())
+    job2 = wait_for_job(client, r2.json().get("project_id") or
+                        _latest_project(client), r2.json()["job_id"])
+    with _sf(client)() as s:
+        pj2 = s.get(GenerationJob, job2["id"]).progress_json or {}
+        assert pj2["remote_outcome"] == "ambiguous"
+        assert pj2["reconcile_required"] is True
+        assert pj2["remote_status"] == "unknown"
+
+
+def _latest_project(client):
+    return client.get("/api/projects").json()[0]["id"]

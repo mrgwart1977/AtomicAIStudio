@@ -99,6 +99,10 @@ class MockCloudTextAdapter:
             yield {"progress": 0.05, "message": "submission outcome unknown",
                    "detail": {"remote_status": RemoteStatus.UNKNOWN.value,
                               "remote_submission": "outcome_unknown",
+                              # Ambiguous ≠ confirmed failure — the remote
+                              # side MAY hold the job; tooling must never
+                              # read this as a provider refusal.
+                              "remote_outcome": "ambiguous",
                               "reconcile_required": True,
                               "simulated": True}}
             raise RuntimeError(
@@ -127,6 +131,7 @@ class MockCloudTextAdapter:
                 yield {"progress": 0.5, "message": "remote outcome unknown",
                        "detail": {"remote_status": RemoteStatus.UNKNOWN.value,
                                   "remote_job_id": rh.remote_id,
+                                  "remote_outcome": "ambiguous",
                                   "reconcile_required": True,
                                   "simulated": True}}
                 raise RuntimeError(
@@ -135,6 +140,13 @@ class MockCloudTextAdapter:
             if h.status == RemoteStatus.SUCCEEDED:
                 break
             if h.status == RemoteStatus.FAILED:
+                # Confirmed provider-side failure — recorded distinctly
+                # from ambiguous outcomes before the job fails.
+                yield {"progress": 0.9, "message": "remote job failed",
+                       "detail": {"remote_status": "failed",
+                                  "remote_job_id": rh.remote_id,
+                                  "remote_outcome": "provider_failed",
+                                  "simulated": True}}
                 raise RuntimeError(
                     f"remote job {rh.remote_id} failed "
                     f"({(h.detail or {}).get('error', 'provider error')})")
@@ -144,6 +156,7 @@ class MockCloudTextAdapter:
                 yield {"progress": 0.9, "message": "poll timeout",
                        "detail": {"remote_status": "timeout_awaiting",
                                   "remote_job_id": rh.remote_id,
+                                  "remote_outcome": "ambiguous",
                                   "reconcile_required": True,
                                   "simulated": True}}
                 raise TimeoutError(
