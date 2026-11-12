@@ -32,10 +32,14 @@ this project uses semver once public releases begin.
   tracked to completion but its results are discarded and can never
   publish into a newer session's cache. Shutdown cancels the task,
   waits a bounded grace (5 s) for in-flight scans, cancels queued work,
-  and lets any wedged filesystem call finish on the daemon worker
-  thread — entry/candidate bounds limit work items, not wall-clock,
-  and a stalled syscall is documented as beyond cooperative
-  cancellation. The Providers page refreshes watch status every ~12 s
+  and lets any wedged filesystem call finish on the worker — a raw
+  daemon `threading.Thread` + FIFO queue rather than
+  `ThreadPoolExecutor`, because `concurrent.futures._python_exit` joins
+  pool workers at interpreter shutdown regardless of daemon flags.
+  Verified by a subprocess-level exit probe: with a stalled worker the
+  backend process exits in bounded time, not just `stop()`. Entry and
+  candidate bounds limit work items, not wall-clock; a stalled syscall
+  is documented as beyond cooperative cancellation. The Providers page refreshes watch status every ~12 s
   while auto-check is enabled (read-only GET, one request in flight,
   never triggers a scan, silent on transient backend errors). Still
   stat-only, non-recursive, and never auto-imports.

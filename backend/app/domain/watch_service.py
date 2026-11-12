@@ -28,20 +28,29 @@ Safety invariants (all Stage A logic reused):
 Shutdown: entry/candidate bounds limit WORK ITEMS, not wall-clock — a
 wedged filesystem syscall (e.g. a dead network mount) is beyond
 cooperative cancellation. stop() therefore waits a bounded grace for
-in-flight scans, cancels queued ones (cancel_futures), and lets any
-still-running syscall finish on the worker thread — which is spawned
-daemon-side so it can never wedge interpreter exit. This is the
-practical bound short of process isolation; per Stage A the watched
-surface is one user-designated directory, so the residual risk is a
-stalled local stat, not runaway work.
+in-flight scans, cancels queued ones, and poisons the worker — a
+still-running call finishes on the worker thread with results dead.
+
+Why a raw daemon thread instead of ThreadPoolExecutor:
+concurrent.futures registers ``_python_exit``, which JOINS every pool
+worker at interpreter shutdown regardless of the worker's daemon flag —
+so a stalled scan inside an executor can still wedge process exit even
+with shutdown(wait=False). A plain ``threading.Thread(daemon=True)`` is
+genuinely abandoned at interpreter exit (``threading._shutdown`` only
+joins non-daemon threads), and ``concurrent.futures.Future`` still gives
+the same done()/result()/cancel()/callback surface the pool did. This
+is the practical bound short of process isolation; per Stage A the
+watched surface is one user-designated directory, so the residual risk
+is a stalled local stat, not runaway work.
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, wait
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -73,15 +82,15 @@ class ImportWatchService:
         self._stopping = False
         self._task: asyncio.Task | None = None
         # One worker thread for ALL filesystem access — scans serialize by
-        # construction, so two scans can never run concurrently. Executor
-        # workers inherit the daemon flag of the thread that first submits,
-        # so the pool is warmed from a daemon thread: a permanently stalled
-        # filesystem syscall can then never wedge interpreter exit.
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="watch-scan")
-        threading.Thread(
-            target=lambda: self._executor.submit(lambda: None).result(),
-            name="watch-scan-warm", daemon=True).start()
+        # construction, so two scans can never run concurrently. Raw
+        # daemon thread + FIFO queue, NOT ThreadPoolExecutor: see module
+        # docstring — _python_exit joins pool workers at interpreter
+        # shutdown even when daemon; a raw daemon thread is truly
+        # abandoned, so a wedged filesystem call cannot block exit.
+        self._work_q: queue.Queue = queue.Queue()
+        self._worker = threading.Thread(
+            target=self._worker_loop, name="watch-scan", daemon=True)
+        self._worker.start()
         # provider_key -> (future, gen, fingerprint). Results publish only
         # if gen+fingerprint still match the live state at collect time.
         self._pending: dict[str, tuple[Any, int, str]] = {}
@@ -119,7 +128,16 @@ class ImportWatchService:
         self._pending.clear()
         if inflight:
             wait(inflight, timeout=self._grace)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        # Cancel queued-but-unstarted scans (their futures fire done-
+        # callbacks → orphan tracking drains), then poison the worker —
+        # a running call finishes on the daemon thread, results dead.
+        try:
+            while True:
+                _fn, _args, fut = self._work_q.get_nowait()
+                fut.cancel()
+        except queue.Empty:
+            pass
+        self._work_q.put(None)
 
     # ---- status / candidate surface --------------------------------------
 
@@ -142,6 +160,21 @@ class ImportWatchService:
     def _drop(self, key: str) -> None:
         self._state.pop(key, None)
         self._orphan_pending(key)
+
+    def _worker_loop(self) -> None:
+        """Single consumer of the scan queue — every os call the watcher
+        makes happens on this thread. Poison-pill exits; a cancelled
+        queued item is skipped without running its filesystem op."""
+        while True:
+            item = self._work_q.get()
+            if item is None:                     # poison pill — clean exit
+                return
+            fn, args, fut = item
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn(*args))
+                except BaseException as e:
+                    fut.set_exception(e)
 
     # ---- poll loop --------------------------------------------------------
 
@@ -227,16 +260,15 @@ class ImportWatchService:
                     continue
                 # Schedule the scan on the single worker thread — results
                 # are collected next tick; nothing blocks the event loop.
-                # A plain concurrent future is used (not run_in_executor):
-                # it is never awaited, only polled — so it is loop-agnostic
-                # and thread-safe across ticks.
+                # A plain concurrent.futures.Future is the handle: never
+                # awaited, only polled — loop-agnostic and thread-safe.
                 if self._stopping:
                     continue
                 ext_map = bridge.watch_eligible_exts(prov)
-                self._pending[key] = (
-                    self._executor.submit(
-                        bridge.scan_watch_folder, folder, ext_map, set()),
-                    st["gen"], fp)
+                fut: Future = Future()
+                self._work_q.put((bridge.scan_watch_folder,
+                                  (folder, ext_map, set()), fut))
+                self._pending[key] = (fut, st["gen"], fp)
             for key in list(self._state):
                 if key not in live:
                     self._drop(key)

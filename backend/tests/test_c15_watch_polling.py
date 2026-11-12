@@ -578,6 +578,27 @@ class TestDisableReenableRace:
                        if t.name.startswith("watch-scan")]
         assert workers and all(t.daemon for t in workers)
 
+    def test_process_exit_is_bounded_with_stalled_scan(self):
+        """stop() returning fast is not the same as the PROCESS exiting —
+        concurrent.futures._python_exit joins pool workers at interpreter
+        shutdown regardless of daemon flags. This probe runs the real
+        service under the same interpreter pytest runs on, stalls the
+        worker for 120s, stops, and sys.exit()s. If anything joins the
+        worker, subprocess.run times out."""
+        import subprocess
+        import sys
+        probe = Path(__file__).parent / "_watch_exit_probe.py"
+        try:
+            r = subprocess.run(
+                [sys.executable, str(probe)],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            pytest.fail("backend process hung >30s exiting with a "
+                        "stalled scan — worker thread is not safely "
+                        "abandoned at interpreter shutdown")
+        assert r.returncode == 0, r.stderr[-2000:]
+
 
 class TestLifecycle:
     def test_start_stop_cancels_task(self, client):
