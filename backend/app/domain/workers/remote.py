@@ -54,7 +54,18 @@ class RemoteHandle:
 
 
 class RemoteProvider(Protocol):
+    """Remote-side contract a cloud adapter drives.
+
+    Idempotency contract (C2.0a — per-provider transport mappings land
+    in C2.0c): ``idempotency`` declares how the provider dedupes a
+    resubmission — ``"native"`` (provider honors the key itself),
+    ``"request_id"`` (key becomes the retrievable request id), or
+    ``"none"`` (provider cannot dedupe — resubmission is FORBIDDEN;
+    UNKNOWN outcomes must reconcile, never resubmit). A provider that
+    cannot honor one of these modes must not be submitted to.
+    """
     name: str
+    idempotency: str = "none"  # native | request_id | none
 
     async def submit(self, intent: SubmissionIntent) -> RemoteHandle: ...
 
@@ -63,6 +74,21 @@ class RemoteProvider(Protocol):
         ...
 
     async def cancel(self, remote_id: str) -> RemoteHandle: ...
+
+
+def provenance_confidence(remote: dict | None) -> str:
+    """C2.0a — verified_remote eligibility contract.
+
+    `verified_remote` may be claimed ONLY when a remote_job_id exists
+    AND `provider_verified` evidence was established by an authorized
+    real provider transport (C2.0c+). Simulated/mocked results — and
+    anything lacking explicit verification evidence — can never claim
+    it. This is the single decision point; adapters must not set the
+    label directly."""
+    rem = remote or {}
+    if rem.get("remote_job_id") and rem.get("provider_verified") is True:
+        return "verified_remote"
+    return "simulated"
 
 
 class MockRemoteProvider:
