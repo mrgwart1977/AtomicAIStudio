@@ -59,10 +59,15 @@ this project uses semver once public releases begin.
 
 ### Fixed
 - Live settlement fails closed on missing, empty, partial, malformed,
-  or negative provider usage: the DeepSeek response parser no longer
-  fabricates `{0,0}` usage, and `_usage_cost_micro` returns None for
-  unusable reports so the reservation settles at the reserved cap
-  (`estimate_at_settle`) instead of $0 underbooking.
+  null, or negative provider usage: the DeepSeek response parser no
+  longer fabricates `{0,0}` usage, and `_usage_cost_micro` returns
+  None for unusable reports. The financial exposure is then held as
+  an OPEN reservation with `settlement_state="usage_unavailable"` —
+  never reported as a provider-confirmed charge, never silently
+  released; explicit documented reconciliation is the only exit.
+  Generation outcome and provenance stay separate: an authenticated
+  valid response still returns `succeeded` with verification
+  evidence while billing remains unresolved.
 - C2 exit gate Stage B1 — production-capable live transport
   infrastructure, still unreachable from every shipped surface
   (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the

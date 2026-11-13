@@ -482,7 +482,11 @@ def run_validation(session_factory: Callable, *, project_id: str,
                 outcome = out["result"]["outcome"]
                 if outcome == "succeeded":
                     _mark(s, job_id, "succeeded",
-                          result={"outcome": outcome})
+                          result={
+                              "outcome": outcome,
+                              "settlement":
+                                  out["result"].get("settlement_state")
+                                  or out["result"]["reservation"]})
                 elif outcome == "ambiguous":
                     _mark(s, job_id, "unknown",
                           error="provider outcome undetermined — "

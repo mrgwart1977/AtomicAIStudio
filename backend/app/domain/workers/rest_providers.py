@@ -423,6 +423,22 @@ def _openai_usage(body: dict[str, Any]) -> dict[str, int] | None:
             "output_tokens": int(u.get("output_tokens") or 0)}
 
 
+def _deepseek_usage(usage: Any) -> dict[str, int] | None:
+    """Normalize the chat-completions usage object. Both token counts
+    must be present and integer-coercible — anything missing, partial,
+    or malformed returns None so settlement treats it as unresolved
+    exposure (never fabricated zeros, never a confirmed charge)."""
+    if not isinstance(usage, dict):
+        return None
+    inp, out = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if inp is None or out is None:
+        return None  # null counts are schema noise, not honest zeros
+    try:
+        return {"input_tokens": int(inp), "output_tokens": int(out)}
+    except (TypeError, ValueError):
+        return None
+
+
 class OpenAIResponsesProvider(RestRemoteProvider):
     """OpenAI Responses API — async lifecycle via ``background: true``.
 
@@ -615,13 +631,7 @@ class OpenAICompatChatProvider(RestRemoteProvider):
         # completion without usage is anomalous, and zeros would settle
         # at $0 instead of falling back to the reserved-cap estimate.
         usage = body.get("usage")
-        if (isinstance(usage, dict)
-                and "prompt_tokens" in usage
-                and "completion_tokens" in usage):
-            usage = {"input_tokens": int(usage["prompt_tokens"] or 0),
-                     "output_tokens": int(usage["completion_tokens"] or 0)}
-        else:
-            usage = None  # missing/partial — never fabricate zeros
+        usage = _deepseek_usage(usage)  # None when unusable
         detail = {
             "transport_simulated": True,
             "text": message.get("content") or "",
