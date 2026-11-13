@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **SEC-A2.2 — WebSocket client first-frame authentication**: the
+  desktop `connectWs()` no longer puts `?token=` in the WS URL — it
+  sends `{"type":"auth","token":...}` as the first frame after `open`
+  and treats the socket as authenticated only after `auth_ok`.
+  Pre-auth messages (event-shaped or malformed) are dropped.
+  `1008` auth refusal is non-retryable per-token: the cached backend
+  info is invalidated so the next attempt re-asks the shell — sidecar
+  restart/token rotation resumes automatically while the same token
+  stops the loop (no bad-credential resubmission). Network drops use
+  the existing bounded backoff and re-authenticate on every attempt.
 - **SEC-A2.1 — WebSocket first-frame authentication (backend)**: the
   `/api/ws` endpoint now runs `UNAUTHENTICATED → AUTHENTICATED →
   CLOSED`. When no `?token=` query parameter is present, the client
