@@ -30,6 +30,7 @@ from app.adapters.base import JobCancelled, JobHandle
 from app.adapters.registry import AdapterRegistry
 from app.db.models import Asset, GenerationJob, new_id, utcnow
 from app.domain.events import EventBus
+from app.domain.redact import redact_detail
 
 log = logging.getLogger(__name__)
 
@@ -603,7 +604,7 @@ class JobEngine:
                 "adapter_id": job.adapter_id,
                 "output_asset_id": job.output_asset_id,
                 "error": job.error,
-                "progress_json": job.progress_json,
+                "progress_json": redact_detail(job.progress_json),
                 "cancel_requested": job.cancel_requested,
                 "gpu_index": job.gpu_index,
                 "model_key": job.model_key,

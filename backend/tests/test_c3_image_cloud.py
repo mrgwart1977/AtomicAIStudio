@@ -562,6 +562,101 @@ class TestFailurePaths:
         assert "not retrievable" in (res.reconcile_note or "")
 
 
+# ---------- sensitive remote-URL redaction (C3-A hardening) ----------
+
+_URL_BODY = {"created": 1,
+             "data": [{"url": "https://cdn.example/sim-temp.png?sig=SECRET",
+                       "revised_prompt": "x"}],
+             "usage": {"input_tokens": 5, "output_tokens": 900,
+                       "total_tokens": 905}}
+
+
+class TestSensitiveUrlRedaction:
+    """Signed/temporary remote URLs persist for reconcile but are
+    bearer references — they must never leave via API, WS, errors."""
+
+    def _pending_job(self, client, monkeypatch, pid):
+        _override(client, monkeypatch, _status_handler(200, _URL_BODY))
+        r = _gen(client, pid)
+        return wait_for_job(client, pid, r.json()["job_id"])
+
+    def test_redact_detail_deep_walk(self):
+        from app.domain.redact import redact_detail, REDACTED
+        raw = {"image_url": "https://x?sig=1",
+               "remote_outcome": "artifact_pending_retrieval",
+               "attempts": [{"detail": {"download_url": "https://y"},
+                             "status": "ok"}],
+               "nested": {"list": [{"url": "https://z"}, 3, "s"]},
+               "remote_job_id": "r-1"}
+        out = redact_detail(raw)
+        assert out["image_url"] == REDACTED
+        assert out["attempts"][0]["detail"]["download_url"] == REDACTED
+        assert out["nested"]["list"][0]["url"] == REDACTED
+        # non-sensitive values + key presence preserved
+        assert out["remote_outcome"] == "artifact_pending_retrieval"
+        assert out["attempts"][0]["status"] == "ok"
+        assert out["nested"]["list"][1:] == [3, "s"]
+        assert out["remote_job_id"] == "r-1"
+        assert raw["image_url"].startswith("https://")  # original intact
+
+    def test_job_api_redacts_pending_url(self, client, monkeypatch):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        job = self._pending_job(client, monkeypatch, pid)
+        assert job["status"] == "failed"
+        pj = job["progress_json"] or {}
+        # API view: marker only — the raw URL appears nowhere in the
+        # serialized job (not progress, not error).
+        assert pj["image_url"] != _URL_BODY["data"][0]["url"]
+        assert "redacted" in pj["image_url"]
+        assert _URL_BODY["data"][0]["url"] not in json.dumps(job)
+        # outcome classification survives redaction
+        assert pj["remote_outcome"] == "artifact_pending_retrieval"
+        assert pj["remote_status"] == "succeeded"
+        assert pj["reconcile_required"] is True
+        # durable store KEEPS the URL for future reconcile/retrieval
+        assert (_job_row(client, job["id"]).progress_json
+                ["image_url"] == _URL_BODY["data"][0]["url"])
+
+    def test_ws_broadcast_redacts_pending_url(self, client, monkeypatch):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _override(client, monkeypatch, _status_handler(200, _URL_BODY))
+        events = []
+        with client.websocket_connect("/api/ws?token=test-token") as ws:
+            r = _gen(client, pid)
+            jid = r.json()["job_id"]
+            # drain job.progress events until the job reaches terminal
+            for _ in range(200):
+                msg = ws.receive_json()
+                if (msg.get("event") == "job.progress"
+                        and msg.get("resource_id") == jid):
+                    events.append(msg["payload"])
+                    if msg["payload"].get("status") in (
+                            "succeeded", "failed", "cancelled"):
+                        break
+        assert events, "no job.progress events received"
+        blob = json.dumps(events)
+        assert _URL_BODY["data"][0]["url"] not in blob
+        assert "sig=SECRET" not in blob
+        assert "redacted" in blob  # marker present in the final state
+
+    def test_jobout_redacts_result_and_progress(self):
+        from app.domain.redact import REDACTED
+        from app.schemas.api import JobOut
+        from app.db.models import utcnow
+        job = JobOut(
+            id="j", project_id="p", adapter_id="a", kind="image",
+            status="failed", progress=0.9, message="m", error=None,
+            resumable=False, output_asset_id=None, command_id=None,
+            result_json={"image_url": "https://x?sig=1", "ok": 1},
+            progress_json={"image_url": "https://x?sig=1"},
+            created_at=utcnow(), completed_at=None)
+        assert job.progress_json["image_url"] == REDACTED
+        assert job.result_json["image_url"] == REDACTED
+        assert job.result_json["ok"] == 1
+
+
 # ---------------- idempotency / concurrency / budgets ----------------
 
 class TestFinancialDiscipline:

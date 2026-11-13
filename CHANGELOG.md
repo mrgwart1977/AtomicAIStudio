@@ -53,14 +53,21 @@ this project uses semver once public releases begin.
     evidence must be a real date within 90 days — stale/malformed/
     future-dated pricing fails closed. Asset-registration failures fail
     the job cleanly (rollback of uncommitted asset rows, work-dir
-    purge) instead of stranding the job `running`.
-  - 59 regression tests: preview/commit/idempotency/concurrency,
+    purge) instead of stranding the job `running`. Signed/temporary
+    remote URLs persist in `progress_json` for reconcile but are
+    bearer references — `domain/redact.py` strips them (and raw
+    payload keys) from every outbound surface: `JobOut` responses and
+    `job.progress` websocket events show a redaction marker while the
+    durable row keeps the real value; outcome classification
+    (`artifact_pending_retrieval`) is unaffected.
+  - 63 regression tests: preview/commit/idempotency/concurrency,
     budgets, fail-closed pricing incl. staleness, image-safety matrix
     incl. decompression bomb + pre-decode cap, CAS/provenance/job
     linkage, settle/release/hold billing paths, artifact-pending
     retrieval, registration-failure isolation, sim-vs-live accounting
     isolation, explicit reconcile, restart sweep, zero-egress
-    construction, no credential reads.
+    construction, no credential reads, sensitive remote-URL redaction
+    across REST + websocket paths.
 - C2 exit gate Stage B2a — DeepSeek-only live-validation permit
   (`domain/live_permit.py`), a durable single-use authorization for a
   future owner-approved real request. `cloud.live.validate_arm` writes

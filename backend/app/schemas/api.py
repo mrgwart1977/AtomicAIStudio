@@ -6,7 +6,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.domain.redact import redact_detail
 
 
 # ---------- projects ----------
@@ -168,6 +170,13 @@ class JobOut(BaseModel):
     recovery_state: str | None = None
     created_at: datetime
     completed_at: datetime | None
+
+    @field_validator("progress_json", "result_json", mode="before")
+    @classmethod
+    def _redact_sensitive_detail(cls, v):
+        # Signed/temporary remote URLs persist for reconcile but are
+        # bearer references — never leave via job-detail responses.
+        return redact_detail(v)
 
 
 class AssetOut(BaseModel):
