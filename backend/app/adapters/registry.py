@@ -41,6 +41,14 @@ class AdapterRegistry:
         from app.adapters.cloud_rest import RestCloudTextAdapter
         from app.domain.workers.rest_simulated import build_simulated_providers
         self.register(RestCloudTextAdapter(build_simulated_providers()))
+        # C3-A — documented image contracts (OpenAI Images sync shape)
+        # over httpx.MockTransport fixtures only. Construction refuses
+        # any real transport — no live egress path exists here either.
+        from app.adapters.cloud_image import SimCloudImageAdapter
+        from app.domain.workers.rest_simulated import (
+            build_simulated_image_providers)
+        self.register(SimCloudImageAdapter(
+            build_simulated_image_providers()))
         # M4.1 mock persistent adapter — dev/test only. Its worker is a
         # Python script spawned via sys.executable, which doesn't exist
         # as a usable interpreter in a frozen build (sys.executable is

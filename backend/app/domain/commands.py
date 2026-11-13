@@ -48,7 +48,7 @@ SUPPORTED_COMMANDS = {
     "project.delete",
     # generation (mock + real local inference since M3)
     "generate.image.mock", "generate.image", "generate.image.persistent",
-    "generate.video", "generate.text.cloud",
+    "generate.video", "generate.text.cloud", "generate.image.cloud",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -82,14 +82,14 @@ SUPPORTED_COMMANDS = {
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
-                       "generate.text.cloud"}
+                       "generate.text.cloud", "generate.image.cloud"}
 
 # Commands whose commit transaction must begin BEGIN IMMEDIATE — they
 # check-then-act on financial state, so the budget-check SELECT must
 # run after the write lock is held (scoped; see api/routers.py
 # _spend_isolation). Everything else stays deferred.
 SPEND_GUARDED_COMMANDS = {
-    "generate.text.cloud",
+    "generate.text.cloud", "generate.image.cloud",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
     # live-gate mutations check-then-act on budgets + gate state
     "cloud.live.enable", "cloud.live.disable",
@@ -112,6 +112,9 @@ JOB_COMMANDS = {
     # Default cloud-text adapter — generate.text.cloud resolves per
     # provider_key (REST contract impls route to cloud.text.rest).
     "generate.text.cloud": "cloud.text.mock",
+    # C3-A — cloud image contract adapter; per-provider contract
+    # coverage is checked at commit (only implemented contracts run).
+    "generate.image.cloud": "cloud.image.sim",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -182,6 +185,9 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.text.cloud":
         return (f"Simulate cloud text job for {payload.get('provider_key', '?')} "
+                f"— '{(payload.get('prompt') or '')[:60]}'")
+    if command_type == "generate.image.cloud":
+        return (f"Simulate cloud image job for {payload.get('provider_key', '?')} "
                 f"— '{(payload.get('prompt') or '')[:60]}'")
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
@@ -337,6 +343,72 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         else:
             warnings.append("Runs on the MOCK remote provider — simulated "
                             "lifecycle only; output can never be verified_remote")
+    if command_type == "generate.image.cloud":
+        # C3-A — simulated cloud image lifecycle. Eligibility is
+        # catalog-driven (T1 official-API image strategy + image model);
+        # execution_target must be explicitly "cloud". No credentials
+        # are read and nothing billable runs — the transport is a
+        # MockTransport fixture; output can never be verified_remote.
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        from app.domain.workers.rest_image_providers import (
+            IMAGE_REST_KEYS)
+        provider = _bridge.get_provider(payload.get("provider_key"))
+        if provider is None:
+            raise CommandError(404, "provider not found in catalog")
+        if payload.get("execution_target") != "cloud":
+            raise CommandError(422, "cloud generation requires explicit "
+                                    "execution_target 'cloud' — local is "
+                                    "the default and must be opted out of")
+        prompt = (payload.get("prompt") or "").strip()
+        if not prompt:
+            raise CommandError(422, "prompt is required")
+        if len(prompt) > 8000:
+            raise CommandError(422, "prompt exceeds 8000 characters")
+        strat = _cc.t1_image_strategy(provider)
+        if strat is None:
+            raise CommandError(422, "no documented T1 image API path — "
+                                    "provider not eligible for cloud image")
+        if _bridge.record_stale(strat):
+            warnings.append("Documented strategy evidence needs re-check — "
+                            "this simulation proceeds on stale evidence only")
+        model = _cc.pick_image_model(provider, payload.get("model_id"))
+        if payload.get("model_id") and model is None:
+            raise CommandError(
+                422, f"unknown image model '{payload['model_id']}'")
+        if model is None:
+            raise CommandError(422, "no image-capable model for this provider")
+        if payload.get("provider_key") not in IMAGE_REST_KEYS:
+            raise CommandError(
+                422, f"no image contract implemented for provider "
+                     f"'{payload.get('provider_key')}' — C3-A covers: "
+                     + ", ".join(IMAGE_REST_KEYS))
+        est = _cc.estimate_image_cost(
+            model, count=1, size=payload.get("size"),
+            quality=payload.get("quality"), prompt=prompt)
+        if est["est_cost_usd"] is None:
+            raise CommandError(
+                422, {"error": "pricing_unavailable",
+                      "detail": "catalog pricing for this model is missing, "
+                                "stale, or not estimable — refusing rather "
+                                "than guessing a billable amount"})
+        warnings.append(
+            f"Cloud execution sends: {_cc.data_out_summary(provider, prompt)}")
+        warnings.append(
+            f"Cost is an ESTIMATE only (~${est['est_cost_usd']:.4f}, "
+            f"{est['unit']}) — simulated accounting on this run; "
+            "no billable execution happens in C3-A")
+        if int(payload.get("count") or 1) != 1:
+            raise CommandError(422, "C3-A supports exactly one image per job")
+        for ref in ("scene_id", "shot_id", "character_id", "world_id",
+                    "location_id", "reference_asset_id"):
+            if payload.get(ref) is not None:
+                warnings.append(
+                    f"Filmmaking metadata attached: {ref}")
+        warnings.append(
+            "Runs on a SIMULATED transport — documented request/response "
+            "shapes with no network egress; output is a deterministic "
+            "test PNG and can never be verified_remote")
     if command_type in ("spend.budget_set", "spend.budget_remove"):
         if payload.get("target", "project") not in ("project", "global"):
             raise CommandError(422, "target must be 'project' or 'global'")
@@ -1559,7 +1631,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     "generate.video",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
-                    "generate.text.cloud"),
+                    "generate.text.cloud", "generate.image.cloud"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1574,7 +1646,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 raise CommandError(409, str(exc)) from exc
             raise
         audit["after"]["job_id"] = job.id
-        if command_type == "generate.text.cloud":
+        if command_type in ("generate.text.cloud", "generate.image.cloud"):
             # Minimized durable record — the prompt body lives in the job
             # request (like local generation), never re-echoed to audit.
             audit["after"]["cloud"] = {
@@ -1833,6 +1905,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image.persistent": "image",
         "generate.video": "video",
         "generate.text.cloud": "text",
+        "generate.image.cloud": "image",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -1912,6 +1985,57 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "cost_is_estimate": True,
             "data_out": _cc.data_out_summary(provider, payload["prompt"]),
             "simulated": True,
+        }
+    elif command_type == "generate.image.cloud":
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        from app.domain.workers.rest_image_providers import (
+            IMAGE_REST_KEYS)
+        provider = _bridge.get_provider(payload.get("provider_key"))
+        if provider is None:
+            raise CommandError(404, "provider not found in catalog")
+        if payload.get("provider_key") not in IMAGE_REST_KEYS:
+            raise CommandError(
+                422, f"no image contract implemented for provider "
+                     f"'{payload.get('provider_key')}'")
+        prompt = (payload.get("prompt") or "").strip()
+        if not prompt:
+            raise CommandError(422, "prompt is required")
+        model = _cc.pick_image_model(provider, payload.get("model_id"))
+        strat = _cc.t1_image_strategy(provider)
+        if model is None or strat is None:
+            raise CommandError(
+                422, "provider has no documented image strategy/model")
+        est = _cc.estimate_image_cost(
+            model, count=1, size=payload.get("size"),
+            quality=payload.get("quality"), prompt=prompt)
+        if est["est_cost_usd"] is None:
+            raise CommandError(422, "pricing_unavailable")
+        req = {
+            "command_type": command_type,
+            "provider_key": provider["key"],
+            "model_id": model["id"],
+            "strategy_id": strat["strategy_id"],
+            "prompt": prompt,
+            "negative_prompt": payload.get("negative_prompt") or "",
+            "execution_target": "cloud",
+            "size": payload.get("size"),
+            "quality": payload.get("quality"),
+            "seed": payload.get("seed"),
+            "count": 1,
+            "est_cost_usd": est["est_cost_usd"],
+            "cost_table": model.get("cost_table"),
+            "cost_is_estimate": True,
+            "data_out": _cc.data_out_summary(provider, prompt),
+            "simulated": True,
+            # Filmmaking linkage — passthrough into request_json and the
+            # asset provenance; no schema change needed.
+            "scene_id": payload.get("scene_id"),
+            "shot_id": payload.get("shot_id"),
+            "character_id": payload.get("character_id"),
+            "world_id": payload.get("world_id"),
+            "location_id": payload.get("location_id"),
+            "reference_asset_id": payload.get("reference_asset_id"),
         }
     elif command_type == "generate.video":
         from app.domain import compatibility, model_catalog

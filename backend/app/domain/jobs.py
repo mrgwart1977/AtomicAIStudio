@@ -30,6 +30,7 @@ from app.adapters.base import JobCancelled, JobHandle
 from app.adapters.registry import AdapterRegistry
 from app.db.models import Asset, GenerationJob, new_id, utcnow
 from app.domain.events import EventBus
+from app.domain.redact import redact_detail
 
 log = logging.getLogger(__name__)
 
@@ -425,18 +426,36 @@ class JobEngine:
                 job.status = "succeeded"
                 job.progress = 1.0
             else:
-                asset = self._register_asset(s, job, final_output)
-                job.output_asset_id = asset.id
-                for extra in final_output.get("extra_assets") or []:
-                    self._register_asset(s, job, {
-                        "origin": final_output.get("origin", "generated"),
-                        "media": final_output.get("media"),
-                        **extra,
-                    })
-                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "succeeded")
-                job.status = "succeeded"
-                job.progress = 1.0
-                self._apply_post_command(s, job, final_output, asset)
+                try:
+                    asset = self._register_asset(s, job, final_output)
+                    job.output_asset_id = asset.id
+                    for extra in final_output.get("extra_assets") or []:
+                        self._register_asset(s, job, {
+                            "origin": final_output.get("origin", "generated"),
+                            "media": final_output.get("media"),
+                            **extra,
+                        })
+                except Exception as exc:
+                    # Artifact registration IS job success — a partial
+                    # CAS/asset failure must not produce a 'succeeded'
+                    # job with no artifact, nor strand the job in
+                    # 'running' until a restart sweep. Spend actions
+                    # already committed by adapter progress stay as
+                    # recorded (settled stays settled, held stays open)
+                    # — only the uncommitted asset rows roll back.
+                    s.rollback()
+                    job = s.get(GenerationJob, job_id)
+                    attempts_mod.finish_attempt(
+                        s, job, attempt["attempt_id"], "failed")
+                    job.status = "failed"
+                    job.error = f"asset registration failed: {exc}"
+                    self._purge_work_dir(work_dir, job.id)
+                else:
+                    attempts_mod.finish_attempt(
+                        s, job, attempt["attempt_id"], "succeeded")
+                    job.status = "succeeded"
+                    job.progress = 1.0
+                    self._apply_post_command(s, job, final_output, asset)
             job.completed_at = utcnow()
             s.commit()
             await self._publish(job)
@@ -585,7 +604,7 @@ class JobEngine:
                 "adapter_id": job.adapter_id,
                 "output_asset_id": job.output_asset_id,
                 "error": job.error,
-                "progress_json": job.progress_json,
+                "progress_json": redact_detail(job.progress_json),
                 "cancel_requested": job.cancel_requested,
                 "gpu_index": job.gpu_index,
                 "model_key": job.model_key,

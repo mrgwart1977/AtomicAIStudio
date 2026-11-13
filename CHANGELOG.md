@@ -7,6 +7,67 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C3-A — cloud image generation on simulated transports
+  (`generate.image.cloud` → `cloud.image.sim`). OpenAI Images sync
+  contract (`POST /v1/images/generations`) exercised over
+  `httpx.MockTransport` fixtures — documented request/response shapes,
+  zero egress, dummy credentials, deterministic test PNGs. Contract is
+  declarative `EndpointSpec` data (`domain/workers/rest_image_providers.py`)
+  so async/poll/cancel providers (FLUX-style) plug into the same
+  lifecycle the text adapter already drives; temporary-URL payloads and
+  provider-specific errors are handled at the contract seam.
+  - Extensible image pricing (`cloud_cost.estimate_image_cost`): one
+    billing `unit` per cost_table — `per_image` (flat or quality-tiered
+    `rates`), `per_mpixel`, `per_mtok`, `per_credit`. Missing table,
+    missing `checked` evidence, unknown unit, or unestimable input
+    fails closed (commit refuses `pricing_unavailable`). Unspecified
+    quality reserves the highest documented tier — worst-case bound,
+    never an under-estimate. Catalog cost tables added for
+    `gpt-image-1` (tiered) and `gemini-2.5-flash-image` (flat $0.039).
+  - Financial lifecycle identical to cloud text: spend-guarded commit,
+    `spend.admit` reservation at estimate (or `max_cost_usd`), settle at
+    `images_returned` × catalog rate (source `simulated`), 4xx release,
+    ambiguous/unusable billing → open hold for explicit reconcile —
+    never a fabricated charge. Job is non-resumable (remote scope
+    reconciles, never auto-resubmits).
+  - `domain/image_safety.py` — payload gate before CAS: bounded bytes
+    (16 MiB, not the 2 MiB text cap — no live HTTP limits changed),
+    PNG/JPEG/WebP allowlist, header+full decode verify, 64 MP pixel cap
+    + 8192-dimension limit (decompression-bomb refusal before decode),
+    SHA-256 digest, safe re-encoded PNG thumbnail.
+  - Filmmaking metadata passes through request_json → AssetVersion
+    media_json: scene/shot/character/world/location ids, prompt +
+    negative prompt, seed, requested vs actual dimensions, reference
+    asset — no schema migration needed.
+  - Provenance: asset carries adapter id, job id, remote provider,
+    `provenance_confidence: simulated` — `verified_remote` is
+    structurally unreachable (no `provider_verified` evidence can be
+    produced by a mock transport).
+  - Review-hardening: URL-only responses classify as
+    `artifact_pending_retrieval` (remote succeeded, retrieval
+    unsupported in C3-A) — distinct from `ambiguous` and `failed`,
+    reconcile-required, with the temporary URL persisted in
+    `progress_json` for a future retrieval workflow; never resubmitted.
+    Encoded payloads are capped before base64 decode (≈4/3 inflation
+    bound) so oversized strings never materialize. Pricing `checked`
+    evidence must be a real date within 90 days — stale/malformed/
+    future-dated pricing fails closed. Asset-registration failures fail
+    the job cleanly (rollback of uncommitted asset rows, work-dir
+    purge) instead of stranding the job `running`. Signed/temporary
+    remote URLs persist in `progress_json` for reconcile but are
+    bearer references — `domain/redact.py` strips them (and raw
+    payload keys) from every outbound surface: `JobOut` responses and
+    `job.progress` websocket events show a redaction marker while the
+    durable row keeps the real value; outcome classification
+    (`artifact_pending_retrieval`) is unaffected.
+  - 63 regression tests: preview/commit/idempotency/concurrency,
+    budgets, fail-closed pricing incl. staleness, image-safety matrix
+    incl. decompression bomb + pre-decode cap, CAS/provenance/job
+    linkage, settle/release/hold billing paths, artifact-pending
+    retrieval, registration-failure isolation, sim-vs-live accounting
+    isolation, explicit reconcile, restart sweep, zero-egress
+    construction, no credential reads, sensitive remote-URL redaction
+    across REST + websocket paths.
 - C2 exit gate Stage B2a — DeepSeek-only live-validation permit
   (`domain/live_permit.py`), a durable single-use authorization for a
   future owner-approved real request. `cloud.live.validate_arm` writes
