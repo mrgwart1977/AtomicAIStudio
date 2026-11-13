@@ -750,7 +750,13 @@ class TestCommandIdempotency:
             t.join(timeout=30)
         assert len(results) == 1 and len(errors) == 1
         assert results[0 if 0 in results else 1]["outcome"] == "succeeded"
-        assert isinstance(next(iter(errors.values())), lp.PermitRefused)
+        # The loser refuses at whichever guard it hits first — the
+        # one-open-reservation cap (BudgetError) or the consumed permit
+        # (PermitRefused). Either way: exactly one send, zero loser
+        # bookings.
+        assert isinstance(
+            next(iter(errors.values())),
+            (lp.PermitRefused, spend.BudgetError))
         assert sends == ["https://api.deepseek.com/chat/completions"]
         live = _live_reservations(client)
         assert len(live) == 1 and live[0].status == "settled"
