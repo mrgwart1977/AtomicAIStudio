@@ -5,13 +5,14 @@
 // entries only, and generated PNGs are deterministic test artifacts —
 // the UI must never present any of it as real provider output.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, fetchAssetObjectUrl } from "../../api/client";
+import { apiFetch } from "../../api/client";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
   CommandProposal, ImageContracts, Job,
   ProviderDetail, ProviderSummary, SpendReservation, SpendSummary,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
+import { useAssetObjectUrl } from "../../components/AuthImage";
 import { SimBadge, fmtMicro } from "./cloudShared";
 
 const inputCls =
@@ -89,26 +90,9 @@ interface Pending {
   proposal: CommandProposal;
 }
 
-/** Authenticated thumbnail loader — the token travels in the request
- * header, never in a URL. "error" = failed safely (missing/404/denied);
- * null = still loading. */
-function useAssetThumb(pid: string, assetId: string | null | undefined):
-    string | "error" | null {
-  const [state, setState] = useState<string | "error" | null>(null);
-  useEffect(() => {
-    if (!assetId) return;
-    let url: string | null = null;
-    let dead = false;
-    fetchAssetObjectUrl(pid, assetId)
-      .then((u) => {
-        if (dead) URL.revokeObjectURL(u);
-        else { url = u; setState(u); }
-      })
-      .catch(() => { if (!dead) setState("error"); });
-    return () => { dead = true; if (url) URL.revokeObjectURL(url); };
-  }, [pid, assetId]);
-  return state;
-}
+/** Authenticated thumbnail loader — shared implementation lives in
+ * components/AuthImage (token in the request header, never a URL). */
+const useAssetThumb = useAssetObjectUrl;
 
 export function CloudImagePanel({ pid, revision, simSummary, reservations,
                                   onCommitted }: {

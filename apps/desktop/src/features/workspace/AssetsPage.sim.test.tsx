@@ -10,7 +10,7 @@ const apiFetch = vi.fn();
 const commitCommand = vi.fn();
 vi.mock("../../api/client", () => ({
   apiFetch: (...a: unknown[]) => apiFetch(...a),
-  assetFileUrl: () => "mock://file",
+  fetchAssetObjectUrl: () => Promise.resolve("blob:mock"),
   getBackendInfo: () => Promise.resolve({ baseUrl: "http://x", token: "t" }),
 }));
 vi.mock("../../api/commands", () => ({

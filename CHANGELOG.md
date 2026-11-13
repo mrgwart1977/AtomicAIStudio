@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **SEC-A1 — token-free asset URLs in the UI**: every image/video
+  preview now loads bytes via `fetchAssetObjectUrl` (the session token
+  travels in the `X-Atomic-Token` header, never in a URL) and renders a
+  managed `blob:` object URL — shared `components/AuthImage` +
+  `useAssetObjectUrl` provide stale-response rejection, revocation on
+  change/unmount (bounded retention), and fallback loading/error
+  states. `assetFileUrl` (the `?token=` producer) was removed; migrated
+  sites: ProjectsPage, AssetsPage, JobsPanel, GeneratePage,
+  VideoGeneratePanel, StoryboardPage, EntityPage, CloudImagePanel.
+  Server-side `?token=` acceptance is unchanged (removal is a later
+  phase) — WebSocket auth still uses query token until SEC-A2.
+
+
 All notable changes to this project will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project uses semver once public releases begin.

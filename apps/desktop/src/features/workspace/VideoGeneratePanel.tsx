@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
+import { apiFetch } from "../../api/client";
+import { useAssetObjectUrl } from "../../components/AuthImage";
 import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
-import type { Asset, AssetPage, BackendInfo } from "../../api/types";
+import type { Asset, AssetPage } from "../../api/types";
 
 const inputCls =
   "w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg placeholder:text-faint";
@@ -29,7 +30,7 @@ export function VideoGeneratePanel() {
   const [selected, setSelected] = useState<Asset | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [info, setInfo] = useState<BackendInfo | null>(null);
+  const selectedUrl = useAssetObjectUrl(selected?.project_id, selected?.id);
 
   const installedVideo = useMemo(
     () => models.filter((m) => m.modality === "video" && m.install?.status === "installed"),
@@ -71,7 +72,6 @@ export function VideoGeneratePanel() {
   }
 
   useEffect(() => {
-    void getBackendInfo().then(setInfo);
     void loadAssets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid]);
@@ -223,7 +223,7 @@ export function VideoGeneratePanel() {
           <video
             key={selected.id}
             className="w-full rounded-md border border-line bg-black"
-            src={info ? assetFileUrl(selected.project_id, selected.id, info) : undefined}
+            src={selectedUrl && selectedUrl !== "error" ? selectedUrl : undefined}
             controls
             preload="metadata"
           />
