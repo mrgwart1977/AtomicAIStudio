@@ -1,0 +1,37 @@
+{
+  "pageUrl": "http://tauri.localhost/",
+  "webSockets": [
+    {
+      "url": "ws://127.0.0.1:60087/api/ws",
+      "hasQueryToken": false
+    }
+  ],
+  "frames": [
+    {
+      "dir": "client→server",
+      "opcode": 1,
+      "shape": {
+        "type": "auth",
+        "token": "<redacted:string>"
+      }
+    },
+    {
+      "dir": "server→client",
+      "opcode": 1,
+      "shape": {
+        "type": "auth_ok"
+      }
+    },
+    {
+      "dir": "client→server",
+      "opcode": 1,
+      "shape": {
+        "raw": "<non-json>"
+      }
+    }
+  ],
+  "pageState": {
+    "title": "Atomic Dream Engine",
+    "appMounted": false
+  }
+}
