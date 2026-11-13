@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **SEC-A3 — query-token authentication removed**: no endpoint accepts
+  `?token=` anymore. REST is `X-Atomic-Token` header-only
+  (`require_token` no longer falls back to query params); `/api/ws`
+  requires the first-frame auth protocol for every client — query
+  parameters carry no credential meaning. Header REST auth, first-frame
+  WS auth, project authorization, sidecar token validation, and error
+  semantics are unchanged. Rollback: revert this change (single commit)
+  to restore the query fallbacks; no client in the repo produced
+  `?token=` at removal time (guard tests keep it that way).
 - **SEC-A2.2 — WebSocket client first-frame authentication**: the
   desktop `connectWs()` no longer puts `?token=` in the WS URL — it
   sends `{"type":"auth","token":...}` as the first frame after `open`

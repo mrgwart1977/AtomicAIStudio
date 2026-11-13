@@ -1047,49 +1047,43 @@ def entity_versions(
 
 async def websocket_endpoint(websocket: WebSocket) -> None:
     from app.security import (
-        WS_MAX_UNAUTHENTICATED, is_auth_frame, require_token_ws,
-        ws_origin_allowed)
+        WS_MAX_UNAUTHENTICATED, is_auth_frame, ws_origin_allowed)
 
     state = websocket.app.state
 
     # A2.1 — origin policy before ANY accept (defense in depth; the
-    # token still gates either path).
+    # token still gates).
     if not ws_origin_allowed(websocket.headers.get("origin")):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    if websocket.query_params.get("token") is not None:
-        # Legacy ?token= handshake — preserved for compatibility until
-        # A3. require_token_ws closes 1008 on a bad token.
-        await require_token_ws(websocket)
-    else:
-        # First-frame authentication under a bounded unauthenticated
-        # slot: UNAUTHENTICATED → AUTHENTICATED → CLOSED. No
-        # subscription or event delivery exists before this point.
+    # First-frame authentication under a bounded unauthenticated slot:
+    # UNAUTHENTICATED → AUTHENTICATED → CLOSED. No subscription or
+    # event delivery exists before this point. A3 — ?token= carries no
+    # meaning here: every client authenticates in-band.
+    async with state.ws_unauth_lock:
+        if state.ws_unauth_count >= WS_MAX_UNAUTHENTICATED:
+            slot = False
+        else:
+            state.ws_unauth_count += 1
+            slot = True
+    if not slot:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    try:
+        # Accept first — a WS client cannot send its auth frame until
+        # the handshake completes. The socket is still UNAUTHENTICATED:
+        # no subscription, no events.
+        await websocket.accept()
+        authed = await _ws_first_frame_auth(websocket, state.settings)
+    finally:
         async with state.ws_unauth_lock:
-            if state.ws_unauth_count >= WS_MAX_UNAUTHENTICATED:
-                slot = False
-            else:
-                state.ws_unauth_count += 1
-                slot = True
-        if not slot:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        try:
-            # Accept first — a WS client cannot send its auth frame
-            # until the handshake completes. The socket is still
-            # UNAUTHENTICATED: no subscription, no events.
-            await websocket.accept()
-            authed = await _ws_first_frame_auth(
-                websocket, state.settings)
-        finally:
-            async with state.ws_unauth_lock:
-                state.ws_unauth_count -= 1
-        if not authed:
-            return
-        # auth_ok is the first post-handshake server message — the
-        # client treats the connection as authenticated only then.
-        await websocket.send_json({"type": "auth_ok"})
+            state.ws_unauth_count -= 1
+    if not authed:
+        return
+    # auth_ok is the first post-handshake server message — the client
+    # treats the connection as authenticated only then.
+    await websocket.send_json({"type": "auth_ok"})
 
     if websocket.client is None:
         return
