@@ -388,7 +388,10 @@ def reconcile(session: Session, *, project_id: str, job_id: str,
 
     confirmed_charge    — settle at actual; overage requires
                           accept_overage and is recorded uncapped.
-    confirmed_no_charge — release.
+    confirmed_no_charge — release. Requires a non-empty note: the
+                          operator's documented non-billing evidence
+                          or decision, written to the audit trail —
+                          ambiguity alone can never release a hold.
     still_unknown       — keep open; note + count (exposure retained).
 
     Idempotent: if the reservation already left 'open', a replayed same
@@ -414,8 +417,15 @@ def reconcile(session: Session, *, project_id: str, job_id: str,
 
     day_key, month_key = period_keys()
     if outcome == "confirmed_no_charge":
+        if not (note and str(note).strip()):
+            from app.domain.commands import CommandError
+            raise CommandError(
+                422, "confirmed_no_charge requires a note documenting "
+                     "the non-billing evidence or the operator's "
+                     "decision — an uncertain outcome cannot be "
+                     "released on silence")
         release(session, job_id=job_id,
-                reason=note or "user reconciled: confirmed no charge")
+                reason=note)
     elif outcome == "still_unknown":
         session.execute(
             update(SpendReservation)
