@@ -364,7 +364,21 @@ IMAGES = [
        auth=["api_key"], creds=_key_credential("api.bfl.ai key"),
        base_url="https://api.bfl.ai", job_model="async_poll", pricing="per_image",
        docs="https://docs.bfl.ai",
-       models=[{"id": "flux-pro-1.1", "capability": "image"},
+       models=[{"id": "flux-pro-1.1", "capability": "image",
+                # Documented dimension range 256–1440, multiples of 32 —
+                # declared presets are all compliant.
+                "sizes": ["1024x1024", "1280x720", "720x1280",
+                          "1440x1440", "1216x832", "832x1216"],
+                "qualities": ["auto"], "seed": True,
+                "cost_table": {"unit": "per_image", "rate": 0.04,
+                               "checked": "2026-11-13",
+                               "source": "docs.bfl.ai FLUX1.1 [pro] "
+                                         "pricing",
+                               "note": "$0.04/image flat per BFL "
+                                       "published rate"}},
+               # Editing model (image-to-image) — outside the C3-C
+               # generation contract; NO cost_table so commit fails
+               # closed (pricing_unavailable) rather than guessing.
                {"id": "flux-kontext", "capability": "image.edit"}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
                    _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate")]),
@@ -377,7 +391,16 @@ IMAGES = [
        tos="https://www.adobe.com/legal/terms.html",
        status_reason="Enterprise server-to-server OAuth credential.",
        notes="Shared Adobe credential also covers Firefly Video.",
-       models=[{"id": "firefly-image-4", "capability": "image"}],
+       models=[{"id": "firefly-image-4", "capability": "image",
+                # C3-C verification finding (2026-11): the Firefly API
+                # is asynchronous + IMS OAuth and — critically — Adobe
+                # publishes no per-image API USD price (web-app
+                # generative credits are not API billing). With no
+                # authoritative rate, cost admission must fail closed,
+                # so NO cost_table is declared and this provider has no
+                # implemented contract in this build.
+                "notes": "API pricing not published per-image; "
+                         "contract intentionally unimplemented"}],
        strategies=[_s(_API, "T1", ["image.generate"], note="S2S OAuth scope"),
                    _s(_ASSIST, "T2", ["image.generate"], connection={"launch_url": "https://firefly.adobe.com"}, **_T2)]),
     _p("ideogram", "Ideogram", "image", "A", "ideogram",

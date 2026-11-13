@@ -461,7 +461,11 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           </select>
         </div>
         <div>
-          <label className={labelCls} htmlFor="ci-seed">Seed (optional)</label>
+          <label className={labelCls} htmlFor="ci-seed">
+            Seed (optional — {model?.seed
+              ? "sent to the provider"
+              : "saved in metadata; not sent for this contract"})
+          </label>
           <input id="ci-seed" className={inputCls} type="number" value={seed}
             onChange={(e) => setSeed(e.target.value)} placeholder="random" />
         </div>

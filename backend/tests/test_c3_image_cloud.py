@@ -216,8 +216,8 @@ class TestValidation:
         before any enqueue or reservation."""
         pid = make_project(client)["id"]
         assert _gen(client, pid, provider_key="openai").status_code == 422
-        assert _gen(client, pid, provider_key="bfl-flux",
-                    model_id="flux-pro-1.1").status_code == 422
+        assert _gen(client, pid, provider_key="adobe-firefly",
+                    model_id="firefly-image-4").status_code == 422
 
     def test_unknown_model_refused(self, client):
         pid = make_project(client)["id"]
@@ -226,8 +226,8 @@ class TestValidation:
 
     def test_missing_pricing_fails_closed(self, client):
         """A model with no cost_table → est is None; commit refuses."""
-        prov = catalog.get_provider("bfl-flux")
-        m = cc.pick_image_model(prov, "flux-pro-1.1")
+        prov = catalog.get_provider("adobe-firefly")
+        m = cc.pick_image_model(prov, "firefly-image-4")
         assert m is not None
         assert cc.estimate_image_cost(m, count=1)["est_cost_usd"] is None
 

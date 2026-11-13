@@ -32,7 +32,7 @@ from app.domain.workers.rest_providers import (
 
 #: Catalog provider keys with an implemented image REST contract.
 IMAGE_REST_KEYS = ("openai-images", "gemini-images", "recraft",
-                   "ideogram")
+                   "ideogram", "bfl-flux")
 
 OPENAI_IMAGES_SPEC = EndpointSpec(
     provider_key="openai-images",
@@ -105,8 +105,28 @@ IDEOGRAM_SPEC = EndpointSpec(
     artifact_hosts=("ideogram.ai", "cdn.ideogram.ai"),
 )
 
+# C3-C — Black Forest Labs: asynchronous generation. POST
+# /v1/{model} returns {id, polling_url}; GET /v1/get_result?id=
+# polls until status Ready / Error / Failed. Results are temporary
+# URLs (result.sample) on the delivery.bfl.ai CDN — retrieved via
+# fetch_artifact(). BFL documents NO cancellation endpoint, so
+# cancel_path stays None and cancel() raises UnsupportedRemoteOp.
+BFL_FLUX_SPEC = EndpointSpec(
+    provider_key="bfl-flux",
+    base_url="https://api.bfl.ai",
+    lifecycle="async_poll",
+    submit_path="/v1/{model}",
+    poll_path="/v1/get_result?id={id}",
+    cancel_path=None,
+    submit_extra={"output_format": "png"},
+    idempotency="none",
+    docs="https://docs.bfl.ai/flux_models/flux_1_1_pro",
+    artifact_hosts=("delivery.bfl.ai", "api.bfl.ai"),
+)
+
 IMAGE_SPECS = {s.provider_key: s for s in (
     OPENAI_IMAGES_SPEC, GEMINI_IMAGES_SPEC, RECRAFT_SPEC,
+    BFL_FLUX_SPEC,
     IDEOGRAM_SPEC)}
 
 
@@ -375,11 +395,77 @@ class IdeogramProvider(RestRemoteProvider):
                             RemoteStatus.SUCCEEDED, detail=detail)
 
 
+class BflFluxProvider(RestRemoteProvider):
+    """FLUX async contract (C3-C): submit → id, poll get_result.
+
+    Documented poll statuses: Pending, Ready, Error, Failed,
+    Request Moderated, Content Moderated, Task not found. Moderation
+    is a provider refusal — no charge evidence; terminal failure.
+    ``Task not found`` maps to UNKNOWN: we submitted but the record
+    is unreachable — reconcile, never resubmit.
+    """
+
+    _POLL = {"pending": RemoteStatus.RUNNING,
+             "ready": RemoteStatus.SUCCEEDED,
+             "error": RemoteStatus.FAILED,
+             "failed": RemoteStatus.FAILED,
+             "request moderated": RemoteStatus.FAILED,
+             "content moderated": RemoteStatus.FAILED,
+             "task not found": RemoteStatus.UNKNOWN}
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"x-key": self._api_key}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        body: dict[str, Any] = {"prompt": req.get("prompt") or "",
+                                "prompt_upsampling": False,
+                                "safety_tolerance": 2}
+        size = req.get("size") or ""
+        # Documented dimension range 256–1440, multiples of 32; the
+        # catalog only declares compliant "WxH" presets.
+        if "x" in size:
+            w, _, h = size.partition("x")
+            body["width"], body["height"] = int(w), int(h)
+        if req.get("seed") is not None:
+            body["seed"] = req["seed"]
+        return body
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        # Submit response: {"id": ..., "polling_url": ...} (no status).
+        if "status" not in body:
+            rid = body.get("id")
+            if not rid:
+                raise RemoteError(
+                    RemoteErrorKind.MALFORMED,
+                    "flux submit returned no request id — outcome unknown",
+                    charge_evidence="unknown")
+            return RemoteHandle(self.name, str(rid),
+                                RemoteStatus.SUBMITTED,
+                                detail={"transport_simulated": True,
+                                        "polling_url": body.get(
+                                            "polling_url")})
+        raw = str(body.get("status") or "").strip().lower()
+        status = self._POLL.get(raw, RemoteStatus.UNKNOWN)
+        detail: dict[str, Any] = {"transport_simulated": True,
+                                  "remote_status_raw": body.get("status")}
+        if status == RemoteStatus.SUCCEEDED:
+            result = body.get("result") or {}
+            detail["image_url"] = result.get("sample")
+            detail["seed"] = result.get("seed")
+            detail["images_returned"] = 1
+        if status == RemoteStatus.FAILED:
+            detail["failure"] = (body.get("result") or {}).get("details") \
+                or body.get("status")
+        return RemoteHandle(self.name, str(body.get("id") or "") or None,
+                            status, detail=detail)
+
+
 def make_image_provider(provider_key: str, *, transport: Any,
                         api_key: str = "") -> RestRemoteProvider:
     spec = IMAGE_SPECS[provider_key]
     cls = {"openai-images": OpenAIImagesProvider,
            "gemini-images": GeminiImagesProvider,
            "recraft": RecraftProvider,
-           "ideogram": IdeogramProvider}[provider_key]
+           "ideogram": IdeogramProvider,
+           "bfl-flux": BflFluxProvider}[provider_key]
     return cls(spec, transport=transport, api_key=api_key)

@@ -32,8 +32,20 @@ this project uses semver once public releases begin.
     cap — all inside the injected transport, zero egress). Billing
     gains `per_credit` settlement from reported or declared credit
     usage; every new cost_table row carries a `checked` freshness date
-    and `source` URL. BFL FLUX, Adobe Firefly, and Ideogram's async
-    mode remain unimplemented contracts (disabled, never implied).
+    and `source` URL.
+- C3-C-2 — BFL FLUX async contract (`bfl-flux`/`flux-pro-1.1`):
+  POST `/v1/{model}` → `{id, polling_url}`, poll
+  `GET /v1/get_result?id=` through the documented Pending→Ready
+  lifecycle; `result.sample` temporary URL retrieved via
+  `fetch_artifact` on `delivery.bfl.ai`. Moderation/failure statuses
+  map to provider_failed (exposure held); `Task not found` polls to
+  the ambiguous-timeout hold — never a resubmission. No documented
+  cancel endpoint → `UnsupportedRemoteOp`. `flux-kontext`
+  (editing model) stays outside the contract with no cost_table —
+  commit fails closed. **Adobe Firefly remains intentionally
+  unimplemented**: the API is async + IMS OAuth and Adobe publishes
+  no per-image API USD price, so cost admission would have to
+  guess — catalog documents this; provider renders disabled.
 - C3-B — Cloud Studio image UI (`CloudImagePanel` in the Cloud
   workspace tab). Surfaces `generate.image.cloud` end-to-end:
   catalog-driven provider/model pickers gated by the implemented

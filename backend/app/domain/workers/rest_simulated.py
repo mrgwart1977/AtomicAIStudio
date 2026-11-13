@@ -378,6 +378,51 @@ def simulated_image_handler(provider_key: str,
             return _json({"error": "route"}, 404)
         return handler
 
+    if provider_key == "bfl-flux":
+        poll_count = {"n": 0}
+
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            rid = f"sim-flux-{seq['n']:04d}"
+            return _json({
+                "id": rid,
+                "polling_url": f"https://api.bfl.ai/v1/get_result?id={rid}",
+                "status": "Pending"})
+
+        def poll(req: httpx.Request) -> httpx.Response:
+            # Deterministic lifecycle: first poll Pending, then Ready —
+            # exercises the async driver across at least two ticks.
+            poll_count["n"] += 1
+            rid = req.url.params.get("id") or f"sim-flux-{seq['n']:04d}"
+            if poll_count["n"] < 2:
+                return _json({"id": rid, "status": "Pending",
+                              "progress": 0.5})
+            return _json({
+                "id": rid, "status": "Ready",
+                "result": {"sample":
+                           f"https://delivery.bfl.ai/sim/{rid}.png",
+                           "seed": 4242}})
+
+        routes = {"submit": submit, "poll": poll,
+                  **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if (req.method == "POST"
+                    and req.url.path.startswith("/v1/")
+                    and "get_result" not in req.url.path):
+                return routes["submit"](req)
+            if req.method == "GET" \
+                    and req.url.path == "/v1/get_result":
+                return routes["poll"](req)
+            # delivery.bfl.ai temporary artifact → synthetic bytes.
+            if req.method == "GET" and req.url.path.startswith("/sim/"):
+                return httpx.Response(
+                    200, content=_sim_image_png("flux sim", 0,
+                                                "1024x1024"),
+                    headers={"Content-Type": "image/png"})
+            return _json({"error": "route"}, 404)
+        return handler
+
     raise KeyError(f"no simulated image transport for {provider_key!r}")
 
 

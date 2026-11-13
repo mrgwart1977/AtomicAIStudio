@@ -314,6 +314,185 @@ class TestIdeogram:
         assert prog.get("remote_outcome") == "artifact_pending_retrieval"
 
 
+class TestBflFlux:
+    """Async contract: submit → poll → Ready → artifact retrieval."""
+
+    def test_async_lifecycle_succeeds_and_settles(self, client):
+        proj = make_project(client, "C3C-Flux")
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1",
+                                             size="1280x720"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+        a = next(i for i in client.get(
+            f"/api/projects/{proj['id']}/assets").json()["items"]
+            if i["id"] == job["output_asset_id"])
+        assert a["provenance_json"]["remote_provider"] == "bfl-flux"
+        assert a["provenance_json"]["provenance_confidence"] == \
+            "simulated"
+        # Flat $0.04/image → settled charge.
+        charges = _charges(client, job["id"])
+        assert charges and charges[0].micro == 40_000
+        assert charges[0].environment == "simulated"
+
+    def test_submit_shape_and_x_key(self, client, monkeypatch):
+        proj = make_project(client, "C3C-FluxReq")
+        seen = _capture(client, monkeypatch, "bfl-flux",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "id": "sim-flux-cap",
+                            "polling_url": "https://api.bfl.ai/v1/"
+                                           "get_result?id=sim-flux-cap",
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "bfl-flux",
+                                       "flux-pro-1.1", size="720x1280",
+                                       seed=11))
+        req = seen["request"]
+        assert req.url.path == "/v1/flux-pro-1.1"
+        assert req.headers.get("x-key") is not None
+        body = json.loads(req.content)
+        assert body["width"] == 720 and body["height"] == 1280
+        assert body["output_format"] == "png"
+        assert body["seed"] == 11
+
+    def test_moderated_poll_is_failed_and_held(self, client, monkeypatch):
+        proj = make_project(client, "C3C-FluxMod")
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"poll": lambda req: httpx.Response(
+                    200, content=json.dumps({
+                        "id": "sim-flux-mod",
+                        "status": "Request Moderated"}).encode(),
+                    headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "provider_failed"
+
+    def test_task_not_found_times_out_ambiguous(self, client,
+                                                monkeypatch):
+        """Submitted remote is unreachable — poll until budget →
+        ambiguous + hold, NEVER a resubmission."""
+        from app.adapters import cloud_image as ci
+        monkeypatch.setattr(ci, "_POLL_BUDGET_S", 0.4)
+        proj = make_project(client, "C3C-FluxLost")
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"poll": lambda req: httpx.Response(
+                    200, content=json.dumps({
+                        "id": "sim-flux-gone",
+                        "status": "Task not found"}).encode(),
+                    headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "ambiguous"
+        res = _reservation(client, job["id"])
+        assert res is not None and res.status == "open"
+
+    def test_interrupted_async_job_never_auto_resubmits(
+            self, client, monkeypatch):
+        """Crash between submit and completion: reconcile re-queues the
+        job, but the non-idempotent contract must NOT silently
+        resubmit — the outcome is ambiguous + reconcile-required."""
+        from app.db.models import GenerationJob
+        proj = make_project(client, "C3C-FluxRestart")
+        submits = {"n": 0}
+
+        def counting_submit(req: httpx.Request) -> httpx.Response:
+            submits["n"] += 1
+            rid = f"sim-flux-cap-{submits['n']}"
+            return httpx.Response(200, content=json.dumps({
+                "id": rid,
+                "polling_url": "https://api.bfl.ai/v1/"
+                               f"get_result?id={rid}"}).encode(),
+                headers={"Content-Type": "application/json"})
+
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"submit": counting_submit,
+                 # Poll never resolves → job stays 'running' with the
+                 # reservation open — a genuine mid-flight state.
+                 "poll": lambda req: httpx.Response(
+                     200, content=json.dumps({
+                         "id": "sim-flux-cap-1",
+                         "status": "Pending"}).encode(),
+                     headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        r = _gen(client, proj["id"], "bfl-flux", "flux-pro-1.1")
+        assert r.status_code == 200
+        jid = r.json()["job_id"]
+        # Wait until the worker is in the poll loop (job running).
+        import time
+        j = {}
+        for _ in range(100):
+            jobs = client.get(
+                f"/api/projects/{proj['id']}/jobs").json()
+            j = next((x for x in jobs if x["id"] == jid), {})
+            if j.get("status") == "running":
+                break
+            time.sleep(0.05)
+        assert j.get("status") == "running"
+        assert submits["n"] == 1
+
+        # Crash: reconcile must FAIL the remote-scope job into
+        # needs_reconciliation + hold, never re-queue (a re-queue
+        # would auto-resubmit non-idempotent remote work).
+        engine = client.app.state.job_engine
+        with _sf(client)() as s:
+            requeued = engine.reconcile_interrupted(s)
+            s.commit()
+            row = s.get(GenerationJob, jid)
+            assert requeued == 0
+            assert row.status == "failed"
+            assert row.recovery_state == "needs_reconciliation"
+            assert row.resumable is False
+        # Exactly ONE remote submission ever happened — and stays so.
+        assert submits["n"] == 1
+        res = _reservation(client, jid)
+        assert res is not None and res.status == "open"
+
+    def test_no_documented_cancel(self, client):
+        import asyncio
+        from app.domain.workers.rest_providers import \
+            UnsupportedRemoteOp
+        p = _adapter(client).providers["bfl-flux"]
+        with pytest.raises(UnsupportedRemoteOp):
+            asyncio.new_event_loop().run_until_complete(
+                p.cancel("sim-flux-0001"))
+
+    def test_edit_model_fails_closed(self, client):
+        """flux-kontext is an EDITING model outside this contract; no
+        cost_table → pricing_unavailable refusal, never a guess."""
+        proj = make_project(client, "C3C-FluxEdit")
+        r = _gen(client, proj["id"], "bfl-flux", "flux-kontext")
+        assert r.status_code == 422
+        assert "pricing" in r.text or "not eligible" in r.text
+
+    def test_firefly_remains_unimplemented(self, client):
+        """Adobe publishes no per-image API price → no contract, and
+        the commit path refuses it rather than implying support."""
+        body = client.get("/api/providers/image-contracts").json()
+        assert "adobe-firefly" not in body["implemented"]
+        proj = make_project(client, "C3C-Firefly")
+        r = _gen(client, proj["id"], "adobe-firefly",
+                 "firefly-image-4")
+        assert r.status_code == 422
+
+
 class TestPreviewAuthority:
     def test_new_providers_estimate_authoritatively(self, client):
         proj = make_project(client, "C3C-Est")

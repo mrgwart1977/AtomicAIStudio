@@ -216,6 +216,32 @@ class SimCloudImageAdapter:
                    "simulated": True,
                    "transport_simulated": True}}}
 
+        # C3-C — never auto-resubmit a non-idempotent remote call. A
+        # crash/interrupt re-queue re-enters run(); submitting again
+        # would silently duplicate remote work the engine cannot
+        # dedupe (idempotency="none"). A retried attempt instead marks
+        # the outcome ambiguous for explicit reconcile — matching the
+        # remote.py contract that only an owner-approved retry may
+        # create a new submission. Idempotent providers ("native"/
+        # "request_id") may resubmit safely — the remote dedupes.
+        if (int(req.get("job_attempt_no") or 1) > 1
+                and provider.spec.idempotency == "none"):
+            yield {"progress": 0.05,
+                   "message": "interrupted attempt — remote state "
+                              "unknown; reconcile required",
+                   "detail": self._fail_detail(
+                       None, "ambiguous",
+                       spend_action={"type": "hold",
+                                     "note": "attempt restarted after "
+                                             "interrupt — a remote "
+                                             "submission may exist; "
+                                             "never auto-resubmitted"},
+                       extra={"resubmit_refused": True,
+                              "attempt_no": req.get("job_attempt_no")})}
+            raise RuntimeError(
+                "non-idempotent remote contract will not be "
+                "auto-resubmitted — reconcile the prior attempt")
+
         try:
             rh = await provider.submit(intent)
         except RemoteError as exc:
