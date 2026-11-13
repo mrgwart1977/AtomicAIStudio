@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import logoUrl from "../assets/logo.png";
+import brandLogoUrl from "../assets/atomic-dream-engine-logo.png";
 import { useApp, type WorkspaceMode } from "../stores/appStore";
 
 const MODES: { id: WorkspaceMode; label: string }[] = [
@@ -15,12 +15,13 @@ export function TopBar() {
   const ws = useApp((s) => s.wsConnected);
 
   return (
-    <header className="flex h-14 items-center border-b border-line bg-panel px-4">
-      <div className="flex w-64 items-center gap-2 text-lg font-bold tracking-wide">
-        <img src={logoUrl} alt="" className="h-8 w-8 shrink-0" aria-hidden="true" />
-        <span>
-          <span className="text-teal">ATOMIC</span> <span className="text-fg">DREAM ENGINE</span>
-        </span>
+    <header className="flex h-16 items-center border-b border-line bg-panel px-4">
+      <div className="flex w-64 min-w-0 items-center">
+        <img
+          src={brandLogoUrl}
+          alt="Atomic Dream Engine"
+          className="h-14 w-auto max-w-full shrink object-contain object-left"
+        />
       </div>
       <div className="flex-1 text-center text-sm text-muted">
         {project ? `${project.name} / ${project.template.replace("_", " ")}` : "No project open"}
