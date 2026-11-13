@@ -750,13 +750,15 @@ class TestCommandIdempotency:
             t.join(timeout=30)
         assert len(results) == 1 and len(errors) == 1
         assert results[0 if 0 in results else 1]["outcome"] == "succeeded"
-        # The loser refuses at whichever guard it hits first — the
-        # one-open-reservation cap (BudgetError) or the consumed permit
-        # (PermitRefused). Either way: exactly one send, zero loser
-        # bookings.
+        # The loser refuses at whichever serialized guard it hits
+        # first — admission concurrency (LiveDispatchRefused), the
+        # one-open-reservation cap (BudgetError), or the consumed
+        # permit (PermitRefused). Either way: exactly one send, zero
+        # loser bookings.
+        from app.domain.workers.live_transport import LiveDispatchRefused
         assert isinstance(
             next(iter(errors.values())),
-            (lp.PermitRefused, spend.BudgetError))
+            (lp.PermitRefused, spend.BudgetError, LiveDispatchRefused))
         assert sends == ["https://api.deepseek.com/chat/completions"]
         live = _live_reservations(client)
         assert len(live) == 1 and live[0].status == "settled"
