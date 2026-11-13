@@ -60,32 +60,88 @@ export async function fetchAssetObjectUrl(
   return URL.createObjectURL(await res.blob());
 }
 
+/** Drop the cached backend info so the next connect re-asks the shell
+ * for the sidecar's port + session token. Used after an authentication
+ * refusal — a sidecar restart or token rotation mints a new token that
+ * only the fresh invoke can see. */
+export function invalidateBackendInfo(): void {
+  cached = null;
+}
+
+/** A2.2 — WebSocket first-frame authentication.
+ *
+ * The session token travels in an in-band auth frame, never in the URL.
+ * The socket is AUTHENTICATED only after the server's `auth_ok`;
+ * anything arriving before that (including event-shaped messages) is
+ * dropped. Close code 1008 = auth refusal → non-retryable until
+ * credentials change: the cached token is invalidated and the next
+ * attempt re-asks the shell — a sidecar restart/token rotation yields
+ * a new token and resumes; the same token stops the loop so we never
+ * resubmit known-bad credentials. Network failures retry with bounded
+ * backoff and re-authenticate on every attempt. */
 export function connectWs(onEvent: (e: WsEvent) => void, onState: (open: boolean) => void): () => void {
   let ws: WebSocket | null = null;
   let closed = false;
   let retry = 0;
+  // The last token the server refused — never resubmit it; a retry is
+  // only attempted after re-fetching credentials from the shell.
+  let authFailedToken: string | null = null;
 
   async function open() {
     const { baseUrl, token } = await getBackendInfo();
-    const url = `${baseUrl.replace(/^http/, "ws")}/api/ws?token=${encodeURIComponent(token)}`;
-    ws = new WebSocket(url);
-    ws.onopen = () => {
-      retry = 0;
-      onState(true);
-      // Keepalive so the server's read loop stays healthy.
-      const ping = setInterval(() => ws?.readyState === WebSocket.OPEN && ws.send("ping"), 15000);
-      ws!.onclose = () => {
-        clearInterval(ping);
-        onState(false);
-        if (!closed) setTimeout(open, Math.min(5000, 500 * ++retry));
-      };
+    if (closed || token === authFailedToken) return;
+    const sock = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/api/ws`);
+    ws = sock;
+    let authed = false;
+    let ping: ReturnType<typeof setInterval> | null = null;
+
+    sock.onopen = () => {
+      // First frame is authentication — nothing else may precede it.
+      sock.send(JSON.stringify({ type: "auth", token }));
     };
-    ws.onmessage = (m) => {
+
+    sock.onmessage = (m) => {
+      if (ws !== sock) return;              // stale socket — drop
+      if (!authed) {
+        // Pre-auth: only auth_ok is meaningful; events or malformed
+        // frames arriving before it are dropped, never delivered.
+        try {
+          const frame = JSON.parse(m.data) as { type?: unknown };
+          if (frame?.type === "auth_ok") {
+            authed = true;
+            retry = 0;
+            onState(true);
+            ping = setInterval(
+              () => sock.readyState === WebSocket.OPEN && sock.send("ping"),
+              15000);
+          }
+        } catch { /* malformed handshake frame — ignore */ }
+        return;
+      }
       try {
         onEvent(JSON.parse(m.data) as WsEvent);
-      } catch {
-        /* non-JSON keepalive */
+      } catch { /* non-JSON keepalive */ }
+    };
+
+    sock.onclose = (e) => {
+      if (ws !== sock) return;
+      if (ping !== null) clearInterval(ping);
+      if (authed) onState(false);
+      if (closed) return;
+      if (e.code === 1008) {
+        // Auth refusal — remember this token as known-bad. Drop the
+        // cached backend info so the retry re-asks the shell: a
+        // sidecar restart/rotation yields a new token and we resume;
+        // the same token short-circuits in open() — no resubmission.
+        authFailedToken = token;
+        invalidateBackendInfo();
+        onState(false);
+        setTimeout(open, 2000);
+        return;
       }
+      // Network failure or post-auth drop — bounded backoff; every
+      // attempt authenticates from scratch.
+      setTimeout(open, Math.min(5000, 500 * ++retry));
     };
   }
   void open();
