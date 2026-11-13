@@ -444,16 +444,14 @@ async def live_dispatch(
                 "reservation": "open",
                 "transport_is_live": transport.is_real}
 
-    # Success — provider-reported usage → micro at catalog rates;
-    # estimate fallback only when usage is absent.
+    # Success — provider-reported usage → micro at catalog rates.
+    # Missing/unusable usage is NEVER a confirmed charge: the
+    # reservation stays open as unresolved financial exposure
+    # (usage_unavailable) until explicit documented reconcile.
     usage = (handle.detail or {}).get("usage")
     model = next((m for m in (lg.catalog.get_provider(provider_key) or {})
                   .get("models") or [] if m.get("id") == model_id), {})
     micro = _usage_cost_micro(usage, model.get("cost_table"))
-    if micro is None:
-        micro, source = res.reserved_micro, "estimate_at_settle"
-    else:
-        source = "provider_reported"
     ev = {
         "transport": "live" if transport.is_real else "controlled",
         "authenticated": bool(api_key),
@@ -470,7 +468,22 @@ async def live_dispatch(
     }
     verified = lg.verification_evidence_valid(
         ev, transport_is_live=transport.is_real, provider_key=provider_key)
-    _spend.settle(session, job_id=job_id, micro=micro, source=source,
+    if micro is None:
+        # Genuine response, unresolved billing: provenance stands on
+        # the authenticated round trip; the financial side stays OPEN
+        # — never fabricated, never silently released. Reconcile only.
+        return {"outcome": "succeeded", "job_id": job_id,
+                "provider_key": provider_key,
+                "remote": {"remote_job_id": handle.remote_id,
+                           "status": handle.status.value,
+                           "detail": handle.detail},
+                "reservation": "open",
+                "settlement_state": "usage_unavailable",
+                "transport_is_live": transport.is_real,
+                "provider_verified": verified,
+                "verification_evidence": ev}
+    _spend.settle(session, job_id=job_id, micro=micro,
+                  source="provider_reported",
                   remote_job_id=handle.remote_id)
     session.commit()
     return {"outcome": "succeeded", "job_id": job_id,
@@ -479,7 +492,7 @@ async def live_dispatch(
                        "status": handle.status.value,
                        "detail": handle.detail},
             "reservation": "settled", "settled_micro": micro,
-            "charge_source": source,
+            "charge_source": "provider_reported",
             "transport_is_live": transport.is_real,
             "provider_verified": verified,
             "verification_evidence": ev}
@@ -495,7 +508,12 @@ def _usage_cost_micro(usage: dict | None, cost_table: dict | None
     in_rate, out_rate = table.get("input_per_mtok"), table.get("output_per_mtok")
     if usage is None or in_rate is None or out_rate is None:
         return None
-    usd = (Decimal(int(usage["input_tokens"])) * Decimal(str(in_rate))
-           + Decimal(int(usage["output_tokens"])) * Decimal(str(out_rate))
-           ) / Decimal(1_000_000)
+    try:
+        inp, out = int(usage["input_tokens"]), int(usage["output_tokens"])
+    except (KeyError, TypeError, ValueError):
+        return None  # malformed usage — caller books the reserved cap
+    if inp < 0 or out < 0:
+        return None  # nonsensical usage — never settle a negative bill
+    usd = (Decimal(inp) * Decimal(str(in_rate))
+           + Decimal(out) * Decimal(str(out_rate))) / Decimal(1_000_000)
     return _spend.usd_to_micro(usd)

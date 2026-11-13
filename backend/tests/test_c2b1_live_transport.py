@@ -77,7 +77,7 @@ def _budget(client, pid, limit="5.00", scope="lifetime", target="global"):
                    {"target": target, "scope": scope, "limit_usd": limit})
 
 
-EN = {"provider_key": "deepseek", "model_id": "deepseek-chat",
+EN = {"provider_key": "deepseek", "model_id": "deepseek-flash",
       "credential_ref": "deepseek"}
 GOOD_RESOLVER = lambda h, p: ["93.184.216.34"]  # noqa: E731 — public fixture IP
 
@@ -101,8 +101,8 @@ def _dispatch(client, pid, *, vault, inner=None, resolver=GOOD_RESOLVER,
     jid = job_id or f"b1-live-{new_id()[:8]}"
     with _sf(client)() as s:
         return asyncio.run(lt.live_dispatch(
-            s, provider_key="deepseek", model_id="deepseek-chat",
-            request={"model_id": "deepseek-chat", "prompt": "Write a beat.",
+            s, provider_key="deepseek", model_id="deepseek-flash",
+            request={"model_id": "deepseek-flash", "prompt": "Write a beat.",
                      "max_output_tokens": 32},
             job_id=jid, command_id="c-b1", project_id=pid,
             max_cost_usd=max_usd, vault=vault,
@@ -498,9 +498,9 @@ class TestDispatchOrchestration:
         assert len(sends) == 1
         res = _reservation(client, jid)
         assert res.status == "settled" and res.environment == "live"
-        # usage 10×$0.27 + 5×$1.10 per Mtok → $8.2e-6 → ceiling micro
+        # usage 10×$0.30 + 5×$1.20 per Mtok → $9.0e-6 → ceiling micro
         assert out["settled_micro"] == spend.usd_to_micro(
-            (10 * 0.27 + 5 * 1.10) / 1_000_000)
+            (10 * 0.30 + 5 * 1.20) / 1_000_000)
         assert out["charge_source"] == "provider_reported"
         # evidence shape correct — but controlled transport: NEVER
         # verified_remote in B1.
@@ -843,9 +843,136 @@ class TestSimulatedLiveIsolation:
         assert out["reservation"] == "settled"
         # simulated submit still books environment='simulated'
         r = _commit(client, pid, "generate.text.cloud", {
-            "provider_key": "deepseek", "model_id": "deepseek-chat",
+            "provider_key": "deepseek", "model_id": "deepseek-flash",
             "prompt": "Write a beat.", "execution_target": "cloud"})
         assert r.status_code == 200, r.text
         job = wait_for_job(client, pid, r.json()["job_id"])
         res = _reservation(client, job["id"])
         assert res.environment == "simulated"
+
+
+# ---------------- settlement: missing/partial usage fails closed ----------------
+
+# ------------- settlement: unusable usage = unresolved exposure -------------
+
+class TestUsageUnresolvedExposure:
+    """A genuinely valid response with missing/unusable usage keeps
+    provenance (outcome succeeded, evidence intact) while the
+    financial exposure stays OPEN — never fabricated into a
+    confirmed charge, never silently released. Reconcile-only."""
+
+    def _body(self, usage_marker, **kw):
+        body = {"id": "chatcmpl-u1",
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}]}
+        if usage_marker != "ABSENT":
+            body["usage"] = usage_marker
+        return body
+
+    def _run(self, client, pid, vault, body):
+        inner = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=body))
+        return _dispatch(client, pid, vault=vault, inner=inner)
+
+    def _setup(self, client):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        return pid
+
+    def _mkjob(self, client, pid, jid):
+        """GenerationJob row so reconcile/restart paths can bind to
+        the synthetic dispatch job_id."""
+        with _sf(client)() as s:
+            s.add(GenerationJob(
+                id=jid, project_id=pid, adapter_id="cloud.live.validate",
+                kind="text", idempotency_key=jid,
+                request_json={"stage": "B1"}, status="dispatching",
+                resumable=False, execution_scope="remote"))
+            s.commit()
+
+    @pytest.mark.parametrize("usage_marker", [
+        "ABSENT", {}, {"prompt_tokens": 10},
+        {"prompt_tokens": "garbage", "completion_tokens": 1},
+        {"prompt_tokens": -5, "completion_tokens": 2},
+        {"prompt_tokens": None, "completion_tokens": None},
+        "not-a-dict",
+    ])
+    def test_unusable_usage_holds_reservation_open(
+            self, client, vault, usage_marker):
+        pid = self._setup(client)
+        out = self._run(client, pid, vault,
+                        self._body(usage_marker))
+        assert out["outcome"] == "succeeded"
+        assert out["reservation"] == "open"
+        assert out["settlement_state"] == "usage_unavailable"
+        res = _reservation(client, out["job_id"])
+        assert res.status == "open"           # exposure retained
+        # provenance unaffected — response was authentic and complete
+        assert out["verification_evidence"]["endpoint_host"] == \
+            "api.deepseek.com"
+        assert out["remote"]["detail"]["text"] == "ok"
+
+    def test_valid_zero_usage_settles_at_zero(self, client, vault):
+        """Provider honestly reports {0,0} → provider_reported $0 —
+        a REAL zero, not a fabricated one."""
+        pid = self._setup(client)
+        out = self._run(client, pid, vault, self._body(
+            {"prompt_tokens": 0, "completion_tokens": 0}))
+        assert out["outcome"] == "succeeded"
+        assert out["reservation"] == "settled"
+        assert out["charge_source"] == "provider_reported"
+        assert out["settled_micro"] == 0
+
+    def test_valid_positive_usage_settles_reported(self, client, vault):
+        pid = self._setup(client)
+        out = self._run(client, pid, vault, self._body(
+            {"prompt_tokens": 10, "completion_tokens": 5}))
+        assert out["charge_source"] == "provider_reported"
+        assert out["settled_micro"] == spend.usd_to_micro(
+            (10 * 0.30 + 5 * 1.20) / 1_000_000)
+
+    def test_open_exposure_survives_restart_sweep(self, client, vault):
+        """reconcile_interrupted touches 'running' jobs only — an open
+        live reservation is retained verbatim across restart."""
+        from app.db.models import GenerationJob
+        pid = self._setup(client)
+        out = self._run(client, pid, vault, self._body("ABSENT"))
+        jid = out["job_id"]
+        self._mkjob(client, pid, jid)
+        with _sf(client)() as s:
+            job = s.get(GenerationJob, jid)
+            assert job.status == "dispatching"  # crash mid-dispatch
+            engine = client.app.state.job_engine
+            requeued = engine.reconcile_interrupted(s)
+            s.commit()
+        res = _reservation(client, jid)
+        assert res.status == "open"
+        assert requeued == 0
+
+    def test_explicit_reconcile_resolves_exposure(self, client, vault):
+        pid = self._setup(client)
+        out = self._run(client, pid, vault, self._body("ABSENT"))
+        jid = out["job_id"]
+        self._mkjob(client, pid, jid)
+        with _sf(client)() as s:
+            spend.reconcile(s, project_id=pid, job_id=jid,
+                            outcome="confirmed_no_charge",
+                            note="provider dashboard shows zero usage; "
+                                 "response id chatcmpl-u1 verified")
+            s.commit()
+        assert _reservation(client, jid).status == "released"
+
+    def test_second_dispatch_blocked_while_exposure_open(
+            self, client, vault):
+        """One-in-flight policy: an unresolved live reservation blocks
+        the next admission until reconciled."""
+        pid = self._setup(client)
+        out = self._run(client, pid, vault, self._body("ABSENT"))
+        with pytest.raises(Exception) as ei:
+            self._run(client, pid, vault,
+                      self._body({"prompt_tokens": 1,
+                                  "completion_tokens": 1}))
+        assert ei.value.code in ("concurrency", "in_flight", "budget")
+        # first reservation still open, untouched by the refusal
+        assert _reservation(client, out["job_id"]).status == "open"

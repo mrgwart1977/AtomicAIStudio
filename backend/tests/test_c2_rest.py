@@ -232,7 +232,7 @@ async def test_gemini_auth_headers_and_path():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key,path,model", [
-    ("deepseek", "/chat/completions", "deepseek-chat"),
+    ("deepseek", "/chat/completions", "deepseek-flash"),
     ("xai", "/v1/chat/completions", "grok-4")])
 async def test_chat_compat_auth_headers_and_path(key, path, model):
     """DeepSeek and xAI both use Bearer auth on their documented
@@ -347,8 +347,8 @@ def test_gemini_sync_lifecycle_end_to_end(client):
 
 
 @pytest.mark.parametrize("key,model,rid,micro", [
-    # deepseek-chat: 21×0.27 + 29×1.10 = 37.57 USD/Mtok → 38 µUSD
-    ("deepseek", "deepseek-chat", "deepseek-sim-0001", 38),
+    # deepseek-flash: 21×0.30 + 29×1.20 = 41.1 USD/Mtok → 42 µUSD
+    ("deepseek", "deepseek-flash", "deepseek-sim-0001", 42),
     # grok-4: 21×3.00 + 29×15.00 = 498 USD/Mtok → 498 µUSD
     ("xai", "grok-4", "xai-sim-0001", 498)])
 def test_chat_compat_sync_lifecycle_end_to_end(client, key, model,
@@ -1037,7 +1037,7 @@ def test_sync_success_single_http_request(client, monkeypatch, key):
 @pytest.mark.parametrize("key,model", [
     ("google-gemini", "gpt-5"),           # model belongs to openai
     ("deepseek", "grok-4"),               # model belongs to xai
-    ("xai", "deepseek-chat"),             # model belongs to deepseek
+    ("xai", "deepseek-flash"),             # model belongs to deepseek
     ("google-gemini", "not-a-model")])
 def test_rest_provider_model_fails_closed(client, key, model):
     """A model that isn't a text-capable catalog model OF THE CHOSEN
