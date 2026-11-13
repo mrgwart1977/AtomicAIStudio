@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **SEC-A2.1 — WebSocket first-frame authentication (backend)**: the
+  `/api/ws` endpoint now runs `UNAUTHENTICATED → AUTHENTICATED →
+  CLOSED`. When no `?token=` query parameter is present, the client
+  must send `{"type":"auth","token":"..."}` (JSON ≤ 4 KB) as its first
+  frame within 3 s; a wrong token closes `1008`, malformed/oversized
+  or non-auth first frames close `1002`/`1009`, and a second auth
+  frame on an established socket closes `1002`. No event subscription
+  or event delivery exists before authentication. Unauthenticated
+  handshakes draw from a bounded pool (`WS_MAX_UNAUTHENTICATED = 32`)
+  enforced under `app.state.ws_unauth_lock`, so concurrent attempts
+  cannot exceed the cap; slots release on timeout, rejection,
+  disconnect, and successful auth. An Origin allowlist
+  (`tauri.localhost`, `localhost`, `127.0.0.1`, `::1`) refuses
+  cross-site WebSockets from untrusted browser pages — defense in
+  depth, not a token replacement. Legacy `?token=` clients keep
+  working until A2.2; REST `?token=` acceptance is unchanged. The
+  session token is never logged or echoed.
 - **SEC-A1 — token-free asset URLs in the UI**: every image/video
   preview now loads bytes via `fetchAssetObjectUrl` (the session token
   travels in the `X-Atomic-Token` header, never in a URL) and renders a

@@ -107,6 +107,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.session_factory = sf
             app.state.settings = settings
             app.state.event_bus = EventBus()
+            # A2.1 — bounded unauthenticated WS connection pool: the
+            # counter is only mutated under this lock so concurrent
+            # handshakes can never exceed WS_MAX_UNAUTHENTICATED.
+            import asyncio as _asyncio
+            app.state.ws_unauth_lock = _asyncio.Lock()
+            app.state.ws_unauth_count = 0
 
             # C1 provider credential vault — DPAPI-protected file under
             # the data dir; secrets never enter the DB.
