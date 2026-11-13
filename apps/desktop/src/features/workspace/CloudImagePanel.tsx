@@ -45,7 +45,15 @@ function t1ImageEligible(d: ProviderDetail): boolean {
  * tier — worst-case estimate, never an under-estimate. */
 function tierRate(model: ImageModel | undefined, quality: string): number | null {
   const table = model?.cost_table;
-  if (!table || table.unit !== "per_image") return null;
+  if (!table) return null;
+  if (table.unit === "per_credit") {
+    // Documented per-image credit price × USD-per-credit (Recraft,
+    // BFL, Firefly, Ideogram) — preliminary hint only; the backend
+    // preview remains authoritative.
+    const c = table.credits_per_image, u = table.usd_per_credit;
+    return c != null && u != null ? c * u : null;
+  }
+  if (table.unit !== "per_image") return null;
   const rates = table.rates || {};
   if (quality && quality !== "auto" && rates[quality] != null) return rates[quality];
   const vals = Object.values(rates);
@@ -416,7 +424,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
       <div className="mt-2">
         <label className={labelCls} htmlFor="ci-negative">
-          Negative prompt (optional — saved with the asset metadata; not sent for this contract)
+          Negative prompt (optional — {model?.negative_prompt
+            ? "sent to the provider"
+            : "saved with the asset metadata; not sent for this contract"})
         </label>
         <textarea id="ci-negative" className={`${inputCls} min-h-10`} value={negativePrompt}
           onChange={(e) => setNegativePrompt(e.target.value)}

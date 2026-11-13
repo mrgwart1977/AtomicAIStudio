@@ -31,7 +31,8 @@ from app.domain.workers.rest_providers import (
     EndpointSpec, RemoteError, RemoteErrorKind, RestRemoteProvider)
 
 #: Catalog provider keys with an implemented image REST contract.
-IMAGE_REST_KEYS = ("openai-images",)
+IMAGE_REST_KEYS = ("openai-images", "gemini-images", "recraft",
+                   "ideogram")
 
 OPENAI_IMAGES_SPEC = EndpointSpec(
     provider_key="openai-images",
@@ -48,7 +49,65 @@ OPENAI_IMAGES_SPEC = EndpointSpec(
     docs="https://platform.openai.com/docs/api-reference/images",
 )
 
-IMAGE_SPECS = {OPENAI_IMAGES_SPEC.provider_key: OPENAI_IMAGES_SPEC}
+# C3-C — Google image generation on the shared Gemini API host.
+# Two documented surfaces share this provider_key:
+#   • gemini-2.5-flash-image → POST /v1beta/models/{model}:generateContent
+#     (contents/parts → candidates[].content.parts[].inlineData)
+#   • imagen-4.0-*-generate-001 → POST /v1beta/models/{model}:predict
+#     (instances/parameters → predictions[].bytesBase64Encoded)
+# Both are synchronous, x-goog-api-key auth, no poll/cancel surface.
+GEMINI_IMAGES_SPEC = EndpointSpec(
+    provider_key="gemini-images",
+    base_url="https://generativelanguage.googleapis.com",
+    lifecycle="sync",
+    submit_path="/v1beta/models/{model}:generateContent",
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={},
+    idempotency="none",
+    docs="https://ai.google.dev/gemini-api/docs/image-generation",
+)
+
+# C3-C — Recraft: synchronous POST /v1/images/generations, Bearer auth.
+# Requesting response_format="b64_json" returns inline bytes (the
+# default url mode issues ~24h temporary links — we ask for bytes so
+# the artifact lands in CAS immediately). Response reports `credits`
+# (API units consumed) — settle from the reported count.
+RECRAFT_SPEC = EndpointSpec(
+    provider_key="recraft",
+    base_url="https://external.api.recraft.ai",
+    lifecycle="sync",
+    submit_path="/v1/images/generations",
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={"n": 1, "response_format": "b64_json"},
+    idempotency="none",
+    docs="https://www.recraft.ai/docs/api-reference/endpoints",
+)
+
+# C3-C — Ideogram: synchronous multipart POST
+# /v2/image/generate/ideogram-3, Api-Key header. The documented
+# response carries temporary image URLs (data[].url) — retrieved via
+# fetch_artifact() on the documented ideogram.ai delivery hosts.
+# The API also documents an `async` flag + GET /v2/generations/{id}
+# polling path; this contract implements the synchronous mode only.
+IDEOGRAM_SPEC = EndpointSpec(
+    provider_key="ideogram",
+    base_url="https://api.ideogram.ai",
+    lifecycle="sync",
+    submit_path="/v2/image/generate/ideogram-3",
+    poll_path=None,
+    cancel_path=None,
+    submit_extra={"num_images": 1},
+    idempotency="none",
+    docs="https://developer.ideogram.ai/api-reference/images/generate/ideogram-3",
+    content="multipart",
+    artifact_hosts=("ideogram.ai", "cdn.ideogram.ai"),
+)
+
+IMAGE_SPECS = {s.provider_key: s for s in (
+    OPENAI_IMAGES_SPEC, GEMINI_IMAGES_SPEC, RECRAFT_SPEC,
+    IDEOGRAM_SPEC)}
 
 
 def _image_usage(body: dict[str, Any]) -> dict[str, int] | None:
@@ -120,8 +179,207 @@ class OpenAIImagesProvider(RestRemoteProvider):
                             RemoteStatus.SUCCEEDED, detail=detail)
 
 
+class GeminiImagesProvider(RestRemoteProvider):
+    """Google image generation on the Gemini API — synchronous.
+
+    ``gemini-2.5-flash-image`` uses ``:generateContent``; ``imagen-4.0-*``
+    uses ``:predict`` — the verb is part of the documented contract, so
+    submit() picks it from the model id rather than inventing a path.
+    Neither surface documents retrieval or cancellation.
+    """
+
+    @staticmethod
+    def _is_imagen(model_id: str | None) -> bool:
+        return (model_id or "").startswith("imagen-")
+
+    async def submit(self, intent: SubmissionIntent) -> RemoteHandle:
+        model = intent.request.get("model_id") or ""
+        if self._is_imagen(model):
+            body, headers = await self._call(
+                "POST", f"/v1beta/models/{model}:predict", op="submit",
+                json_body=self._submit_body(intent.request))
+        else:
+            path = self.spec.submit_path.format(model=model)
+            body, headers = await self._call(
+                "POST", path, op="submit",
+                json_body={**self._submit_body(intent.request),
+                           **self.spec.submit_extra})
+        try:
+            return self._parse(body, headers)
+        except RemoteError:
+            raise
+        except Exception as exc:
+            raise RemoteError(
+                RemoteErrorKind.MALFORMED,
+                f"submit: unparseable success body ({exc}) — outcome unknown",
+                charge_evidence="unknown") from exc
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"x-goog-api-key": self._api_key,
+                "Content-Type": "application/json"}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        prompt = req.get("prompt") or ""
+        ratio = req.get("size")           # catalog sizes are "W:H" ratios
+        if self._is_imagen(req.get("model_id")):
+            params: dict[str, Any] = {"sampleCount": 1}
+            if ratio:
+                params["aspectRatio"] = ratio
+            return {"instances": [{"prompt": prompt}],
+                    "parameters": params}
+        body: dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"]},
+        }
+        if ratio:
+            body["generationConfig"]["imageConfig"] = {
+                "aspectRatio": ratio}
+        return body
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        detail: dict[str, Any] = {"transport_simulated": True}
+        # Imagen :predict → predictions[{bytesBase64Encoded, mimeType}]
+        preds = body.get("predictions")
+        if isinstance(preds, list) and preds:
+            first = preds[0] if isinstance(preds[0], dict) else {}
+            detail["image_b64"] = first.get("bytesBase64Encoded")
+            detail["images_returned"] = len(preds)
+            return RemoteHandle(self.name, None,
+                                RemoteStatus.SUCCEEDED, detail=detail)
+        # generateContent → candidates[].content.parts[].inlineData.data
+        cands = body.get("candidates")
+        if isinstance(cands, list) and cands:
+            images = 0
+            b64 = None
+            for cand in cands:
+                parts = ((cand.get("content") or {}).get("parts")
+                         if isinstance(cand, dict) else None) or []
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    inline = part.get("inlineData") or part.get("inline_data")
+                    if isinstance(inline, dict) and inline.get("data"):
+                        images += 1
+                        b64 = b64 or inline["data"]
+            if b64:
+                detail["image_b64"] = b64
+                detail["images_returned"] = images
+                usage = body.get("usageMetadata")
+                if isinstance(usage, dict):
+                    detail["usage"] = usage
+                return RemoteHandle(self.name, None,
+                                    RemoteStatus.SUCCEEDED, detail=detail)
+            # Safety-finished candidates carry finishReason but no image.
+            reason = (cands[0].get("finishReason")
+                      if isinstance(cands[0], dict) else None)
+            raise RemoteError(
+                RemoteErrorKind.PROVIDER_FAILED,
+                f"generation finished without image "
+                f"(finishReason={reason!r}) — provider refusal class",
+                charge_evidence="none_confirmed")
+        raise RemoteError(
+            RemoteErrorKind.MALFORMED,
+            "image response has no predictions/candidates — outcome unknown",
+            charge_evidence="unknown")
+
+
+class RecraftProvider(RestRemoteProvider):
+    """Recraft — synchronous ``POST /v1/images/generations``.
+
+    ``response_format=b64_json`` (in submit_extra) returns inline bytes;
+    the response's ``credits`` field reports the API units consumed —
+    settle uses the reported count, never an assumed one. ``style`` is
+    not transmitted: styles are model-specific curated names not yet
+    catalogued, and an unverified style id must not be sent.
+    """
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json"}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        body = {"model": req.get("model_id"),
+                "prompt": req.get("prompt") or ""}
+        if req.get("size"):
+            body["size"] = req["size"]
+        # negative_prompt is documented on V3 only — transmit it solely
+        # for V3 models; nothing is claimed for other lines.
+        if req.get("negative_prompt") and "v3" in (req.get("model_id") or ""):
+            body["negative_prompt"] = req["negative_prompt"]
+        return body
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        data = body.get("data")
+        if not isinstance(data, list) or not data:
+            raise RemoteError(
+                RemoteErrorKind.MALFORMED,
+                "generations response has no data entries — outcome unknown",
+                charge_evidence="unknown")
+        first = data[0] if isinstance(data[0], dict) else {}
+        detail: dict[str, Any] = {
+            "transport_simulated": True,
+            "image_b64": first.get("b64_json"),
+            "image_url": first.get("url"),
+            "images_returned": len(data),
+        }
+        credits = body.get("credits")
+        if isinstance(credits, (int, float)):
+            detail["credits"] = credits
+            detail["usage"] = {"credits": int(credits)}
+        return RemoteHandle(self.name, body.get("id"),
+                            RemoteStatus.SUCCEEDED, detail=detail)
+
+
+class IdeogramProvider(RestRemoteProvider):
+    """Ideogram 3.0 — synchronous multipart generation.
+
+    ``POST /v2/image/generate/ideogram-3`` as multipart/form-data
+    (Api-Key header). Sync mode returns ``data[{url, seed, resolution}]``
+    whose links are temporary — the adapter retrieves the artifact via
+    ``fetch_artifact``. The documented ``async`` mode + polling path is
+    not claimed by this contract.
+    """
+
+    def _auth_headers(self) -> dict[str, str]:
+        # Content-Type is left to httpx's multipart encoder.
+        return {"Api-Key": self._api_key}
+
+    def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
+        form: dict[str, Any] = {"prompt": req.get("prompt") or ""}
+        if req.get("size"):
+            form["aspect_ratio"] = req["size"]
+        if req.get("quality"):
+            form["rendering_speed"] = req["quality"]
+        if req.get("seed") is not None:
+            form["seed"] = req["seed"]
+        if req.get("negative_prompt"):
+            form["negative_prompt"] = req["negative_prompt"]
+        return form
+
+    def _parse(self, body: dict[str, Any], headers: httpx.Headers) -> RemoteHandle:
+        data = body.get("data")
+        if not isinstance(data, list) or not data:
+            raise RemoteError(
+                RemoteErrorKind.MALFORMED,
+                "ideogram response has no data entries — outcome unknown",
+                charge_evidence="unknown")
+        first = data[0] if isinstance(data[0], dict) else {}
+        detail: dict[str, Any] = {
+            "transport_simulated": True,
+            "image_url": first.get("url"),
+            "images_returned": len(data),
+            "seed": first.get("seed"),
+            "resolution": first.get("resolution"),
+        }
+        return RemoteHandle(self.name, None,
+                            RemoteStatus.SUCCEEDED, detail=detail)
+
+
 def make_image_provider(provider_key: str, *, transport: Any,
                         api_key: str = "") -> RestRemoteProvider:
     spec = IMAGE_SPECS[provider_key]
-    cls = {"openai-images": OpenAIImagesProvider}[provider_key]
+    cls = {"openai-images": OpenAIImagesProvider,
+           "gemini-images": GeminiImagesProvider,
+           "recraft": RecraftProvider,
+           "ideogram": IdeogramProvider}[provider_key]
     return cls(spec, transport=transport, api_key=api_key)

@@ -7,6 +7,33 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C3-C-1 — Simulated sync image-provider expansion. Implemented
+  contracts for three additional providers on the existing mock
+  boundary (`IMAGE_REST_KEYS` now also includes them; Cloud Studio
+  picks them up automatically):
+  - `gemini-images` — `gemini-2.5-flash-image` via the documented
+    `:generateContent` shape (contents→inlineData, usageMetadata) plus
+    `imagen-4.0-generate-001` / `-ultra-generate-001` via `:predict`
+    (instances→predictions). Ten documented aspect ratios; $0.039/$0.04/
+    $0.06 per image per Google's published rates.
+  - `recraft` — `recraftv4_1` + `recraftv3` via
+    `/v1/images/generations` (b64_json + reported `credits` API units;
+    settles credits×usd_per_credit: $0.035/$0.04 raster).
+  - `ideogram` — `ideogram-3` via the documented v2 multipart endpoint
+    (`Api-Key` auth; prompt/aspect_ratio/rendering_speed/seed/
+    negative_prompt fields). Sync responses return temporary artifact
+    URLs, retrieved through the provider's own injected transport under
+    a declared host allowlist + byte cap; expired/foreign URLs keep the
+    durable `artifact_pending_retrieval` outcome for reconcile — never
+    resubmitted.
+  - Framework: `EndpointSpec` gains documented `content` ("multipart")
+    and `artifact_hosts` fields; `RestRemoteProvider` gains bounded
+    `fetch_artifact` (https-only, suffix-matched hosts, streamed byte
+    cap — all inside the injected transport, zero egress). Billing
+    gains `per_credit` settlement from reported or declared credit
+    usage; every new cost_table row carries a `checked` freshness date
+    and `source` URL. BFL FLUX, Adobe Firefly, and Ideogram's async
+    mode remain unimplemented contracts (disabled, never implied).
 - C3-B — Cloud Studio image UI (`CloudImagePanel` in the Cloud
   workspace tab). Surfaces `generate.image.cloud` end-to-end:
   catalog-driven provider/model pickers gated by the implemented

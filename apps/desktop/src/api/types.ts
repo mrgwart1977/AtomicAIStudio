@@ -88,6 +88,10 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
     /** Catalog-declared generation parameters (C3-B image UI). */
     sizes?: string[];
     qualities?: string[];
+    /** True when the implemented contract actually transmits this
+     * model's negative_prompt field (C3-C). */
+    negative_prompt?: boolean;
+    seed?: boolean;
     cost_table?: {
       unit?: string;                       // per_image | per_mpixel | per_mtok | per_credit
       rate?: number;
@@ -99,6 +103,7 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
       output_per_mtok?: number;
       currency?: string;
       checked?: string;
+      source?: string;
       note?: string;
     } | null;
   }>;

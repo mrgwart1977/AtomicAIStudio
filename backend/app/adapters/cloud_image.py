@@ -73,7 +73,24 @@ def _image_cost_micro(usage: dict | None, images: int | None,
                + Decimal(int(usage["output_tokens"])) * Decimal(str(out_r))
                ) / Decimal(1_000_000)
         return _spend.usd_to_micro(usd), "usage_x_catalog_rates"
-    if unit in ("per_mpixel", "per_credit"):
+    if unit == "per_credit":
+        # C3-C — credit-metered providers (Recraft API units, BFL
+        # credits, Ideogram credits, Firefly generative credits). Settle
+        # from the REPORTED credit count when present; otherwise the
+        # documented per-image credit price declared in the catalog.
+        usd_per_credit = table.get("usd_per_credit")
+        if usd_per_credit is None:
+            return None, "no_credit_rate"
+        credits = (usage or {}).get("credits")
+        if credits is None:
+            declared = table.get("credits_per_image")
+            if declared is None or images is None:
+                return None, "no_credits_reported"
+            credits = float(declared) * images
+        return _spend.usd_to_micro(
+            Decimal(str(credits)) * Decimal(str(usd_per_credit))
+            ), "credits_x_catalog_rate"
+    if unit in ("per_mpixel",):
         # Declared for future providers — settle on reported counts.
         return None, "unit_not_settled_in_c3a"
     return None, "no_cost_table"
@@ -179,6 +196,7 @@ class SimCloudImageAdapter:
             request={"provider_key": provider_key,
                      "model_id": req.get("model_id"),
                      "prompt": req.get("prompt") or "",
+                     "negative_prompt": req.get("negative_prompt"),
                      "size": req.get("size"),
                      "quality": req.get("quality"),
                      "seed": req.get("seed"),
@@ -242,7 +260,7 @@ class SimCloudImageAdapter:
                 "outcome unknown, not resubmitted")
 
         if provider.spec.lifecycle == "sync":
-            for item in self._finish(handle, req, rh):
+            async for item in self._finish(handle, req, rh):
                 yield item
             return
 
@@ -268,7 +286,7 @@ class SimCloudImageAdapter:
                     f"remote job {rh.remote_id} unreachable — outcome "
                     "unknown, not resubmitted")
             if h.status == RemoteStatus.SUCCEEDED:
-                for item in self._finish(handle, req, h):
+                async for item in self._finish(handle, req, h):
                     yield item
                 return
             if h.status == RemoteStatus.FAILED:
@@ -314,6 +332,18 @@ class SimCloudImageAdapter:
                               "remote_status": h.status.value,
                               "transport_simulated": True}}
 
+    def _reject(self, exc, rh):
+        # Provider-shaped but unsafe/unparseable payload — the work may
+        # have been processed; billing stays HELD for reconcile.
+        yield {"progress": 0.9, "message": "image payload rejected",
+               "detail": self._fail_detail(
+                   rh.remote_id, "ambiguous",
+                   spend_action={"type": "hold",
+                                 "note": f"payload failed safety "
+                                         f"inspection ({exc}) — "
+                                         "outcome unknown; held"},
+                   extra={"image_rejected": str(exc)})}
+
     async def _cancel_detail(self, provider, rh, req) -> dict:
         try:
             h = await provider.cancel(rh.remote_id)
@@ -341,44 +371,61 @@ class SimCloudImageAdapter:
                 {"type": "hold",
                  "note": "cancel response inconclusive — exposure held"}))
 
-    def _finish(self, handle: JobHandle, req, rh):
+    async def _finish(self, handle: JobHandle, req, rh):
         detail = rh.detail or {}
         b64 = detail.get("image_b64")
         url = detail.get("image_url")
-        if not b64:
-            if url:
-                # Distinct outcome: the provider SUCCEEDED and returned
-                # a temporary remote URL — generation happened, the
-                # artifact is real, but C3-A implements no download
-                # path. This is NOT 'ambiguous' (the remote outcome is
-                # known) and NOT 'failed' (the provider succeeded):
-                # artifact_pending_retrieval, reconcile_required, and
-                # the URL is preserved in progress_json for a future
-                # retrieval/reconcile workflow. Never auto-resubmitted
-                # (remote-scoped jobs are non-resumable). Billing:
-                # usable usage settles — the work was billed; unusable
-                # billing stays held.
+        data: bytes | None = None
+        if b64:
+            try:
+                # Bound the decode BEFORE allocation — base64 inflates
+                # ~4/3 over binary; an oversized string refuses before
+                # any materialization, independent of the decoded cap.
+                if len(b64) > (image_safety.MAX_IMAGE_BYTES * 4 // 3) + 1024:
+                    raise image_safety.ImageRejected(
+                        f"encoded image payload {len(b64)} chars exceeds "
+                        "pre-decode cap")
+                data = base64.b64decode(b64)
+            except (image_safety.ImageRejected, ValueError) as exc:
+                for item in self._reject(exc, rh):
+                    yield item
+                raise RuntimeError(
+                    f"image payload rejected by safety gate: {exc}") from exc
+        elif url:
+            # C3-C: providers that return temporary artifact URLs (BFL
+            # result.sample, Firefly pre-signed outputs, Ideogram
+            # data[].url) are retrieved through the provider's own
+            # injected transport — the SAME egress boundary as every
+            # other call. Failure (expired/undocumented-host/oversize)
+            # keeps the durable artifact_pending_retrieval outcome:
+            # generation is confirmed, the URL is preserved for
+            # reconcile, and nothing is resubmitted.
+            provider = self.providers[req["provider_key"]]
+            try:
+                data = await provider.fetch_artifact(url)
+            except (RemoteError, UnsupportedRemoteOp) as exc:
                 action, _micro, _basis = self._settle_action(
                     req, rh, rh.remote_id)
                 if action["type"] != "settle":
                     action = {"type": "hold",
                               "note": "image generated remotely "
-                                      "(temporary URL) but not "
-                                      "retrievable in C3-A — billing "
+                                      "(temporary URL) — billing "
                                       "unresolved; exposure held for "
                                       "reconcile"}
                 yield {"progress": 0.9,
-                       "message": "image generated remotely — retrieval "
-                                  "unsupported in C3-A",
+                       "message": "image generated remotely — "
+                                  "retrieval failed (reconcile required)",
                        "detail": self._fail_detail(
                            rh.remote_id, "artifact_pending_retrieval",
                            spend_action=action,
                            extra={"remote_status": "succeeded",
-                                  "image_url": url})}
+                                  "image_url": url,
+                                  "retrieval_error": str(exc)})}
                 raise RuntimeError(
-                    "image generated remotely (temporary URL) — "
-                    "download path not implemented in C3-A; durable "
-                    "URL preserved for reconcile, not resubmitted")
+                    f"remote artifact not retrievable ({exc}); durable "
+                    "URL preserved for reconcile, not resubmitted"
+                    ) from exc
+        else:
             yield {"progress": 0.9, "message": "no inline image bytes",
                    "detail": self._fail_detail(
                        rh.remote_id, "ambiguous",
@@ -387,29 +434,13 @@ class SimCloudImageAdapter:
                                              "image bytes — outcome "
                                              "unknown; exposure held"})}
             raise RuntimeError(
-                "image response has no b64_json payload — outcome "
+                "image response has no image payload — outcome "
                 "unknown, not resubmitted")
         try:
-            # Bound the decode BEFORE allocation — base64 inflates ~4/3
-            # over binary; an oversized string refuses before any
-            # materialization, independent of the decoded cap.
-            if len(b64) > (image_safety.MAX_IMAGE_BYTES * 4 // 3) + 1024:
-                raise image_safety.ImageRejected(
-                    f"encoded image payload {len(b64)} chars exceeds "
-                    "pre-decode cap")
-            data = base64.b64decode(b64)
             info = image_safety.inspect_image(data)
         except (image_safety.ImageRejected, ValueError) as exc:
-            # Provider-shaped but unsafe/unparseable payload — the work
-            # may have been processed; billing stays HELD for reconcile.
-            yield {"progress": 0.9, "message": "image payload rejected",
-                   "detail": self._fail_detail(
-                       rh.remote_id, "ambiguous",
-                       spend_action={"type": "hold",
-                                     "note": f"payload failed safety "
-                                             f"inspection ({exc}) — "
-                                             "outcome unknown; held"},
-                       extra={"image_rejected": str(exc)})}
+            for item in self._reject(exc, rh):
+                yield item
             raise RuntimeError(
                 f"image payload rejected by safety gate: {exc}") from exc
 
