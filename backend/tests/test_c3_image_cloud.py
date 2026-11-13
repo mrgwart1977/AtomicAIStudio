@@ -942,3 +942,45 @@ class TestHardening:
                       "note": "simulated transport — verified no billing"})
         assert ok.status_code == 200, ok.text
         assert _reservation(client, jid).status == "released"
+
+
+class TestImageContracts:
+    """C3-B — the catalog→UI contract surface. The panel must be able to
+    distinguish implemented (selectable) image providers from
+    catalog-only entries without hardcoding a parallel list."""
+
+    def test_contracts_lists_exactly_the_implemented_keys(self, client):
+        r = client.get("/api/providers/image-contracts")
+        assert r.status_code == 200
+        body = r.json()
+        assert sorted(body["implemented"]) == sorted(IMAGE_REST_KEYS)
+        assert body["adapter_id"] == "cloud.image.sim"
+        assert body["simulated"] is True
+
+    def test_image_models_expose_sizes_and_qualities(self, client):
+        """Catalog model rows declare supported dimensions/quality tiers
+        so the UI offers real options rather than inventing settings."""
+        r = client.get("/api/providers/openai-images")
+        assert r.status_code == 200
+        models = {m["id"]: m for m in r.json()["models"]}
+        m = models["gpt-image-1"]
+        assert m["capability"] == "image"
+        assert "1024x1024" in m["sizes"]
+        assert "1024x1536" in m["sizes"]
+        assert set(m["qualities"]) >= {"low", "medium", "high"}
+        assert m["cost_table"]["unit"] == "per_image"
+
+    def test_unimplemented_image_provider_stays_selectable_only_in_catalog(
+            self, client):
+        """A catalog image provider without a worker contract is still
+        returned by the catalog (so the UI can display it as disabled)
+        but is absent from the implemented list."""
+        r = client.get("/api/providers/image-contracts")
+        implemented = r.json()["implemented"]
+        r2 = client.get("/api/providers?category=image")
+        assert r2.status_code == 200
+        catalog_keys = {p["key"] for p in r2.json()}
+        assert implemented[0] in catalog_keys
+        # every non-implemented catalog entry is exactly what the UI
+        # disables — the contract list is the single source of truth
+        assert catalog_keys - set(implemented)

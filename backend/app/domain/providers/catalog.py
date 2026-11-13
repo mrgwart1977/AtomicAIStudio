@@ -309,6 +309,10 @@ IMAGES = [
        privacy="Sends prompt + reference images to OpenAI (US).",
        notes="Uses the shared OpenAI credential.",
        models=[{"id": "gpt-image-1", "capability": "image",
+                # Documented Images-API generation parameters.
+                "sizes": ["auto", "1024x1024", "1536x1024",
+                          "1024x1536"],
+                "qualities": ["auto", "low", "medium", "high"],
                 # Token-billed upstream; per-image equivalents from the
                 # pricing doc — conservative, always the higher tier.
                 "cost_table": {"unit": "per_image",

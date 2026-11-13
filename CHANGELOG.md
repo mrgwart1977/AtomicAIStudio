@@ -7,6 +7,44 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C3-B — Cloud Studio image UI (`CloudImagePanel` in the Cloud
+  workspace tab). Surfaces `generate.image.cloud` end-to-end:
+  catalog-driven provider/model pickers gated by the implemented
+  contract list (`GET /api/providers/image-contracts`), prompt +
+  negative prompt, catalog-declared sizes/quality tiers, optional
+  seed, per-image estimate + synthetic budget headroom, and the
+  preview → approve → commit workflow. Any parameter change after a
+  preview discards the pending approval (fingerprinted payload), a
+  fresh preview is required, and commits send the exact previewed
+  payload. Catalog providers without an implemented contract render
+  disabled with the reason — never implied operational.
+  - Simulation transparency everywhere: SIMULATION banner on the
+    form, the approval card, and every job card; the approve action
+    reads "generate simulated image"; results are labeled
+    `provenance: simulated` + "deterministic test PNG, not provider
+    output"; financial rows always say `(synthetic — no real charge
+    exists)`.
+  - Job cards split generation status (queued/running/succeeded/
+    failed) from financial status (reservation open/settled + held-
+    for-reconcile); `artifact_pending_retrieval` and `ambiguous`
+    outcomes get explicit "reconcile required" wording. Remote
+    temporary URLs are never rendered — the panel surfaces no
+    `image_url` field at all.
+  - Assets: succeeded jobs show the generated thumbnail (authenticated
+    `/file` URL) plus "View in Assets" — it navigates to the asset the
+    C3-A job already registered; there is no second import path and no
+    duplicate asset creation. Scene/shot/character associations flow
+    from pickers → request metadata → asset media_json, and linked
+    names render on the job card.
+  - Backend additions are minimal and read-only in effect: an
+    `image-contracts` catalog endpoint exposing `IMAGE_REST_KEYS`, and
+    `sizes`/`qualities` metadata on `gpt-image-1` so the UI offers
+    only real options. No new commands, no financial changes, no live
+    paths.
+  - 25 frontend tests (provider gating, invalidation, duplicate
+    submit, sim labeling, status/financial split, asset navigation,
+    URL non-exposure, responsive grids) + 3 backend contract tests;
+    evidence screenshots in `docs/c3b-evidence/`.
 - C3-A — cloud image generation on simulated transports
   (`generate.image.cloud` → `cloud.image.sim`). OpenAI Images sync
   contract (`POST /v1/images/generations`) exercised over

@@ -85,11 +85,21 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
   models: Array<{
     id: string;
     capability: string;
+    /** Catalog-declared generation parameters (C3-B image UI). */
+    sizes?: string[];
+    qualities?: string[];
     cost_table?: {
+      unit?: string;                       // per_image | per_mpixel | per_mtok | per_credit
+      rate?: number;
+      rates?: Record<string, number>;      // quality-tiered per-image rates
+      credits_per_image?: number;
+      usd_per_credit?: number;
+      assumed_output_tokens?: number;
       input_per_mtok?: number;
       output_per_mtok?: number;
       currency?: string;
       checked?: string;
+      note?: string;
     } | null;
   }>;
   docs_url: string | null;
@@ -157,6 +167,16 @@ export interface ProviderTestResult {
   error?: string | null;
   would_use?: string | null;
   tier?: string | null;
+}
+
+/** GET /api/providers/image-contracts — catalog image providers with an
+ * implemented generation contract. Everything else is shown disabled;
+ * all contracts run on simulated transports in this build. */
+export interface ImageContracts {
+  implemented: string[];
+  adapter_id: string;
+  simulated: boolean;
+  note: string;
 }
 
 // ---- C1.5 access bridge ----

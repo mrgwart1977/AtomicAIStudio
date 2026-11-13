@@ -65,6 +65,24 @@ def set_default(body: DefaultUpdate, db: Session = Depends(get_db)):
     return {"defaults": defaults}
 
 
+@providers_router.get("/api/providers/image-contracts")
+def image_contracts():
+    """C3-B — provider keys with an implemented cloud image contract.
+
+    Static route declared before /api/providers/{key} so it is not
+    captured as a provider key. This is the honest source the Cloud
+    Studio image UI uses to enable generation: every other catalog
+    image provider is shown disabled — commit refuses them identically.
+    Contracts are exercised on simulated transports only; there is no
+    live path in this build."""
+    from app.domain.workers.rest_image_providers import IMAGE_REST_KEYS
+    return {"implemented": list(IMAGE_REST_KEYS),
+            "adapter_id": "cloud.image.sim",
+            "simulated": True,
+            "note": "Implemented image REST contracts — simulated "
+                    "transports only, no live provider path exists."}
+
+
 @providers_router.get("/api/providers/{key}", response_model=ProviderDetailOut)
 def provider_detail(key: str, request: Request, db: Session = Depends(get_db)):
     out = registry.provider_detail(db, _vault(request), key)
