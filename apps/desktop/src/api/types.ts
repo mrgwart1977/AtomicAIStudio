@@ -85,11 +85,21 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
   models: Array<{
     id: string;
     capability: string;
+    /** Catalog-declared generation parameters (C3-B image UI). */
+    sizes?: string[];
+    qualities?: string[];
     cost_table?: {
+      unit?: string;                       // per_image | per_mpixel | per_mtok | per_credit
+      rate?: number;
+      rates?: Record<string, number>;      // quality-tiered per-image rates
+      credits_per_image?: number;
+      usd_per_credit?: number;
+      assumed_output_tokens?: number;
       input_per_mtok?: number;
       output_per_mtok?: number;
       currency?: string;
       checked?: string;
+      note?: string;
     } | null;
   }>;
   docs_url: string | null;
@@ -159,6 +169,16 @@ export interface ProviderTestResult {
   tier?: string | null;
 }
 
+/** GET /api/providers/image-contracts — catalog image providers with an
+ * implemented generation contract. Everything else is shown disabled;
+ * all contracts run on simulated transports in this build. */
+export interface ImageContracts {
+  implemented: string[];
+  adapter_id: string;
+  simulated: boolean;
+  note: string;
+}
+
 // ---- C1.5 access bridge ----
 
 export interface CapabilityEntry {
@@ -194,6 +214,18 @@ export interface CommandProposal {
   warnings: string[];
   diff?: Record<string, unknown>;
   estimated_cost: { compute: string; currency_usd: number; requires_approval: boolean };
+  /** Authoritative estimate for generation commands — the figure the
+   * approval surface MUST display. Null for commands without a catalog
+   * estimate; client-side hints are preliminary only. */
+  cost_estimate?: {
+    est_cost_usd: number | null;
+    unit: string | null;
+    currency: string;
+    is_estimate: boolean;
+    simulated: boolean;
+    settlement: string;
+    rates_checked?: string | null;
+  } | null;
   current_revision: number;
   launches_generation: boolean;
 }

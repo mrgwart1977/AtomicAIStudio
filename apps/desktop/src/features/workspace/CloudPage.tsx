@@ -11,9 +11,10 @@ import type {
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { AssistedPanel } from "./AssistedPanel";
+import { CloudImagePanel } from "./CloudImagePanel";
 import { LiveGatePanel } from "./LiveGatePanel";
+import { SimBadge, fmtMicro } from "./cloudShared";
 
-const SIM_BANNER = "SIMULATION — No external AI provider contacted.";
 const SCOPES = ["session", "day", "month", "lifetime"] as const;
 
 const inputCls =
@@ -21,14 +22,6 @@ const inputCls =
 const labelCls = "mb-1 block text-xs font-medium text-muted";
 const btnCls =
   "rounded-md bg-action px-3 py-1.5 text-sm text-white hover:bg-action/80 disabled:opacity-40";
-
-/** µUSD → display dollars. Financial values are always labeled by the
- * surrounding copy — this only formats magnitude. */
-export function fmtMicro(micro: number | null | undefined): string {
-  if (micro == null) return "—";
-  const usd = micro / 1e6;
-  return usd === 0 ? "$0" : usd < 0.0001 ? "<$0.0001" : `$${usd.toFixed(4)}`;
-}
 
 /** Mirrors backend cloud_cost.t1_text_strategy: A-class provider with a
  * documented T1 official_api strategy covering text.* — nothing else is
@@ -64,14 +57,6 @@ function needsReconcile(j: Job): boolean {
   return j.recovery_state === "needs_reconciliation"
     || j.progress_json?.reconcile_required === true
     || jobOutcome(j) === "ambiguous";
-}
-
-function SimBadge({ className = "" }: { className?: string }) {
-  return (
-    <p role="note" className={`rounded border border-amber/50 bg-amber/10 px-2.5 py-1.5 text-xs font-semibold uppercase tracking-wide text-amber ${className}`}>
-      {SIM_BANNER}
-    </p>
-  );
 }
 
 /** Preview → approve → commit panel shared by every mutation on this
@@ -201,7 +186,7 @@ export function CloudPage() {
   return (
     <div className="mx-auto max-w-5xl p-6" data-testid="cloud-page">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Cloud Studio — text generation</h1>
+        <h1 className="text-lg font-semibold">Cloud Studio</h1>
       </div>
       <SimBadge className="mt-3" />
       <p className="mt-2 text-xs text-muted">
@@ -328,6 +313,11 @@ export function CloudPage() {
           {remoteJobs.map((j) => <RemoteJobCard key={j.id} job={j} />)}
         </ul>
       </section>
+
+      {/* ---------- C3-B cloud image generation (simulated) ---------- */}
+      <CloudImagePanel pid={pid} revision={project.revision}
+        simSummary={simSummary} reservations={reservations}
+        onCommitted={reload} />
 
       {/* ---------- C1.5 assisted text workflows ---------- */}
       <AssistedPanel pid={pid} revision={project.revision}

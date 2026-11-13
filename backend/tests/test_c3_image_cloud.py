@@ -942,3 +942,107 @@ class TestHardening:
                       "note": "simulated transport — verified no billing"})
         assert ok.status_code == 200, ok.text
         assert _reservation(client, jid).status == "released"
+
+
+class TestImageContracts:
+    """C3-B — the catalog→UI contract surface. The panel must be able to
+    distinguish implemented (selectable) image providers from
+    catalog-only entries without hardcoding a parallel list."""
+
+    def test_contracts_lists_exactly_the_implemented_keys(self, client):
+        r = client.get("/api/providers/image-contracts")
+        assert r.status_code == 200
+        body = r.json()
+        assert sorted(body["implemented"]) == sorted(IMAGE_REST_KEYS)
+        assert body["adapter_id"] == "cloud.image.sim"
+        assert body["simulated"] is True
+
+    def test_image_models_expose_sizes_and_qualities(self, client):
+        """Catalog model rows declare supported dimensions/quality tiers
+        so the UI offers real options rather than inventing settings."""
+        r = client.get("/api/providers/openai-images")
+        assert r.status_code == 200
+        models = {m["id"]: m for m in r.json()["models"]}
+        m = models["gpt-image-1"]
+        assert m["capability"] == "image"
+        assert "1024x1024" in m["sizes"]
+        assert "1024x1536" in m["sizes"]
+        assert set(m["qualities"]) >= {"low", "medium", "high"}
+        assert m["cost_table"]["unit"] == "per_image"
+
+    def test_unimplemented_image_provider_stays_selectable_only_in_catalog(
+            self, client):
+        """A catalog image provider without a worker contract is still
+        returned by the catalog (so the UI can display it as disabled)
+        but is absent from the implemented list."""
+        r = client.get("/api/providers/image-contracts")
+        implemented = r.json()["implemented"]
+        r2 = client.get("/api/providers?category=image")
+        assert r2.status_code == 200
+        catalog_keys = {p["key"] for p in r2.json()}
+        assert implemented[0] in catalog_keys
+        # every non-implemented catalog entry is exactly what the UI
+        # disables — the contract list is the single source of truth
+        assert catalog_keys - set(implemented)
+
+
+class TestPreviewCostAuthority:
+    """C3-B review-hardening — the backend preview response carries the
+    AUTHORITATIVE estimate the approval surface must display; the same
+    figure is what the commit reserves. Client-side hints are
+    preliminary only and can never override it."""
+
+    def _preview(self, client, pid, **payload):
+        body = {"provider_key": "openai-images", "model_id": "gpt-image-1",
+                "prompt": "a test image", "execution_target": "cloud",
+                **payload}
+        return client.post(
+            f"/api/projects/{pid}/commands/preview",
+            json={"command_type": "generate.image.cloud", "payload": body,
+                  "scope": "project", "origin": "ui"})
+
+    def test_preview_returns_authoritative_cost_estimate(self, client):
+        pid = make_project(client)["id"]
+        r = self._preview(client, pid)
+        assert r.status_code == 200, r.text
+        ce = r.json()["cost_estimate"]
+        # provider-default quality reserves the HIGHEST tier = $0.19
+        assert ce["est_cost_usd"] == pytest.approx(0.19)
+        assert ce["unit"] == "per_image"
+        assert ce["is_estimate"] is True
+        assert ce["simulated"] is True
+
+    def test_preview_estimate_tracks_quality_tier(self, client):
+        pid = make_project(client)["id"]
+        for quality, usd in (("low", 0.02), ("medium", 0.07),
+                             ("high", 0.19), ("auto", 0.19)):
+            ce = self._preview(client, pid, quality=quality) \
+                .json()["cost_estimate"]
+            assert ce["est_cost_usd"] == pytest.approx(usd), quality
+
+    def test_preview_estimate_matches_reserved_amount(self, client):
+        """The figure shown at approval is the figure reserved at
+        commit — approval display and financial admission share one
+        number, not two parallel computations."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        est = self._preview(client, pid, quality="medium") \
+            .json()["cost_estimate"]["est_cost_usd"]
+        r = _gen(client, pid, quality="medium")
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "succeeded"
+        res = _reservation(client, job["id"])
+        assert res.reserved_micro == spend.usd_to_micro(est)
+
+    def test_preview_refuses_unestimable_pricing(self, client, monkeypatch):
+        """Unestimable pricing is refused at PREVIEW — the UI never gets
+        an approval surface it could 'approve' around."""
+        pid = make_project(client)["id"]
+        orig = cc.pick_image_model
+        monkeypatch.setattr(
+            cc, "pick_image_model",
+            lambda prov, mid: {**(orig(prov, mid) or {}),
+                               "cost_table": {"unit": "per_credit"}})
+        r = self._preview(client, pid)
+        assert r.status_code == 422
+        assert "pricing_unavailable" in r.text

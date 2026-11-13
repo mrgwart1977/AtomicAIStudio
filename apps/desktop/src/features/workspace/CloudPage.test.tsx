@@ -11,7 +11,10 @@ const apiFetch = vi.fn();
 const commitCommand = vi.fn();
 const previewCommand = vi.fn();
 
-vi.mock("../../api/client", () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
+vi.mock("../../api/client", () => ({
+  apiFetch: (...a: unknown[]) => apiFetch(...a),
+  fetchAssetObjectUrl: () => Promise.resolve("blob:mock"),
+}));
 vi.mock("../../api/commands", () => ({
   commitCommand: (...a: unknown[]) => commitCommand(...a),
   previewCommand: (...a: unknown[]) => previewCommand(...a),

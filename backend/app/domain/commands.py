@@ -825,6 +825,41 @@ def _diff_for(command_type: str, payload: dict) -> dict[str, Any]:
     return {"summary": _summary(command_type, payload)}
 
 
+def _preview_cost_estimate(command_type: str, payload: dict) -> dict | None:
+    """Structured authoritative estimate for the preview response.
+
+    Recomputed through the same pure catalog functions _validate applied
+    (pick model → estimate) so the returned figure IS the number the
+    commit path validates against — the UI must render this value, and
+    any client-side hint is preliminary only. None for commands without
+    a catalog estimate or when the estimate is not computable."""
+    if command_type not in ("generate.text.cloud", "generate.image.cloud"):
+        return None
+    from app.domain import bridge as _bridge
+    from app.domain import cloud_cost as _cc
+    provider = _bridge.get_provider(payload.get("provider_key"))
+    if provider is None:
+        return None
+    prompt = (payload.get("prompt") or "").strip()
+    if command_type == "generate.text.cloud":
+        model = _cc.pick_text_model(provider, payload.get("model_id"))
+        if model is None:
+            return None
+        est = _cc.estimate_text_cost(model, prompt)
+    else:
+        model = _cc.pick_image_model(provider, payload.get("model_id"))
+        if model is None:
+            return None
+        est = _cc.estimate_image_cost(
+            model, count=1, size=payload.get("size"),
+            quality=payload.get("quality"), prompt=prompt)
+    return {"est_cost_usd": est["est_cost_usd"],
+            "unit": est.get("unit"), "currency": "USD",
+            "is_estimate": True, "simulated": True,
+            "settlement": "usage-based",
+            "rates_checked": est.get("rates_checked")}
+
+
 def preview(session: Session, project: Project, *, command_type: str, payload: dict,
             scope: str, origin: str, target_type: str | None, target_id: str | None) -> dict:
     if command_type not in SUPPORTED_COMMANDS:
@@ -845,6 +880,7 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         "warnings": warnings,
         "diff": _diff_for(command_type, payload),
         "estimated_cost": {"compute": "local", "currency_usd": 0.0, "requires_approval": False},
+        "cost_estimate": _preview_cost_estimate(command_type, payload),
         "current_revision": project.revision,
         "launches_generation": command_type in GENERATION_COMMANDS,
     }
