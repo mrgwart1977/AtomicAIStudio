@@ -10,6 +10,7 @@ accounting environment.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, Callable
@@ -205,3 +206,97 @@ def build_simulated_providers(
     return {key: make_provider(key, transport=simulated_transport(key),
                                api_key=api_key)
             for key in REST_PROVIDER_KEYS}
+
+
+# ---------- C3-A — simulated image fixtures ----------
+
+_SIZE_PIXELS = {"1024x1024": (1024, 1024), "1792x1024": (1792, 1024),
+                "1024x1792": (1024, 1792)}
+
+
+def _sim_image_png(prompt: str, seed: int, size: str) -> bytes:
+    """Deterministic labeled test PNG — same request → same bytes.
+
+    A workflow test artifact: colored gradient + SIMULATED stamp, never
+    a representation of real provider image quality."""
+    import io
+    from PIL import Image, ImageDraw
+    w, h = _SIZE_PIXELS.get(size, (1024, 1024))
+    scale = max(1, min(w, h) // 512)   # keep fixtures small in memory
+    w, h = w // scale, h // scale
+    digest = hashlib.sha256(
+        f"{prompt}|{seed}|{w}x{h}".encode()).digest()
+    r, g, b = digest[0] // 2 + 40, digest[1] // 2 + 60, digest[2] // 2 + 80
+    img = Image.new("RGB", (w, h), (14, 18, 28))
+    draw = ImageDraw.Draw(img)
+    for y in range(h):
+        t = y / h
+        draw.line([(0, y), (w, y)],
+                  fill=(int(r * t), int(g * t), int(b * t)))
+    draw.rectangle([8, 8, w - 8, h - 8], outline=(255, 196, 66), width=3)
+    draw.text((16, 16), "SIMULATED — no provider contact",
+              fill=(255, 220, 130))
+    draw.text((16, 34), (prompt or "")[:80], fill=(230, 238, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def openai_images_obj(*, prompt: str, seed: int, size: str,
+                      usage: dict | None = None) -> dict:
+    """Documented Images-API object shape (subset)."""
+    import base64
+    png = _sim_image_png(prompt, seed, size)
+    return {
+        "created": 1763000000,
+        "data": [{"b64_json": base64.b64encode(png).decode(),
+                  "revised_prompt": (prompt or "")[:256]}],
+        "usage": usage or {"input_tokens": 18, "output_tokens": 900,
+                           "total_tokens": 918},
+    }
+
+
+def simulated_image_handler(provider_key: str,
+                            overrides: dict[str, Callable] | None = None):
+    """In-memory handler for image provider routes (C3-A fixtures)."""
+    seq = {"n": 0}
+
+    if provider_key == "openai-images":
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            body = json.loads(req.content or b"{}")
+            return _json(openai_images_obj(
+                prompt=body.get("prompt") or "",
+                seed=int(body.get("seed") or 0),
+                size=body.get("size") or "1024x1024"))
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "POST" \
+                    and req.url.path == "/v1/images/generations":
+                return routes["submit"](req)
+            return _json({"error": {"type": "not_found",
+                                    "message": "route"}}, 404)
+        return handler
+
+    raise KeyError(f"no simulated image transport for {provider_key!r}")
+
+
+def simulated_image_transport(
+        provider_key: str,
+        overrides: dict[str, Callable] | None = None) -> httpx.MockTransport:
+    return httpx.MockTransport(
+        simulated_image_handler(provider_key, overrides))
+
+
+def build_simulated_image_providers(
+        *, api_key: str = "simulated-no-credential") -> dict:
+    """Image providers for the app runtime — MockTransport fixtures
+    emitting documented image shapes; zero egress by construction."""
+    from app.domain.workers.rest_image_providers import (
+        IMAGE_REST_KEYS, make_image_provider)
+    return {key: make_image_provider(
+                key, transport=simulated_image_transport(key),
+                api_key=api_key)
+            for key in IMAGE_REST_KEYS}
