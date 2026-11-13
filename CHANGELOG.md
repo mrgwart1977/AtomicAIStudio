@@ -38,6 +38,16 @@ this project uses semver once public releases begin.
     `idempotency_key` with a different type/project/payload now fails
     409 instead of silently replaying; a true replay never re-runs the
     post-commit dispatch hook.
+  - Pre-submission evidence check: `run_validation` verifies durable
+    evidence (armed permit + zero open live reservations) before
+    dispatching — never inferred from a job's status. An open live
+    reservation means a prior dispatch crossed the billable boundary
+    with unknown outcome: the new run fails closed
+    (`uncertain_prior_dispatch`) until explicit reconciliation.
+  - Approval filesystem hardening: `load_approval` rejects symlinks
+    and non-regular files, and on POSIX refuses files writable by
+    group/other. Threat model documented: defense against app-level
+    reachability only, not owner-level filesystem compromise.
 - C2 exit gate Stage B1 — production-capable live transport
   infrastructure, still unreachable from every shipped surface
   (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the

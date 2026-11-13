@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -76,6 +77,17 @@ MAX_PROMPT_CHARS = 500
 #   a stale approval, a re-armed permit, or a restored database can
 #   never satisfy it. Nothing in this build creates an exec approval —
 #   Stage B2b stays locked until the owner writes one.
+#
+# Filesystem threat model: the owner should keep <data_dir>/owner/
+# readable/writable by the OS account that runs the app only — the
+# directory inherits the data_dir's ACL, which on Windows is the
+# user's profile ACL. load_approval rejects symlinks and non-regular
+# files, and on POSIX refuses files writable by group/other. This is
+# defense-in-depth ONLY: a process that already possesses owner-level
+# filesystem write access can fabricate approvals — the mechanism
+# protects against app-level reachability (commands, routes, env vars,
+# config toggles, project import/export, restored databases), not
+# against a compromised host account.
 OWNER_DIR = "owner"
 _APPROVAL_SCOPES = {"arm": "validate_arm", "exec": "validate_run"}
 
@@ -146,11 +158,25 @@ def load_approval(data_dir: Any, kind: str) -> dict[str, Any]:
             f"owner_approval:{kind}",
             "no data dir — owner approval cannot be established")
     path = approval_path(data_dir, kind)
+    # Unsafe filesystem objects refuse — symlink chains could point an
+    # approval at a file the owner never wrote.
+    if path.is_symlink():
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            "approval must be a regular file, not a link")
     if not path.is_file():
         raise PermitRefused(
             f"owner_approval:{kind}",
             f"no owner {kind} approval file — an authenticated session "
             "is not owner authorization; see module docstring")
+    if os.name == "posix":
+        import stat
+        mode = path.stat().st_mode
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PermitRefused(
+                f"owner_approval:{kind}",
+                "approval file is writable by group/others — tighten "
+                "permissions (e.g. chmod 600)")
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -380,6 +406,36 @@ def run_validation(session_factory: Callable, *, project_id: str,
         ).scalar_one_or_none()
         return row is not None and row.status == "open"
 
+    def _assert_pre_submission(s) -> None:
+        """Durable evidence that NO prior attempt crossed the billable
+        submission boundary — checked before dispatching, never
+        inferred from a job's status string.
+
+        Chain of proof: consume() marks the permit consumed in the
+        SAME commit as spend.admit()'s reservation row; the credential
+        read and transport construction happen strictly after that
+        commit. Therefore an armed permit + no open live reservation
+        provably means: never consumed, never booked, credential never
+        read, nothing submitted. An OPEN live reservation for this
+        provider, by contrast, is durable proof a prior dispatch
+        committed admission — its outcome is unknown, so a new run
+        must fail closed and wait for explicit reconciliation."""
+        from app.db.models import SpendReservation
+        from sqlalchemy import select
+        open_rows = s.execute(
+            select(SpendReservation).where(
+                SpendReservation.provider_key == PERMIT_PROVIDER,
+                SpendReservation.environment == "live",
+                SpendReservation.status == "open")
+        ).scalars().all()
+        if open_rows:
+            raise PermitRefused(
+                "uncertain_prior_dispatch",
+                "an open live reservation exists — a prior dispatch "
+                "crossed the billable boundary and its outcome is "
+                "unknown; reconcile it explicitly or re-arm with fresh "
+                "authorization before any new attempt")
+
     def work() -> None:
         try:
             with session_factory() as s:
@@ -393,6 +449,7 @@ def run_validation(session_factory: Callable, *, project_id: str,
                         "mismatch:project_id",
                         "permit is armed for a different project — "
                         "refused, permit stays armed")
+                _assert_pre_submission(s)
                 _mark(s, job_id, "dispatching")
                 try:
                     out["result"] = asyncio.run(lt.live_dispatch(

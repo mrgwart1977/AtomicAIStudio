@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -884,3 +885,214 @@ class TestCrashWindows:
         with _sf(client)() as s:
             assert lp.armed(s) is not None
         assert _live_reservations(client) == []
+
+
+def _open_live_reservation(client, pid, job_id):
+    """Book a REAL open live reservation via spend.admit — durable
+    evidence that a prior dispatch crossed the billable boundary."""
+    with _sf(client)() as s:
+        res = spend.admit(
+            s, job_id=job_id, command_id=None, project_id=pid,
+            provider_key="deepseek", environment="live",
+            est_usd="0.05", max_usd="0.05",
+            app_state=client.app.state)
+        s.commit()
+        return res
+
+
+# ---------------- durable submission boundary ----------------
+
+class TestSubmissionBoundary:
+    def test_uncertain_prior_dispatch_blocks_new_run(
+            self, client, vault):
+        """An OPEN live reservation is durable proof a prior attempt
+        crossed admission — outcome unknown → a new run must fail
+        closed even though the permit is armed. Never inferred from
+        job.status."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        jid0 = new_id()
+        _mkjob(client, pid, jid0, "job:b2a-prior")
+        _open_live_reservation(client, pid, jid0)
+        sends = []
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False,
+                 inner=httpx.MockTransport(
+                     lambda req: sends.append(str(req.url))))
+        assert ei.value.code == "uncertain_prior_dispatch"
+        assert sends == []
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+        # the uncertain reservation is retained, not silently released
+        res = _reservation(client, jid0)
+        assert res.status == "open"
+        # explicit reconcile resolves it — then the run proceeds
+        with _sf(client)() as s:
+            spend.reconcile(s, project_id=pid, job_id=jid0,
+                            outcome="confirmed_no_charge",
+                            note="prior attempt verified unbilled")
+            s.commit()
+        out = _run(client, pid)
+        assert out["outcome"] == "succeeded"
+
+    def test_pre_submission_evidence_chain(self, client, vault):
+        """After a pre-session crash the durable evidence — armed
+        permit, no reservation, zero credential reads, zero sends —
+        establishes the boundary was never crossed; retry is then
+        (and only then) safe."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        jid = new_id()
+        _mkjob(client, pid, jid, "job:b2a-evidence")
+
+        def dead_factory():
+            raise RuntimeError("dead before session")
+
+        with pytest.raises(RuntimeError):
+            lp.run_validation(
+                dead_factory, project_id=pid, job_id=jid,
+                job_idempotency_key="job:b2a-evidence",
+                command_id=None, vault=vault,
+                data_dir=client.app.state.settings.data_dir)
+        assert vault.get_calls == []          # no credential read
+        assert _live_reservations(client) == []  # nothing booked
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None    # nothing consumed
+        out = _run(client, pid)
+        assert out["outcome"] == "succeeded"
+
+    def test_dispatching_state_survives_restart_untouched(
+            self, client, vault):
+        """A job frozen at 'dispatching' + open reservation is the
+        crash-between-boundary-and-send state: restart recovery must
+        neither requeue nor clear it — reconcile only."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        jid = new_id()
+        _mkjob(client, pid, jid, "job:b2a-dispatching")
+        with _sf(client)() as s:
+            s.get(GenerationJob, jid).status = "dispatching"
+            s.commit()
+        _open_live_reservation(client, pid, jid)
+        engine = client.app.state.job_engine
+        with _sf(client)() as s:
+            requeued = engine.reconcile_interrupted(s)
+            s.commit()
+        assert requeued == 0
+        with _sf(client)() as s:
+            assert s.get(GenerationJob, jid).status == "dispatching"
+        assert _reservation(client, jid).status == "open"
+
+
+# ---------------- owner approval reuse ----------------
+
+class TestApprovalReuse:
+    def test_rearm_new_identity_invalidates_approval(
+            self, client, vault):
+        """Re-arming mints a NEW permit_id and fingerprint — the
+        unchanged exec file from the prior permit cannot authorize
+        the second paid operation."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        with _sf(client)() as s:
+            first = dict(lp.armed(s))
+        _approve_exec(client)
+        out = _run(client, pid, approve_exec=False)
+        assert out["outcome"] == "succeeded"
+        # consumed permit is gone — only the ledger record remains
+        with _sf(client)() as s:
+            assert lp.armed(s) is None
+            hist = lp.consumed_history(s)
+            assert [h["permit_id"] for h in hist] == [
+                first["permit_id"]]
+        _armed(client, pid)  # re-arm — new identity
+        with _sf(client)() as s:
+            second = lp.armed(s)
+        assert second["permit_id"] != first["permit_id"]
+        assert (lp.permit_fingerprint(second)
+                != lp.permit_fingerprint(first))
+        # SAME unchanged exec file → fingerprint mismatch → refused
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "owner_approval:fingerprint"
+
+    def test_consumed_permit_record_cannot_reauthorize(
+            self, client, vault):
+        """The consumed ledger is append-only evidence — a burned
+        permit cannot be replayed even with its exec file present."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        out = _run(client, pid, approve_exec=False)
+        assert out["outcome"] == "succeeded"
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "no_permit"
+
+
+# ---------------- approval filesystem boundary ----------------
+
+class TestApprovalFilesystem:
+    def test_symlink_arm_approval_refused(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        d = _owner_dir(client)
+        target = d / "real.json"
+        target.write_text(json.dumps({
+            "approve": "validate_arm", "provider_key": "deepseek",
+            "model_id": "deepseek-chat", "project_id": pid,
+            "not_after": _expiry()}), encoding="utf-8")
+        try:
+            (d / "arm-approval.json").symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks unavailable here: {exc}")
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+
+    def test_directory_as_approval_refused(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        (_owner_dir(client) / "arm-approval.json").mkdir()
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+
+    @pytest.mark.skipif(os.name != "posix",
+                        reason="POSIX mode-bit check only")
+    def test_group_writable_approval_refused(self, client, vault):
+        import os as _os
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        doc = _approve_arm(client, pid)
+        p = _owner_dir(client) / "arm-approval.json"
+        _os.chmod(p, 0o666)
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+
+    def test_no_app_write_path_for_approvals(self):
+        """Static sweep: only live_permit.py may even NAME the
+        approval files, and it only ever reads them — no command,
+        route, or module can create or modify one."""
+        import inspect
+        import pathlib
+        import app as app_pkg
+        root = pathlib.Path(app_pkg.__file__).parent
+        hits = []
+        for f in root.rglob("*.py"):
+            if f.name == "live_permit.py":
+                continue
+            src = f.read_text(encoding="utf-8")
+            if ("arm-approval" in src or "exec-approval" in src
+                    or "approval_path" in src):
+                hits.append(str(f.relative_to(root)))
+        assert hits == []
+        src = inspect.getsource(lp)
+        assert "write_text" not in src and "open(" not in src
