@@ -16,8 +16,8 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
-from app.db.models import (Asset, AssetVersion, GenerationJob, SpendCharge,
-                           SpendReservation)
+from app.db.models import (Asset, AssetVersion, CommandTransaction,
+                           GenerationJob, SpendCharge, SpendReservation)
 from app.domain import image_safety, spend
 from app.domain.providers import catalog
 from app.domain import cloud_cost as cc
@@ -308,6 +308,21 @@ class TestCostUnits:
         assert cc.estimate_image_cost(
             {"cost_table": table}, size=None)["est_cost_usd"] is None
 
+    @pytest.mark.parametrize("checked", [
+        "2000-01-01",      # stale — far beyond the 90-day freshness window
+        "not-a-date",      # malformed evidence
+        "2999-01-01",      # future-dated — cannot be a real check date
+    ])
+    def test_stale_or_untrusted_pricing_fails_closed(self, checked):
+        """Pricing evidence that is missing, malformed, stale, or
+        future-dated is NOT authoritative — est stays None and the
+        commit path refuses."""
+        m = {"cost_table": {"unit": "per_image", "rate": 0.04,
+                            "checked": checked}}
+        est = cc.estimate_image_cost(m)
+        assert est["est_cost_usd"] is None
+        assert est["price_fresh"] is False
+
 
 # ---------------- image safety gate ----------------
 
@@ -479,6 +494,73 @@ class TestFailurePaths:
         assert res.status == "open"
         assert res.reconcile_note          # hold note recorded
 
+    def test_oversized_b64_refused_before_decode(self, client, monkeypatch):
+        """The encoded payload itself is capped before base64 decode —
+        a 20+ MB string can never materialize inside the safety gate."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        big = "A" * (image_safety.MAX_IMAGE_BYTES * 4 // 3 + 2048)
+        body = {"created": 1, "data": [{"b64_json": big}],
+                "usage": {"input_tokens": 5, "output_tokens": 900,
+                          "total_tokens": 905}}
+        _override(client, monkeypatch, _status_handler(200, body))
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "failed"
+        res = _reservation(client, job["id"])
+        assert res.status == "open"
+        assert "safety inspection" in (res.reconcile_note or "")
+
+    def test_url_only_is_artifact_pending_not_ambiguous(
+            self, client, monkeypatch):
+        """URL-only response = remote SUCCESS with an unretrieved
+        artifact — a distinct outcome, never 'ambiguous', never
+        resubmitted. The URL is preserved for reconcile/retrieval;
+        usable usage still settles (the work was billed)."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        body = {"created": 1,
+                "data": [{"url": "https://cdn.example/sim-temp.png",
+                          "revised_prompt": "x"}],
+                "usage": {"input_tokens": 5, "output_tokens": 900,
+                          "total_tokens": 905}}
+        _override(client, monkeypatch, _status_handler(200, body))
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "failed"      # no artifact to register
+        row = _job_row(client, job["id"])
+        pj = row.progress_json or {}
+        assert pj["remote_outcome"] == "artifact_pending_retrieval"
+        assert pj["reconcile_required"] is True
+        assert pj["image_url"] == "https://cdn.example/sim-temp.png"
+        assert pj["remote_status"] == "succeeded"
+        assert _reservation(client, job["id"]).status == "settled"
+        assert not job["output_asset_id"]
+
+    def test_url_only_without_usage_holds(self, client, monkeypatch):
+        """URL-only + unusable billing basis → held for reconcile;
+        still a distinct artifact-pending outcome, not a silent
+        release. (per_image settles on images_returned, so this uses a
+        token-billed table where usage IS the basis.)"""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        orig = cc.pick_image_model
+        monkeypatch.setattr(
+            cc, "pick_image_model",
+            lambda prov, mid: {**(orig(prov, mid) or {}),
+                               "cost_table": _PER_MTOK_TABLE})
+        body = {"created": 1,
+                "data": [{"url": "https://cdn.example/sim-temp.png"}]}
+        _override(client, monkeypatch, _status_handler(200, body))
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "failed"
+        pj = _job_row(client, job["id"]).progress_json or {}
+        assert pj["remote_outcome"] == "artifact_pending_retrieval"
+        res = _reservation(client, job["id"])
+        assert res.status == "open"
+        assert "not retrievable" in (res.reconcile_note or "")
+
 
 # ---------------- idempotency / concurrency / budgets ----------------
 
@@ -640,3 +722,128 @@ class TestRestartAndBoundaries:
         assert OPENAI_IMAGES_SPEC.lifecycle == "sync"
         assert OPENAI_IMAGES_SPEC.submit_path == "/v1/images/generations"
         assert "openai-images" in IMAGE_REST_KEYS
+
+
+# ---------------- review-hardening invariants ----------------
+
+_PER_MTOK_TABLE = {"unit": "per_mtok", "input_per_mtok": 5.0,
+                   "output_per_mtok": 40.0, "assumed_output_tokens": 900,
+                   "checked": "2026-11-13"}
+
+
+class TestHardening:
+    def test_simulated_financial_isolation(self, client):
+        """Simulated accounting is environment-partitioned: a settled
+        sim charge never enters live consumption, never inflates live
+        exposure, and is labeled 'simulated' everywhere it appears."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "succeeded"
+        res = _reservation(client, job["id"])
+        chg = _charges(client, job["id"])
+        assert res.environment == "simulated"
+        assert len(chg) == 1
+        assert chg[0].environment == "simulated"
+        assert chg[0].source == "simulated"
+        with _sf(client)() as s:
+            sid = spend.billing_session_id(s)
+            live = spend.consumed_micro(
+                s, environment="live", scope="lifetime",
+                project_id=pid, session_id=sid)
+            sim = spend.consumed_micro(
+                s, environment="simulated", scope="lifetime",
+                project_id=pid, session_id=sid)
+            from app.domain import live_gate as _lg
+            # zero live consumption AND zero live admission exposure —
+            # simulated holds can never block a real provider
+            assert live == 0
+            assert _lg.live_exposure_micro(s) == 0
+            assert sim == spend.usd_to_micro(0.19)
+            # audit record carries the simulated environment label
+            tx = s.execute(select(CommandTransaction).where(
+                CommandTransaction.project_id == pid)
+                .order_by(CommandTransaction.after_revision.desc())
+            ).scalars().first()
+            assert tx.audit_json["after"]["cloud"]["environment"] \
+                == "simulated"
+
+    def test_success_artifact_with_unresolved_billing(
+            self, client, monkeypatch):
+        """A VALID image whose billing basis is unusable: the artifact
+        persists, the job succeeds, the reservation stays OPEN
+        (usage_unavailable) — no fabricated charge, no silent release.
+        Artifact success and financial resolution are independent."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        # A token-billed model settles ONLY on reported usage — forcing
+        # the unresolved-exposure path while the image itself is valid.
+        orig = cc.pick_image_model
+        monkeypatch.setattr(
+            cc, "pick_image_model",
+            lambda prov, mid: {**(orig(prov, mid) or {}),
+                               "cost_table": _PER_MTOK_TABLE})
+        body = openai_images_obj(prompt="p", seed=1, size="1024x1024")
+        body.pop("usage", None)
+        _override(client, monkeypatch, _status_handler(200, body))
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "succeeded"
+        assert job["output_asset_id"]
+        res = _reservation(client, job["id"])
+        assert res.status == "open"
+        assert "usage_unavailable" in (res.reconcile_note or "")
+        assert _charges(client, job["id"]) == []
+        with _sf(client)() as s:
+            prov = s.get(Asset, job["output_asset_id"]).provenance_json
+        assert prov["provenance_confidence"] == "simulated"
+
+    def test_registration_failure_fails_job_cleanly(
+            self, client, monkeypatch):
+        """A partial CAS/asset-registration failure must NOT leave a
+        'succeeded' job with no artifact nor strand the job 'running':
+        it fails, output_asset_id stays empty, no Asset row exists."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        engine = client.app.state.job_engine
+
+        def boom(*_a, **_k):
+            raise OSError("disk full (simulated)")
+
+        monkeypatch.setattr(engine, "_register_asset", boom)
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "asset registration failed" in (job.get("error") or "")
+        assert not job["output_asset_id"]
+        with _sf(client)() as s:
+            assert s.execute(select(Asset).where(
+                Asset.project_id == pid)).scalars().all() == []
+        # Financial state stays consistent — the sim settle for the
+        # produced bytes stands (accounting ≠ artifact persistence).
+        assert _reservation(client, job["id"]).status == "settled"
+
+    def test_held_exposure_reconciles_explicitly(
+            self, client, monkeypatch):
+        """An open hold resolves only through the audited reconcile
+        command — confirmed_no_charge requires the operator note."""
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _override(client, monkeypatch, _status_handler(
+            200, {"created": 1, "data": []}))
+        r = _gen(client, pid)
+        job = wait_for_job(client, pid, r.json()["job_id"])
+        jid = job["id"]
+        assert _reservation(client, jid).status == "open"
+        # release without a note is refused — ambiguity alone can never
+        # release a hold
+        bad = _commit(client, pid, "spend.reconcile",
+                      {"job_id": jid, "outcome": "confirmed_no_charge"})
+        assert bad.status_code == 422
+        assert _reservation(client, jid).status == "open"
+        ok = _commit(client, pid, "spend.reconcile",
+                     {"job_id": jid, "outcome": "confirmed_no_charge",
+                      "note": "simulated transport — verified no billing"})
+        assert ok.status_code == 200, ok.text
+        assert _reservation(client, jid).status == "released"

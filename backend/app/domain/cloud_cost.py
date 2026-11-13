@@ -16,12 +16,29 @@ an authorization by itself:
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any
 
 # Rough text heuristic — 4 chars/token, input-side; a nominal output
 # allowance is included so the estimate is not misleadingly low.
 _CHARS_PER_TOKEN = 4
 _ASSUMED_OUTPUT_TOKENS = 512
+
+# Catalog pricing evidence expires: a `checked` date older than this —
+# malformed, missing, stale, or future-dated — is not authoritative and
+# fails closed (est None → caller refuses).
+_PRICE_MAX_AGE_DAYS = 90
+
+
+def _price_age_days(checked: Any) -> int | None:
+    """Age in days of the pricing `checked` evidence, or None when it
+    cannot be trusted (missing, malformed, or future-dated)."""
+    try:
+        d = _dt.date.fromisoformat(str(checked))
+    except (ValueError, TypeError):
+        return None
+    age = (_dt.date.today() - d).days
+    return age if age >= 0 else None
 
 
 def t1_text_strategy(provider: dict) -> dict | None:
@@ -136,9 +153,10 @@ def estimate_image_cost(model: dict, *, count: int = 1,
     table = (model or {}).get("cost_table") or {}
     unit = table.get("unit")
     checked = table.get("checked")
+    age = _price_age_days(checked)
     count = max(1, int(count or 1))
     est_usd = None
-    if checked is not None:
+    if age is not None and age <= _PRICE_MAX_AGE_DAYS:
         if unit == "per_image":
             rate = image_tier_rate(table, quality)
             if rate is not None:
@@ -172,6 +190,8 @@ def estimate_image_cost(model: dict, *, count: int = 1,
         "est_cost_usd": est_usd,
         "is_estimate": True,
         "rates_checked": checked,
+        "price_age_days": age,
+        "price_fresh": age is not None and age <= _PRICE_MAX_AGE_DAYS,
     }
 
 

@@ -43,11 +43,24 @@ this project uses semver once public releases begin.
     `provenance_confidence: simulated` — `verified_remote` is
     structurally unreachable (no `provider_verified` evidence can be
     produced by a mock transport).
-  - 49 regression tests: preview/commit/idempotency/concurrency,
-    budgets, fail-closed pricing, image-safety matrix incl.
-    decompression bomb, CAS/provenance/job linkage, hold-vs-settle
-    billing paths, restart sweep, zero-egress construction, no
-    credential reads.
+  - Review-hardening: URL-only responses classify as
+    `artifact_pending_retrieval` (remote succeeded, retrieval
+    unsupported in C3-A) — distinct from `ambiguous` and `failed`,
+    reconcile-required, with the temporary URL persisted in
+    `progress_json` for a future retrieval workflow; never resubmitted.
+    Encoded payloads are capped before base64 decode (≈4/3 inflation
+    bound) so oversized strings never materialize. Pricing `checked`
+    evidence must be a real date within 90 days — stale/malformed/
+    future-dated pricing fails closed. Asset-registration failures fail
+    the job cleanly (rollback of uncommitted asset rows, work-dir
+    purge) instead of stranding the job `running`.
+  - 59 regression tests: preview/commit/idempotency/concurrency,
+    budgets, fail-closed pricing incl. staleness, image-safety matrix
+    incl. decompression bomb + pre-decode cap, CAS/provenance/job
+    linkage, settle/release/hold billing paths, artifact-pending
+    retrieval, registration-failure isolation, sim-vs-live accounting
+    isolation, explicit reconcile, restart sweep, zero-egress
+    construction, no credential reads.
 - C2 exit gate Stage B2a — DeepSeek-only live-validation permit
   (`domain/live_permit.py`), a durable single-use authorization for a
   future owner-approved real request. `cloud.live.validate_arm` writes

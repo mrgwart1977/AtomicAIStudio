@@ -140,7 +140,8 @@ class SimCloudImageAdapter:
     @staticmethod
     def _fail_detail(remote_id, outcome, *, spend_action, extra=None):
         return {"remote_job_id": remote_id, "remote_outcome": outcome,
-                "reconcile_required": outcome == "ambiguous",
+                "reconcile_required": outcome in (
+                    "ambiguous", "artifact_pending_retrieval"),
                 "spend_action": spend_action,
                 "transport_simulated": True, **(extra or {})}
 
@@ -343,11 +344,41 @@ class SimCloudImageAdapter:
     def _finish(self, handle: JobHandle, req, rh):
         detail = rh.detail or {}
         b64 = detail.get("image_b64")
+        url = detail.get("image_url")
         if not b64:
-            # Temporary remote URL payloads (other providers) have no
-            # inline bytes — C3-A sim fixtures always carry b64; a URL
-            # without a download path is an unprocessable payload →
-            # outcome unknown, reservation HELD.
+            if url:
+                # Distinct outcome: the provider SUCCEEDED and returned
+                # a temporary remote URL — generation happened, the
+                # artifact is real, but C3-A implements no download
+                # path. This is NOT 'ambiguous' (the remote outcome is
+                # known) and NOT 'failed' (the provider succeeded):
+                # artifact_pending_retrieval, reconcile_required, and
+                # the URL is preserved in progress_json for a future
+                # retrieval/reconcile workflow. Never auto-resubmitted
+                # (remote-scoped jobs are non-resumable). Billing:
+                # usable usage settles — the work was billed; unusable
+                # billing stays held.
+                action, _micro, _basis = self._settle_action(
+                    req, rh, rh.remote_id)
+                if action["type"] != "settle":
+                    action = {"type": "hold",
+                              "note": "image generated remotely "
+                                      "(temporary URL) but not "
+                                      "retrievable in C3-A — billing "
+                                      "unresolved; exposure held for "
+                                      "reconcile"}
+                yield {"progress": 0.9,
+                       "message": "image generated remotely — retrieval "
+                                  "unsupported in C3-A",
+                       "detail": self._fail_detail(
+                           rh.remote_id, "artifact_pending_retrieval",
+                           spend_action=action,
+                           extra={"remote_status": "succeeded",
+                                  "image_url": url})}
+                raise RuntimeError(
+                    "image generated remotely (temporary URL) — "
+                    "download path not implemented in C3-A; durable "
+                    "URL preserved for reconcile, not resubmitted")
             yield {"progress": 0.9, "message": "no inline image bytes",
                    "detail": self._fail_detail(
                        rh.remote_id, "ambiguous",
@@ -359,6 +390,13 @@ class SimCloudImageAdapter:
                 "image response has no b64_json payload — outcome "
                 "unknown, not resubmitted")
         try:
+            # Bound the decode BEFORE allocation — base64 inflates ~4/3
+            # over binary; an oversized string refuses before any
+            # materialization, independent of the decoded cap.
+            if len(b64) > (image_safety.MAX_IMAGE_BYTES * 4 // 3) + 1024:
+                raise image_safety.ImageRejected(
+                    f"encoded image payload {len(b64)} chars exceeds "
+                    "pre-decode cap")
             data = base64.b64decode(b64)
             info = image_safety.inspect_image(data)
         except (image_safety.ImageRejected, ValueError) as exc:

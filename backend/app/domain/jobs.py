@@ -425,18 +425,36 @@ class JobEngine:
                 job.status = "succeeded"
                 job.progress = 1.0
             else:
-                asset = self._register_asset(s, job, final_output)
-                job.output_asset_id = asset.id
-                for extra in final_output.get("extra_assets") or []:
-                    self._register_asset(s, job, {
-                        "origin": final_output.get("origin", "generated"),
-                        "media": final_output.get("media"),
-                        **extra,
-                    })
-                attempts_mod.finish_attempt(s, job, attempt["attempt_id"], "succeeded")
-                job.status = "succeeded"
-                job.progress = 1.0
-                self._apply_post_command(s, job, final_output, asset)
+                try:
+                    asset = self._register_asset(s, job, final_output)
+                    job.output_asset_id = asset.id
+                    for extra in final_output.get("extra_assets") or []:
+                        self._register_asset(s, job, {
+                            "origin": final_output.get("origin", "generated"),
+                            "media": final_output.get("media"),
+                            **extra,
+                        })
+                except Exception as exc:
+                    # Artifact registration IS job success — a partial
+                    # CAS/asset failure must not produce a 'succeeded'
+                    # job with no artifact, nor strand the job in
+                    # 'running' until a restart sweep. Spend actions
+                    # already committed by adapter progress stay as
+                    # recorded (settled stays settled, held stays open)
+                    # — only the uncommitted asset rows roll back.
+                    s.rollback()
+                    job = s.get(GenerationJob, job_id)
+                    attempts_mod.finish_attempt(
+                        s, job, attempt["attempt_id"], "failed")
+                    job.status = "failed"
+                    job.error = f"asset registration failed: {exc}"
+                    self._purge_work_dir(work_dir, job.id)
+                else:
+                    attempts_mod.finish_attempt(
+                        s, job, attempt["attempt_id"], "succeeded")
+                    job.status = "succeeded"
+                    job.progress = 1.0
+                    self._apply_post_command(s, job, final_output, asset)
             job.completed_at = utcnow()
             s.commit()
             await self._publish(job)
