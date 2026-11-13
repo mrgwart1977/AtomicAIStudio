@@ -69,8 +69,18 @@ def ws_origin_allowed(origin: str | None) -> bool:
         return False
     from urllib.parse import urlparse
     parsed = urlparse(origin)
-    return parsed.scheme in ("http", "https") and (
-        (parsed.hostname or "").lower() in _WS_ALLOWED_ORIGIN_HOSTS)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if (parsed.hostname or "").lower() not in _WS_ALLOWED_ORIGIN_HOSTS:
+        return False
+    # Exact host match only — no suffix/substring. Any port on an
+    # allowed host is permitted (dev tools bind random ports) but an
+    # unparseable/out-of-range port makes the origin deceptive — refuse.
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return True
 
 
 def parse_auth_frame(raw: str) -> str | None:

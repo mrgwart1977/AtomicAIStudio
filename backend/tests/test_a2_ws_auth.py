@@ -175,6 +175,40 @@ class TestOriginPolicy:
                 ws.send_text(AUTH)
                 assert ws.receive_json() == {"type": "auth_ok"}
 
+    def test_deceptive_origin_strings_refused(self, client):
+        """Suffix tricks, embedded allowed-hosts, userinfo deception,
+        non-http schemes, and unparseable ports are all refused —
+        matching is exact hostname, never substring."""
+        refused = [
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://evil.example#localhost",
+            "http://localhost.evil.example:1420",
+            "ws://localhost",                      # not an origin scheme
+            "javascript://localhost",
+            "http://tauri.localhost.evil.example",
+            "http://localhost:99999",              # out-of-range port
+            "http://localhost:abc",                # non-numeric port
+            "HTTP://LOCALHOST.evil.example",
+        ]
+        for origin in refused:
+            try:
+                with _connect(client, headers={"origin": origin}):
+                    pass
+            except WebSocketDisconnect:
+                continue
+            pytest.fail(f"origin {origin!r} was not refused")
+
+    def test_unexpected_ports_on_allowed_hosts(self, client):
+        """Any port on an allowed host is accepted — dev tools and the
+        sidecar itself bind varying loopback ports."""
+        for origin in ("http://localhost:9999",
+                       "http://127.0.0.1:65535",
+                       "https://tauri.localhost:443"):
+            with _connect(client, headers={"origin": origin}) as ws:
+                ws.send_text(AUTH)
+                assert ws.receive_json() == {"type": "auth_ok"}
+
     def test_origin_does_not_bypass_token(self, client):
         """Origin is defense-in-depth, not auth — a trusted origin with
         a bad token is still refused."""
