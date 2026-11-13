@@ -331,7 +331,8 @@ async def live_dispatch(
         inner: Any | None = None, resolver: Callable | None = None,
         gate_probe: Callable | None = None,
         base_backend: Any | None = None,
-        expected_permit: dict | None = None) -> dict[str, Any]:
+        expected_permit: dict | None = None,
+        data_dir: Any | None = None) -> dict[str, Any]:
     """The ONE path a real provider request could ever take.
 
     Ordered invariants:
@@ -371,7 +372,8 @@ async def live_dispatch(
             "credential_ref": entry0.get("credential_ref"),
             "prompt": request.get("prompt"),
             "max_output_tokens": request.get("max_output_tokens"),
-            "max_cost_usd": max_cost_usd})
+            "max_cost_usd": max_cost_usd},
+            data_dir=data_dir)
     session.commit()  # admission committed — only now may a socket exist
 
     st = probe(session)

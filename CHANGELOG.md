@@ -18,6 +18,26 @@ this project uses semver once public releases begin.
   write lock is released first. No permit is ever shipped armed; DeepSeek
   remains the only provider the seam can reach, and the real transport
   stays off until Stage B2b owner approval.
+  - Independent owner authorization: `validate_arm` and `validate_run`
+    additionally require owner-approval FILES under
+    `<data_dir>/owner/` (`arm-approval.json`, `exec-approval.json`) —
+    written by the owner on disk, never by the app. An authenticated
+    session alone cannot authorize; revocation is file deletion or
+    `not_after` expiry. The exec approval must name the armed permit's
+    sha256 fingerprint — the Stage B2b execution lock; nothing in this
+    build creates one, so `validate_run` fails closed even with an
+    armed permit.
+  - Durable run state machine: the GenerationJob row is created inside
+    the command transaction (`validating`) and transitions
+    `validating → dispatching → succeeded|failed|unknown` on committed
+    writes. Neither state is engine-schedulable ("queued" only) nor
+    restart-swept ("running" only) — a crash freezes an auditable
+    state and can never auto-resubmit; unknown outcomes hold the
+    reservation for explicit reconcile.
+  - Command idempotency hardened: replaying a committed
+    `idempotency_key` with a different type/project/payload now fails
+    409 instead of silently replaying; a true replay never re-runs the
+    post-commit dispatch hook.
 - C2 exit gate Stage B1 — production-capable live transport
   infrastructure, still unreachable from every shipped surface
   (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the

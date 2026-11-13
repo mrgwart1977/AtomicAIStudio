@@ -11,6 +11,7 @@ preview.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -1290,11 +1291,24 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
            scope: str, origin: str, target_type: str | None, target_id: str | None,
            expected_revision: int, idempotency_key: str,
            job_engine=None, storage=None, vault=None,
-           session_factory=None) -> dict:
+           session_factory=None, data_dir=None) -> dict:
     existing = session.execute(
         select(CreativeCommand).where(CreativeCommand.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
     if existing:
+        # Idempotent replay returns the recorded outcome and NEVER
+        # re-runs the handler — but a reused key with a different
+        # command type, project, or payload fails closed.
+        same = (
+            existing.command_type == command_type
+            and existing.project_id == project.id
+            and json.dumps(existing.payload_json, sort_keys=True,
+                           default=str) == json.dumps(
+                               payload, sort_keys=True, default=str))
+        if not same:
+            raise CommandError(
+                409, "idempotency_key already committed with a "
+                     "different payload — refusing to replay")
         return {"command": existing, "idempotent_replay": True}
 
     if project.status == "archived" and command_type != "project.restore":
@@ -1691,7 +1705,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     prompt=payload["prompt"],
                     max_output_tokens=payload["max_output_tokens"],
                     max_cost_usd=payload["max_cost_usd"],
-                    command_id=command.id, vault=vault)
+                    command_id=command.id, vault=vault,
+                    data_dir=data_dir)
                 # Prompt content stays in the job request only — the
                 # audit records its length, never its body.
                 audit["after"]["permit"] = {
@@ -1708,11 +1723,29 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 if session_factory is None:
                     raise CommandError(500, "session factory unavailable")
                 job_id = new_id()
+                # Durable job row created INSIDE this transaction —
+                # the command commit and the job's 'validating' record
+                # are atomic. A crash after commit leaves an auditable
+                # accepted-but-never-dispatched state; the dispatch
+                # itself transitions validating → dispatching →
+                # succeeded|failed|unknown on its own session.
+                session.add(GenerationJob(
+                    id=job_id, project_id=project.id,
+                    adapter_id="cloud.live.validate", kind="text",
+                    idempotency_key=f"job:{idempotency_key}",
+                    request_json={"stage": "B2a",
+                                  "provider_key": _lp.PERMIT_PROVIDER,
+                                  "model_id": _lp.PERMIT_MODEL},
+                    status="validating", resumable=False,
+                    execution_scope="remote",
+                    command_id=command.id))
+                session.flush()
                 post_commit = (lambda: _lp.run_validation(
                     session_factory, project_id=project.id,
                     job_id=job_id,
                     job_idempotency_key=f"job:{idempotency_key}",
-                    command_id=command.id, vault=vault))
+                    command_id=command.id, vault=vault,
+                    data_dir=data_dir))
                 audit["after"]["validate_run"] = {
                     "job_id": job_id,
                     "status": "dispatch_requested",

@@ -28,9 +28,12 @@ Permit semantics:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import threading
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -48,6 +51,33 @@ PERMIT_MODEL = "deepseek-chat"
 MAX_PERMIT_COST_USD = Decimal("0.05")   # B2a proposed reservation cap
 MAX_OUTPUT_TOKENS = 64
 MAX_PROMPT_CHARS = 500
+
+# Independent owner-authorization boundary — an authenticated app
+# session is NOT proof of owner approval. Authorization is granted by
+# the owner writing an approval file DIRECTLY under
+# ``<data_dir>/owner/`` with a text editor — no command, API route, env
+# var, settings toggle, or database row can create one, and project
+# backup/restore never exports it. Revocation = delete the file or let
+# ``not_after`` lapse; both take effect on the next attempt, fail
+# closed.
+#
+#   owner/arm-approval.json
+#       {"approve": "validate_arm",
+#        "provider_key": "deepseek", "model_id": "deepseek-chat",
+#        "project_id": "<project id>",
+#        "not_after": "<ISO-8601 UTC>"}
+#
+#   owner/exec-approval.json   — the Stage B2b execution lock.
+#       {"approve": "validate_run",
+#        "permit_fingerprint": "<sha256 of the armed permit>",
+#        "not_after": "<ISO-8601 UTC>"}
+#
+#   The exec approval is bound to the FINGERPRINT of the armed permit:
+#   a stale approval, a re-armed permit, or a restored database can
+#   never satisfy it. Nothing in this build creates an exec approval —
+#   Stage B2b stays locked until the owner writes one.
+OWNER_DIR = "owner"
+_APPROVAL_SCOPES = {"arm": "validate_arm", "exec": "validate_run"}
 
 
 class PermitRefused(Exception):
@@ -91,12 +121,72 @@ def consumed_history(session: Session) -> list[dict[str, Any]]:
 
 
 # ------------------------------------------------------------------
+# owner approval — independent authorization boundary
+# ------------------------------------------------------------------
+
+def permit_fingerprint(permit: dict[str, Any]) -> str:
+    """sha256 over the canonical armed record — the exec approval must
+    name this exact fingerprint, so it can only ever authorize THIS
+    permit."""
+    canon = json.dumps(permit, sort_keys=True, separators=(",", ":"),
+                       default=str)
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+
+def approval_path(data_dir: Any, kind: str) -> Path:
+    return Path(data_dir) / OWNER_DIR / f"{kind}-approval.json"
+
+
+def load_approval(data_dir: Any, kind: str) -> dict[str, Any]:
+    """Read + validate an owner-approval file. Fail closed on EVERY
+    defect — missing file, unreadable, malformed JSON, wrong scope,
+    missing or lapsed expiry."""
+    if data_dir is None:
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            "no data dir — owner approval cannot be established")
+    path = approval_path(data_dir, kind)
+    if not path.is_file():
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            f"no owner {kind} approval file — an authenticated session "
+            "is not owner authorization; see module docstring")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            f"owner {kind} approval unreadable/malformed") from exc
+    if not isinstance(doc, dict):
+        raise PermitRefused(
+            f"owner_approval:{kind}", "approval document malformed")
+    if doc.get("approve") != _APPROVAL_SCOPES[kind]:
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            f"approval scope must be '{_APPROVAL_SCOPES[kind]}'")
+    not_after = doc.get("not_after")
+    try:
+        expiry = datetime.fromisoformat(str(not_after))
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise PermitRefused(
+            f"owner_approval:{kind}",
+            "approval requires an ISO 'not_after' expiry") from exc
+    if expiry <= datetime.now(timezone.utc):
+        raise PermitRefused(
+            f"owner_approval:{kind}", "owner approval has expired")
+    return doc
+
+
+# ------------------------------------------------------------------
 # arm — the authorization act (audited command only)
 # ------------------------------------------------------------------
 
 def arm(session: Session, *, project_id: str, credential_ref: str,
         prompt: Any, max_output_tokens: Any, max_cost_usd: Any,
-        command_id: str | None, vault: Any) -> dict[str, Any]:
+        command_id: str | None, vault: Any,
+        data_dir: Any | None = None) -> dict[str, Any]:
     """Create the armed permit. Validates EVERYTHING that can be
     checked without a socket — the run path re-checks admission again
     inside live_dispatch."""
@@ -145,6 +235,16 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
         max_cost_usd=cost, vault=vault)
     if not allowed:
         raise PermitRefused(code, f"live admission refused at arm: {code}")
+    # Independent owner authorization — checked AFTER every app-level
+    # check so the approval is the final gate, not a substitute for it.
+    doc = load_approval(data_dir, "arm")
+    for f, want in (("provider_key", PERMIT_PROVIDER),
+                    ("model_id", PERMIT_MODEL),
+                    ("project_id", project_id)):
+        if doc.get(f) != want:
+            raise PermitRefused(
+                f"owner_approval:{f}",
+                f"owner arm-approval {f} does not match this request")
     st = _state(session)
     permit = {
         "permit_id": new_id(),
@@ -173,17 +273,25 @@ _MATCH_FIELDS = ("provider_key", "model_id", "project_id",
 
 
 def consume(session: Session, *, job_id: str,
-            dispatch: dict[str, Any]) -> dict[str, Any]:
+            dispatch: dict[str, Any],
+            data_dir: Any | None = None) -> dict[str, Any]:
     """Move the armed permit to consumed — same transaction as the
     reservation booking. Field-by-field compare against what the
     dispatch will actually use; any mismatch refuses WITHOUT consuming
-    (the armed record stays intact as evidence)."""
+    (the armed record stays intact as evidence).
+
+    The Stage B2b execution lock lives here: a valid owner
+    ``exec-approval`` naming THIS permit's fingerprint must exist —
+    an armed permit alone can never execute."""
     st = _state(session)
     permit = st["armed"]
     if permit is None:
         raise PermitRefused(
             "no_permit",
             "no armed validation permit — dispatch refused")
+    # Lock check FIRST — absent/expired/mis-scoped exec approval
+    # refuses before anything else is compared.
+    doc = load_approval(data_dir, "exec")
     for f in _MATCH_FIELDS:
         if dispatch.get(f) != permit.get(f):
             raise PermitRefused(
@@ -195,6 +303,14 @@ def consume(session: Session, *, job_id: str,
         raise PermitRefused(
             "mismatch:max_cost_usd",
             "dispatch cost cap does not match the armed permit")
+    # Fingerprint binding LAST — the approval must name this exact
+    # armed record, so a swapped/rewritten permit can never satisfy a
+    # previously issued approval.
+    if doc.get("permit_fingerprint") != permit_fingerprint(permit):
+        raise PermitRefused(
+            "owner_approval:fingerprint",
+            "exec approval is not bound to the armed permit — refused, "
+            "permit stays armed")
     st["armed"] = None
     record = {**permit, "consumed_at": _now(), "consumed_job_id": job_id}
     st["consumed"].append(record)
@@ -209,6 +325,7 @@ def consume(session: Session, *, job_id: str,
 def run_validation(session_factory: Callable, *, project_id: str,
                    job_id: str, job_idempotency_key: str,
                    command_id: str | None, vault: Any,
+                   data_dir: Any | None = None,
                    app_state: Any | None = None, inner: Any | None = None,
                    resolver: Callable | None = None,
                    gate_probe: Callable | None = None,
@@ -221,16 +338,51 @@ def run_validation(session_factory: Callable, *, project_id: str,
     sends comes FROM the armed permit record — caller input can only
     select WHICH permit, never reshape it.
 
+    Durable state machine on the GenerationJob row (created atomically
+    with the command, status "validating"):
+
+        validating → dispatching → succeeded | failed | unknown
+
+    "validating" and "dispatching" are deliberately outside the engine
+    vocabulary — nothing selects them for scheduling, the restart sweep
+    only touches "running", and resumable=False plus an unregistered
+    adapter_id mean a restart can never resubmit. A crash freezes the
+    row at its last committed state — that IS the audit:
+      * validating  — accepted, dispatch never started.
+      * dispatching — died inside the boundary; if a reservation was
+                      booked it stays OPEN for explicit reconcile.
+      * unknown     — non-terminal: provider outcome undetermined,
+                      reservation held.
+
     inner=None (the shipped path) builds the real _SecureHTTPTransport;
     tests inject MockTransport/dummy vaults — and is_real=False means
     no controlled run can produce verified_remote.
     """
     out: dict[str, Any] = {}
 
-    def work() -> None:
+    def _mark(s, job_id, status, error=None, result=None):
         from app.db.models import GenerationJob
-        with session_factory() as s:
-            try:
+        job = s.get(GenerationJob, job_id)
+        if job is not None:
+            job.status = status
+            if error is not None:
+                job.error = error
+            if result is not None:
+                job.result_json = result
+            s.commit()
+
+    def _open_reservation(s, job_id) -> bool:
+        from app.db.models import SpendReservation
+        from sqlalchemy import select
+        row = s.execute(
+            select(SpendReservation).where(
+                SpendReservation.job_id == job_id)
+        ).scalar_one_or_none()
+        return row is not None and row.status == "open"
+
+    def work() -> None:
+        try:
+            with session_factory() as s:
                 permit = armed(s)
                 if permit is None:
                     raise PermitRefused(
@@ -241,23 +393,7 @@ def run_validation(session_factory: Callable, *, project_id: str,
                         "mismatch:project_id",
                         "permit is armed for a different project — "
                         "refused, permit stays armed")
-                # Durable job row — committed atomically with the
-                # reservation + permit consume inside live_dispatch.
-                # resumable=False: a crash can never auto-resubmit a
-                # possibly-billable request.
-                s.add(GenerationJob(
-                    id=job_id, project_id=permit["project_id"],
-                    adapter_id="cloud.live.validate", kind="text",
-                    idempotency_key=job_idempotency_key,
-                    request_json={
-                        "provider_key": permit["provider_key"],
-                        "model_id": permit["model_id"],
-                        "prompt": permit["prompt"],
-                        "max_output_tokens":
-                            permit["max_output_tokens"]},
-                    status="running", resumable=False,
-                    command_id=command_id))
-                s.flush()
+                _mark(s, job_id, "dispatching")
                 try:
                     out["result"] = asyncio.run(lt.live_dispatch(
                         s,
@@ -273,31 +409,35 @@ def run_validation(session_factory: Callable, *, project_id: str,
                         app_state=app_state, inner=inner,
                         resolver=resolver, gate_probe=gate_probe,
                         base_backend=base_backend,
-                        expected_permit=permit))
+                        expected_permit=permit, data_dir=data_dir))
                 except Exception:
-                    # If admission committed before the refusal, the
-                    # job row committed with it — mark it so reconcile
-                    # finds a clean record instead of a stale 'running'.
+                    # If a reservation committed before the refusal the
+                    # outcome is unknown — mark it held, not failed.
                     s.rollback()
-                    job = s.get(GenerationJob, job_id)
-                    if job is not None:
-                        job.status = "failed"
-                        job.error = ("dispatch refused — see live-gate "
-                                     "audit (reservation may be held "
-                                     "for reconcile)")
-                        s.commit()
+                    held = _open_reservation(s, job_id)
+                    _mark(
+                        s, job_id,
+                        "unknown" if held else "failed",
+                        error="dispatch refused — reservation held open"
+                              " for reconcile" if held else
+                              "dispatch refused before admission")
                     raise
-                job = s.get(GenerationJob, job_id)
                 outcome = out["result"]["outcome"]
-                if job is not None:
-                    job.status = ("succeeded" if outcome == "succeeded"
-                                  else "failed")
-                    job.error = (None if outcome == "succeeded"
-                                 else f"{outcome}: reservation "
-                                      f"{out['result']['reservation']}")
-                    s.commit()
-            except Exception as exc:
-                out["error"] = exc
+                if outcome == "succeeded":
+                    _mark(s, job_id, "succeeded",
+                          result={"outcome": outcome})
+                elif outcome == "ambiguous":
+                    _mark(s, job_id, "unknown",
+                          error="provider outcome undetermined — "
+                                "reservation held for reconcile",
+                          result={"outcome": outcome})
+                else:
+                    _mark(s, job_id, "failed",
+                          error=f"{outcome}: "
+                                f"{out['result']['reservation']}",
+                          result={"outcome": outcome})
+        except Exception as exc:
+            out["error"] = exc
 
     t = threading.Thread(target=work, daemon=True)
     t.start()

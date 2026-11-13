@@ -524,6 +524,9 @@ async def commit_command(
             vault=request.app.state.provider_vault,
             session_factory=getattr(
                 request.app.state, "session_factory", None),
+            data_dir=getattr(
+                getattr(request.app.state, "settings", None),
+                "data_dir", None),
         )
     except cmd.CommandError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

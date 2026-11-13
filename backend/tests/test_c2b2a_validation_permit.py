@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -98,20 +101,79 @@ def _setup(client, pid, vault):
     assert r.status_code == 200, r.text
 
 
+# ---------- owner-approval files (the independent auth boundary) ----------
+
+def _owner_dir(client):
+    d = Path(client.app.state.settings.data_dir) / lp.OWNER_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _expiry(hours=1):
+    return (datetime.now(timezone.utc)
+            + timedelta(hours=hours)).isoformat()
+
+
+def _approve_arm(client, pid, **overrides):
+    doc = {"approve": "validate_arm", "provider_key": "deepseek",
+           "model_id": "deepseek-chat", "project_id": pid,
+           "not_after": _expiry()}
+    doc.update(overrides)
+    (_owner_dir(client) / "arm-approval.json"
+     ).write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def _approve_exec(client, **overrides):
+    """Write the Stage B2b exec approval bound to the CURRENT armed
+    permit's fingerprint — exactly what a future owner would do.
+    No-op when nothing is armed (the run will refuse 'no_permit'
+    before the lock is even consulted)."""
+    with _sf(client)() as s:
+        permit = lp.armed(s)
+    if permit is None:
+        return None
+    doc = {"approve": "validate_run",
+           "permit_fingerprint": lp.permit_fingerprint(permit),
+           "not_after": _expiry()}
+    doc.update(overrides)
+    (_owner_dir(client) / "exec-approval.json"
+     ).write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
 def _armed(client, pid):
+    _approve_arm(client, pid)
     r = _commit(client, pid, "cloud.live.validate_arm", ARM)
     assert r.status_code == 200, r.text
     return r
 
 
-def _run(client, pid, *, inner=None):
+def _mkjob(client, pid, jid, ikey):
+    """Mirror the command handler's durable job row (status
+    'validating') for direct run_validation calls."""
+    with _sf(client)() as s:
+        s.add(GenerationJob(
+            id=jid, project_id=pid, adapter_id="cloud.live.validate",
+            kind="text", idempotency_key=ikey,
+            request_json={"stage": "B2a"}, status="validating",
+            resumable=False, execution_scope="remote"))
+        s.commit()
+
+
+def _run(client, pid, *, inner=None, job_id=None, approve_exec=True):
     """Direct run_validation call with injected mock inner — the
     command path always uses inner=None (real transport) so it is
     only exercised for pre-transport refusals in tests."""
+    if approve_exec:
+        _approve_exec(client)
+    jid = job_id or new_id()
+    _mkjob(client, pid, jid, f"job:b2a-{new_id()[:8]}")
     return lp.run_validation(
-        _sf(client), project_id=pid, job_id=new_id(),
+        _sf(client), project_id=pid, job_id=jid,
         job_idempotency_key=f"job:b2a-{new_id()[:8]}",
         command_id=None, vault=client.app.state.provider_vault,
+        data_dir=client.app.state.settings.data_dir,
         inner=inner or httpx.MockTransport(
             lambda req: httpx.Response(200, json=DEEPSEEK_OK)),
         resolver=GOOD_RESOLVER)
@@ -338,6 +400,9 @@ class TestRunDispatch:
         pid = make_project(client)["id"]
         _setup(client, pid, vault)
         _armed(client, pid)
+        _approve_exec(client)
+        jid = new_id()
+        _mkjob(client, pid, jid, f"job:b2a-{new_id()[:8]}")
 
         def killer(session):
             st = lg.state(session)
@@ -347,16 +412,21 @@ class TestRunDispatch:
         from app.domain.workers.live_transport import LiveDispatchRefused
         with pytest.raises(LiveDispatchRefused) as ei:
             lp.run_validation(
-                _sf(client), project_id=pid, job_id=new_id(),
+                _sf(client), project_id=pid, job_id=jid,
                 job_idempotency_key=f"job:b2a-{new_id()[:8]}",
                 command_id=None, vault=vault,
+                data_dir=client.app.state.settings.data_dir,
                 inner=httpx.MockTransport(
                     lambda req: httpx.Response(200, json=DEEPSEEK_OK)),
                 resolver=GOOD_RESOLVER, gate_probe=killer)
         assert ei.value.code == "global_kill"
+        res = _reservation(client, jid)
+        assert res is not None and res.status == "open"
         with _sf(client)() as s:
             assert lp.armed(s) is None
             assert len(lp.consumed_history(s)) == 1
+            job = s.get(GenerationJob, jid)
+            assert job.status == "unknown"  # held, not failed
         # consumed permanently — no replay path exists
         with pytest.raises(lp.PermitRefused) as ei2:
             _run(client, pid)
@@ -399,11 +469,14 @@ class TestRunDispatch:
         pid = make_project(client)["id"]
         _setup(client, pid, vault)
         _armed(client, pid)
+        _approve_exec(client)
         jid = new_id()
+        _mkjob(client, pid, jid, f"job:b2a-{new_id()[:8]}")
         out = lp.run_validation(
             _sf(client), project_id=pid, job_id=jid,
             job_idempotency_key=f"job:b2a-{new_id()[:8]}",
             command_id=None, vault=vault,
+            data_dir=client.app.state.settings.data_dir,
             inner=httpx.MockTransport(
                 lambda req: (_ for _ in ()).throw(
                     httpx.ConnectError("dropped"))),
@@ -414,5 +487,392 @@ class TestRunDispatch:
         assert res.status == "open"
         with _sf(client)() as s:
             job = s.get(GenerationJob, jid)
-            assert job.status == "failed"  # honest, not resumable
+            assert job.status == "unknown"  # non-terminal, held
             assert job.resumable is False
+
+
+def _commit_key(client, pid, command_type, payload, key):
+    """Commit with a caller-chosen idempotency key (replay tests)."""
+    return client.post(
+        f"/api/projects/{pid}/commands/commit",
+        json={"command_type": command_type, "payload": payload,
+              "scope": "project", "expected_revision": _rev(client, pid),
+              "idempotency_key": key})
+
+
+def _live_reservations(client):
+    with _sf(client)() as s:
+        return s.execute(select(SpendReservation).where(
+            SpendReservation.environment == "live")).scalars().all()
+
+
+def _validate_jobs(client):
+    with _sf(client)() as s:
+        return s.execute(select(GenerationJob).where(
+            GenerationJob.adapter_id == "cloud.live.validate")
+        ).scalars().all()
+
+
+# ---------------- owner authorization boundary ----------------
+
+class TestOwnerAuthorization:
+    """An authenticated session + green budgets/grants/credentials is
+    NOT owner approval — the file under <data_dir>/owner/ is the only
+    proof, and no app surface can write it."""
+
+    def test_arm_requires_owner_approval(self, client, vault):
+        """Everything else green — still refused without the file."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "owner_approval:arm"
+        with _sf(client)() as s:
+            assert lp.armed(s) is None
+
+    def test_arm_approval_scope_binding_expiry(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        past = (datetime.now(timezone.utc)
+                - timedelta(hours=1)).isoformat()
+        cases = [
+            {"approve": "validate_run"},                  # wrong scope
+            {"provider_key": "xai"},                       # wrong provider
+            {"model_id": "deepseek-reasoner"},             # wrong model
+            {"project_id": "not-this-project"},            # wrong project
+            {"not_after": past},                           # expired
+            {"not_after": "garbage"},                      # unparseable
+        ]
+        for ov in cases:
+            doc = {"approve": "validate_arm",
+                   "provider_key": "deepseek",
+                   "model_id": "deepseek-chat", "project_id": pid,
+                   "not_after": _expiry()}
+            doc.update(ov)
+            if "not_after" not in ov and ov != {"approve": "validate_run"}:
+                doc.pop("not_after", None) if "not_after" in ov else None
+            (_owner_dir(client) / "arm-approval.json"
+             ).write_text(json.dumps(doc), encoding="utf-8")
+            r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+            assert r.status_code == 422, ov
+            assert "owner_approval" in r.json()["detail"]["error"], ov
+            with _sf(client)() as s:
+                assert lp.armed(s) is None
+        # missing not_after entirely
+        doc = {"approve": "validate_arm", "provider_key": "deepseek",
+               "model_id": "deepseek-chat", "project_id": pid}
+        (_owner_dir(client) / "arm-approval.json"
+         ).write_text(json.dumps(doc), encoding="utf-8")
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+
+    def test_arm_approval_malformed(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        (_owner_dir(client) / "arm-approval.json"
+         ).write_text("not json{", encoding="utf-8")
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+
+    def test_arm_approval_revocation(self, client, vault):
+        """Deleting the file revokes instantly — next arm refuses."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _run(client, pid)  # consume so a second arm is reachable
+        (_owner_dir(client) / "arm-approval.json").unlink()
+        r = _commit(client, pid, "cloud.live.validate_arm", ARM)
+        assert r.status_code == 422
+        assert "owner_approval" in r.json()["detail"]["error"]
+        with _sf(client)() as s:
+            assert lp.armed(s) is None
+
+
+# ---------------- Stage B2b execution lock ----------------
+
+class TestExecLock:
+    """An armed permit can NEVER execute without a fresh owner
+    exec-approval bound to that permit's fingerprint."""
+
+    def test_armed_permit_locked_without_exec_approval(
+            self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        sends = []
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False,
+                 inner=httpx.MockTransport(
+                     lambda req: sends.append(str(req.url))))
+        assert ei.value.code == "owner_approval:exec"
+        assert sends == []                       # zero egress attempts
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None       # permit NOT consumed
+        assert _live_reservations(client) == []  # nothing booked
+
+    def test_exec_approval_wrong_fingerprint(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client, permit_fingerprint="0" * 64)
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "owner_approval:fingerprint"
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+
+    def test_exec_approval_expired(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client, not_after=(
+            datetime.now(timezone.utc)
+            - timedelta(hours=1)).isoformat())
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "owner_approval:exec"
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+
+    def test_exec_approval_revocation(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        (_owner_dir(client) / "exec-approval.json").unlink()
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "owner_approval:exec"
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+
+    def test_stale_exec_approval_after_rearm(self, client, vault):
+        """The approval is fingerprint-bound — re-arming a new permit
+        invalidates the previous exec file automatically."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        out = _run(client, pid)               # consumes permit A
+        assert out["outcome"] == "succeeded"
+        _armed(client, pid)                   # arm permit B (new id)
+        with pytest.raises(lp.PermitRefused) as ei:
+            _run(client, pid, approve_exec=False)
+        assert ei.value.code == "owner_approval:fingerprint"
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+
+    def test_locked_run_marks_job_failed_not_stuck(self, client, vault):
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        jid = new_id()
+        with pytest.raises(lp.PermitRefused):
+            _run(client, pid, approve_exec=False, job_id=jid)
+        with _sf(client)() as s:
+            job = s.get(GenerationJob, jid)
+            assert job.status == "failed"
+
+
+# ---------------- command idempotency ----------------
+
+class TestCommandIdempotency:
+    def test_duplicate_validate_run_replays_no_second_job(
+            self, client, vault):
+        """Same key + same payload → recorded result, no second job,
+        no second dispatch attempt."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        key = f"b2a-dup-{new_id()[:8]}"
+        r1 = _commit_key(client, pid, "cloud.live.validate_run",
+                         {}, key)
+        # locked (no exec approval) → refusal, but command committed
+        assert r1.status_code == 422
+        r2 = _commit_key(client, pid, "cloud.live.validate_run",
+                         {}, key)
+        assert r2.status_code == 200
+        assert r2.json()["idempotent_replay"] is True
+        assert len(_validate_jobs(client)) == 1
+
+    def test_idempotency_key_payload_mismatch_refused(
+            self, client, vault):
+        pid = make_project(client)["id"]
+        key = f"b2a-mix-{new_id()[:8]}"
+        r1 = _commit_key(client, pid, "spend.budget_set",
+                         {"target": "global", "scope": "lifetime",
+                          "limit_usd": "5.00"}, key)
+        assert r1.status_code == 200, r1.text
+        r2 = _commit_key(client, pid, "spend.budget_set",
+                         {"target": "global", "scope": "lifetime",
+                          "limit_usd": "9.00"}, key)
+        assert r2.status_code == 409
+        r3 = _commit_key(client, pid, "spend.budget_set",
+                         {"target": "global", "scope": "lifetime",
+                          "limit_usd": "5.00"}, key)
+        assert r3.status_code == 200
+        assert r3.json()["idempotent_replay"] is True
+
+    def test_concurrent_runs_single_consume(self, client, vault):
+        """Two racing validate_runs: exactly one consume/dispatch —
+        the loser sees no_permit and books nothing."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        sends = []
+        results: dict[int, Any] = {}
+        errors: dict[int, Exception] = {}
+
+        def handler(req):
+            sends.append(str(req.url))
+            return httpx.Response(200, json=DEEPSEEK_OK)
+
+        def go(i):
+            jid = new_id()
+            _mkjob(client, pid, jid, f"job:b2a-race-{i}")
+            try:
+                results[i] = lp.run_validation(
+                    _sf(client), project_id=pid, job_id=jid,
+                    job_idempotency_key=f"job:b2a-race-{i}",
+                    command_id=None, vault=vault,
+                    data_dir=client.app.state.settings.data_dir,
+                    inner=httpx.MockTransport(handler),
+                    resolver=GOOD_RESOLVER)
+            except Exception as exc:  # noqa: BLE001 — collected
+                errors[i] = exc
+
+        ts = [threading.Thread(target=go, args=(i,)) for i in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=30)
+        assert len(results) == 1 and len(errors) == 1
+        assert results[0 if 0 in results else 1]["outcome"] == "succeeded"
+        assert isinstance(next(iter(errors.values())), lp.PermitRefused)
+        assert sends == ["https://api.deepseek.com/chat/completions"]
+        live = _live_reservations(client)
+        assert len(live) == 1 and live[0].status == "settled"
+
+
+# ---------------- crash windows ----------------
+
+class TestCrashWindows:
+    def test_crash_before_dispatch_starts_is_auditable(
+            self, client, vault):
+        """Post-commit hook dies before its session opens → the
+        committed job sits at 'validating' (accepted, never started),
+        the permit stays armed, nothing is booked — and an explicit
+        owner retry can proceed."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        jid = new_id()
+        _mkjob(client, pid, jid, "job:b2a-precrash")
+
+        def dead_factory():
+            raise RuntimeError("process died before worker session")
+
+        with pytest.raises(RuntimeError):
+            lp.run_validation(
+                dead_factory, project_id=pid, job_id=jid,
+                job_idempotency_key="job:b2a-precrash",
+                command_id=None, vault=vault,
+                data_dir=client.app.state.settings.data_dir)
+        with _sf(client)() as s:
+            job = s.get(GenerationJob, jid)
+            assert job.status == "validating"   # auditable, not lost
+            assert lp.armed(s) is not None      # permit NOT burned
+        assert _live_reservations(client) == []
+        # explicit retry with a fresh job proceeds normally
+        out = _run(client, pid)
+        assert out["outcome"] == "succeeded"
+
+    def test_crash_after_submission_holds_reservation(
+            self, client, vault):
+        """Body-level failure after the request went out → ambiguous,
+        reservation open, job 'unknown' — never auto-released."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        jid = new_id()
+        _mkjob(client, pid, jid, "job:b2a-postcrash")
+        out = lp.run_validation(
+            _sf(client), project_id=pid, job_id=jid,
+            job_idempotency_key="job:b2a-postcrash",
+            command_id=None, vault=vault,
+            data_dir=client.app.state.settings.data_dir,
+            inner=httpx.MockTransport(
+                lambda req: (_ for _ in ()).throw(
+                    httpx.ReadError("gone"))),
+            resolver=GOOD_RESOLVER)
+        assert out["outcome"] == "ambiguous"
+        res = _reservation(client, jid)
+        assert res.status == "open"
+        with _sf(client)() as s:
+            assert s.get(GenerationJob, jid).status == "unknown"
+
+    def test_restart_never_resubmits_uncertain(self, client, vault):
+        """Startup recovery only sweeps 'running' jobs; a validate job
+        frozen at 'unknown' is neither re-queued nor resubmitted —
+        explicit reconcile is the only exit."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        jid = new_id()
+        _mkjob(client, pid, jid, "job:b2a-restart")
+        out = lp.run_validation(
+            _sf(client), project_id=pid, job_id=jid,
+            job_idempotency_key="job:b2a-restart",
+            command_id=None, vault=vault,
+            data_dir=client.app.state.settings.data_dir,
+            inner=httpx.MockTransport(
+                lambda req: (_ for _ in ()).throw(
+                    httpx.ReadError("gone"))),
+            resolver=GOOD_RESOLVER)
+        assert out["outcome"] == "ambiguous"
+        engine = client.app.state.job_engine
+        with _sf(client)() as s:
+            requeued = engine.reconcile_interrupted(s)
+            s.commit()
+        assert requeued == 0
+        with _sf(client)() as s:
+            job = s.get(GenerationJob, jid)
+            assert job.status == "unknown"      # untouched by restart
+            assert lp.armed(s) is None
+        res = _reservation(client, jid)
+        assert res.status == "open"             # still held
+        # explicit reconcile is the only exit — confirmed_no_charge
+        # releases; still_unknown would keep it open.
+        with _sf(client)() as s:
+            spend.reconcile(
+                s, project_id=pid, job_id=jid,
+                outcome="confirmed_no_charge",
+                note="test reconcile")
+            s.commit()
+        res = _reservation(client, jid)
+        assert res.status == "released"
+
+    def test_credential_removed_between_arm_and_run(
+            self, client, vault):
+        """Credential yanked after arming → dispatch_admission refuses
+        BEFORE consume: permit stays armed, nothing booked."""
+        pid = make_project(client)["id"]
+        _setup(client, pid, vault)
+        _armed(client, pid)
+        _approve_exec(client)
+        vault._configured = False
+        sends = []
+        from app.domain.workers.live_transport import LiveDispatchRefused
+        with pytest.raises(LiveDispatchRefused):
+            _run(client, pid, approve_exec=False,
+                 inner=httpx.MockTransport(
+                     lambda req: sends.append(str(req.url))))
+        assert sends == []
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None
+        assert _live_reservations(client) == []
