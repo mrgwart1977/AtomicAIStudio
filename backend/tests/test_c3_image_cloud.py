@@ -216,8 +216,8 @@ class TestValidation:
         before any enqueue or reservation."""
         pid = make_project(client)["id"]
         assert _gen(client, pid, provider_key="openai").status_code == 422
-        assert _gen(client, pid, provider_key="gemini-images",
-                    model_id="gemini-2.5-flash-image").status_code == 422
+        assert _gen(client, pid, provider_key="adobe-firefly",
+                    model_id="firefly-image-4").status_code == 422
 
     def test_unknown_model_refused(self, client):
         pid = make_project(client)["id"]
@@ -226,8 +226,8 @@ class TestValidation:
 
     def test_missing_pricing_fails_closed(self, client):
         """A model with no cost_table → est is None; commit refuses."""
-        prov = catalog.get_provider("gemini-images")
-        m = cc.pick_image_model(prov, "imagen-4")
+        prov = catalog.get_provider("adobe-firefly")
+        m = cc.pick_image_model(prov, "firefly-image-4")
         assert m is not None
         assert cc.estimate_image_cost(m, count=1)["est_cost_usd"] is None
 
@@ -464,6 +464,17 @@ class TestFailurePaths:
             ) == (None, "no_image_rate")
         assert _image_cost_micro(
             None, 1, {"unit": "per_credit"}, None
+            ) == (None, "no_credit_rate")
+        assert _image_cost_micro(
+            None, 1, {"unit": "per_credit",
+                      "usd_per_credit": 0.001}, None
+            ) == (None, "no_credits_reported")
+        assert _image_cost_micro(
+            {"credits": 35}, 1, {"unit": "per_credit",
+                                 "usd_per_credit": 0.001}, None
+            ) == (35_000, "credits_x_catalog_rate")
+        assert _image_cost_micro(
+            None, 1, {"unit": "per_mpixel"}, None
             ) == (None, "unit_not_settled_in_c3a")
         # usable basis → real settle math
         micro, basis = _image_cost_micro(
@@ -559,7 +570,8 @@ class TestFailurePaths:
         assert pj["remote_outcome"] == "artifact_pending_retrieval"
         res = _reservation(client, job["id"])
         assert res.status == "open"
-        assert "not retrievable" in (res.reconcile_note or "")
+        assert "billing unresolved" in (res.reconcile_note or "")
+        assert "held for reconcile" in (res.reconcile_note or "")
 
 
 # ---------- sensitive remote-URL redaction (C3-A hardening) ----------

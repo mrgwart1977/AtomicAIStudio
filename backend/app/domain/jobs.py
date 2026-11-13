@@ -352,6 +352,11 @@ class JobEngine:
             # verbatim for remote submission intents so a resubmission
             # can never duplicate (billable or simulated) work.
             request["job_idempotency_key"] = job.idempotency_key
+            # C3-C — the attempt ordinal lets remote adapters refuse an
+            # automatic resubmission of a non-idempotent provider call
+            # after a crash/interrupt re-queue (attempt > 1 must never
+            # silently duplicate remote work — remote.py contract).
+            request["job_attempt_no"] = job.attempt_no
             handle = JobHandle(
                 job_id=job.id, project_id=job.project_id or "",
                 request=request, work_dir=str(work_dir),

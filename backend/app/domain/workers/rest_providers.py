@@ -126,6 +126,16 @@ class EndpointSpec:
     idempotency: str                  # RemoteProvider contract
     docs: str                         # evidence URL
     poll_statuses: dict[str, RemoteStatus] = field(default_factory=dict)
+    # C3-C: documented request encoding — "json" (default) or
+    # "multipart" (form fields, e.g. Ideogram's multipart/form-data
+    # contract). Anything else is refused, never guessed.
+    content: str = "json"
+    # C3-C: documented delivery hosts whose temporary artifact URLs the
+    # adapter may retrieve through the injected transport (BFL result
+    # CDN, Firefly's published storage domains, …). Empty = no remote
+    # artifact retrieval is implemented for this provider — URL-only
+    # results stay artifact_pending_retrieval.
+    artifact_hosts: tuple[str, ...] = ()
 
 
 OPENAI_RESPONSES_SPEC = EndpointSpec(
@@ -317,12 +327,20 @@ class RestRemoteProvider:
     # ---- contract ----
 
     async def _call(self, method: str, path: str, *, op: str,
-                    json_body: dict | None = None) -> tuple[dict, httpx.Headers]:
-        """One classified request. Raises RemoteError; returns (json, headers)."""
+                    json_body: dict | None = None,
+                    form: dict | None = None) -> tuple[dict, httpx.Headers]:
+        """One classified request. Raises RemoteError; returns (json, headers).
+
+        ``form`` encodes documented multipart/form-data contracts: every
+        value is sent as a plain text field (no filename), matching e.g.
+        Ideogram's POST contract."""
+        files = ({k: (None, str(v)) for k, v in form.items()}
+                 if form is not None else None)
         try:
             resp = await self._client.request(
                 method, path, headers=self._auth_headers(),
-                json=json_body)
+                json=json_body if form is None else None,
+                files=files)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise RemoteError(
                 RemoteErrorKind.TRANSPORT,
@@ -358,10 +376,12 @@ class RestRemoteProvider:
         # embeds the model in the URL ({model}:generateContent).
         path = self.spec.submit_path.format(
             model=intent.request.get("model_id") or "")
+        payload = {**self._submit_body(intent.request),
+                   **self.spec.submit_extra}
         body, headers = await self._call(
             "POST", path, op="submit",
-            json_body={**self._submit_body(intent.request),
-                       **self.spec.submit_extra})
+            json_body=payload if self.spec.content == "json" else None,
+            form=payload if self.spec.content == "multipart" else None)
         try:
             return self._parse(body, headers)
         except RemoteError:
@@ -400,6 +420,95 @@ class RestRemoteProvider:
             "POST", self.spec.cancel_path.format(id=remote_id),
             op="cancel")
         return self._parse(body, headers)
+
+    async def fetch_artifact(self, url: str) -> bytes:
+        """C3-C — retrieve a documented temporary artifact URL.
+
+        Egress discipline identical to every other call: the request goes
+        through THIS provider's injected transport (mock in simulation —
+        zero network), so nothing outside the declared transport can be
+        reached. Guards, all hard-refusals:
+          - ``spec.artifact_hosts`` empty → the provider documents no
+            retrievable artifacts → ``UnsupportedRemoteOp``;
+          - scheme must be https;
+          - host must equal or be a subdomain of a documented
+            ``artifact_hosts`` entry (suffix match);
+          - response must be 2xx with a byte body within the image cap —
+            an expired/gone URL raises RemoteError(VALIDATION) so the
+            caller can mark the outcome artifact_pending_retrieval.
+        """
+        if not self.spec.artifact_hosts:
+            raise UnsupportedRemoteOp(
+                f"{self.name}: provider documents no retrievable "
+                "artifact hosts")
+        from urllib.parse import urlparse
+        from app.domain import image_safety as _safety
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                "artifact URL is not https — refused",
+                charge_evidence="none_confirmed")
+        if parsed.username is not None or parsed.password is not None:
+            # user:pass@host smuggles Basic-auth material into a URL we
+            # did not issue — refuse outright.
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                "artifact URL carries user-info — refused",
+                charge_evidence="none_confirmed")
+        if parsed.port not in (None, 443):
+            # Documented delivery endpoints serve 443 only; an explicit
+            # off-port URL is not a normal signed artifact.
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                "artifact URL uses a non-default port — refused",
+                charge_evidence="none_confirmed")
+        host = (parsed.hostname or "").lower()
+        if not any(host == h or host.endswith("." + h)
+                   for h in self.spec.artifact_hosts):
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                f"artifact host {host!r} not in the documented delivery "
+                "hosts — refused",
+                charge_evidence="none_confirmed")
+        try:
+            # NO auth headers on artifact fetches: delivery URLs are
+            # pre-signed and self-authenticating — the provider key
+            # must never leak to a CDN host, allowlisted or not.
+            # Redirects are never followed (client follows none); a 3xx
+            # is a failed retrieval, not a silent re-validation point.
+            async with self._client.stream("GET", url) as resp:
+                if not (200 <= resp.status_code < 300):
+                    raise RemoteError(
+                        RemoteErrorKind.VALIDATION,
+                        f"artifact retrieval HTTP {resp.status_code} — "
+                        "URL expired, revoked, or redirected",
+                        charge_evidence="unknown",
+                        http_status=resp.status_code)
+                declared = int(resp.headers.get("content-length") or 0)
+                if declared > _safety.MAX_IMAGE_BYTES:
+                    raise RemoteError(
+                        RemoteErrorKind.MALFORMED,
+                        "artifact declares a size beyond the image byte "
+                        "cap",
+                        charge_evidence="unknown")
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in resp.aiter_bytes(64 * 1024):
+                    size += len(chunk)
+                    if size > _safety.MAX_IMAGE_BYTES:
+                        raise RemoteError(
+                            RemoteErrorKind.MALFORMED,
+                            "artifact exceeds the image byte cap",
+                            charge_evidence="unknown")
+                    chunks.append(chunk)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise RemoteError(
+                RemoteErrorKind.TRANSPORT,
+                f"artifact retrieval failed ({type(exc).__name__}) — "
+                "outcome unknown",
+                charge_evidence="unknown") from exc
+        return b"".join(chunks)
 
 
 # ---------- OpenAI Responses ----------

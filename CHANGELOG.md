@@ -22,6 +22,55 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C3-C-1 — Simulated sync image-provider expansion. Implemented
+  contracts for three additional providers on the existing mock
+  boundary (`IMAGE_REST_KEYS` now also includes them; Cloud Studio
+  picks them up automatically):
+  - `gemini-images` — `gemini-2.5-flash-image` via the documented
+    `:generateContent` shape (contents→inlineData, usageMetadata) plus
+    `imagen-4.0-generate-001` / `-ultra-generate-001` via `:predict`
+    (instances→predictions). Ten documented aspect ratios; $0.039/$0.04/
+    $0.06 per image per Google's published rates.
+  - `recraft` — `recraftv4_1` + `recraftv3` via
+    `/v1/images/generations` (b64_json + reported `credits` API units;
+    settles credits×usd_per_credit: $0.035/$0.04 raster).
+  - `ideogram` — `ideogram-3` via the documented v2 multipart endpoint
+    (`Api-Key` auth; prompt/aspect_ratio/rendering_speed/seed/
+    negative_prompt fields). Sync responses return temporary artifact
+    URLs, retrieved through the provider's own injected transport under
+    a declared host allowlist + byte cap; expired/foreign URLs keep the
+    durable `artifact_pending_retrieval` outcome for reconcile — never
+    resubmitted.
+  - Framework: `EndpointSpec` gains documented `content` ("multipart")
+    and `artifact_hosts` fields; `RestRemoteProvider` gains bounded
+    `fetch_artifact` (https-only, suffix-matched hosts, streamed byte
+    cap — all inside the injected transport, zero egress). Billing
+    gains `per_credit` settlement from reported or declared credit
+    usage; every new cost_table row carries a `checked` freshness date
+    and `source` URL.
+- C3-C-2 — BFL FLUX async contract (`bfl-flux`/`flux-pro-1.1`):
+  POST `/v1/{model}` → `{id, polling_url}`, poll
+  `GET /v1/get_result?id=` through the documented Pending→Ready
+  lifecycle; `result.sample` temporary URL retrieved via
+  `fetch_artifact` on `delivery.bfl.ai`. Moderation/failure statuses
+  map to provider_failed (exposure held); `Task not found` polls to
+  the ambiguous-timeout hold — never a resubmission. No documented
+  cancel endpoint → `UnsupportedRemoteOp`. `flux-kontext`
+  (editing model) stays outside the contract with no cost_table —
+  commit fails closed. **Adobe Firefly remains intentionally
+  unimplemented**: the API is async + IMS OAuth and Adobe publishes
+  no per-image API USD price, so cost admission would have to
+  guess — catalog documents this; provider renders disabled.
+- C3-C hardening — remote artifact retrieval (`fetch_artifact`):
+  no provider auth headers are sent to delivery hosts (pre-signed
+  URLs are self-authenticating); user-info URLs, non-443 ports,
+  deceptive suffix hosts, non-https schemes, loopback/private
+  destinations (via the allowlist), redirects (never followed),
+  oversized Content-Length, and streamed bytes beyond the image cap
+  are all refused before/while reading. BFL `polling_url` and
+  provider failure text no longer persist to durable progress rows;
+  retried attempts can never auto-resubmit a non-idempotent
+  contract (`job_attempt_no` guard).
 - C3-B — Cloud Studio image UI (`CloudImagePanel` in the Cloud
   workspace tab). Surfaces `generate.image.cloud` end-to-end:
   catalog-driven provider/model pickers gated by the implemented

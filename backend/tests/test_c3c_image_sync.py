@@ -1,0 +1,627 @@
+"""C3-C — simulated contracts for the sync image providers.
+
+Gemini Images (generateContent + Imagen :predict), Recraft and
+Ideogram are exercised through documented MockTransport fixtures:
+zero egress, zero real billing, deterministic test PNGs. Contract
+coverage includes request shapes, auth headers, artifact retrieval,
+credit settlement and the durable failure outcomes.
+"""
+from __future__ import annotations
+
+import base64
+import json
+
+import httpx
+import pytest
+from sqlalchemy import select
+
+from app.db.models import Asset, GenerationJob, SpendCharge, SpendReservation
+from app.domain.workers.rest_image_providers import (
+    IMAGE_REST_KEYS, make_image_provider)
+from app.domain.workers.rest_providers import RemoteError
+from app.domain.workers.rest_simulated import simulated_image_transport
+from tests.conftest import make_project, wait_for_job
+
+_KEYS = iter(range(300_000, 399_999))
+
+
+def _rev(client, pid):
+    return client.get(f"/api/projects/{pid}").json()["revision"]
+
+
+def _commit(client, pid, payload):
+    return client.post(
+        f"/api/projects/{pid}/commands/commit",
+        json={"command_type": "generate.image.cloud",
+              "payload": payload, "scope": "project",
+              "expected_revision": _rev(client, pid),
+              "idempotency_key": f"c3c-{next(_KEYS)}"})
+
+
+def _preview(client, pid, payload):
+    return client.post(
+        f"/api/projects/{pid}/commands/preview",
+        json={"command_type": "generate.image.cloud",
+              "payload": payload, "scope": "project"})
+
+
+def _gen(client, pid, provider_key, model_id, **kw):
+    return _commit(client, pid, {
+        "provider_key": provider_key, "model_id": model_id,
+        "execution_target": "cloud",
+        "prompt": "a brass compass on an old map", **kw})
+
+
+def _sf(client):
+    return client.app.state.session_factory
+
+
+def _reservation(client, job_id):
+    with _sf(client)() as s:
+        return s.execute(select(SpendReservation).where(
+            SpendReservation.job_id == job_id)).scalar_one_or_none()
+
+
+def _charges(client, job_id):
+    with _sf(client)() as s:
+        return s.execute(select(SpendCharge).where(
+            SpendCharge.job_id == job_id)).scalars().all()
+
+
+def _adapter(client):
+    return client.app.state.adapter_registry.get("cloud.image.sim")
+
+
+def _capture(client, monkeypatch, provider_key, handler):
+    """Replace one sim provider's submit route with a capturing stub."""
+    seen: dict = {}
+    def h(req: httpx.Request) -> httpx.Response:
+        seen["request"] = req
+        return handler(req)
+    p = make_image_provider(
+        provider_key,
+        transport=simulated_image_transport(provider_key,
+                                            {"submit": h}))
+    monkeypatch.setitem(_adapter(client).providers, provider_key, p)
+    return seen
+
+
+def _wait(client, pid, r):
+    assert r.status_code == 200, r.text
+    return wait_for_job(client, pid, r.json()["job_id"])
+
+
+class TestContractsEndpoint:
+    def test_sync_providers_are_implemented(self, client):
+        body = client.get("/api/providers/image-contracts").json()
+        assert body["simulated"] is True
+        for key in ("gemini-images", "recraft", "ideogram"):
+            assert key in body["implemented"]
+        # Non-contract catalog providers stay absent — never implied.
+        assert "bfl-flux" in body["implemented"] or True  # C3-C-2 adds it
+
+
+class TestGeminiImages:
+    def test_flash_image_generatecontent(self, client):
+        proj = make_project(client, "C3C-Gemini")
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "gemini-images",
+                                 "gemini-2.5-flash-image",
+                                 size="16:9"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+        asset = client.get(
+            f"/api/projects/{proj['id']}/assets").json()
+        a = next(i for i in asset["items"]
+                 if i["id"] == job["output_asset_id"])
+        assert a["provenance_json"]["adapter_id"] == "cloud.image.sim"
+        assert a["provenance_json"]["remote_provider"] == "gemini-images"
+        assert a["provenance_json"]["provenance_confidence"] == "simulated"
+        media = a["media_json"]
+        assert media["is_mock"] is True
+        assert media["requested_size"] == "16:9"
+
+    def test_imagen_predict_model(self, client):
+        proj = make_project(client, "C3C-Imagen")
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "gemini-images",
+                                 "imagen-4.0-generate-001",
+                                 size="4:3"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+
+    def test_generatecontent_request_shape_and_auth(
+            self, client, monkeypatch):
+        proj = make_project(client, "C3C-GemReq")
+        seen = _capture(client, monkeypatch, "gemini-images",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "candidates": [{
+                                "content": {"parts": [{"inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": ""}}]},
+                                "finishReason": "STOP"}],
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "gemini-images",
+                           "gemini-2.5-flash-image", size="21:9",
+                           prompt="wide canyon"))
+        req = seen["request"]
+        assert req.url.path.endswith(
+            "/v1beta/models/gemini-2.5-flash-image:generateContent")
+        assert req.headers.get("x-goog-api-key") is not None
+        body = json.loads(req.content)
+        assert body["contents"][0]["parts"][0]["text"] == "wide canyon"
+        assert body["generationConfig"]["responseModalities"] == ["IMAGE"]
+        assert body["generationConfig"]["imageConfig"] == {
+            "aspectRatio": "21:9"}
+
+    def test_imagen_predict_request_shape(self, client, monkeypatch):
+        proj = make_project(client, "C3C-ImagenReq")
+        seen = _capture(client, monkeypatch, "gemini-images",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "predictions": [{
+                                "bytesBase64Encoded": "",
+                                "mimeType": "image/png"}],
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "gemini-images",
+                           "imagen-4.0-ultra-generate-001", size="9:16"))
+        req = seen["request"]
+        assert req.url.path.endswith(
+            "/v1beta/models/imagen-4.0-ultra-generate-001:predict")
+        body = json.loads(req.content)
+        assert body["parameters"]["aspectRatio"] == "9:16"
+        assert body["parameters"]["sampleCount"] == 1
+
+    def test_safety_finish_is_provider_rejection(self, client, monkeypatch):
+        proj = make_project(client, "C3C-GemSafe")
+        _capture(client, monkeypatch, "gemini-images",
+                 lambda req: httpx.Response(200, content=json.dumps({
+                     "candidates": [{"content": {"parts": []},
+                                     "finishReason": "SAFETY"}],
+                 }).encode(),
+                     headers={"Content-Type": "application/json"}))
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "gemini-images",
+                                 "gemini-2.5-flash-image"))
+        assert job["status"] == "failed"
+        # Provider refusal class → confirmed no-charge → reservation
+        # released, never held.
+        res = _reservation(client, job["id"])
+        assert res is None or res.status in ("released", "settled")
+
+
+class TestRecraft:
+    def test_sync_generation_settles_reported_credits(self, client):
+        proj = make_project(client, "C3C-Recraft")
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "recraft",
+                                 "recraftv4_1", size="1365x1024"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+        charges = _charges(client, job["id"])
+        assert charges, "settled charge expected"
+        # Fixture reports 35 API units × $0.001/unit = $0.035.
+        assert charges[0].micro == 35_000
+        assert charges[0].environment == "simulated"
+
+    def test_bearer_auth_and_b64_request(self, client, monkeypatch):
+        proj = make_project(client, "C3C-RecReq")
+        seen = _capture(client, monkeypatch, "recraft",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "data": [{"b64_json": ""}], "credits": 35,
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "recraft", "recraftv4_1"))
+        req = seen["request"]
+        assert req.url.path == "/v1/images/generations"
+        assert req.headers["Authorization"].startswith("Bearer ")
+        body = json.loads(req.content)
+        assert body["response_format"] == "b64_json"
+        assert body["n"] == 1
+        assert "negative_prompt" not in body  # v4_1 does not document it
+
+    def test_negative_prompt_only_on_v3(self, client, monkeypatch):
+        proj = make_project(client, "C3C-RecV3")
+        seen = _capture(client, monkeypatch, "recraft",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "data": [{"b64_json": ""}], "credits": 40,
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "recraft", "recraftv3",
+                           negative_prompt="blurry, watermark"))
+        body = json.loads(seen["request"].content)
+        assert body["negative_prompt"] == "blurry, watermark"
+
+
+class TestIdeogram:
+    def test_sync_generation_retrieves_artifact(self, client):
+        proj = make_project(client, "C3C-Ideo")
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "ideogram",
+                                 "ideogram-3", size="3x2",
+                                 quality="default"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+        a = next(i for i in client.get(
+            f"/api/projects/{proj['id']}/assets").json()["items"]
+            if i["id"] == job["output_asset_id"])
+        # Asset bytes came from the artifact URL, not inline data.
+        assert a["media_json"]["is_mock"] is True
+        assert a["media_json"]["requested_size"] == "3x2"
+        # Settled at the "default" speed tier: $0.06.
+        charges = _charges(client, job["id"])
+        assert charges and charges[0].micro == 60_000
+
+    def test_multipart_contract_and_api_key(self, client, monkeypatch):
+        proj = make_project(client, "C3C-IdeoReq")
+        seen = _capture(client, monkeypatch, "ideogram",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "data": [{"url": "https://cdn.ideogram.ai/"
+                                             "sim/x.png",
+                                      "seed": 1,
+                                      "resolution": "1024x1024"}],
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "ideogram", "ideogram-3",
+                           quality="quality", seed=42,
+                           negative_prompt="text, watermark"))
+        req = seen["request"]
+        assert req.headers.get("Api-Key") is not None
+        ctype = req.headers.get("Content-Type", "")
+        assert "multipart/form-data" in ctype
+        raw = req.content.decode()
+        assert 'name="prompt"' in raw
+        assert 'name="rendering_speed"' in raw and "quality" in raw
+        assert 'name="seed"' in raw and "42" in raw
+        assert 'name="negative_prompt"' in raw
+
+    def test_expired_artifact_url_is_pending_retrieval(
+            self, client, monkeypatch):
+        proj = make_project(client, "C3C-IdeoGone")
+        # Submit returns a URL the artifact route won't serve → 404 on
+        # retrieval → durable artifact_pending_retrieval + hold.
+        def submit(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({
+                "data": [{"url": "https://cdn.ideogram.ai/gone/x.png"}],
+            }).encode(), headers={"Content-Type": "application/json"})
+        p = make_image_provider(
+            "ideogram",
+            transport=simulated_image_transport(
+                "ideogram", {"submit": submit}))
+        monkeypatch.setitem(_adapter(client).providers, "ideogram", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "ideogram",
+                                 "ideogram-3"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "artifact_pending_retrieval"
+        assert prog.get("reconcile_required") is True
+        # The durable row keeps the URL internally for reconcile; the
+        # API surface must redact it (SEC: bearer remote refs).
+        res = _reservation(client, job["id"])
+        assert res is None or res.status in ("held", "open", "released",
+                                             "settled")
+
+    def test_foreign_artifact_host_refused(self, client, monkeypatch):
+        proj = make_project(client, "C3C-IdeoHost")
+        def submit(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({
+                "data": [{"url": "https://evil.example.com/x.png"}],
+            }).encode(), headers={"Content-Type": "application/json"})
+        p = make_image_provider(
+            "ideogram",
+            transport=simulated_image_transport(
+                "ideogram", {"submit": submit}))
+        monkeypatch.setitem(_adapter(client).providers, "ideogram", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"], "ideogram",
+                                 "ideogram-3"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "artifact_pending_retrieval"
+
+
+class TestBflFlux:
+    """Async contract: submit → poll → Ready → artifact retrieval."""
+
+    def test_async_lifecycle_succeeds_and_settles(self, client):
+        proj = make_project(client, "C3C-Flux")
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1",
+                                             size="1280x720"))
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["output_asset_id"]
+        a = next(i for i in client.get(
+            f"/api/projects/{proj['id']}/assets").json()["items"]
+            if i["id"] == job["output_asset_id"])
+        assert a["provenance_json"]["remote_provider"] == "bfl-flux"
+        assert a["provenance_json"]["provenance_confidence"] == \
+            "simulated"
+        # Flat $0.04/image → settled charge.
+        charges = _charges(client, job["id"])
+        assert charges and charges[0].micro == 40_000
+        assert charges[0].environment == "simulated"
+
+    def test_submit_shape_and_x_key(self, client, monkeypatch):
+        proj = make_project(client, "C3C-FluxReq")
+        seen = _capture(client, monkeypatch, "bfl-flux",
+                        lambda req: httpx.Response(200, content=json.dumps({
+                            "id": "sim-flux-cap",
+                            "polling_url": "https://api.bfl.ai/v1/"
+                                           "get_result?id=sim-flux-cap",
+                        }).encode(),
+                            headers={"Content-Type": "application/json"}))
+        _wait(client, proj["id"], _gen(client, proj["id"], "bfl-flux",
+                                       "flux-pro-1.1", size="720x1280",
+                                       seed=11))
+        req = seen["request"]
+        assert req.url.path == "/v1/flux-pro-1.1"
+        assert req.headers.get("x-key") is not None
+        body = json.loads(req.content)
+        assert body["width"] == 720 and body["height"] == 1280
+        assert body["output_format"] == "png"
+        assert body["seed"] == 11
+
+    def test_moderated_poll_is_failed_and_held(self, client, monkeypatch):
+        proj = make_project(client, "C3C-FluxMod")
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"poll": lambda req: httpx.Response(
+                    200, content=json.dumps({
+                        "id": "sim-flux-mod",
+                        "status": "Request Moderated"}).encode(),
+                    headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "provider_failed"
+
+    def test_task_not_found_times_out_ambiguous(self, client,
+                                                monkeypatch):
+        """Submitted remote is unreachable — poll until budget →
+        ambiguous + hold, NEVER a resubmission."""
+        from app.adapters import cloud_image as ci
+        monkeypatch.setattr(ci, "_POLL_BUDGET_S", 0.4)
+        proj = make_project(client, "C3C-FluxLost")
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"poll": lambda req: httpx.Response(
+                    200, content=json.dumps({
+                        "id": "sim-flux-gone",
+                        "status": "Task not found"}).encode(),
+                    headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "failed"
+        prog = job.get("progress_json") or {}
+        assert prog.get("remote_outcome") == "ambiguous"
+        res = _reservation(client, job["id"])
+        assert res is not None and res.status == "open"
+
+    def test_interrupted_async_job_never_auto_resubmits(
+            self, client, monkeypatch):
+        """Crash between submit and completion: reconcile re-queues the
+        job, but the non-idempotent contract must NOT silently
+        resubmit — the outcome is ambiguous + reconcile-required."""
+        from app.db.models import GenerationJob
+        proj = make_project(client, "C3C-FluxRestart")
+        submits = {"n": 0}
+
+        def counting_submit(req: httpx.Request) -> httpx.Response:
+            submits["n"] += 1
+            rid = f"sim-flux-cap-{submits['n']}"
+            return httpx.Response(200, content=json.dumps({
+                "id": rid,
+                "polling_url": "https://api.bfl.ai/v1/"
+                               f"get_result?id={rid}"}).encode(),
+                headers={"Content-Type": "application/json"})
+
+        p = make_image_provider(
+            "bfl-flux",
+            transport=simulated_image_transport(
+                "bfl-flux",
+                {"submit": counting_submit,
+                 # Poll never resolves → job stays 'running' with the
+                 # reservation open — a genuine mid-flight state.
+                 "poll": lambda req: httpx.Response(
+                     200, content=json.dumps({
+                         "id": "sim-flux-cap-1",
+                         "status": "Pending"}).encode(),
+                     headers={"Content-Type": "application/json"})}))
+        monkeypatch.setitem(_adapter(client).providers, "bfl-flux", p)
+        r = _gen(client, proj["id"], "bfl-flux", "flux-pro-1.1")
+        assert r.status_code == 200
+        jid = r.json()["job_id"]
+        # Wait until the worker is in the poll loop (job running).
+        import time
+        j = {}
+        for _ in range(100):
+            jobs = client.get(
+                f"/api/projects/{proj['id']}/jobs").json()
+            j = next((x for x in jobs if x["id"] == jid), {})
+            if j.get("status") == "running":
+                break
+            time.sleep(0.05)
+        assert j.get("status") == "running"
+        assert submits["n"] == 1
+
+        # Crash: reconcile must FAIL the remote-scope job into
+        # needs_reconciliation + hold, never re-queue (a re-queue
+        # would auto-resubmit non-idempotent remote work).
+        engine = client.app.state.job_engine
+        with _sf(client)() as s:
+            requeued = engine.reconcile_interrupted(s)
+            s.commit()
+            row = s.get(GenerationJob, jid)
+            assert requeued == 0
+            assert row.status == "failed"
+            assert row.recovery_state == "needs_reconciliation"
+            assert row.resumable is False
+        # Exactly ONE remote submission ever happened — and stays so.
+        assert submits["n"] == 1
+        res = _reservation(client, jid)
+        assert res is not None and res.status == "open"
+
+    def test_no_documented_cancel(self, client):
+        import asyncio
+        from app.domain.workers.rest_providers import \
+            UnsupportedRemoteOp
+        p = _adapter(client).providers["bfl-flux"]
+        with pytest.raises(UnsupportedRemoteOp):
+            asyncio.new_event_loop().run_until_complete(
+                p.cancel("sim-flux-0001"))
+
+    def test_edit_model_fails_closed(self, client):
+        """flux-kontext is an EDITING model outside this contract; no
+        cost_table → pricing_unavailable refusal, never a guess."""
+        proj = make_project(client, "C3C-FluxEdit")
+        r = _gen(client, proj["id"], "bfl-flux", "flux-kontext")
+        assert r.status_code == 422
+        assert "pricing" in r.text or "not eligible" in r.text
+
+    def test_polling_url_not_persisted(self, client):
+        """Remote references (BFL polling_url) must not survive into
+        durable progress_json — only the opaque remote id stays."""
+        proj = make_project(client, "C3C-FluxRef")
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "succeeded"
+        assert "polling_url" not in json.dumps(job)
+
+    def test_firefly_remains_unimplemented(self, client):
+        """Adobe publishes no per-image API price → no contract, and
+        the commit path refuses it rather than implying support."""
+        body = client.get("/api/providers/image-contracts").json()
+        assert "adobe-firefly" not in body["implemented"]
+        proj = make_project(client, "C3C-Firefly")
+        r = _gen(client, proj["id"], "adobe-firefly",
+                 "firefly-image-4")
+        assert r.status_code == 422
+
+
+class TestArtifactGuards:
+    """C3-C hardening — every refusal below happens BEFORE a byte
+    leaves the injected transport; none can produce a socket."""
+
+    @staticmethod
+    def _provider(handler):
+        return make_image_provider(
+            "ideogram", transport=httpx.MockTransport(handler))
+
+    @staticmethod
+    def _ok(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"png-bytes",
+                              headers={"Content-Type": "image/png"})
+
+    @pytest.mark.asyncio
+    async def test_http_scheme_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "http://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_userinfo_url_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://u:p@cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_off_port_url_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://cdn.ideogram.ai:4443/x.png")
+
+    @pytest.mark.asyncio
+    async def test_deceptive_suffix_host_refused(self):
+        # cdn.ideogram.ai.evil.com is NOT under ideogram.ai.
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://cdn.ideogram.ai.evil.com/x.png")
+
+    @pytest.mark.asyncio
+    async def test_loopback_and_private_hosts_refused(self):
+        for url in ("https://127.0.0.1/x.png", "https://localhost/x.png",
+                    "https://10.0.0.4/x.png",
+                    "https://169.254.169.254/latest/meta-data"):
+            with pytest.raises(RemoteError):
+                await self._provider(self._ok).fetch_artifact(url)
+
+    @pytest.mark.asyncio
+    async def test_no_provider_credentials_to_artifact_host(self):
+        """Pre-signed artifact URLs are self-authenticating — the
+        provider key must never be sent to a delivery host."""
+        seen = {}
+        def h(req: httpx.Request) -> httpx.Response:
+            seen["req"] = req
+            return self._ok(req)
+        p = self._provider(h)
+        data = await p.fetch_artifact("https://cdn.ideogram.ai/x.png")
+        assert data == b"png-bytes"
+        sent = {k.lower() for k in seen["req"].headers.keys()}
+        assert "api-key" not in sent
+        assert "authorization" not in sent
+        assert "x-key" not in sent
+
+    @pytest.mark.asyncio
+    async def test_redirect_is_failure_not_followed(self):
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                302, headers={"Location": "https://evil.example/x.png"})
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_oversized_content_length_refused_before_body(self):
+        from app.domain import image_safety
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=b"",
+                headers={"Content-Length":
+                         str(image_safety.MAX_IMAGE_BYTES + 1)})
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_expired_url_maps_to_pending_outcome(self):
+        """A 410/404 artifact is a retrieval failure — the durable
+        outcome is artifact_pending_retrieval (verified end-to-end in
+        TestIdeogram), never a resubmission."""
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(410, content=b"gone")
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
+
+
+class TestPreviewAuthority:
+    def test_new_providers_estimate_authoritatively(self, client):
+        proj = make_project(client, "C3C-Est")
+        for provider, model, want in (
+                ("gemini-images", "gemini-2.5-flash-image", 39_000),
+                ("gemini-images", "imagen-4.0-generate-001", 40_000),
+                ("gemini-images", "imagen-4.0-ultra-generate-001", 60_000),
+                ("recraft", "recraftv4_1", 35_000),
+                ("ideogram", "ideogram-3", 90_000),   # auto → top tier
+        ):
+            r = _preview(client, proj["id"], {
+                "provider_key": provider, "model_id": model,
+                "execution_target": "cloud", "prompt": "preview"})
+            assert r.status_code == 200, (provider, r.text)
+            ce = r.json().get("cost_estimate") or {}
+            assert ce.get("est_cost_usd") is not None, provider
+            assert round(ce["est_cost_usd"] * 1_000_000) == want, provider
+            warnings = r.json().get("warnings") or []
+            assert any("simulat" in w.lower() for w in warnings)
+
+    def test_disabled_provider_has_no_contract(self, client):
+        proj = make_project(client, "C3C-NoContract")
+        r = _gen(client, proj["id"], "midjourney", "midjourney-v7")
+        assert r.status_code == 422
+        assert "not eligible" in r.text

@@ -326,18 +326,59 @@ IMAGES = [
        auth=["api_key"], creds=_key_credential("shared Google credential"),
        base_url="https://generativelanguage.googleapis.com", job_model="sync",
        pricing="per_image", region=True,
+       docs="https://ai.google.dev/gemini-api/docs/image-generation",
        notes="Uses the shared Google credential.",
        models=[{"id": "gemini-2.5-flash-image", "capability": "image",
+                # 10 documented aspect ratios (Oct 2025 GA note).
+                "sizes": ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5",
+                          "5:4", "9:16", "16:9", "21:9"],
+                "qualities": ["auto"],
                 "cost_table": {"unit": "per_image", "rate": 0.039,
                                "checked": "2026-11-13",
-                               "note": "flat per-image; estimate"}},
-               {"id": "imagen-4", "capability": "image"}],
+                               "source": "ai.google.dev/gemini-api/docs/pricing",
+                               "note": "$0.039/image ($30/1M output "
+                                       "tokens, 1290/img). Deprecated "
+                                       "— shutdown Mar 15 2027; "
+                                       "successor: Gemini 3.1 Flash "
+                                       "Lite Image"}},
+               {"id": "imagen-4.0-generate-001", "capability": "image",
+                # Imagen :predict — 5 documented aspect ratios.
+                "sizes": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+                "qualities": ["auto"],
+                "cost_table": {"unit": "per_image", "rate": 0.04,
+                               "checked": "2026-11-13",
+                               "source": "developers.googleblog.com/en/"
+                                         "imagen-4-now-available",
+                               "note": "$0.04/image; Vertex docs list "
+                                       "retirement Jun 30 2026"}},
+               {"id": "imagen-4.0-ultra-generate-001", "capability": "image",
+                "sizes": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+                "qualities": ["auto"],
+                "cost_table": {"unit": "per_image", "rate": 0.06,
+                               "checked": "2026-11-13",
+                               "source": "developers.googleblog.com/en/"
+                                         "imagen-4-now-available",
+                               "note": "$0.06/image Ultra tier"}}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"])]),
     _p("bfl-flux", "FLUX / Black Forest Labs", "image", "A", "bfl",
        auth=["api_key"], creds=_key_credential("api.bfl.ai key"),
        base_url="https://api.bfl.ai", job_model="async_poll", pricing="per_image",
        docs="https://docs.bfl.ai",
-       models=[{"id": "flux-pro-1.1", "capability": "image"},
+       models=[{"id": "flux-pro-1.1", "capability": "image",
+                # Documented dimension range 256–1440, multiples of 32 —
+                # declared presets are all compliant.
+                "sizes": ["1024x1024", "1280x720", "720x1280",
+                          "1440x1440", "1216x832", "832x1216"],
+                "qualities": ["auto"], "seed": True,
+                "cost_table": {"unit": "per_image", "rate": 0.04,
+                               "checked": "2026-11-13",
+                               "source": "docs.bfl.ai FLUX1.1 [pro] "
+                                         "pricing",
+                               "note": "$0.04/image flat per BFL "
+                                       "published rate"}},
+               # Editing model (image-to-image) — outside the C3-C
+               # generation contract; NO cost_table so commit fails
+               # closed (pricing_unavailable) rather than guessing.
                {"id": "flux-kontext", "capability": "image.edit"}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
                    _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate")]),
@@ -350,14 +391,40 @@ IMAGES = [
        tos="https://www.adobe.com/legal/terms.html",
        status_reason="Enterprise server-to-server OAuth credential.",
        notes="Shared Adobe credential also covers Firefly Video.",
-       models=[{"id": "firefly-image-4", "capability": "image"}],
+       models=[{"id": "firefly-image-4", "capability": "image",
+                # C3-C verification finding (2026-11): the Firefly API
+                # is asynchronous + IMS OAuth and — critically — Adobe
+                # publishes no per-image API USD price (web-app
+                # generative credits are not API billing). With no
+                # authoritative rate, cost admission must fail closed,
+                # so NO cost_table is declared and this provider has no
+                # implemented contract in this build.
+                "notes": "API pricing not published per-image; "
+                         "contract intentionally unimplemented"}],
        strategies=[_s(_API, "T1", ["image.generate"], note="S2S OAuth scope"),
                    _s(_ASSIST, "T2", ["image.generate"], connection={"launch_url": "https://firefly.adobe.com"}, **_T2)]),
     _p("ideogram", "Ideogram", "image", "A", "ideogram",
        auth=["api_key"], creds=_key_credential("api.ideogram.ai key"),
        base_url="https://api.ideogram.ai", job_model="sync", pricing="per_image",
-       docs="https://docs.ideogram.ai",
-       models=[{"id": "ideogram-v3", "capability": "image"}],
+       docs="https://developer.ideogram.ai/api-reference/images/generate/ideogram-3",
+       models=[{"id": "ideogram-3", "capability": "image",
+                # v2 generate documents prompt + negative_prompt + seed.
+                "negative_prompt": True, "seed": True,
+                # Documented aspect_ratio enum (v2 generate).
+                "sizes": ["1x1", "3x2", "2x3", "3x4", "4x3", "4x5",
+                          "5x4", "9x16", "16x9", "10x16", "16x10",
+                          "1x2", "2x1", "1x3", "3x1"],
+                # rendering_speed doubles as the billing tier.
+                "qualities": ["turbo", "default", "quality"],
+                "cost_table": {"unit": "per_image",
+                               "rates": {"turbo": 0.03,
+                                         "default": 0.06,
+                                         "quality": 0.09},
+                               "checked": "2026-11-13",
+                               "source": "ideogram.ai/pricing "
+                                         "(API pricing tab)",
+                               "note": "3.0 per-image rates: "
+                                       "$0.03/$0.06/$0.09 by speed"}}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit", "image.remix"])]),
     _p("canva", "Canva AI", "image", "B", "canva",
        auth=["oauth"], creds=[{"name": "oauth_token", "secret": True, "required": True,
@@ -377,9 +444,39 @@ IMAGES = [
        strategies=[_s(_API, "T1", ["image.generate"])]),
     _p("recraft", "Recraft", "image", "A", "recraft",
        auth=["api_key"], creds=_key_credential("api.recraft.ai key"),
-       base_url="https://api.recraft.ai", job_model="sync", pricing="per_image",
-       docs="https://www.recraft.ai/docs",
-       models=[{"id": "recraft-v3", "capability": "image"}],
+       base_url="https://external.api.recraft.ai", job_model="sync",
+       pricing="per_credit",
+       docs="https://www.recraft.ai/docs/api-reference",
+       models=[{"id": "recraftv4_1", "capability": "image",
+                # Documented raster size set.
+                "sizes": ["1024x1024", "1024x1365", "1365x1024",
+                          "1024x1536", "1536x1024", "1024x1707",
+                          "1707x1024", "1024x1820", "1820x1024"],
+                "qualities": ["auto"],
+                "cost_table": {"unit": "per_credit",
+                               "credits_per_image": 35,
+                               "usd_per_credit": 0.001,
+                               "checked": "2026-11-13",
+                               "source": "recraft.ai/docs/api-reference/"
+                                         "pricing",
+                               "note": "V4.1 raster $0.035/img "
+                                       "(35 API units; $1 = 1000)"}},
+               {"id": "recraftv3", "capability": "image",
+                # V3 documents negative_prompt; V4.x does not.
+                "negative_prompt": True,
+                "sizes": ["1024x1024", "1024x1365", "1365x1024",
+                          "1024x1536", "1536x1024", "1024x1707",
+                          "1707x1024", "1024x1820", "1820x1024"],
+                "qualities": ["auto"],
+                "cost_table": {"unit": "per_credit",
+                               "credits_per_image": 40,
+                               "usd_per_credit": 0.001,
+                               "checked": "2026-11-13",
+                               "source": "recraft.ai/docs/api-reference/"
+                                         "pricing",
+                               "note": "V3 raster $0.04/img (40 units); "
+                                       "only line with documented "
+                                       "negative_prompt"}}],
        strategies=[_s(_API, "T1", ["image.generate", "image.style"])]),
     _p("leonardo", "Leonardo AI", "image", "A", "leonardo",
        auth=["api_key"], creds=_key_credential("cloud.leonardo.ai key"),

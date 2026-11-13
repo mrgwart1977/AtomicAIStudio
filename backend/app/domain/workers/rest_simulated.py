@@ -10,6 +10,7 @@ accounting environment.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -278,6 +279,148 @@ def simulated_image_handler(provider_key: str,
                 return routes["submit"](req)
             return _json({"error": {"type": "not_found",
                                     "message": "route"}}, 404)
+        return handler
+
+    # ---- C3-C fixtures — documented shapes, synthetic bytes ----
+
+    if provider_key == "gemini-images":
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            model = req.url.path.split("/")[-1].split(":")[0]
+            body = json.loads(req.content or b"{}")
+            if req.url.path.endswith(":predict"):
+                # Imagen :predict → predictions[bytesBase64Encoded]
+                prompt = ((body.get("instances") or [{}])[0]
+                          .get("prompt") or "")
+                png = base64.b64encode(
+                    _sim_image_png(prompt, 0, "1024x1024")).decode()
+                return _json({"predictions": [{
+                    "bytesBase64Encoded": png,
+                    "mimeType": "image/png"}]})
+            # generateContent → candidates[].content.parts[].inlineData
+            prompt = (((body.get("contents") or [{}])[0]
+                       .get("parts") or [{}])[0].get("text") or "")
+            png = base64.b64encode(
+                _sim_image_png(prompt, 0, "1024x1024")).decode()
+            return _json({
+                "candidates": [{
+                    "content": {"role": "model",
+                                "parts": [{"inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": png}}]},
+                    "finishReason": "STOP", "index": 0}],
+                "usageMetadata": {"promptTokenCount": 12,
+                                  "candidatesTokenCount": 1290,
+                                  "totalTokenCount": 1302},
+                "modelVersion": model})
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if (req.method == "POST"
+                    and req.url.path.startswith("/v1beta/models/")
+                    and (req.url.path.endswith(":generateContent")
+                         or req.url.path.endswith(":predict"))):
+                return routes["submit"](req)
+            return _json({"error": {"code": 404, "status": "NOT_FOUND",
+                                    "message": "route"}}, 404)
+        return handler
+
+    if provider_key == "recraft":
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            body = json.loads(req.content or b"{}")
+            png = base64.b64encode(_sim_image_png(
+                body.get("prompt") or "", 0,
+                body.get("size") or "1024x1024")).decode()
+            return _json({
+                "created": 1763000000,
+                "data": [{"b64_json": png}],
+                # API units charged for the request — sim reports the
+                # documented per-image unit price of the model.
+                "credits": 35,
+            })
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "POST" \
+                    and req.url.path == "/v1/images/generations":
+                return routes["submit"](req)
+            return _json({"error": {"type": "not_found",
+                                    "message": "route"}}, 404)
+        return handler
+
+    if provider_key == "ideogram":
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            return _json({
+                "created": "2026-11-13T00:00:00.000Z",
+                "data": [{
+                    "url": f"https://cdn.ideogram.ai/sim/img_{seq['n']:04d}.png",
+                    "seed": 777000 + seq["n"],
+                    "resolution": "1024x1024",
+                    "is_image_safe": True,
+                }]})
+
+        routes = {"submit": submit, **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "POST" \
+                    and req.url.path == "/v2/image/generate/ideogram-3":
+                return routes["submit"](req)
+            # Documented temporary artifact URL → synthetic bytes.
+            if req.method == "GET" and req.url.path.startswith("/sim/"):
+                return httpx.Response(
+                    200, content=_sim_image_png("ideogram sim", 0,
+                                                "1024x1024"),
+                    headers={"Content-Type": "image/png"})
+            return _json({"error": "route"}, 404)
+        return handler
+
+    if provider_key == "bfl-flux":
+        poll_count = {"n": 0}
+
+        def submit(req: httpx.Request) -> httpx.Response:
+            seq["n"] += 1
+            rid = f"sim-flux-{seq['n']:04d}"
+            return _json({
+                "id": rid,
+                "polling_url": f"https://api.bfl.ai/v1/get_result?id={rid}",
+                "status": "Pending"})
+
+        def poll(req: httpx.Request) -> httpx.Response:
+            # Deterministic lifecycle: first poll Pending, then Ready —
+            # exercises the async driver across at least two ticks.
+            poll_count["n"] += 1
+            rid = req.url.params.get("id") or f"sim-flux-{seq['n']:04d}"
+            if poll_count["n"] < 2:
+                return _json({"id": rid, "status": "Pending",
+                              "progress": 0.5})
+            return _json({
+                "id": rid, "status": "Ready",
+                "result": {"sample":
+                           f"https://delivery.bfl.ai/sim/{rid}.png",
+                           "seed": 4242}})
+
+        routes = {"submit": submit, "poll": poll,
+                  **(overrides or {})}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if (req.method == "POST"
+                    and req.url.path.startswith("/v1/")
+                    and "get_result" not in req.url.path):
+                return routes["submit"](req)
+            if req.method == "GET" \
+                    and req.url.path == "/v1/get_result":
+                return routes["poll"](req)
+            # delivery.bfl.ai temporary artifact → synthetic bytes.
+            if req.method == "GET" and req.url.path.startswith("/sim/"):
+                return httpx.Response(
+                    200, content=_sim_image_png("flux sim", 0,
+                                                "1024x1024"),
+                    headers={"Content-Type": "image/png"})
+            return _json({"error": "route"}, 404)
         return handler
 
     raise KeyError(f"no simulated image transport for {provider_key!r}")
