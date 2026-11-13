@@ -13,9 +13,7 @@ const previewCommand = vi.fn();
 
 vi.mock("../../api/client", () => ({
   apiFetch: (...a: unknown[]) => apiFetch(...a),
-  getBackendInfo: () => Promise.resolve({ baseUrl: "http://x", token: "t" }),
-  assetFileUrl: (pid: string, aid: string, info: { baseUrl: string }) =>
-    `${info.baseUrl}/api/projects/${pid}/assets/${aid}/file`,
+  fetchAssetObjectUrl: () => Promise.resolve("blob:mock"),
 }));
 vi.mock("../../api/commands", () => ({
   commitCommand: (...a: unknown[]) => commitCommand(...a),

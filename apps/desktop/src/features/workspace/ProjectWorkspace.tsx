@@ -49,21 +49,25 @@ export function ProjectWorkspace() {
         >
           ← Projects
         </button>
-        <div className="mb-3">
-          <h1 className="text-lg font-semibold leading-tight">{project.name}</h1>
+        <div className="mb-3 min-w-0 shrink">
+          <h1 className="truncate text-lg font-semibold leading-tight">{project.name}</h1>
           <p className="text-xs text-muted">
             {project.kind} · {project.aspect_ratio} · {Math.round((project.fps_num / project.fps_den) * 1000) / 1000} fps
             {project.status === "archived" ? " · archived" : ""}
           </p>
         </div>
-        <nav className="ml-auto flex gap-1" aria-label="Workspace">
+        {/* 10 tabs can't always fit at the 1100px minimum — the nav
+            scrolls horizontally instead of pushing the header wide.
+            Keyboard focus auto-scrolls an off-screen tab into view;
+            every tab remains a real button. */}
+        <nav className="ml-auto flex min-w-0 gap-1 overflow-x-auto" aria-label="Workspace">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               aria-current={tab === t.id ? "page" : undefined}
               className={clsx(
-                "rounded-t-md px-3.5 py-2 text-sm",
+                "shrink-0 whitespace-nowrap rounded-t-md px-3.5 py-2 text-sm",
                 tab === t.id
                   ? "border-b-2 border-teal bg-card text-teal"
                   : "text-muted hover:text-fg",

@@ -130,6 +130,10 @@ class CommandProposalOut(BaseModel):
     warnings: list[str]
     diff: dict[str, Any] = Field(default_factory=dict)
     estimated_cost: dict[str, Any]
+    # C3-B — structured authoritative estimate for generation commands
+    # (null for commands without one). The approval surface renders this
+    # figure; any client-side hint is preliminary only.
+    cost_estimate: dict[str, Any] | None = None
     current_revision: int
     launches_generation: bool
 

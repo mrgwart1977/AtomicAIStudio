@@ -45,6 +45,22 @@ export function assetFileUrl(projectId: string, assetId: string, info: BackendIn
   return `${info.baseUrl}/api/projects/${projectId}/assets/${assetId}/file?token=${encodeURIComponent(info.token)}`;
 }
 
+/** Authenticated binary fetch for an asset file — the session token
+ * travels in the request header, never in a URL, so nothing lands in
+ * server access logs, browser history, or caches. Returns an object
+ * URL the caller must revoke. */
+export async function fetchAssetObjectUrl(
+  projectId: string, assetId: string,
+): Promise<string> {
+  const { baseUrl, token } = await getBackendInfo();
+  const res = await fetch(
+    `${baseUrl}/api/projects/${projectId}/assets/${assetId}/file`,
+    { headers: { "X-Atomic-Token": token } },
+  );
+  if (!res.ok) throw new Error(`${res.status}`);
+  return URL.createObjectURL(await res.blob());
+}
+
 export function connectWs(onEvent: (e: WsEvent) => void, onState: (open: boolean) => void): () => void {
   let ws: WebSocket | null = null;
   let closed = false;

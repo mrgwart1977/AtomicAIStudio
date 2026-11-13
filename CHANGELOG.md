@@ -45,6 +45,20 @@ this project uses semver once public releases begin.
     submit, sim labeling, status/financial split, asset navigation,
     URL non-exposure, responsive grids) + 3 backend contract tests;
     evidence screenshots in `docs/c3b-evidence/`.
+  - Review-hardening: the preview response now carries a structured
+    `cost_estimate` — the authoritative figure the approval surface
+    renders (recomputed through the same pure catalog functions
+    `_validate` applied; client-side hints are labeled preliminary).
+    Previews the backend could not price disable approval outright.
+    Thumbnails load via header-authenticated fetch → object URL
+    (`fetchAssetObjectUrl`) — the session token never appears in an
+    image URL; missing/denied images fail to a safe placeholder.
+    The 10-tab workspace nav scrolls horizontally at the 1100px
+    minimum instead of overflowing the header (`min-w-0` +
+    `overflow-x-auto`; tabs are `shrink-0` real buttons with
+    `aria-current`, so keyboard focus auto-scrolls them into view).
+    Job fixtures/tests now cover artifact-success-with-open-hold so a
+    succeeded job is never read as settled.
 - C3-A — cloud image generation on simulated transports
   (`generate.image.cloud` → `cloud.image.sim`). OpenAI Images sync
   contract (`POST /v1/images/generations`) exercised over

@@ -5,10 +5,10 @@
 // entries only, and generated PNGs are deterministic test artifacts —
 // the UI must never present any of it as real provider output.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
+import { apiFetch, fetchAssetObjectUrl } from "../../api/client";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
-  BackendInfo, CommandProposal, ImageContracts, Job,
+  CommandProposal, ImageContracts, Job,
   ProviderDetail, ProviderSummary, SpendReservation, SpendSummary,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
@@ -87,10 +87,27 @@ interface Pending {
   fingerprint: string;
   payload: Record<string, unknown>;
   proposal: CommandProposal;
-  /** Mirrored catalog estimate captured at preview time — the generic
-   * proposal.estimated_cost field is a fixed stub for cloud commands;
-   * the authoritative figure also arrives inside proposal warnings. */
-  estUsd: number | null;
+}
+
+/** Authenticated thumbnail loader — the token travels in the request
+ * header, never in a URL. "error" = failed safely (missing/404/denied);
+ * null = still loading. */
+function useAssetThumb(pid: string, assetId: string | null | undefined):
+    string | "error" | null {
+  const [state, setState] = useState<string | "error" | null>(null);
+  useEffect(() => {
+    if (!assetId) return;
+    let url: string | null = null;
+    let dead = false;
+    fetchAssetObjectUrl(pid, assetId)
+      .then((u) => {
+        if (dead) URL.revokeObjectURL(u);
+        else { url = u; setState(u); }
+      })
+      .catch(() => { if (!dead) setState("error"); });
+    return () => { dead = true; if (url) URL.revokeObjectURL(url); };
+  }, [pid, assetId]);
+  return state;
 }
 
 export function CloudImagePanel({ pid, revision, simSummary, reservations,
@@ -109,7 +126,6 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const setAssetKindFilter = useApp((s) => s.setAssetKindFilter);
   const refreshAssets = useApp((s) => s.refreshAssets);
 
-  const [info, setInfo] = useState<BackendInfo | null>(null);
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [details, setDetails] = useState<Record<string, ProviderDetail>>({});
   const [contracts, setContracts] = useState<string[]>([]);
@@ -134,8 +150,6 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const inFlight = useRef(false);
-
-  useEffect(() => { void getBackendInfo().then(setInfo); }, []);
 
   const reload = () => {
     setLoadErr(null);
@@ -244,6 +258,12 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const genReady = !!providerKey && selectable.some((p) => p.key === providerKey)
     && !!prompt.trim() && prompt.length <= 8000;
 
+  // If the backend previewed but could not price (a path that exists
+  // for future billing units), approving cannot be offered — the
+  // commit would refuse, so the button is disabled up front.
+  const unpriced = !!pending && pending.proposal.cost_estimate != null
+    && pending.proposal.cost_estimate.est_cost_usd == null;
+
   const doPreview = () => {
     if (!genReady || inFlight.current) return;
     inFlight.current = true;
@@ -251,7 +271,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     const p = payload();
     previewCommand(pid, "generate.image.cloud", p)
       .then((proposal) => setPending(
-        { fingerprint, payload: p, proposal, estUsd: estRate }))
+        { fingerprint, payload: p, proposal }))
       .catch((e) => setError(`Preview failed: ${String(e)}`))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
@@ -316,7 +336,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
             <div className="flex justify-between"><dt className="text-faint">Output</dt><dd className="text-fg">1 image · test PNG</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Size</dt><dd className="text-fg">{String(pending.payload.size ?? "provider default")}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Quality</dt><dd className="text-fg">{String(pending.payload.quality ?? "provider default")}</dd></div>
-            <div className="flex justify-between"><dt className="text-faint">Est. cost</dt><dd className="text-fg">{pending.estUsd != null ? `$${pending.estUsd.toFixed(4)}` : "see warnings"} (estimate — not a charge)</dd></div>
+            <div className="flex justify-between"><dt className="text-faint">Est. cost</dt><dd className="text-fg" data-testid="ci-approval-cost">{pending.proposal.cost_estimate?.est_cost_usd != null ? `$${pending.proposal.cost_estimate.est_cost_usd.toFixed(4)} (authoritative preview — estimate, not a charge)` : "not priced — commit may refuse"}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Data out</dt><dd className="text-fg">prompt text (~{String(pending.payload.prompt ?? "").length} chars) — nothing else sent</dd></div>
           </dl>
           <p className="mt-2 text-sm text-fg">{pending.proposal.summary}</p>
@@ -326,7 +346,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
             </ul>
           )}
           <div className="mt-3 flex gap-2">
-            <button onClick={doCommit} disabled={busy} className={btnCls}
+            <button onClick={doCommit} disabled={busy || unpriced} className={btnCls}
               data-testid="ci-approve">
               Approve &amp; generate simulated image
             </button>
@@ -336,6 +356,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           </div>
           <p className="mt-2 text-[10px] text-faint">
             Changing any setting above discards this approval — a fresh preview is required.
+            {unpriced && " This request cannot be priced — the commit would be refused."}
           </p>
         </section>
       )}
@@ -493,7 +514,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           <p className="text-xs text-muted" data-testid="ci-cost-estimate">
             Estimated cost:{" "}
             <b>{estRate != null ? `$${estRate.toFixed(4)}` : "shown at preview"}</b>
-            <span className="text-faint"> — per image, estimate only, simulated accounting</span>
+            <span className="text-faint"> — per image, preliminary estimate; the backend preview is authoritative</span>
           </p>
           {budgetHint && (
             <p className={`mt-1 text-xs ${budgetHint.over ? "text-amber" : "text-faint"}`}
@@ -530,7 +551,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
         )}
         <ul className="mt-3 space-y-3">
           {imageJobs.map((j) => (
-            <CloudImageJobCard key={j.id} job={j} pid={pid} info={info}
+            <CloudImageJobCard key={j.id} job={j} pid={pid}
               reservation={reservations.find((r) => r.job_id === j.id)}
               asset={j.output_asset_id ? assetById.get(j.output_asset_id) : undefined}
               scenes={scenes} shots={shots} characters={characters}
@@ -552,11 +573,10 @@ const STATUS_STYLE: Record<string, string> = {
   cancelled: "border-line text-faint",
 };
 
-function CloudImageJobCard({ job, pid, info, reservation, asset, scenes,
+function CloudImageJobCard({ job, pid, reservation, asset, scenes,
                              shots, characters, onViewAssets }: {
   job: Job;
   pid: string;
-  info: BackendInfo | null;
   reservation?: SpendReservation;
   asset?: { id: string; media_json?: Record<string, unknown> };
   scenes: { id: string; title: string }[];
@@ -571,6 +591,7 @@ function CloudImageJobCard({ job, pid, info, reservation, asset, scenes,
   const reconcile = needsReconcile(job)
     || d?.remote_outcome === "artifact_pending_retrieval";
   const media = asset?.media_json ?? {};
+  const thumb = useAssetThumb(pid, job.output_asset_id);
 
   const links = [
     media.scene_id && `scene: ${scenes.find((s) => s.id === media.scene_id)?.title ?? "linked"}`,
@@ -633,17 +654,22 @@ function CloudImageJobCard({ job, pid, info, reservation, asset, scenes,
       )}
 
       {/* result — the C3-A job already registered the asset; this only
-          navigates to it, never writes a second copy. */}
-      {job.status === "succeeded" && job.output_asset_id && info && (
+          navigates to it, never writes a second copy. The thumbnail is
+          fetched with header auth → object URL: no token ever appears
+          in a URL, and a missing/unauthorized image fails safe. */}
+      {job.status === "succeeded" && job.output_asset_id && (
         <div className="mt-3 flex items-start gap-3">
-          <a href={assetFileUrl(pid, job.output_asset_id, info)}
-            target="_blank" rel="noreferrer"
-            aria-label="Open generated image full size">
-            <img src={assetFileUrl(pid, job.output_asset_id, info)}
+          {thumb && thumb !== "error" ? (
+            <img src={thumb}
               alt="Simulated cloud image result"
               className="h-24 w-24 rounded border border-line object-cover"
               data-testid={`ci-thumb-${job.id}`} />
-          </a>
+          ) : (
+            <div className="flex h-24 w-24 items-center justify-center rounded border border-line bg-card text-center text-[10px] text-faint"
+              data-testid={`ci-thumb-fallback-${job.id}`}>
+              {thumb === "error" ? "preview unavailable" : "loading…"}
+            </div>
+          )}
           <div className="text-xs">
             <p className="text-fg">Simulated test image — saved to assets.</p>
             <p className="mt-0.5 text-[10px] text-faint">

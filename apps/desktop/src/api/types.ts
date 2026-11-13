@@ -214,6 +214,18 @@ export interface CommandProposal {
   warnings: string[];
   diff?: Record<string, unknown>;
   estimated_cost: { compute: string; currency_usd: number; requires_approval: boolean };
+  /** Authoritative estimate for generation commands — the figure the
+   * approval surface MUST display. Null for commands without a catalog
+   * estimate; client-side hints are preliminary only. */
+  cost_estimate?: {
+    est_cost_usd: number | null;
+    unit: string | null;
+    currency: string;
+    is_estimate: boolean;
+    simulated: boolean;
+    settlement: string;
+    rates_checked?: string | null;
+  } | null;
   current_revision: number;
   launches_generation: boolean;
 }

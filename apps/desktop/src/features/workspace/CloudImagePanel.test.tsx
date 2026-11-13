@@ -14,11 +14,10 @@ const setWorkspaceTab = vi.fn();
 const setAssetKindFilter = vi.fn();
 const refreshAssets = vi.fn();
 
+const fetchAssetObjectUrl = vi.fn();
 vi.mock("../../api/client", () => ({
   apiFetch: (...a: unknown[]) => apiFetch(...a),
-  getBackendInfo: () => Promise.resolve({ baseUrl: "http://test", token: "tk" }),
-  assetFileUrl: (pid: string, aid: string, info: { baseUrl: string; token: string }) =>
-    `${info.baseUrl}/api/projects/${pid}/assets/${aid}/file?token=${info.token}`,
+  fetchAssetObjectUrl: (...a: unknown[]) => fetchAssetObjectUrl(...a),
 }));
 vi.mock("../../api/commands", () => ({
   commitCommand: (...a: unknown[]) => commitCommand(...a),
@@ -105,6 +104,10 @@ const RESERVATIONS = [
     provider_key: "openai-images", environment: "simulated", status: "open",
     reserved_micro: 190000, remote_job_id: null, reconcile_count: 0,
     reconcile_note: "held", created_at: "2026-01-01T00:01:00Z" },
+  { id: "r3", job_id: "job-open", command_id: null, project_id: "p1",
+    provider_key: "openai-images", environment: "simulated", status: "open",
+    reserved_micro: 70000, remote_job_id: null, reconcile_count: 0,
+    reconcile_note: "usage_unavailable", created_at: "2026-01-01T00:02:30Z" },
 ];
 
 const JOBS: Record<string, unknown> = {
@@ -114,9 +117,27 @@ const JOBS: Record<string, unknown> = {
     output_asset_id: "asset-1",
     execution_scope: "remote", recovery_state: null, cancel_requested: false,
     created_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:02:30Z",
+    // Real backend shape: remote_status/remote_intent only —
+    // remote_outcome is absent on the plain success path.
     progress_json: {
       remote_intent: { provider_key: "openai-images", model_id: "gpt-image-1", lifecycle: "sync" },
-      remote_outcome: "succeeded", remote_status: "succeeded",
+      remote_status: "succeeded", remote_job_id: "req_1",
+      transport_simulated: true,
+    },
+  },
+  "job-open": {
+    // Artifact succeeded but billing stayed unresolved — the job is
+    // 'succeeded' AND the hold stays open for reconcile. Success must
+    // never be read as settlement.
+    id: "job-open", project_id: "p1", adapter_id: "cloud.image.sim", kind: "image",
+    status: "succeeded", progress: 1, message: "", error: null,
+    output_asset_id: "asset-2",
+    execution_scope: "remote", recovery_state: null, cancel_requested: false,
+    created_at: "2026-01-01T00:02:30Z", completed_at: "2026-01-01T00:02:45Z",
+    progress_json: {
+      remote_intent: { provider_key: "openai-images", model_id: "gpt-image-1", lifecycle: "sync" },
+      remote_status: "succeeded", transport_simulated: true,
+      spend_action: "hold_usage_unavailable",
     },
   },
   "job-run": {
@@ -193,11 +214,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   store.jobs = { ...JOBS };
   apiFetch.mockImplementation(route);
+  fetchAssetObjectUrl.mockResolvedValue("blob:mock-thumb");
   previewCommand.mockResolvedValue({
     summary: "Simulate cloud image job for openai-images",
     warnings: ["Cost is an ESTIMATE only (~$0.1900, per_image)",
       "Runs on a SIMULATED transport"],
     affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
+    // The backend-authoritative estimate — what the approval MUST show.
+    cost_estimate: { est_cost_usd: 0.19, unit: "per_image", currency: "USD",
+      is_estimate: true, simulated: true, settlement: "usage-based" },
     current_revision: 7, launches_generation: true,
   });
   commitCommand.mockResolvedValue({
@@ -214,9 +239,11 @@ describe("CloudImagePanel — simulation honesty & provider selection", () => {
       "SIMULATION — No external AI provider contacted.").length;
     expect(bannerCount).toBeGreaterThanOrEqual(5); // form + 4 image job cards
     expect(screen.getByText(/deterministic test image, not real provider output/)).toBeTruthy();
-    // result card provenance label
-    expect(screen.getByText(/provenance: simulated/)).toBeTruthy();
-    expect(screen.getByText(/deterministic test PNG, not provider output/)).toBeTruthy();
+    // result card provenance labels (every succeeded job carries one)
+    expect(screen.getAllByText(/provenance: simulated/).length)
+      .toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/deterministic test PNG, not provider output/)
+      .length).toBeGreaterThanOrEqual(2);
   });
 
   it("enables only implemented contracts; others are disabled with reasons", async () => {
@@ -287,7 +314,7 @@ describe("CloudImagePanel — estimate, budget, settings", () => {
   it("shows the worst-case per-image estimate for provider-default quality", async () => {
     await fillForm();
     expect(screen.getByTestId("ci-cost-estimate").textContent).toContain("$0.1900");
-    expect(screen.getByTestId("ci-cost-estimate").textContent).toContain("estimate only");
+    expect(screen.getByTestId("ci-cost-estimate").textContent).toContain("preliminary estimate");
   });
 
   it("re-estimates per quality tier", async () => {
@@ -351,7 +378,7 @@ describe("CloudImagePanel — preview → approve → commit", () => {
     const card = screen.getByTestId("ci-approval");
     expect(card.textContent).toContain("SIMULATION — No external AI provider contacted.");
     expect(card.textContent).toContain("simulated — mocked transport");
-    expect(card.textContent).toContain("estimate — not a charge");
+    expect(card.textContent).toContain("estimate, not a charge");
     expect(commitCommand).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("ci-approve"));
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
@@ -372,10 +399,53 @@ describe("CloudImagePanel — preview → approve → commit", () => {
 
   it("also invalidates on non-prompt parameter changes", async () => {
     await fillForm();
+    // every cost-affecting field is fingerprinted — each drops the approval
+    for (const change of [
+      () => fireEvent.change(screen.getByTestId("ci-quality"), { target: { value: "low" } }),
+      () => fireEvent.change(screen.getByTestId("ci-size"), { target: { value: "1024x1024" } }),
+      () => fireEvent.change(screen.getByLabelText("Seed (optional)"), { target: { value: "42" } }),
+      () => fireEvent.change(screen.getByLabelText(/Max cost cap/), { target: { value: "0.5" } }),
+    ]) {
+      fireEvent.click(screen.getByTestId("ci-preview-btn"));
+      await waitFor(() => screen.getByTestId("ci-approval"));
+      change();
+      await waitFor(() => expect(screen.queryByTestId("ci-approval")).toBeNull());
+    }
+    expect(commitCommand).not.toHaveBeenCalled();
+  });
+
+  it("approval shows the BACKEND authoritative estimate — not the hint", async () => {
+    await fillForm();
+    previewCommand.mockResolvedValueOnce({
+      summary: "s", warnings: ["Cost is an ESTIMATE only (~$0.0777)"],
+      affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
+      cost_estimate: { est_cost_usd: 0.0777, unit: "per_image", currency: "USD",
+        is_estimate: true, simulated: true, settlement: "usage-based" },
+      current_revision: 7, launches_generation: true,
+    });
+    fireEvent.click(screen.getByTestId("ci-preview-btn"));
+    const el = await screen.findByTestId("ci-approval-cost");
+    // $0.0777 is the backend figure — the mirror's worst-case $0.19 must NOT appear
+    expect(el.textContent).toContain("$0.0777");
+    expect(el.textContent).toContain("authoritative preview");
+    expect(el.textContent).toContain("estimate, not a charge");
+    expect(el.textContent).not.toContain("$0.1900");
+  });
+
+  it("cannot approve a preview the backend could not price", async () => {
+    await fillForm();
+    previewCommand.mockResolvedValueOnce({
+      summary: "s", warnings: ["pricing unavailable"],
+      affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
+      cost_estimate: { est_cost_usd: null, unit: "per_credit", currency: "USD",
+        is_estimate: true, simulated: true, settlement: "usage-based" },
+      current_revision: 7, launches_generation: true,
+    });
     fireEvent.click(screen.getByTestId("ci-preview-btn"));
     await waitFor(() => screen.getByTestId("ci-approval"));
-    fireEvent.change(screen.getByTestId("ci-quality"), { target: { value: "low" } });
-    await waitFor(() => expect(screen.queryByTestId("ci-approval")).toBeNull());
+    expect((screen.getByTestId("ci-approve") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("ci-approval").textContent)
+      .toContain("cannot be priced");
     expect(commitCommand).not.toHaveBeenCalled();
   });
 
@@ -449,7 +519,19 @@ describe("CloudImagePanel — job lifecycle & asset navigation", () => {
       .toContain("reconcile required");
     expect(screen.getByTestId("ci-outcome-job-amb").textContent)
       .toContain("Outcome unknown");
-    expect(screen.getByTestId("ci-outcome-job-ok").textContent).toBe("Completed");
+    // plain success emits no remote_outcome — nothing extra is claimed
+    expect(screen.queryByTestId("ci-outcome-job-ok")).toBeNull();
+  });
+
+  it("job success is never presented as financial settlement", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByTestId("ci-job-job-open"));
+    expect(screen.getByTestId("ci-status-job-open").textContent).toBe("succeeded");
+    // …yet its reservation stayed OPEN — the financial row says so
+    const fin = screen.getByTestId("ci-fin-job-open");
+    expect(fin.textContent).toContain("open");
+    expect(fin.textContent).toContain("hold — reconcile required");
+    expect(fin.textContent).toContain("synthetic — no real charge exists");
   });
 
   it("shows running progress", async () => {
@@ -459,15 +541,30 @@ describe("CloudImagePanel — job lifecycle & asset navigation", () => {
       .toContain("remote job running (simulated transport)");
   });
 
-  it("renders the result thumbnail and navigates to the existing asset", async () => {
+  it("renders the result thumbnail via header auth — no token in any URL", async () => {
     renderPanel();
     await waitFor(() => screen.getByTestId("ci-job-job-ok"));
-    const img = screen.getByTestId("ci-thumb-job-ok") as HTMLImageElement;
-    expect(img.src).toContain("/api/projects/p1/assets/asset-1/file");
+    const img = await screen.findByTestId("ci-thumb-job-ok") as HTMLImageElement;
+    // authenticated fetch → object URL: the DOM never holds a token URL
+    expect(img.src).toBe("blob:mock-thumb");
+    expect(fetchAssetObjectUrl).toHaveBeenCalledWith("p1", "asset-1");
+    expect(document.body.innerHTML).not.toContain("token=");
+    expect(document.querySelector('a[href*="token="]')).toBeNull();
     // "View in Assets" navigates — it never re-imports or duplicates
     fireEvent.click(screen.getByTestId("ci-view-assets-job-ok"));
     expect(setAssetKindFilter).toHaveBeenCalledWith("image");
     expect(setWorkspaceTab).toHaveBeenCalledWith("assets");
+  });
+
+  it("fails safe when the thumbnail cannot be loaded", async () => {
+    fetchAssetObjectUrl.mockRejectedValue(new Error("404"));
+    renderPanel();
+    const fallback = await screen.findByTestId("ci-thumb-fallback-job-ok");
+    expect(fallback.textContent).toContain("preview unavailable");
+    expect(screen.queryByTestId("ci-thumb-job-ok")).toBeNull();
+    // the View in Assets path still works — the asset exists even if
+    // its preview bytes could not be fetched
+    expect(screen.getByTestId("ci-view-assets-job-ok")).toBeTruthy();
   });
 
   it("shows filmmaking associations from the generated asset", async () => {
