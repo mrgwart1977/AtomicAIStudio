@@ -103,6 +103,7 @@ CommandType = Literal[
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
     "cloud.live.enable", "cloud.live.disable",
     "cloud.live.disable_all", "cloud.live.resume",
+    "cloud.live.validate_arm", "cloud.live.validate_run",
 ]
 
 

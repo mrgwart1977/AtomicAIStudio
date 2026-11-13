@@ -488,8 +488,15 @@ def test_reconcile_confirmed_charge_and_overage(client, monkeypatch):
 
 def test_reconcile_no_charge_and_replay(client, monkeypatch):
     pid, job_id = _held_job(client, monkeypatch)
+    # confirmed_no_charge demands a documented operator decision —
+    # an uncertain outcome cannot be released on silence.
     r = _commit(client, pid, "spend.reconcile",
                 {"job_id": job_id, "outcome": "confirmed_no_charge"})
+    assert r.status_code == 422
+    r = _commit(client, pid, "spend.reconcile",
+                {"job_id": job_id, "outcome": "confirmed_no_charge",
+                 "note": "provider dashboard shows no usage for the "
+                         "request window"})
     assert r.status_code == 200
     res = _reservation(client, job_id)
     assert res.status == "released"
@@ -728,7 +735,8 @@ def test_project_delete_refused_with_open_reservation(client, monkeypatch):
     assert "spend reservation" in r.json()["detail"]
     # Reconcile the hold away → deletion proceeds.
     r2 = _commit(client, pid, "spend.reconcile",
-                 {"job_id": job_id, "outcome": "confirmed_no_charge"})
+                 {"job_id": job_id, "outcome": "confirmed_no_charge",
+                  "note": "verified unbilled — deleting project"})
     assert r2.status_code == 200
     r3 = client.post(f"/api/projects/{pid}/commands/commit",
                      json={"command_type": "project.delete",
@@ -773,7 +781,8 @@ def test_reservations_endpoint_open_first_and_fields(client, monkeypatch):
     assert row["reserved_micro"] > 0
     # Reconcile → row becomes terminal but stays listed.
     _commit(client, pid, "spend.reconcile",
-            {"job_id": job_id, "outcome": "confirmed_no_charge"})
+            {"job_id": job_id, "outcome": "confirmed_no_charge",
+             "note": "verified unbilled"})
     rows2 = client.get(f"/api/projects/{pid}/spend/reservations").json()
     assert rows2[0]["status"] == "released"
 

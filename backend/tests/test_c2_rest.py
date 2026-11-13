@@ -1220,10 +1220,11 @@ def test_hold_then_reconcile(client, monkeypatch):
                  ctype="spend.reconcile")
     assert r1.status_code == 200
     assert _reservation(client, job["id"]).status == "open"
-    # confirmed_no_charge releases
+    # confirmed_no_charge releases — requires a documented decision
     r2 = _commit(client, pid, {"job_id": job["id"],
-                               "outcome": "confirmed_no_charge"}, "c2recon",
-                 ctype="spend.reconcile")
+                               "outcome": "confirmed_no_charge",
+                               "note": "provider confirmed refusal"},
+                 "c2recon", ctype="spend.reconcile")
     assert r2.status_code == 200
     assert _reservation(client, job["id"]).status == "released"
 
