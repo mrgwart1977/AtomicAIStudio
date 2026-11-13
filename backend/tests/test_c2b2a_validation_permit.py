@@ -89,7 +89,7 @@ def _budget(client, pid):
              "limit_usd": "5.00"})
 
 
-EN = {"provider_key": "deepseek", "model_id": "deepseek-chat",
+EN = {"provider_key": "deepseek", "model_id": "deepseek-flash",
       "credential_ref": "deepseek"}
 ARM = {"credential_ref": "deepseek", "prompt": PROMPT,
        "max_output_tokens": 32, "max_cost_usd": "0.05"}
@@ -117,7 +117,7 @@ def _expiry(hours=1):
 
 def _approve_arm(client, pid, **overrides):
     doc = {"approve": "validate_arm", "provider_key": "deepseek",
-           "model_id": "deepseek-chat", "project_id": pid,
+           "model_id": "deepseek-flash", "project_id": pid,
            "not_after": _expiry()}
     doc.update(overrides)
     (_owner_dir(client) / "arm-approval.json"
@@ -256,7 +256,7 @@ class TestArm:
 
     def test_arm_only_deepseek_no_generic_switch(self, client, vault):
         """Enabling a different provider/model does NOT allow arming —
-        the permit is hardcoded to deepseek/deepseek-chat."""
+        the permit is hardcoded to deepseek/deepseek-flash."""
         pid = make_project(client)["id"]
         _budget(client, pid)
         r = _commit(client, pid, "cloud.live.enable", {
@@ -277,7 +277,7 @@ class TestArm:
             p = lp.armed(s)
             assert p is not None
             assert p["provider_key"] == "deepseek"
-            assert p["model_id"] == "deepseek-chat"
+            assert p["model_id"] == "deepseek-flash"
             assert p["project_id"] == pid
 
     def test_no_permit_is_shipped_state(self, client):
@@ -547,7 +547,7 @@ class TestOwnerAuthorization:
         for ov in cases:
             doc = {"approve": "validate_arm",
                    "provider_key": "deepseek",
-                   "model_id": "deepseek-chat", "project_id": pid,
+                   "model_id": "deepseek-flash", "project_id": pid,
                    "not_after": _expiry()}
             doc.update(ov)
             if "not_after" not in ov and ov != {"approve": "validate_run"}:
@@ -561,7 +561,7 @@ class TestOwnerAuthorization:
                 assert lp.armed(s) is None
         # missing not_after entirely
         doc = {"approve": "validate_arm", "provider_key": "deepseek",
-               "model_id": "deepseek-chat", "project_id": pid}
+               "model_id": "deepseek-flash", "project_id": pid}
         (_owner_dir(client) / "arm-approval.json"
          ).write_text(json.dumps(doc), encoding="utf-8")
         r = _commit(client, pid, "cloud.live.validate_arm", ARM)
@@ -1046,7 +1046,7 @@ class TestApprovalFilesystem:
         target = d / "real.json"
         target.write_text(json.dumps({
             "approve": "validate_arm", "provider_key": "deepseek",
-            "model_id": "deepseek-chat", "project_id": pid,
+            "model_id": "deepseek-flash", "project_id": pid,
             "not_after": _expiry()}), encoding="utf-8")
         try:
             (d / "arm-approval.json").symlink_to(target)

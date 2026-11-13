@@ -48,6 +48,21 @@ this project uses semver once public releases begin.
     and non-regular files, and on POSIX refuses files writable by
     group/other. Threat model documented: defense against app-level
     reachability only, not owner-level filesystem compromise.
+
+### Changed
+- DeepSeek catalog + permit model updated to current official API
+  reference (verified 2026-11-13): the retired `deepseek-chat` /
+  `deepseek-reasoner` ids are replaced by `deepseek-flash`
+  ($0.30/$1.20 per Mtok, peak) and `deepseek-v4-pro`
+  ($1.32/$3.96 per Mtok, peak). The single-use permit now binds
+  `deepseek-flash`.
+
+### Fixed
+- Live settlement fails closed on missing, empty, partial, malformed,
+  or negative provider usage: the DeepSeek response parser no longer
+  fabricates `{0,0}` usage, and `_usage_cost_micro` returns None for
+  unusable reports so the reservation settles at the reserved cap
+  (`estimate_at_settle`) instead of $0 underbooking.
 - C2 exit gate Stage B1 — production-capable live transport
   infrastructure, still unreachable from every shipped surface
   (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the

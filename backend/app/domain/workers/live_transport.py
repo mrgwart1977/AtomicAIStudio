@@ -495,7 +495,12 @@ def _usage_cost_micro(usage: dict | None, cost_table: dict | None
     in_rate, out_rate = table.get("input_per_mtok"), table.get("output_per_mtok")
     if usage is None or in_rate is None or out_rate is None:
         return None
-    usd = (Decimal(int(usage["input_tokens"])) * Decimal(str(in_rate))
-           + Decimal(int(usage["output_tokens"])) * Decimal(str(out_rate))
-           ) / Decimal(1_000_000)
+    try:
+        inp, out = int(usage["input_tokens"]), int(usage["output_tokens"])
+    except (KeyError, TypeError, ValueError):
+        return None  # malformed usage — caller books the reserved cap
+    if inp < 0 or out < 0:
+        return None  # nonsensical usage — never settle a negative bill
+    usd = (Decimal(inp) * Decimal(str(in_rate))
+           + Decimal(out) * Decimal(str(out_rate))) / Decimal(1_000_000)
     return _spend.usd_to_micro(usd)

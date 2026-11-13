@@ -89,7 +89,7 @@ def _seed_live_exposure(client, provider_key, *, open_micro=0, charged_micro=0,
         s.commit()
 
 
-EN = {"provider_key": "deepseek", "model_id": "deepseek-chat",
+EN = {"provider_key": "deepseek", "model_id": "deepseek-flash",
       "credential_ref": "deepseek"}
 
 
@@ -104,7 +104,7 @@ class TestEnable:
         with _sf(client)() as s:
             st = lg.state(s)
         e = st["providers"]["deepseek"]
-        assert e["enabled"] and e["model_id"] == "deepseek-chat"
+        assert e["enabled"] and e["model_id"] == "deepseek-flash"
         assert e["credential_ref"] == "deepseek"
         assert e["granted_at"] and e["revoked_at"] is None
 
@@ -206,7 +206,7 @@ class TestDisable:
     def _adm(self, client):
         with _sf(client)() as s:
             return lg.dispatch_admission(
-                s, provider_key="deepseek", model_id="deepseek-chat",
+                s, provider_key="deepseek", model_id="deepseek-flash",
                 max_cost_usd="0.05",
                 vault=client.app.state.provider_vault)
 
@@ -269,7 +269,7 @@ class TestDispatchAdmission:
         assert _commit(client, pid, "cloud.live.enable", EN).status_code == 200
 
     def _adm(self, client, **kw):
-        args = dict(provider_key="deepseek", model_id="deepseek-chat",
+        args = dict(provider_key="deepseek", model_id="deepseek-flash",
                     max_cost_usd="0.05",
                     vault=client.app.state.provider_vault)
         args.update(kw)
@@ -481,7 +481,7 @@ class TestStatusEndpoint:
 
 class TestExecutionBoundary:
     def _rest_payload(self, **kw):
-        return {"provider_key": "deepseek", "model_id": "deepseek-chat",
+        return {"provider_key": "deepseek", "model_id": "deepseek-flash",
                 "prompt": "Write a scene beat.",
                 "execution_target": "cloud", **kw}
 
@@ -676,7 +676,7 @@ class TestDurabilityBoundaries:
         vault._c = False  # credential deleted underneath the grant
         with _sf(client)() as s:
             allowed, code = lg.dispatch_admission(
-                s, provider_key="deepseek", model_id="deepseek-chat",
+                s, provider_key="deepseek", model_id="deepseek-flash",
                 max_cost_usd="0.05", vault=vault)
         assert (allowed, code) == (False, "credential")
         body = client.get(f"/api/projects/{pid}/cloud/live-status").json()

@@ -611,13 +611,22 @@ class OpenAICompatChatProvider(RestRemoteProvider):
                 "chat.completion response has no choices — outcome unknown",
                 charge_evidence="unknown")
         message = choices[0].get("message") or {}
-        usage = body.get("usage") or {}
+        # Missing usage stays None — never fabricate zeros: a real
+        # completion without usage is anomalous, and zeros would settle
+        # at $0 instead of falling back to the reserved-cap estimate.
+        usage = body.get("usage")
+        if (isinstance(usage, dict)
+                and "prompt_tokens" in usage
+                and "completion_tokens" in usage):
+            usage = {"input_tokens": int(usage["prompt_tokens"] or 0),
+                     "output_tokens": int(usage["completion_tokens"] or 0)}
+        else:
+            usage = None  # missing/partial — never fabricate zeros
         detail = {
             "transport_simulated": True,
             "text": message.get("content") or "",
             "finish_reason": choices[0].get("finish_reason"),
-            "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                      "output_tokens": int(usage.get("completion_tokens") or 0)},
+            "usage": usage,
         }
         return RemoteHandle(self.name, body.get("id"),
                             RemoteStatus.SUCCEEDED, detail=detail)

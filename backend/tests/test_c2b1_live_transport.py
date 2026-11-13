@@ -77,7 +77,7 @@ def _budget(client, pid, limit="5.00", scope="lifetime", target="global"):
                    {"target": target, "scope": scope, "limit_usd": limit})
 
 
-EN = {"provider_key": "deepseek", "model_id": "deepseek-chat",
+EN = {"provider_key": "deepseek", "model_id": "deepseek-flash",
       "credential_ref": "deepseek"}
 GOOD_RESOLVER = lambda h, p: ["93.184.216.34"]  # noqa: E731 — public fixture IP
 
@@ -101,8 +101,8 @@ def _dispatch(client, pid, *, vault, inner=None, resolver=GOOD_RESOLVER,
     jid = job_id or f"b1-live-{new_id()[:8]}"
     with _sf(client)() as s:
         return asyncio.run(lt.live_dispatch(
-            s, provider_key="deepseek", model_id="deepseek-chat",
-            request={"model_id": "deepseek-chat", "prompt": "Write a beat.",
+            s, provider_key="deepseek", model_id="deepseek-flash",
+            request={"model_id": "deepseek-flash", "prompt": "Write a beat.",
                      "max_output_tokens": 32},
             job_id=jid, command_id="c-b1", project_id=pid,
             max_cost_usd=max_usd, vault=vault,
@@ -498,9 +498,9 @@ class TestDispatchOrchestration:
         assert len(sends) == 1
         res = _reservation(client, jid)
         assert res.status == "settled" and res.environment == "live"
-        # usage 10×$0.27 + 5×$1.10 per Mtok → $8.2e-6 → ceiling micro
+        # usage 10×$0.30 + 5×$1.20 per Mtok → $9.0e-6 → ceiling micro
         assert out["settled_micro"] == spend.usd_to_micro(
-            (10 * 0.27 + 5 * 1.10) / 1_000_000)
+            (10 * 0.30 + 5 * 1.20) / 1_000_000)
         assert out["charge_source"] == "provider_reported"
         # evidence shape correct — but controlled transport: NEVER
         # verified_remote in B1.
@@ -843,9 +843,62 @@ class TestSimulatedLiveIsolation:
         assert out["reservation"] == "settled"
         # simulated submit still books environment='simulated'
         r = _commit(client, pid, "generate.text.cloud", {
-            "provider_key": "deepseek", "model_id": "deepseek-chat",
+            "provider_key": "deepseek", "model_id": "deepseek-flash",
             "prompt": "Write a beat.", "execution_target": "cloud"})
         assert r.status_code == 200, r.text
         job = wait_for_job(client, pid, r.json()["job_id"])
         res = _reservation(client, job["id"])
         assert res.environment == "simulated"
+
+
+# ---------------- settlement: missing/partial usage fails closed ----------------
+
+class TestUsageFailClosed:
+    """A successful response WITHOUT complete usage must never settle
+    at $0 or a fabricated number — it books the full reserved cap and
+    is auditable via charge_source='estimate_at_settle'."""
+
+    def _dispatch_body(self, client, pid, vault, body):
+        inner = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=body))
+        return _dispatch(client, pid, vault=vault, inner=inner)
+
+    def test_missing_usage_books_reserved_cap(self, client, vault):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        body = {"id": "chatcmpl-n1",
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}]}
+        out = self._dispatch_body(client, pid, vault, body)
+        assert out["outcome"] == "succeeded"
+        assert out["charge_source"] == "estimate_at_settle"
+        res = _reservation(client, out["job_id"])
+        assert res.status == "settled"
+        assert out["settled_micro"] == res.reserved_micro > 0
+
+    def test_partial_usage_books_reserved_cap(self, client, vault):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        body = {"id": "chatcmpl-n2",
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10}}  # no completion_tokens
+        out = self._dispatch_body(client, pid, vault, body)
+        assert out["charge_source"] == "estimate_at_settle"
+        res = _reservation(client, out["job_id"])
+        assert out["settled_micro"] == res.reserved_micro > 0
+
+    def test_empty_usage_dict_books_reserved_cap(self, client, vault):
+        pid = make_project(client)["id"]
+        _budget(client, pid)
+        _commit(client, pid, "cloud.live.enable", EN)
+        body = {"id": "chatcmpl-n3",
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {}}
+        out = self._dispatch_body(client, pid, vault, body)
+        assert out["charge_source"] == "estimate_at_settle"
+        assert out["settled_micro"] == \
+            _reservation(client, out["job_id"]).reserved_micro > 0

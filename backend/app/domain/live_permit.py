@@ -4,7 +4,7 @@ The ONE authorization mechanism for a future explicitly approved live
 validation request. Hardcoded to exactly one provider/model — this is
 deliberately NOT a generic live-execution switch:
 
-    provider: deepseek      model: deepseek-chat
+    provider: deepseek      model: deepseek-flash
 
 A permit is created by the audited command ``cloud.live.validate_arm``
 and consumed by ``cloud.live.validate_run`` — which nothing executes
@@ -48,7 +48,7 @@ PERMIT_KEY = "live_validation_permit_v1"
 # The ONLY provider/model a permit may ever authorize — module
 # constants, not payload: no input can widen this.
 PERMIT_PROVIDER = "deepseek"
-PERMIT_MODEL = "deepseek-chat"
+PERMIT_MODEL = "deepseek-flash"
 MAX_PERMIT_COST_USD = Decimal("0.05")   # B2a proposed reservation cap
 MAX_OUTPUT_TOKENS = 64
 MAX_PROMPT_CHARS = 500
@@ -64,7 +64,7 @@ MAX_PROMPT_CHARS = 500
 #
 #   owner/arm-approval.json
 #       {"approve": "validate_arm",
-#        "provider_key": "deepseek", "model_id": "deepseek-chat",
+#        "provider_key": "deepseek", "model_id": "deepseek-flash",
 #        "project_id": "<project id>",
 #        "not_after": "<ISO-8601 UTC>"}
 #
