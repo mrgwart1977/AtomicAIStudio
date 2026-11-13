@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
+import { apiFetch, getBackendInfo } from "../../api/client";
+import { AuthImage } from "../../components/AuthImage";
 import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
 import { VideoGeneratePanel } from "./VideoGeneratePanel";
@@ -524,11 +525,13 @@ export function GeneratePage() {
 
         {selected && info ? (
           <div className="mt-3 flex min-h-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-card">
-              <img
-                src={assetFileUrl(pid, selected.id, info)}
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-line bg-card">
+              <AuthImage
+                pid={pid}
+                assetId={selected.id}
                 alt={selected.name}
                 className="h-full w-full object-contain"
+                fallback={<span className="text-sm text-faint">loading preview…</span>}
               />
             </div>
             <div className="mt-2 flex items-center justify-between text-xs text-muted">
@@ -561,10 +564,12 @@ export function GeneratePage() {
                   selected?.id === a.id ? "border-teal" : "border-line"
                 }`}
               >
-                <img
-                  src={assetFileUrl(pid, a.id, info)}
+                <AuthImage
+                  pid={pid}
+                  assetId={a.id}
                   alt={a.name}
                   className="h-full w-full object-cover"
+                  fallback={<span className="block h-full w-full bg-panel" />}
                 />
               </button>
             ))}

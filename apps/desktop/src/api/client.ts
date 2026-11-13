@@ -41,9 +41,8 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return (await res.json()) as T;
 }
 
-export function assetFileUrl(projectId: string, assetId: string, info: BackendInfo): string {
-  return `${info.baseUrl}/api/projects/${projectId}/assets/${assetId}/file?token=${encodeURIComponent(info.token)}`;
-}
+// SEC-A1: `assetFileUrl` (token-in-query URLs) was removed — asset bytes
+// must be fetched with the X-Atomic-Token header via fetchAssetObjectUrl.
 
 /** Authenticated binary fetch for an asset file — the session token
  * travels in the request header, never in a URL, so nothing lands in

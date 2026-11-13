@@ -1,4 +1,5 @@
-import { getBackendInfo, assetFileUrl, apiFetch } from "../api/client";
+import { getBackendInfo, apiFetch } from "../api/client";
+import { AuthImage } from "./AuthImage";
 import { useEffect, useState } from "react";
 import { useApp } from "../stores/appStore";
 import { fmtBytes } from "../features/workspace/BackupsPage";
@@ -99,10 +100,16 @@ export function JobsPanel() {
               )}
               {asset && base && pid && (
                 asset.kind === "image" ? (
-                  <img
-                    src={assetFileUrl(pid, asset.id, base)}
+                  <AuthImage
+                    pid={pid}
+                    assetId={asset.id}
                     alt="Generated output"
                     className="mt-2 w-full rounded border border-line"
+                    fallback={
+                      <p className="mt-2 rounded border border-line px-2 py-1 text-[10px] text-faint">
+                        {asset.kind} asset · {asset.name}
+                      </p>
+                    }
                   />
                 ) : (
                   <p className="mt-2 rounded border border-line px-2 py-1 text-[10px] text-faint">

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
+import { apiFetch } from "../../api/client";
+import { AuthImage } from "../../components/AuthImage";
 import { commitCommand } from "../../api/commands";
 import type {
-  BackendInfo,
   CastMember,
   EntityRevision,
   Entity,
@@ -81,7 +81,6 @@ export function StoryboardPage() {
   const setGenerateShotId = useApp((s) => s.setGenerateShotId);
   const setWorkspaceTab = useApp((s) => s.setWorkspaceTab);
 
-  const [info, setInfo] = useState<BackendInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sceneDlg, setSceneDlg] = useState<{ mode: "new" } | { mode: "edit"; row: StoryboardScene } | null>(null);
   const [shotDlg, setShotDlg] = useState<{ scene: StoryboardScene; entry: StoryboardScene["shots"][number] | null } | null>(null);
@@ -91,7 +90,6 @@ export function StoryboardPage() {
   const [dropAt, setDropAt] = useState<{ sceneId: string; index: number } | null>(null);
 
   useEffect(() => {
-    void getBackendInfo().then(setInfo);
     void refreshAssets();
   }, [refreshAssets]);
 
@@ -238,7 +236,6 @@ export function StoryboardPage() {
                   />
                   <ShotCard
                     entry={entry}
-                    info={info}
                     projectId={project.id}
                     onDragStart={() => { drag.current = { shotId: entry.shot.id, sceneId: row.scene.id }; }}
                     onDragEnd={() => { drag.current = null; setDropAt(null); }}
@@ -330,15 +327,13 @@ function DropZone({ active, tail, onDragOver, onLeave, onDrop }: {
   );
 }
 
-function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate }: {
+function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate }: {
   entry: StoryboardScene["shots"][number];
-  info: BackendInfo | null;
   projectId: string;
   onDragStart: () => void; onDragEnd: () => void; onClick: () => void; onDuplicate: () => void;
   onGenerate: () => void;
 }) {
   const s = entry.shot;
-  const thumb = info && s.thumbnail_asset_id ? assetFileUrl(projectId, s.thumbnail_asset_id, info) : null;
   return (
     <div
       draggable
@@ -349,13 +344,18 @@ function ShotCard({ entry, info, projectId, onDragStart, onDragEnd, onClick, onD
       className="group w-44 cursor-grab rounded-md border border-line bg-panel transition-colors hover:border-teal active:cursor-grabbing"
     >
       <div className="relative h-20 overflow-hidden rounded-t-md bg-ink">
-        {thumb ? (
-          <img src={thumb} alt="" className="h-full w-full object-cover" draggable={false} />
-        ) : (
-          <div className="flex h-full items-center justify-center text-2xl font-bold text-faint">
-            {SHOT_LABEL[s.shot_type] ?? "—"}
-          </div>
-        )}
+        <AuthImage
+          pid={projectId}
+          assetId={s.thumbnail_asset_id}
+          alt=""
+          className="h-full w-full object-cover"
+          draggable={false}
+          fallback={
+            <div className="flex h-full items-center justify-center text-2xl font-bold text-faint">
+              {SHOT_LABEL[s.shot_type] ?? "—"}
+            </div>
+          }
+        />
         <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-white">
           {s.shot_type.replace("_", " ")}
         </span>
