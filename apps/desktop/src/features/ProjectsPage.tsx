@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../api/client";
-import type { BackendInfo, CommitResult, ProjectCard } from "../api/types";
+import { apiFetch } from "../api/client";
+import { AuthImage } from "../components/AuthImage";
+import type { CommitResult, ProjectCard } from "../api/types";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { RenameDialog } from "../components/RenameDialog";
 import { useApp } from "../stores/appStore";
@@ -8,11 +9,6 @@ import { NewProjectDialog } from "./NewProjectDialog";
 
 type SortKey = "updated_at" | "name" | "created_at";
 
-function useBackend() {
-  const [info, setInfo] = useState<BackendInfo | null>(null);
-  if (!info) void getBackendInfo().then(setInfo);
-  return info;
-}
 
 async function runCommand(
   p: { id: string; revision: number },
@@ -33,10 +29,9 @@ async function runCommand(
 }
 
 function Card({
-  p, info, onOpen, onAction,
+  p, onOpen, onAction,
 }: {
   p: ProjectCard;
-  info: BackendInfo | null;
   onOpen: () => void;
   onAction: (action: string) => void;
 }) {
@@ -45,15 +40,13 @@ function Card({
     <div className="group relative overflow-hidden rounded-lg border border-line bg-card">
       <button onClick={onOpen} className="block w-full text-left">
         <div className="flex h-28 items-center justify-center bg-panel text-faint">
-          {p.thumbnail_asset_id && info ? (
-            <img
-              src={assetFileUrl(p.id, p.thumbnail_asset_id, info)}
-              alt=""
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <span className="text-xs uppercase tracking-widest">{p.kind}</span>
-          )}
+          <AuthImage
+            pid={p.id}
+            assetId={p.thumbnail_asset_id}
+            alt=""
+            className="h-full w-full object-cover"
+            fallback={<span className="text-xs uppercase tracking-widest">{p.kind}</span>}
+          />
         </div>
         <div className="p-3">
           <div className="flex items-center justify-between">
@@ -119,7 +112,6 @@ export function ProjectsPage() {
   const setProject = useApp((s) => s.setCurrentProject);
   const setPage = useApp((s) => s.setPage);
   const refresh = useApp((s) => s.refreshProjects);
-  const info = useBackend();
 
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("updated_at");
@@ -216,7 +208,6 @@ export function ProjectsPage() {
           <Card
             key={p.id}
             p={p}
-            info={info}
             onOpen={() => {
               setProject(p.id);
               setPage("project");

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { commitCommand, pickFile } from "../../api/commands";
-import { apiFetch, assetFileUrl, getBackendInfo } from "../../api/client";
-import type { Asset, BackendInfo, SharedAsset } from "../../api/types";
+import { apiFetch } from "../../api/client";
+import { AuthImage } from "../../components/AuthImage";
+import type { Asset, SharedAsset } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 
 function fmtBytes(n: number): string {
@@ -41,7 +42,6 @@ export function AssetsPage() {
   const refreshAssets = useApp((s) => s.refreshAssets);
   const refreshProject = useApp((s) => s.refreshProjectData);
 
-  const [info, setInfo] = useState<BackendInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,10 +49,6 @@ export function AssetsPage() {
   const [shared, setShared] = useState<SharedAsset[] | null>(null);
   const [missingOnly, setMissingOnly] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
-
-  useEffect(() => {
-    void getBackendInfo().then(setInfo);
-  }, []);
 
   const items = (page?.items ?? []).filter((a) => !missingOnly || a.status === "missing");
 
@@ -175,8 +171,14 @@ export function AssetsPage() {
         {items.map((a) => (
           <div key={a.id} className="overflow-hidden rounded-md border border-line bg-card">
             <div className="flex h-24 items-center justify-center bg-panel text-faint">
-              {a.kind === "image" && info && a.status !== "missing" ? (
-                <img src={assetFileUrl(a.project_id, a.id, info)} alt="" className="h-full w-full object-cover" />
+              {a.kind === "image" && a.status !== "missing" ? (
+                <AuthImage
+                  pid={a.project_id}
+                  assetId={a.id}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  fallback={<span className="text-xs uppercase tracking-widest">{a.kind}</span>}
+                />
               ) : (
                 <span className="text-xs uppercase tracking-widest">{a.kind}</span>
               )}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { assetFileUrl, getBackendInfo } from "../../api/client";
 import { commitCommand } from "../../api/commands";
-import type { Asset, BackendInfo, Entity, EntityAssetLink, EntityRevision } from "../../api/types";
+import type { Asset, Entity, EntityAssetLink, EntityRevision } from "../../api/types";
+import { AuthImage } from "../../components/AuthImage";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 
@@ -92,8 +92,6 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
   const [revertTo, setRevertTo] = useState<number | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
-  const [info, setInfo] = useState<BackendInfo | null>(null);
-
   const entity: Entity | undefined = entities.find((e) => e.id === sel);
   const revs: EntityRevision[] = sel ? revisions[sel] ?? [] : [];
   const fields = FIELD_HINTS[etype] ?? [];
@@ -114,10 +112,6 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
     () => entityAssets.filter((l) => l.entity_type === etype && l.entity_id === sel),
     [entityAssets, etype, sel],
   );
-
-  useEffect(() => {
-    void getBackendInfo().then(setInfo);
-  }, []);
 
   useEffect(() => {
     if (sel) void refreshRevs(etype, sel);
@@ -406,7 +400,6 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                 <ReferenceAssets
                   links={selLinks}
                   assets={imageAssets}
-                  info={info}
                   projectId={project!.id}
                   run={run}
                   etype={etype}
@@ -470,10 +463,9 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
 
 const LINK_ROLES = ["reference", "identity", "wardrobe", "voice", "style"];
 
-function ReferenceAssets({ links, assets, info, projectId, run, etype, entityId }: {
+function ReferenceAssets({ links, assets, projectId, run, etype, entityId }: {
   links: EntityAssetLink[];
   assets: Asset[];
-  info: BackendInfo | null;
   projectId: string;
   run: (t: string, p: Record<string, unknown>) => Promise<unknown>;
   etype: string;
@@ -494,12 +486,10 @@ function ReferenceAssets({ links, assets, info, projectId, run, etype, entityId 
       <div className="mt-2 flex flex-wrap gap-2">
         {links.map((l) => (
           <div key={l.id} className="relative w-24 rounded-md border border-line bg-panel">
-            {info ? (
-              <img src={assetFileUrl(projectId, l.asset_id, info)} alt={l.label || nameOf(l.asset_id)}
-                className="h-16 w-full rounded-t-md object-cover" />
-            ) : (
-              <div className="flex h-16 items-center justify-center text-[10px] text-faint">img</div>
-            )}
+            <AuthImage pid={projectId} assetId={l.asset_id}
+              alt={l.label || nameOf(l.asset_id)}
+              className="h-16 w-full rounded-t-md object-cover"
+              fallback={<div className="flex h-16 items-center justify-center text-[10px] text-faint">img</div>} />
             <div className="p-1">
               <div className="truncate text-[9px] font-medium">{l.label || nameOf(l.asset_id)}</div>
               <div className="text-[8px] uppercase text-faint">{l.role}</div>
