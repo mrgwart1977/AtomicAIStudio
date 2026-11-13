@@ -330,7 +330,8 @@ async def live_dispatch(
         app_state: Any | None = None,
         inner: Any | None = None, resolver: Callable | None = None,
         gate_probe: Callable | None = None,
-        base_backend: Any | None = None) -> dict[str, Any]:
+        base_backend: Any | None = None,
+        expected_permit: dict | None = None) -> dict[str, Any]:
     """The ONE path a real provider request could ever take.
 
     Ordered invariants:
@@ -356,6 +357,21 @@ async def live_dispatch(
         project_id=project_id, provider_key=provider_key,
         environment="live", est_usd=max_cost_usd,
         max_usd=max_cost_usd, app_state=app_state)
+    if expected_permit is not None:
+        # Single-use authorization — consumed in the SAME transaction
+        # as the reservation: a crash leaves both uncommitted (permit
+        # still armed) or both committed (permit burned, reservation
+        # booked). Never replayable.
+        from app.domain import live_permit
+        st0 = probe(session)
+        entry0 = (st0.get("providers") or {}).get(provider_key) or {}
+        live_permit.consume(session, job_id=job_id, dispatch={
+            "provider_key": provider_key, "model_id": model_id,
+            "project_id": project_id,
+            "credential_ref": entry0.get("credential_ref"),
+            "prompt": request.get("prompt"),
+            "max_output_tokens": request.get("max_output_tokens"),
+            "max_cost_usd": max_cost_usd})
     session.commit()  # admission committed — only now may a socket exist
 
     st = probe(session)

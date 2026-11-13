@@ -7,6 +7,17 @@ this project uses semver once public releases begin.
 ## [Unreleased]
 
 ### Added
+- C2 exit gate Stage B2a — DeepSeek-only live-validation permit
+  (`domain/live_permit.py`), a durable single-use authorization for a
+  future owner-approved real request. `cloud.live.validate_arm` writes
+  an armed permit naming provider/model/project/credential-ref/prompt/
+  token and cost limits; `cloud.live.validate_run` consumes it in the
+  same atomic transaction as `spend.admit()` — a tampered or
+  mismatched record fails closed with no reservation. Dispatch runs
+  through a post-commit hook on a separate session so the command's
+  write lock is released first. No permit is ever shipped armed; DeepSeek
+  remains the only provider the seam can reach, and the real transport
+  stays off until Stage B2b owner approval.
 - C2 exit gate Stage B1 — production-capable live transport
   infrastructure, still unreachable from every shipped surface
   (`domain/workers/live_transport.py`). `LiveHTTPTransport` enforces the

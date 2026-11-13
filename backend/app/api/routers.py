@@ -522,11 +522,30 @@ async def commit_command(
             job_engine=request.app.state.job_engine,
             storage=request.app.state.storage,
             vault=request.app.state.provider_vault,
+            session_factory=getattr(
+                request.app.state, "session_factory", None),
         )
     except cmd.CommandError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
     command: CreativeCommand = result["command"]
     db.commit()
+    post_commit = result.get("post_commit")
+    if post_commit is not None:
+        # B2a validate_run — the live dispatch runs only AFTER the
+        # command transaction has released the write lock. Refusals
+        # here are real dispatch outcomes; the command stays committed
+        # as the durable record of the attempt.
+        try:
+            post_commit()
+        except Exception as exc:
+            from app.domain import live_permit as _lp
+            from app.domain.workers.live_transport import (
+                LiveDispatchRefused)
+            if isinstance(exc, (_lp.PermitRefused, LiveDispatchRefused)):
+                raise HTTPException(
+                    422, {"error": exc.code,
+                          "detail": str(exc)[:300]}) from exc
+            raise
     await request.app.state.event_bus.publish(
         "command.committed", project.id, command.id,
         {"command_type": command.command_type, "revision": project.revision},

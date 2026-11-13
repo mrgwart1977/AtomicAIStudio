@@ -65,6 +65,8 @@ SUPPORTED_COMMANDS = {
     # C2 exit gate — Stage A live-connectivity safety controls
     "cloud.live.enable", "cloud.live.disable",
     "cloud.live.disable_all", "cloud.live.resume",
+    # C2 exit gate — Stage B2a single-use DeepSeek validation permit
+    "cloud.live.validate_arm", "cloud.live.validate_run",
     # scenes & storyboard (M2)
     "scene.create", "scene.update", "scene.archive", "scene.unarchive",
     "scene.revert", "scene.duplicate", "scene.move",
@@ -91,6 +93,8 @@ SPEND_GUARDED_COMMANDS = {
     # live-gate mutations check-then-act on budgets + gate state
     "cloud.live.enable", "cloud.live.disable",
     "cloud.live.disable_all", "cloud.live.resume",
+    # B2a permit arm/run — check-then-act on permit + financial state
+    "cloud.live.validate_arm", "cloud.live.validate_run",
     # project.delete checks for unresolved spend holds — the check must
     # hold the write lock or a concurrent admission could slip an open
     # reservation between check and delete (unreconcilable hold left
@@ -220,6 +224,11 @@ def _summary(command_type: str, payload: dict) -> str:
         return "Disable ALL live execution (kill switch)"
     if command_type == "cloud.live.resume":
         return "Lift the global live kill switch"
+    if command_type == "cloud.live.validate_arm":
+        return ("Arm the single-use DeepSeek validation permit "
+                "(B2a — one request, audited, consumed on dispatch)")
+    if command_type == "cloud.live.validate_run":
+        return "Run the armed DeepSeek validation request"
     if command_type.startswith("scene."):
         if command_type == "scene.create":
             return f"Create scene '{payload.get('title', '')}'"
@@ -365,6 +374,20 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         warnings.append(
             "Lifting the kill switch does not re-enable providers — "
             "each must be granted again explicitly")
+    if command_type == "cloud.live.validate_arm":
+        for f in ("credential_ref", "prompt", "max_output_tokens",
+                  "max_cost_usd"):
+            if payload.get(f) is None or str(payload.get(f)) == "":
+                raise CommandError(422, f"{f} is required")
+        warnings.append(
+            "B2a — arms a single-use permit for one DeepSeek request. "
+            "It is consumed the moment dispatch is attempted; nothing "
+            "is sent until cloud.live.validate_run.")
+    if command_type == "cloud.live.validate_run":
+        warnings.append(
+            "Consumes the armed permit — exactly one dispatch attempt. "
+            "Ambiguous outcomes hold the reservation for explicit "
+            "reconcile; nothing is retried automatically.")
     if command_type == "spend.reconcile":
         if not payload.get("job_id"):
             raise CommandError(422, "job_id is required")
@@ -1266,7 +1289,8 @@ def _link_asset(session: Session, project: Project, asset: Asset, mode: str, aud
 def commit(session: Session, project: Project, *, command_type: str, payload: dict,
            scope: str, origin: str, target_type: str | None, target_id: str | None,
            expected_revision: int, idempotency_key: str,
-           job_engine=None, storage=None, vault=None) -> dict:
+           job_engine=None, storage=None, vault=None,
+           session_factory=None) -> dict:
     existing = session.execute(
         select(CreativeCommand).where(CreativeCommand.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
@@ -1282,6 +1306,12 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     before_revision = project.revision
     audit: dict[str, Any] = {"before": {}, "after": {}, "warnings": warnings}
     job: GenerationJob | None = None
+    # B2a — validate_run must dispatch AFTER the command transaction
+    # commits: the handler runs while this session holds the write lock,
+    # and live dispatch books its own BEGIN IMMEDIATE transaction on a
+    # separate session — dispatching here would deadlock on the same
+    # database file.
+    post_commit: Any | None = None
     # Full bridge payloads may be richer than the durable audit record —
     # e.g. watch.scan returns candidate paths to the live session while the
     # audit keeps only counts (data minimization).
@@ -1644,6 +1674,55 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 audit["warnings"].append(
                     "Budget removed — that scope is now unconstrained")
 
+    elif command_type in ("cloud.live.validate_arm",
+                          "cloud.live.validate_run"):
+        # B2a — handled by the dedicated permit branch further down;
+        # checked before the startswith branch so validate_* never
+        # falls into the Stage A handler.
+        from app.domain import live_permit as _lp
+        from app.domain.workers.live_transport import LiveDispatchRefused
+        if vault is None:
+            raise CommandError(500, "credential vault unavailable")
+        try:
+            if command_type == "cloud.live.validate_arm":
+                permit = _lp.arm(
+                    session, project_id=project.id,
+                    credential_ref=payload["credential_ref"],
+                    prompt=payload["prompt"],
+                    max_output_tokens=payload["max_output_tokens"],
+                    max_cost_usd=payload["max_cost_usd"],
+                    command_id=command.id, vault=vault)
+                # Prompt content stays in the job request only — the
+                # audit records its length, never its body.
+                audit["after"]["permit"] = {
+                    "permit_id": permit["permit_id"],
+                    "provider_key": permit["provider_key"],
+                    "model_id": permit["model_id"],
+                    "credential_ref": permit["credential_ref"],
+                    "max_output_tokens": permit["max_output_tokens"],
+                    "max_cost_usd": permit["max_cost_usd"],
+                    "prompt_len": len(permit["prompt"]),
+                    "stage": "B2a",
+                }
+            else:  # cloud.live.validate_run
+                if session_factory is None:
+                    raise CommandError(500, "session factory unavailable")
+                job_id = new_id()
+                post_commit = (lambda: _lp.run_validation(
+                    session_factory, project_id=project.id,
+                    job_id=job_id,
+                    job_idempotency_key=f"job:{idempotency_key}",
+                    command_id=command.id, vault=vault))
+                audit["after"]["validate_run"] = {
+                    "job_id": job_id,
+                    "status": "dispatch_requested",
+                    "stage": "B2a",
+                }
+        except (_lp.PermitRefused, LiveDispatchRefused) as exc:
+            raise CommandError(
+                422, {"error": exc.code,
+                      "detail": str(exc)[:300]}) from exc
+
     elif command_type.startswith("cloud.live."):
         # C2 exit gate Stage A — durable enablement state only. These
         # commands never dispatch, never touch a transport, and never
@@ -1705,6 +1784,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     )
     out: dict[str, Any] = {
         "command": command, "job": job, "idempotent_replay": False, "warnings": warnings,
+        "post_commit": post_commit,
     }
     if command_type == "project.duplicate":
         out["duplicate_project_id"] = audit["after"].get("duplicate_project_id")

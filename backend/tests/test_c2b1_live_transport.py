@@ -125,29 +125,28 @@ class TestUnreachableBoundary:
         assert not any("dispatch" in p for p in paths)
 
     def test_no_shipped_code_calls_or_configs_it(self):
-        """Static sweep: nothing under app/ references live_dispatch or
-        LiveHTTPTransport outside its own module; the module itself
-        reads no environment variable, settings object, or adapter
-        registry — no env/config/job path can reach it."""
+        """Static sweep: the only file that may CALL live_dispatch is
+        live_permit.py — the single-use authorization seam added in
+        B2a. LiveHTTPTransport may be constructed nowhere outside its
+        own module, and live_transport reads no environment variable,
+        settings object, or adapter registry — no env/config/job path
+        can reach it."""
         import pathlib
         import app as app_pkg
         root = pathlib.Path(app_pkg.__file__).parent
         # rest_providers.py may *mention* the boundary (the
-        # is_live_transport marker seam) but must never CALL it —
-        # scan for real usage patterns, not name references.
+        # is_live_transport marker seam) but must never CALL it.
+        # live_permit.py is the one authorized live_dispatch caller;
+        # other files may import LiveDispatchRefused for error
+        # mapping but must never invoke or construct.
         hits = []
-        callers = ("live_dispatch(", "import live_transport",
-                   "from app.domain.workers.live_transport",
-                   "LiveHTTPTransport(")
         for f in root.rglob("*.py"):
-            # live_transport.py is the module itself; rest_providers.py
-            # is the marker-seam file — it names the boundary in
-            # comments but only ever getattr's the is_live_transport
-            # flag, never calls into it.
-            if f.name in ("live_transport.py", "rest_providers.py"):
+            if f.name in ("live_transport.py", "rest_providers.py",
+                          "live_permit.py"):
                 continue
             src = f.read_text(encoding="utf-8")
-            if any(c in src for c in callers):
+            if ("live_dispatch(" in src or "LiveHTTPTransport(" in src
+                    or "import live_transport" in src):
                 hits.append(str(f.relative_to(root)))
         assert hits == []
         src = (root / "domain" / "workers" / "live_transport.py"
@@ -155,6 +154,11 @@ class TestUnreachableBoundary:
         for banned in ("os.environ", "os.getenv", "settings.",
                        "adapter_registry"):
             assert banned not in src, banned
+        # The authorized seam consumes a permit before dispatch — a
+        # live_dispatch call without expected_permit is refused.
+        seam = (root / "domain" / "live_permit.py"
+                ).read_text(encoding="utf-8")
+        assert "expected_permit" in seam and "live_dispatch" in seam
 
     def test_inner_default_marks_real_injected_marks_controlled(self):
         assert lt.LiveHTTPTransport(
