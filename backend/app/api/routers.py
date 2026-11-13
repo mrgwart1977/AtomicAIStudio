@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import asc, desc, func, or_, select
@@ -1046,17 +1046,114 @@ def entity_versions(
 # ---------- websocket ----------
 
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    from app.security import require_token_ws
+    from app.security import (
+        WS_MAX_UNAUTHENTICATED, is_auth_frame, require_token_ws,
+        ws_origin_allowed)
 
-    await require_token_ws(websocket)
+    state = websocket.app.state
+
+    # A2.1 — origin policy before ANY accept (defense in depth; the
+    # token still gates either path).
+    if not ws_origin_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    if websocket.query_params.get("token") is not None:
+        # Legacy ?token= handshake — preserved for compatibility until
+        # A3. require_token_ws closes 1008 on a bad token.
+        await require_token_ws(websocket)
+    else:
+        # First-frame authentication under a bounded unauthenticated
+        # slot: UNAUTHENTICATED → AUTHENTICATED → CLOSED. No
+        # subscription or event delivery exists before this point.
+        async with state.ws_unauth_lock:
+            if state.ws_unauth_count >= WS_MAX_UNAUTHENTICATED:
+                slot = False
+            else:
+                state.ws_unauth_count += 1
+                slot = True
+        if not slot:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        try:
+            # Accept first — a WS client cannot send its auth frame
+            # until the handshake completes. The socket is still
+            # UNAUTHENTICATED: no subscription, no events.
+            await websocket.accept()
+            authed = await _ws_first_frame_auth(
+                websocket, state.settings)
+        finally:
+            async with state.ws_unauth_lock:
+                state.ws_unauth_count -= 1
+        if not authed:
+            return
+        # auth_ok is the first post-handshake server message — the
+        # client treats the connection as authenticated only then.
+        await websocket.send_json({"type": "auth_ok"})
+
     if websocket.client is None:
         return
-    bus = websocket.app.state.event_bus
+    bus = state.event_bus
     await bus.subscribe(websocket)
     try:
         while True:
-            await websocket.receive_text()  # keepalive / future client messages
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg["type"] != "websocket.receive":
+                continue
+            text = msg.get("text")
+            if text is not None and is_auth_frame(text):
+                # Duplicate/late authentication on an established
+                # socket — protocol violation, close it.
+                await websocket.close(code=status.WS_1002_PROTOCOL_ERROR)
+                break
     except WebSocketDisconnect:
         pass
     finally:
         await bus.unsubscribe(websocket)
+
+
+async def _ws_first_frame_auth(websocket: WebSocket, settings) -> bool:
+    """UNAUTHENTICATED state: the socket is already accepted (a client
+    cannot send frames pre-handshake) but has no subscription and no
+    event delivery. Wait for the auth frame, validate, and return True
+    on success — the caller then sends auth_ok and subscribes.
+
+    Any failure closes the socket and returns False:
+      - timeout            → 1008 (policy)
+      - oversized frame    → 1009 (too big)
+      - malformed/non-auth → 1002 (protocol error)
+      - wrong token        → 1008 (policy violation)
+    The token is never logged or echoed.
+    """
+    import asyncio
+    from app.security import (
+        WS_AUTH_MAX_BYTES, WS_AUTH_TIMEOUT_S, parse_auth_frame)
+    try:
+        msg = await asyncio.wait_for(
+            websocket.receive(), WS_AUTH_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return False
+    except WebSocketDisconnect:
+        return False
+    if msg["type"] == "websocket.disconnect":
+        return False                    # client bailed mid-handshake
+    if msg["type"] != "websocket.receive":
+        await websocket.close(code=status.WS_1002_PROTOCOL_ERROR)
+        return False
+    raw = msg.get("text")
+    if raw is None:
+        raw = (msg.get("bytes") or b"").decode("utf-8", "replace")
+    if len(raw.encode("utf-8")) > WS_AUTH_MAX_BYTES:
+        await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+        return False
+    token = parse_auth_frame(raw)
+    if token is None:
+        await websocket.close(code=status.WS_1002_PROTOCOL_ERROR)
+        return False
+    if token != settings.session_token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return False
+    return True

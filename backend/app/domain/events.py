@@ -24,7 +24,13 @@ class EventBus:
         self._lock = asyncio.Lock()
 
     async def subscribe(self, ws: WebSocket) -> None:
-        await ws.accept()
+        # Accept only when the socket hasn't been accepted yet — the
+        # A2.1 first-frame-auth path accepts earlier (before the client
+        # can send its auth frame) and re-accepting would be an ASGI
+        # protocol error.
+        from starlette.websockets import WebSocketState
+        if ws.application_state == WebSocketState.CONNECTING:
+            await ws.accept()
         async with self._lock:
             self._subscribers.add(ws)
 

@@ -372,3 +372,15 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   the frontend persists nothing there.
 - Uninstall removes the install dir only; the data dir is never
   deleted by the installer.
+
+### Open security blockers (tracked)
+
+- **#96 — DNS resolution + resolved-IP filtering (release/security
+  blocker):** before any real image-provider artifact retrieval may be
+  enabled, DNS must be resolved at connection time and every resolved
+  address filtered — DNS-rebinding resistance, private/reserved-range
+  refusal (loopback, RFC-1918, link-local/metadata 169.254.169.254,
+  CGNAT, multicast, unspecified), and no proxy/routing path that
+  bypasses the destination check. Cannot be bypassed by provider
+  catalog configuration or owner approval. Does not affect the
+  current simulated provider boundary (MockTransport — no DNS).
