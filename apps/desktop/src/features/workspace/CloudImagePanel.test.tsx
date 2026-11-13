@@ -403,7 +403,7 @@ describe("CloudImagePanel — preview → approve → commit", () => {
     for (const change of [
       () => fireEvent.change(screen.getByTestId("ci-quality"), { target: { value: "low" } }),
       () => fireEvent.change(screen.getByTestId("ci-size"), { target: { value: "1024x1024" } }),
-      () => fireEvent.change(screen.getByLabelText("Seed (optional)"), { target: { value: "42" } }),
+      () => fireEvent.change(screen.getByLabelText(/^Seed \(optional/), { target: { value: "42" } }),
       () => fireEvent.change(screen.getByLabelText(/Max cost cap/), { target: { value: "0.5" } }),
     ]) {
       fireEvent.click(screen.getByTestId("ci-preview-btn"));

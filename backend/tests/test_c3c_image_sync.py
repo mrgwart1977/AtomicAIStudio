@@ -18,6 +18,7 @@ from sqlalchemy import select
 from app.db.models import Asset, GenerationJob, SpendCharge, SpendReservation
 from app.domain.workers.rest_image_providers import (
     IMAGE_REST_KEYS, make_image_provider)
+from app.domain.workers.rest_providers import RemoteError
 from app.domain.workers.rest_simulated import simulated_image_transport
 from tests.conftest import make_project, wait_for_job
 
@@ -482,6 +483,16 @@ class TestBflFlux:
         assert r.status_code == 422
         assert "pricing" in r.text or "not eligible" in r.text
 
+    def test_polling_url_not_persisted(self, client):
+        """Remote references (BFL polling_url) must not survive into
+        durable progress_json — only the opaque remote id stays."""
+        proj = make_project(client, "C3C-FluxRef")
+        job = _wait(client, proj["id"], _gen(client, proj["id"],
+                                             "bfl-flux",
+                                             "flux-pro-1.1"))
+        assert job["status"] == "succeeded"
+        assert "polling_url" not in json.dumps(job)
+
     def test_firefly_remains_unimplemented(self, client):
         """Adobe publishes no per-image API price → no contract, and
         the commit path refuses it rather than implying support."""
@@ -491,6 +502,102 @@ class TestBflFlux:
         r = _gen(client, proj["id"], "adobe-firefly",
                  "firefly-image-4")
         assert r.status_code == 422
+
+
+class TestArtifactGuards:
+    """C3-C hardening — every refusal below happens BEFORE a byte
+    leaves the injected transport; none can produce a socket."""
+
+    @staticmethod
+    def _provider(handler):
+        return make_image_provider(
+            "ideogram", transport=httpx.MockTransport(handler))
+
+    @staticmethod
+    def _ok(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"png-bytes",
+                              headers={"Content-Type": "image/png"})
+
+    @pytest.mark.asyncio
+    async def test_http_scheme_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "http://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_userinfo_url_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://u:p@cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_off_port_url_refused(self):
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://cdn.ideogram.ai:4443/x.png")
+
+    @pytest.mark.asyncio
+    async def test_deceptive_suffix_host_refused(self):
+        # cdn.ideogram.ai.evil.com is NOT under ideogram.ai.
+        with pytest.raises(RemoteError):
+            await self._provider(self._ok).fetch_artifact(
+                "https://cdn.ideogram.ai.evil.com/x.png")
+
+    @pytest.mark.asyncio
+    async def test_loopback_and_private_hosts_refused(self):
+        for url in ("https://127.0.0.1/x.png", "https://localhost/x.png",
+                    "https://10.0.0.4/x.png",
+                    "https://169.254.169.254/latest/meta-data"):
+            with pytest.raises(RemoteError):
+                await self._provider(self._ok).fetch_artifact(url)
+
+    @pytest.mark.asyncio
+    async def test_no_provider_credentials_to_artifact_host(self):
+        """Pre-signed artifact URLs are self-authenticating — the
+        provider key must never be sent to a delivery host."""
+        seen = {}
+        def h(req: httpx.Request) -> httpx.Response:
+            seen["req"] = req
+            return self._ok(req)
+        p = self._provider(h)
+        data = await p.fetch_artifact("https://cdn.ideogram.ai/x.png")
+        assert data == b"png-bytes"
+        sent = {k.lower() for k in seen["req"].headers.keys()}
+        assert "api-key" not in sent
+        assert "authorization" not in sent
+        assert "x-key" not in sent
+
+    @pytest.mark.asyncio
+    async def test_redirect_is_failure_not_followed(self):
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                302, headers={"Location": "https://evil.example/x.png"})
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_oversized_content_length_refused_before_body(self):
+        from app.domain import image_safety
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=b"",
+                headers={"Content-Length":
+                         str(image_safety.MAX_IMAGE_BYTES + 1)})
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
+
+    @pytest.mark.asyncio
+    async def test_expired_url_maps_to_pending_outcome(self):
+        """A 410/404 artifact is a retrieval failure — the durable
+        outcome is artifact_pending_retrieval (verified end-to-end in
+        TestIdeogram), never a resubmission."""
+        def h(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(410, content=b"gone")
+        with pytest.raises(RemoteError):
+            await self._provider(h).fetch_artifact(
+                "https://cdn.ideogram.ai/x.png")
 
 
 class TestPreviewAuthority:

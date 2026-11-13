@@ -449,6 +449,20 @@ class RestRemoteProvider:
                 RemoteErrorKind.VALIDATION,
                 "artifact URL is not https — refused",
                 charge_evidence="none_confirmed")
+        if parsed.username is not None or parsed.password is not None:
+            # user:pass@host smuggles Basic-auth material into a URL we
+            # did not issue — refuse outright.
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                "artifact URL carries user-info — refused",
+                charge_evidence="none_confirmed")
+        if parsed.port not in (None, 443):
+            # Documented delivery endpoints serve 443 only; an explicit
+            # off-port URL is not a normal signed artifact.
+            raise RemoteError(
+                RemoteErrorKind.VALIDATION,
+                "artifact URL uses a non-default port — refused",
+                charge_evidence="none_confirmed")
         host = (parsed.hostname or "").lower()
         if not any(host == h or host.endswith("." + h)
                    for h in self.spec.artifact_hosts):
@@ -458,16 +472,26 @@ class RestRemoteProvider:
                 "hosts — refused",
                 charge_evidence="none_confirmed")
         try:
-            async with self._client.stream(
-                    "GET", url,
-                    headers=self._auth_headers()) as resp:
+            # NO auth headers on artifact fetches: delivery URLs are
+            # pre-signed and self-authenticating — the provider key
+            # must never leak to a CDN host, allowlisted or not.
+            # Redirects are never followed (client follows none); a 3xx
+            # is a failed retrieval, not a silent re-validation point.
+            async with self._client.stream("GET", url) as resp:
                 if not (200 <= resp.status_code < 300):
                     raise RemoteError(
                         RemoteErrorKind.VALIDATION,
                         f"artifact retrieval HTTP {resp.status_code} — "
-                        "URL expired or revoked",
+                        "URL expired, revoked, or redirected",
                         charge_evidence="unknown",
                         http_status=resp.status_code)
+                declared = int(resp.headers.get("content-length") or 0)
+                if declared > _safety.MAX_IMAGE_BYTES:
+                    raise RemoteError(
+                        RemoteErrorKind.MALFORMED,
+                        "artifact declares a size beyond the image byte "
+                        "cap",
+                        charge_evidence="unknown")
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in resp.aiter_bytes(64 * 1024):

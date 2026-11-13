@@ -441,9 +441,11 @@ class BflFluxProvider(RestRemoteProvider):
                     charge_evidence="unknown")
             return RemoteHandle(self.name, str(rid),
                                 RemoteStatus.SUBMITTED,
-                                detail={"transport_simulated": True,
-                                        "polling_url": body.get(
-                                            "polling_url")})
+                                # polling_url is deliberately NOT stored
+                                # — retrieval uses the documented
+                                # poll_path; a remote reference must not
+                                # persist to durable progress/audit.
+                                detail={"transport_simulated": True})
         raw = str(body.get("status") or "").strip().lower()
         status = self._POLL.get(raw, RemoteStatus.UNKNOWN)
         detail: dict[str, Any] = {"transport_simulated": True,
@@ -454,8 +456,10 @@ class BflFluxProvider(RestRemoteProvider):
             detail["seed"] = result.get("seed")
             detail["images_returned"] = 1
         if status == RemoteStatus.FAILED:
-            detail["failure"] = (body.get("result") or {}).get("details") \
-                or body.get("status")
+            # Persist the status enum only — provider-supplied failure
+            # text is unbounded remote content that must not land in
+            # durable progress rows.
+            detail["failure"] = body.get("status")
         return RemoteHandle(self.name, str(body.get("id") or "") or None,
                             status, detail=detail)
 

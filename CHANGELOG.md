@@ -46,6 +46,16 @@ this project uses semver once public releases begin.
   unimplemented**: the API is async + IMS OAuth and Adobe publishes
   no per-image API USD price, so cost admission would have to
   guess — catalog documents this; provider renders disabled.
+- C3-C hardening — remote artifact retrieval (`fetch_artifact`):
+  no provider auth headers are sent to delivery hosts (pre-signed
+  URLs are self-authenticating); user-info URLs, non-443 ports,
+  deceptive suffix hosts, non-https schemes, loopback/private
+  destinations (via the allowlist), redirects (never followed),
+  oversized Content-Length, and streamed bytes beyond the image cap
+  are all refused before/while reading. BFL `polling_url` and
+  provider failure text no longer persist to durable progress rows;
+  retried attempts can never auto-resubmit a non-idempotent
+  contract (`job_attempt_no` guard).
 - C3-B — Cloud Studio image UI (`CloudImagePanel` in the Cloud
   workspace tab). Surfaces `generate.image.cloud` end-to-end:
   catalog-driven provider/model pickers gated by the implemented
