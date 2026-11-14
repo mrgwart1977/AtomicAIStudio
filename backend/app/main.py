@@ -196,6 +196,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     run.error = "interrupted by application stop"
                 s.commit()
             await job_engine.start()
+            # S2 — staged-upload retention sweep, after job reconcile so
+            # recoverable jobs' referenced staging files are protected.
+            from app.domain.upload_staging import sweep_all_staged
+            sweep_all_staged(sf, settings.data_dir)
             # C1.5 stage B — one shared polling task for opted-in providers
             # (settings.import_behavior == "poll"). In-memory candidates
             # only; every filesystem touch stays on its single worker
