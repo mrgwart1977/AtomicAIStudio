@@ -23,9 +23,116 @@ struct BackendInfo {
     token: String,
 }
 
+/// Process-lifetime guard for the sidecar.
+///
+/// On Windows the child is assigned to an anonymous, per-instance Job
+/// Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When this process
+/// exits for ANY reason — normal quit, crash, or `taskkill /F`, where
+/// no Rust cleanup can run — the OS closes the last job handle and
+/// terminates the child. The job is anonymous and holds only the child
+/// we spawned, so unrelated backend processes are never affected.
+///
+/// On other platforms this is a no-op; normal `RunEvent::Exit` cleanup
+/// and the shell's own child-reaping semantics apply.
+#[cfg(windows)]
+mod job_guard {
+    use std::process::Child;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    /// Holds the job handle for the process lifetime; dropping it is
+    /// what makes the OS reap the sidecar.
+    pub struct JobGuard(HANDLE);
+
+    // The handle is only ever closed in Drop; nothing else touches it.
+    unsafe impl Send for JobGuard {}
+    unsafe impl Sync for JobGuard {}
+
+    impl JobGuard {
+        pub fn new() -> Option<Self> {
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+                unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of_val(&info) as u32,
+                )
+            };
+            if ok == 0 {
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(Self(job))
+        }
+
+        /// Assign an already-spawned child. Errors are reported, not
+        /// fatal — the Exit-event kill remains as a weaker fallback.
+        pub fn assign(&self, child: &Child) -> Result<(), String> {
+            let proc = unsafe {
+                OpenProcess(
+                    PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                    0,
+                    child.id(),
+                )
+            };
+            if proc.is_null() {
+                return Err(format!(
+                    "OpenProcess({}) failed",
+                    unsafe { GetLastError() }
+                ));
+            }
+            let ok = unsafe { AssignProcessToJobObject(self.0, proc) };
+            let err = unsafe { GetLastError() };
+            unsafe { CloseHandle(proc) };
+            if ok == 0 {
+                return Err(format!("AssignProcessToJobObject failed ({err})"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for JobGuard {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod job_guard {
+    use std::process::Child;
+    pub struct JobGuard;
+    impl JobGuard {
+        pub fn new() -> Option<Self> {
+            Some(Self)
+        }
+        pub fn assign(&self, _child: &Child) -> Result<(), String> {
+            Ok(())
+        }
+    }
+}
+
 struct SidecarState {
     info: BackendInfo,
     child: Mutex<Option<Child>>,
+    /// Kept for the whole process lifetime; when the process dies the
+    /// OS drops the job and kills the sidecar. Never touched otherwise.
+    _job: Option<job_guard::JobGuard>,
 }
 
 fn pick_free_port() -> u16 {
@@ -161,6 +268,17 @@ fn main() {
     });
     let mut child = cmd.spawn().expect("spawn backend sidecar");
 
+    // Assign immediately — before readiness — so a crash during or
+    // after startup still lets the OS reap the child. Failure to
+    // assign degrades to Exit-event cleanup only.
+    let job = job_guard::JobGuard::new();
+    if let Some(g) = &job {
+        if let Err(e) = g.assign(&child) {
+            eprintln!("[atomic] sidecar job assignment failed: {e} \
+                       (falling back to Exit-event cleanup)");
+        }
+    }
+
     if let Err(e) = wait_for_backend(&mut child, port, Duration::from_secs(30)) {
         eprintln!("[atomic] {e}");
         // Clean up the half-started child rather than orphaning it.
@@ -178,6 +296,7 @@ fn main() {
                 token: token.clone(),
             },
             child: Mutex::new(Some(child)),
+            _job: job,
         })
         .invoke_handler(tauri::generate_handler![get_backend_info])
         .build(tauri::generate_context!())
