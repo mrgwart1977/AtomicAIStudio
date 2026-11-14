@@ -56,6 +56,8 @@ from app.schemas.api import (
     EntityRevisionOut,
     GpuSettingsOut,
     GpuSettingsUpdate,
+    ResourceSettingsOut,
+    ResourceSettingsUpdate,
     JobOut,
     ModelCatalogEntryOut,
     ModelInstallRequest,
@@ -358,6 +360,118 @@ def set_gpu_settings(body: GpuSettingsUpdate, request: Request, db: Session = De
         "preferred_gpu": model_files._get_setting(db, "preferred_gpu"),
         **st,
     }
+
+
+# ---------- C4-E — unified resource status ----------
+
+
+_RESOURCE_SETTING_KEYS = (
+    ("os_headroom_gib", "res_os_headroom_gib"),
+    ("critical_commit_gib", "res_critical_commit_gib"),
+    ("critical_phys_gib", "res_critical_phys_gib"),
+    ("min_disk_free_gib", "res_min_disk_gib"),
+    ("vram_headroom_gib", "res_vram_headroom_gib"),
+)
+
+
+def _resource_settings(db: Session) -> dict:
+    return {field: model_files._get_setting(db, key)
+            for field, key in _RESOURCE_SETTING_KEYS}
+
+
+@api_router.get("/api/system/resources")
+def system_resources(request: Request, db: Session = Depends(get_db)):
+    """C4-E — one honest snapshot for the resource view: measured RAM,
+    pressure, GPU slots, disk free on the volumes that matter, queued/
+    running jobs with their wait reasons, and the thresholds in force
+    (user override vs default is explicit)."""
+    from app.domain import resources
+    from app.db.models import GenerationJob
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    overrides = resources.settings_overrides(db)
+    margins = resources.safety_margins(overrides)
+    mem = resources.system_memory()
+    jobs = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.status.in_(("queued", "running")))
+        .order_by(GenerationJob.created_at)
+    ).scalars().all()
+    data_dir = request.app.state.settings.data_dir
+    from app.db.models import StorageLocation
+    loc = db.execute(select(StorageLocation).where(
+        StorageLocation.is_default.is_(True))).scalar_one_or_none()
+    return {
+        "memory": {**mem, "pressure": resources.pressure_state()},
+        "gpus": sched.state() if sched else
+                {"gpu_count": 0, "free": 0, "slots": [], "prefs": {}},
+        "disk": {
+            "work_dir": str(data_dir),
+            "work_dir_free_bytes": resources.disk_free_bytes(data_dir),
+            "storage_root": (loc.root_path if loc else None),
+            "storage_root_free_bytes": (
+                resources.disk_free_bytes(loc.root_path) if loc else None),
+        },
+        "jobs": {
+            "queued": [{"id": j.id, "kind": j.kind,
+                        "adapter_id": j.adapter_id,
+                        "project_id": j.project_id,
+                        "message": j.message} for j in jobs
+                       if j.status == "queued"],
+            "running": [{"id": j.id, "kind": j.kind,
+                         "adapter_id": j.adapter_id,
+                         "project_id": j.project_id,
+                         "gpu_index": j.gpu_index,
+                         "progress": j.progress,
+                         "message": j.message} for j in jobs
+                        if j.status == "running"],
+        },
+        "margins": {
+            "effective": margins,
+            "user_overrides": overrides,
+            # measured vs estimated is explicit — nothing silently mixes
+            "basis": "measured" if not overrides else
+                     "measured + user overrides",
+        },
+        "settings": _resource_settings(db),
+    }
+
+
+@api_router.put("/api/settings/resources",
+                response_model=ResourceSettingsOut)
+def set_resource_settings(body: ResourceSettingsUpdate,
+                          request: Request,
+                          db: Session = Depends(get_db)):
+    """C4-E — write user admission thresholds. Values are GiB; None
+    leaves the field at its default. An override can never weaken the
+    built-in critical floors, and non-finite or absurd values refuse."""
+    import math
+    from app.domain import resources
+    # Hard floors — user overrides may only make admission STRICTER.
+    floors = resources.safety_margins()
+    floor_gib = {
+        "critical_commit_gib":
+            floors["critical_commit_headroom_bytes"] / (1024 ** 3),
+        "critical_phys_gib":
+            floors["critical_avail_phys_bytes"] / (1024 ** 3),
+    }
+    vals = body.model_dump(exclude_unset=True)
+    for field, v in vals.items():
+        if v is None:
+            continue
+        if not math.isfinite(v):
+            raise HTTPException(422, f"{field} must be a finite number")
+        if v < 0:
+            raise HTTPException(422, f"{field} cannot be negative")
+        if v > 4096:
+            raise HTTPException(422, f"{field} cannot exceed 4096 GiB")
+        if field in floor_gib and v < floor_gib[field]:
+            raise HTTPException(
+                422, f"{field} cannot be below the built-in safety "
+                     f"floor ({floor_gib[field]:g} GiB)")
+        key = dict(_RESOURCE_SETTING_KEYS)[field]
+        model_files._set_setting(db, key, float(v))
+    db.commit()
+    return _resource_settings(db)
 
 
 # ---------- projects ----------

@@ -150,6 +150,12 @@ class JobEngine:
             else:
                 job.status = "failed"
                 job.error = "interrupted by application stop; not resumable"
+                # C4-E — a crash can leave partial outputs in the work
+                # dir; non-resumable jobs get the same purge as a normal
+                # failure so nothing masquerades as a result later.
+                self._purge_work_dir(
+                    self._data_dir / "jobs" / (job.project_id or "_app"),
+                    job.id)
         return sum(1 for j in stuck if j.status == "queued")
 
     async def start(self) -> None:
@@ -313,7 +319,8 @@ class JobEngine:
                     # no local weights/RAM to preflight (C2.0c).
                     and getattr(profile, "execution_scope", "local")
                     != "remote"):
-                mem_gate = _memory_preflight(job.request_json, profile, job.id)
+                mem_gate = _memory_preflight(job.request_json, profile,
+                                             job.id, db=s)
                 if mem_gate["decision"] == "block":
                     job.status = "failed"
                     job.error = f"preflight memory check failed: {mem_gate['reason']}"
@@ -335,6 +342,28 @@ class JobEngine:
                         return
                     job.message = f"memory warning acknowledged: {mem_gate['reason']}"
                     job.progress_json = {"memory_preflight": mem_gate["snapshot"]}
+                    s.commit()
+
+                # C4-E — disk preflight: the model's declared working
+                # footprint must fit the work/output volumes with the
+                # configured headroom. Block is honest-fail, warn is
+                # recorded on the job for the status surface.
+                disk_gate = _disk_preflight(job.request_json,
+                                            self._data_dir, s)
+                if disk_gate["decision"] == "block":
+                    job.status = "failed"
+                    job.error = (f"preflight disk check failed: "
+                                 f"{disk_gate['reason']}")
+                    job.progress_json = {
+                        "disk_preflight": disk_gate["snapshot"]}
+                    job.completed_at = utcnow()
+                    s.commit()
+                    await self._publish(job)
+                    return
+                if disk_gate["decision"] == "warn":
+                    merged = dict(job.progress_json or {})
+                    merged["disk_preflight"] = disk_gate["snapshot"]
+                    job.progress_json = merged
                     s.commit()
 
             work_dir = self._data_dir / "jobs" / (job.project_id or "_app")
@@ -654,17 +683,59 @@ def _estimate_ram_bytes(request: dict[str, Any]) -> tuple[int, bool]:
 
 
 def _memory_preflight(request: dict[str, Any], profile: Any,
-                      job_id: str = "") -> dict[str, Any]:
+                      job_id: str = "", db=None) -> dict[str, Any]:
     """Gate a gen job on available RAM INCLUDING other workers' live
     reservations. Reserves the estimate for the job's lifetime."""
     from app.domain import resources
     est, known = _estimate_ram_bytes(request)
     reserved_by_others = sum(v for k, v in _reserved_ram.items() if k != job_id)
-    out = resources.preflight_memory_check(est + reserved_by_others, known=known)
+    margins = resources.safety_margins(
+        resources.settings_overrides(db) if db is not None else None)
+    out = resources.preflight_memory_check(
+        est + reserved_by_others, known=known, margins=margins)
     out["snapshot"]["reserved_by_others_bytes"] = reserved_by_others
     if out["decision"] != "block" and job_id:
         _reserved_ram[job_id] = est
     return out
+
+
+def _disk_preflight(request: dict[str, Any], data_dir,
+                    db) -> dict[str, Any]:
+    """C4-E — refuse a gen job whose declared working footprint can't
+    fit the output volumes. needed = the model catalog's declared
+    min_disk_bytes (measured requirement); undeclared → only the
+    configured headroom is enforced, flagged as unknown-estimate.
+    Checks the work-dir volume AND the default CAS location — they can
+    be different drives."""
+    from app.domain import model_catalog, resources
+    from app.db.models import StorageLocation
+    from sqlalchemy import select as _sel
+    spec = model_catalog.get(request.get("model_key") or "")
+    margins = resources.safety_margins(resources.settings_overrides(db))
+    declared = (spec is not None
+                and spec.requirements.get("min_disk_bytes") is not None)
+    needed = int(spec.requirements["min_disk_bytes"]) if declared else 0
+    paths: dict[str, Any] = {"work_dir": data_dir}
+    loc = db.execute(_sel(StorageLocation).where(
+        StorageLocation.is_default.is_(True))).scalar_one_or_none()
+    if loc is not None:
+        paths["storage_root"] = loc.root_path
+    snaps: dict[str, Any] = {}
+    warn: dict[str, Any] | None = None
+    for label, p in paths.items():
+        r = resources.preflight_disk_check(
+            needed, resources.disk_free_bytes(p), label=label,
+            margins=margins, known=declared)
+        snaps[label] = r["snapshot"]
+        if r["decision"] == "block":
+            return {"decision": "block", "reason": r["reason"],
+                    "snapshot": snaps}
+        if r["decision"] == "warn" and warn is None:
+            warn = r
+    if warn is not None:
+        return {"decision": "warn", "reason": warn["reason"],
+                "snapshot": snaps}
+    return {"decision": "ok", "reason": "", "snapshot": snaps}
 
 
 def _release_memory_reservation(job_id: str) -> None:

@@ -59,10 +59,11 @@ def system_memory() -> dict[str, Any]:
                 "commit_headroom_bytes": 0}
 
 
-def safety_margins() -> dict[str, int]:
-    """Configurable guard rails (env-overridable for tests)."""
+def safety_margins(overrides: dict | None = None) -> dict[str, int]:
+    """Configurable guard rails (env-overridable for tests; caller may
+    pass DB-setting overrides in the same byte-keyed shape)."""
     import os
-    return {
+    m = {
         # keep this much physical RAM free for the OS/apps at all times
         "os_headroom_bytes": int(os.environ.get("ATOMIC_OS_HEADROOM_BYTES",
                                                 str(int(4 * GIB)))),
@@ -74,7 +75,76 @@ def safety_margins() -> dict[str, int]:
             os.environ.get("ATOMIC_CRITICAL_PHYS_BYTES", str(int(1.0 * GIB)))),
         # worker wall-clock ceiling (seconds); 0 = disabled
         "max_worker_seconds": int(os.environ.get("ATOMIC_MAX_WORKER_SECONDS", "0")),
+        # C4-E — admission requires at least this much free disk on the
+        # output/work volumes, on top of the job's own estimate
+        "min_disk_free_bytes": int(
+            os.environ.get("ATOMIC_MIN_DISK_BYTES", str(int(5 * GIB)))),
+        # extra headroom subtracted from usable VRAM before a job is
+        # admitted to a device (driver reports often lag allocation)
+        "vram_headroom_bytes": int(
+            os.environ.get("ATOMIC_VRAM_HEADROOM_BYTES", "0")),
     }
+    if overrides:
+        for k, v in overrides.items():
+            if k in m and v is not None:
+                m[k] = int(v)
+    return m
+
+
+def settings_overrides(session) -> dict[str, int]:
+    """C4-E — read the user-configured resource thresholds from
+    app_settings (`res_*_gib` keys written by PUT /api/settings/
+    resources). GiB floats → the byte-keyed margin names."""
+    from app.domain.model_files import _get_setting
+    out: dict[str, int] = {}
+    for key, margin in (
+            ("res_os_headroom_gib", "os_headroom_bytes"),
+            ("res_critical_commit_gib", "critical_commit_headroom_bytes"),
+            ("res_critical_phys_gib", "critical_avail_phys_bytes"),
+            ("res_min_disk_gib", "min_disk_free_bytes"),
+            ("res_vram_headroom_gib", "vram_headroom_bytes")):
+        v = _get_setting(session, key)
+        if v is not None:
+            try:
+                out[margin] = int(float(v) * GIB)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def disk_free_bytes(path) -> int | None:
+    """Free bytes on the volume holding `path`; None when unresolvable."""
+    try:
+        import shutil
+        return int(shutil.disk_usage(str(path)).free)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def preflight_disk_check(needed_bytes: int, free_bytes: int | None,
+                         *, label: str, margins: dict | None = None,
+                         known: bool = True) -> dict[str, Any]:
+    """C4-E — decide whether a job may write `needed_bytes` on a volume.
+    Same decision shape as preflight_memory_check: ok | warn | block.
+    An unknown estimate is a warn (conservative), never a silent pass."""
+    margins = margins or safety_margins()
+    min_free = margins["min_disk_free_bytes"]
+    snap = {"label": label, "needed_bytes": needed_bytes,
+            "free_bytes": free_bytes, "min_free_bytes": min_free,
+            "estimate_known": known}
+    if free_bytes is None:
+        return {"decision": "warn",
+                "reason": f"free disk space on {label} could not be "
+                          "probed — proceeding with monitoring",
+                "snapshot": snap}
+    if free_bytes < needed_bytes + min_free:
+        return {"decision": "block",
+                "reason": f"insufficient disk space on {label}: job "
+                          f"needs ~{needed_bytes / GIB:.2f} GiB plus "
+                          f"~{min_free / GIB:.1f} GiB headroom, only "
+                          f"~{free_bytes / GIB:.2f} GiB free",
+                "snapshot": snap}
+    return {"decision": "ok", "reason": "", "snapshot": snap}
 
 
 def pressure_state() -> str:
@@ -89,11 +159,13 @@ def pressure_state() -> str:
     return "ok"
 
 
-def preflight_memory_check(estimated_ram_bytes: int, *, known: bool) -> dict[str, Any]:
+def preflight_memory_check(estimated_ram_bytes: int, *, known: bool,
+                           margins: dict | None = None) -> dict[str, Any]:
     """Decide whether a job may launch given its RAM estimate.
     Returns {decision: 'ok'|'warn'|'block', reason, snapshot} — the CALLER
     decides whether 'warn' needs user confirmation."""
-    m, margins = system_memory(), safety_margins()
+    m = system_memory()
+    margins = margins or safety_margins()
     headroom_after = m["avail_phys_bytes"] - estimated_ram_bytes
     commit_after = m["commit_headroom_bytes"] - estimated_ram_bytes
     snap = {**m, "estimated_ram_bytes": estimated_ram_bytes,
