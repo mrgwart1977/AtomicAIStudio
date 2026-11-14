@@ -89,6 +89,30 @@ def validate_outpaint(src_w: int, src_h: int,
                          "to expand")
 
 
+def mask_to_provider_b64(data: bytes) -> str:
+    """Translate the internal mask convention to the provider wire
+    format. Both documented inpaint contracts implemented here —
+    OpenAI Images edits and BFL FLUX Fill — expect an image whose
+    transparent region is editable (the inverse of our luminance
+    convention). This explicit boundary conversion is what the
+    simulated submit body carries; the internal mask is never assumed
+    to be provider-compatible as-is."""
+    import base64
+    info = image_safety.inspect_image(data)
+    with Image.open(io.BytesIO(data)) as im:
+        lum = im.convert("L").tobytes()
+    w, h = info.width, info.height
+    rgba = Image.new("RGBA", (w, h))
+    px = rgba.load()
+    for y in range(h):
+        for x in range(w):
+            px[x, y] = ((0, 0, 0, 0) if lum[y * w + x] >= MASK_EDIT_THRESHOLD
+                        else (0, 0, 0, 255))
+    buf = io.BytesIO()
+    rgba.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def compute_pad(src_w: int, src_h: int, out_w: int, out_h: int,
                 placement: str) -> dict[str, int]:
     """Directional pad for a placement anchor (see module docstring).

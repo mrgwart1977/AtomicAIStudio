@@ -719,6 +719,10 @@ class SimCloudEditAdapter(SimCloudImg2ImgAdapter):
                 mask_data, src_w=info.width, src_h=info.height)
             out["mask_b64"] = self._load_inspected_b64(
                 req["mask_path"], req.get("mask_sha256"))
+            # Adapter-boundary translation: the provider wire format is
+            # produced here, never assumed to match the internal mask.
+            out["mask_provider_b64"] = image_edit.mask_to_provider_b64(
+                mask_data)
             out["mask_editable"] = mask_meta
         else:
             out_w, out_h = int(req["out_width"]), int(req["out_height"])

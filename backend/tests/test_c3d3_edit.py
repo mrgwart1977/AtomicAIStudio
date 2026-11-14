@@ -410,3 +410,59 @@ def test_durable_request_shape(client, tmp_path):
     assert req["out_width"] == 128 and req["out_height"] == 96
     assert req["placement"] == "center"
     assert req["pad"]["left"] + req["pad"]["right"] == 64
+
+
+def test_mask_provider_translation():
+    """Internal lum>=128 editable → provider wire = transparent editable.
+    The adapter boundary must convert explicitly — never pass through."""
+    import base64
+    im = Image.new("RGB", (4, 2))
+    for x in range(2):            # left half editable (white)
+        for y in range(2):
+            im.putpixel((x, y), (255, 255, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    out_b64 = image_edit.mask_to_provider_b64(buf.getvalue())
+    out = Image.open(io.BytesIO(base64.b64decode(out_b64))).convert("RGBA")
+    px = out.load()
+    assert px[0, 0][3] == 0 and px[1, 1][3] == 0      # editable → transparent
+    assert px[2, 0][3] == 255 and px[3, 1][3] == 255  # protected → opaque
+    assert out.size == (4, 2)
+
+
+def test_compute_pad_all_nine_anchors():
+    """Every documented anchor is deterministic and preserves the source
+    region exactly (pads sum to the delta; opposite edges get the rest)."""
+    cases = {
+        "center": (32, 32, 24, 24), "top": (32, 32, 0, 48),
+        "bottom": (32, 32, 48, 0), "left": (0, 64, 24, 24),
+        "right": (64, 0, 24, 24), "top_left": (0, 64, 0, 48),
+        "top_right": (64, 0, 0, 48), "bottom_left": (0, 64, 48, 0),
+        "bottom_right": (64, 0, 48, 0)}
+    for anchor, (l, r, t, b) in cases.items():
+        pad = image_edit.compute_pad(64, 48, 128, 96, anchor)
+        assert pad == {"left": l, "right": r, "top": t, "bottom": b}, anchor
+        assert pad["left"] + pad["right"] == 64
+        assert pad["top"] + pad["bottom"] == 48
+    # Odd deltas: extra pixel deterministically on right/bottom.
+    pad = image_edit.compute_pad(64, 48, 65, 49, "center")
+    assert pad == {"left": 0, "right": 1, "top": 0, "bottom": 1}
+
+
+def test_inpaint_submit_body_uses_translated_mask(client, tmp_path):
+    """The provider submit body carries the translated mask, not the raw
+    internal bytes — verified through a capture of the intent request."""
+    from app.adapters.cloud_image import SimCloudEditAdapter
+    from app.domain.workers.rest_simulated import (
+        build_simulated_edit_providers)
+    p = make_project(client)
+    src = _import(client, p["id"], _png(tmp_path / "s.png"), "src.png")
+    msk = _import(client, p["id"], _mask(tmp_path / "m.png"), "mask.png")
+    r = _commit(client, p["id"], "generate.image.edit",
+                {**INPAINT, "source_asset_id": src["id"],
+                 "mask_asset_id": msk["id"]})
+    req = dict(_job_row(client, r["job_id"]).request_json)
+    adapter = SimCloudEditAdapter(build_simulated_edit_providers())
+    intent = adapter._intent_request(req)
+    assert intent["mask_provider_b64"]
+    assert intent["mask_provider_b64"] != intent["mask_b64"]

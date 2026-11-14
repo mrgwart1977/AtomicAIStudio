@@ -195,7 +195,9 @@ class OpenAIImagesProvider(RestRemoteProvider):
             # editable-region image (the real API posts multipart fields;
             # the simulated contract carries the same values as b64 JSON).
             body["image"] = req.get("source_b64") or ""
-            body["mask"] = req.get("mask_b64") or ""
+            # mask_provider_b64 — the adapter's explicit translation to
+            # the documented transparent=editable wire format.
+            body["mask"] = req.get("mask_provider_b64") or ""
         if req.get("size"):
             body["size"] = req["size"]
         if req.get("quality"):
@@ -461,7 +463,7 @@ class BflFluxProvider(RestRemoteProvider):
             # Documented FLUX Fill contract: image + mask (bright region
             # = editable), same /v1/{model} route.
             body["image"] = req.get("source_b64") or ""
-            body["mask"] = req.get("mask_b64") or ""
+            body["mask"] = req.get("mask_provider_b64") or ""
         if req.get("mode") == "outpaint":
             # Documented FLUX Expand contract: image + directional pad.
             body["image"] = req.get("source_b64") or ""
