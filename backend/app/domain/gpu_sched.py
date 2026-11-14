@@ -100,6 +100,17 @@ class GpuScheduler:
             if device in self._busy:
                 self.last_reason = f"requested GPU {device} is busy"
                 return None
+            # C4-E — a manual pin honors the same VRAM fit as auto: a
+            # known estimate that can't fit (usable minus configured
+            # headroom) stays queued rather than risking a hard OOM.
+            headroom = int(prefs.get("vram_headroom_bytes") or 0)
+            usable = max(0, (compatibility.usable_vram(g) or 0) - headroom)
+            if est_vram and usable and usable < est_vram:
+                self.last_reason = (
+                    f"requested GPU {device} cannot fit the job — needs "
+                    f"~{est_gib} VRAM, ~{usable / 2**30:.1f} GiB usable "
+                    "after headroom")
+                return None
             self._busy[device] = job_id
             return device
 

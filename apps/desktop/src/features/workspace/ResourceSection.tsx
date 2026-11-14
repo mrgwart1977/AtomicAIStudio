@@ -185,6 +185,32 @@ export function ResourceSection({ setError }: { setError: (m: string | null) => 
             <p className="mt-1.5 text-[10px] text-faint">
               Thresholds are admission guard rails only — hard critical floors still apply.
             </p>
+            <dl className="mt-2 space-y-0.5 text-[10px] text-faint">
+              <div className="flex justify-between">
+                <dt>OS headroom (effective)</dt>
+                <dd>{fmtBytes(res.margins.effective.os_headroom_bytes ?? 0)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt>Critical commit floor</dt>
+                <dd>{fmtBytes(res.margins.effective.critical_commit_headroom_bytes ?? 0)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt>Critical free-RAM floor</dt>
+                <dd>{fmtBytes(res.margins.effective.critical_avail_phys_bytes ?? 0)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt>Min free disk (effective)</dt>
+                <dd>{fmtBytes(res.margins.effective.min_disk_free_bytes ?? 0)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt>VRAM headroom (effective)</dt>
+                <dd>{fmtBytes(res.margins.effective.vram_headroom_bytes ?? 0)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt>Basis</dt>
+                <dd>{res.margins.basis}</dd>
+              </div>
+            </dl>
             <button onClick={() => void save()} disabled={busy}
               className="mt-2 rounded-md border border-line px-3 py-1 text-xs text-muted hover:text-fg disabled:opacity-40">
               Save thresholds{saved ? " — saved" : ""}

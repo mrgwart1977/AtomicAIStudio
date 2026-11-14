@@ -442,14 +442,32 @@ def set_resource_settings(body: ResourceSettingsUpdate,
                           request: Request,
                           db: Session = Depends(get_db)):
     """C4-E — write user admission thresholds. Values are GiB; None
-    leaves the field at its default. An override can never widen a
-    check below the code's hard critical floor."""
+    leaves the field at its default. An override can never weaken the
+    built-in critical floors, and non-finite or absurd values refuse."""
+    import math
+    from app.domain import resources
+    # Hard floors — user overrides may only make admission STRICTER.
+    floors = resources.safety_margins()
+    floor_gib = {
+        "critical_commit_gib":
+            floors["critical_commit_headroom_bytes"] / (1024 ** 3),
+        "critical_phys_gib":
+            floors["critical_avail_phys_bytes"] / (1024 ** 3),
+    }
     vals = body.model_dump(exclude_unset=True)
     for field, v in vals.items():
         if v is None:
             continue
+        if not math.isfinite(v):
+            raise HTTPException(422, f"{field} must be a finite number")
         if v < 0:
             raise HTTPException(422, f"{field} cannot be negative")
+        if v > 4096:
+            raise HTTPException(422, f"{field} cannot exceed 4096 GiB")
+        if field in floor_gib and v < floor_gib[field]:
+            raise HTTPException(
+                422, f"{field} cannot be below the built-in safety "
+                     f"floor ({floor_gib[field]:g} GiB)")
         key = dict(_RESOURCE_SETTING_KEYS)[field]
         model_files._set_setting(db, key, float(v))
     db.commit()

@@ -66,6 +66,27 @@ def test_gpu_scheduler_vram_headroom():
                       est_vram=4 * _GIB) == 0
 
 
+def test_gpu_scheduler_manual_pin_honors_headroom():
+    """A manual device pin is not an escape hatch: a known estimate
+    that can't fit the pinned GPU stays queued with a clear reason."""
+    from app.domain.gpu_sched import GpuScheduler
+    hw = {"gpus": [{"index": 0, "name": "g0",
+                    "vram_bytes": 10 * _GIB,
+                    "vram_free_bytes": 10 * _GIB},
+                   {"index": 1, "name": "g1",
+                    "vram_bytes": 24 * _GIB,
+                    "vram_free_bytes": 24 * _GIB}]}
+    s = GpuScheduler(hw_probe=hw,
+                     prefs={"vram_headroom_bytes": 8 * _GIB})
+    # GPU 0: 10-8=2 GiB usable < 4 GiB est → queued, no silent move.
+    assert s.acquire("j1", {"device": 0},
+                     est_vram=4 * _GIB) is None
+    assert "cannot fit" in s.last_reason
+    # GPU 1 fits fine on the same request.
+    assert s.acquire("j1", {"device": 1},
+                     est_vram=4 * _GIB) == 1
+
+
 def test_resource_settings_roundtrip(client):
     make_project(client)
     r = client.put("/api/settings/resources",
@@ -84,6 +105,24 @@ def test_resource_settings_roundtrip(client):
     # Negative values refuse.
     assert client.put("/api/settings/resources",
                       json={"os_headroom_gib": -1}).status_code == 422
+    # Nonfinite values refuse — raw bodies since httpx won't emit NaN.
+    r = client.put("/api/settings/resources",
+                   content=b'{"os_headroom_gib": NaN}',
+                   headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = client.put("/api/settings/resources",
+                   content=b'{"vram_headroom_gib": Infinity}',
+                   headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    # Absurd magnitude refuses.
+    assert client.put("/api/settings/resources",
+                      json={"min_disk_free_gib": 99999}
+                      ).status_code == 422
+    # Critical floors cannot be weakened below the built-in value.
+    r = client.put("/api/settings/resources",
+                   json={"critical_commit_gib": 0.1})
+    assert r.status_code == 422
+    assert "floor" in r.text.lower()
 
 
 def test_system_resources_shape(client):
