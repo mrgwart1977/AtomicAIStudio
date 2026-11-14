@@ -241,6 +241,8 @@ def _copy_shot(session: Session, src: Shot, scene_id: str, project_id: str, posi
         shot_type=src.shot_type, duration_sec=src.duration_sec, position=position,
         status=src.status, location_id=src.location_id,
         thumbnail_asset_id=src.thumbnail_asset_id,
+        reference_set_id=src.reference_set_id,
+        source_asset_id=src.source_asset_id,
         continuity_json=dict(src.continuity_json or {}), revision=1,
     )
     session.add(shot)
@@ -427,6 +429,7 @@ def create_shot(session: Session, scene: Scene, *, title: str = "", shot_type: s
 
 def update_shot(session: Session, shot: Shot, *, fields: dict, location_id=...,
                 thumbnail_asset_id=..., continuity=None, command_id: str | None,
+                reference_set_id=..., source_asset_id=...,
                 change_summary: str = "Updated shot") -> dict:
     from app.db.models import Asset
     before = shot_snapshot(session, shot)
@@ -447,6 +450,20 @@ def update_shot(session: Session, shot: Shot, *, fields: dict, location_id=...,
             if a is None or a.project_id != shot.project_id:
                 raise KeyError("thumbnail asset not found in this project")
         shot.thumbnail_asset_id = thumbnail_asset_id
+    # C4-B — generation bindings. None clears (explicit unbind); the
+    # project-scope checks here mirror thumbnail_asset_id handling.
+    if reference_set_id is not ...:
+        if reference_set_id is not None:
+            get_refset(session, reference_set_id, shot.project_id)
+        shot.reference_set_id = reference_set_id
+    if source_asset_id is not ...:
+        if source_asset_id is not None:
+            a = session.get(Asset, source_asset_id)
+            if a is None or a.project_id != shot.project_id:
+                raise KeyError("source asset not found in this project")
+            if a.kind != "image":
+                raise ValueError("shot source asset must be an image")
+        shot.source_asset_id = source_asset_id
     if continuity is not None:
         shot.continuity_json = {**(shot.continuity_json or {}), **continuity}
     shot.revision += 1
@@ -532,6 +549,7 @@ def revert_shot(session: Session, shot: Shot, to_revision: int, *, command_id: s
         raise KeyError(f"revision {to_revision} not found")
     snap = row.snapshot_json
     for f in SHOT_FIELDS + ("status", "scene_id", "location_id", "thumbnail_asset_id",
+                            "reference_set_id", "source_asset_id",
                             "continuity_json", "position"):
         if f in snap:
             setattr(shot, f, snap[f])

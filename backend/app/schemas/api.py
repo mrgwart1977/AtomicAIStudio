@@ -103,6 +103,7 @@ CommandType = Literal[
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
+    "shot.generate",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -353,6 +354,9 @@ class ShotOut(BaseModel):
     status: str
     location_id: str | None
     thumbnail_asset_id: str | None
+    # C4-B — generation bindings (character ref set + img2img source)
+    reference_set_id: str | None = None
+    source_asset_id: str | None = None
     continuity_json: dict[str, Any]
     revision: int
     created_at: datetime

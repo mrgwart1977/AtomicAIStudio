@@ -467,6 +467,9 @@ export interface Shot {
   status: string;
   location_id: string | null;
   thumbnail_asset_id: string | null;
+  /** C4-B — generation bindings (character ref set + img2img source) */
+  reference_set_id: string | null;
+  source_asset_id: string | null;
   continuity_json: Record<string, unknown>;
   revision: number;
   created_at: string;

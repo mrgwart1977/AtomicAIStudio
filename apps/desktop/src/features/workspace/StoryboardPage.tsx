@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { apiFetch } from "../../api/client";
+import { apiFetch, listReferenceSets } from "../../api/client";
 import { AuthImage } from "../../components/AuthImage";
-import { commitCommand } from "../../api/commands";
+import { commitCommand, previewCommand } from "../../api/commands";
 import type {
   CastMember,
+  CommandProposal,
   EntityRevision,
   Entity,
+  ProviderDetail,
+  ProviderSummary,
+  ReferenceSet,
   StoryboardScene,
 } from "../../api/types";
+import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 
@@ -668,9 +673,22 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     prompt: shot?.prompt ?? "",
     location_id: shot?.location_id ?? "",
     thumbnail_asset_id: shot?.thumbnail_asset_id ?? "",
+    reference_set_id: shot?.reference_set_id ?? "",
+    source_asset_id: shot?.source_asset_id ?? "",
     continuity_notes: String(shot?.continuity_json?.notes ?? ""),
     continuity_changes: String(shot?.continuity_json?.changes ?? ""),
   });
+  // C4-B — the project's reference sets, filtered to this shot's cast
+  // (own + inherited). Membership lives server-side; the picker only
+  // rebinds the set id.
+  const [refSets, setRefSets] = useState<ReferenceSet[]>([]);
+  useEffect(() => {
+    let live = true;
+    listReferenceSets(projectId)
+      .then((s) => { if (live) setRefSets(s); })
+      .catch(() => { if (live) setRefSets([]); });
+    return () => { live = false; };
+  }, [projectId]);
   // Cast editing state: {character_id: CastState}, plus added/removed tracking.
   const [cast, setCast] = useState<Record<string, CastState>>(
     () => Object.fromEntries((entry?.cast ?? []).map((c) => [c.character_id, castStateOf(c)])),
@@ -700,6 +718,12 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
   // Inherited members aren't "available" — they're customized via Override.
   const inheritedRows = entry?.inherited ?? [];
   const inheritedIds = new Set(inheritedRows.map((c) => c.character_id));
+  // C4-B — sets whose character is in this shot's effective cast
+  // (own ∪ inherited). The backend enforces the same rule.
+  const castIds = new Set([...Object.keys(cast), ...inheritedIds]);
+  const castSets = castIds.size
+    ? refSets.filter((s) => castIds.has(s.character_id))
+    : refSets;
   const sceneCastIds = new Set(scene.cast.map((c) => c.character_id));
   const avail = characters.filter(
     (c) => c.status === "active" && !assigned.has(c.id) && !inheritedIds.has(c.id));
@@ -721,6 +745,8 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         description: form.description, intent: form.intent, prompt: form.prompt,
         location_id: form.location_id || null,
         thumbnail_asset_id: form.thumbnail_asset_id || null,
+        reference_set_id: form.reference_set_id || null,
+        source_asset_id: form.source_asset_id || null,
         continuity: { notes: form.continuity_notes, changes: form.continuity_changes },
       }]);
     }
@@ -749,6 +775,8 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         duration_sec: parseFloat(form.duration_sec) || 0,
         description: form.description, intent: form.intent, prompt: form.prompt,
         location_id: form.location_id || null,
+        reference_set_id: form.reference_set_id || null,
+        source_asset_id: form.source_asset_id || null,
         continuity: { notes: form.continuity_notes, changes: form.continuity_changes },
       });
     }
@@ -843,6 +871,46 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                   placeholder="since the previous shot…"
                   className="mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg" />
               </label>
+            </div>
+
+            {/* ---- C4-B generation bindings ---- */}
+            <div className="mt-3 rounded-md border border-line p-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Generation bindings
+              </h4>
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <label className="block text-sm text-muted">Character reference set
+                  <select value={form.reference_set_id}
+                    onChange={(e) => setForm({ ...form, reference_set_id: e.target.value })}
+                    className="mt-1 w-full rounded-md border border-line bg-card px-2 py-1.5 text-xs text-fg">
+                    <option value="">None</option>
+                    {castSets.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {charName(s.character_id)} — {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm text-muted">Source image (img2img)
+                  <select value={form.source_asset_id}
+                    onChange={(e) => setForm({ ...form, source_asset_id: e.target.value })}
+                    className="mt-1 w-full rounded-md border border-line bg-card px-2 py-1.5 text-xs text-fg">
+                    <option value="">None — text-to-image</option>
+                    {imageAssets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="mt-1.5 text-[10px] text-faint">
+                References guide appearance; they don't guarantee identity. The backend
+                re-checks the set against this shot's cast at generate time.
+              </p>
+              {shot && (
+                <ShotGenerate
+                  shot={shot} projectId={projectId}
+                  setId={shot.reference_set_id} sourceId={shot.source_asset_id}
+                  onDone={onClose}
+                />
+              )}
             </div>
 
             {/* ---- cast ---- */}
@@ -1018,5 +1086,211 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+// ---------- C4-B shot generate ----------
+
+interface ImageContracts {
+  implemented: string[];
+  img2img_implemented?: string[];
+}
+
+/** Compact generate-from-shot section inside the shot dialog. Composes
+ * the saved shot bindings (reference set + source image) through the
+ * shot.generate convenience command — same preview -> approve -> commit
+ * path as CloudImagePanel, same expected_* staleness pinning. */
+function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
+  shot: { id: string; prompt: string };
+  projectId: string;
+  setId: string | null;
+  sourceId: string | null;
+  onDone: () => void;
+}) {
+  const jobs = useApp((s) => s.jobs);
+  const setWorkspaceTab = useApp((s) => s.setWorkspaceTab);
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [details, setDetails] = useState<Record<string, ProviderDetail>>({});
+  const [contracts, setContracts] = useState<string[]>([]);
+  const [providerKey, setProviderKey] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [pending, setPending] = useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    apiFetch<ImageContracts>("/api/providers/image-contracts")
+      .then((c) => {
+        if (!live) return;
+        setContracts(sourceId ? (c.img2img_implemented ?? []) : c.implemented);
+      })
+      .catch(() => { if (live) setContracts([]); });
+    apiFetch<ProviderSummary[]>("/api/providers?category=image")
+      .then((ps) => {
+        if (!live) return;
+        setProviders(ps);
+        return Promise.all(ps.map((p) =>
+          apiFetch<ProviderDetail>(`/api/providers/${p.key}`)
+            .then((d) => [p.key, d] as const)));
+      })
+      .then((ds) => {
+        if (!live || !ds) return;
+        setDetails(Object.fromEntries(ds));
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [sourceId]);
+
+  const selectable = useMemo(
+    () => providers.filter((p) => contracts.includes(p.key)),
+    [providers, contracts],
+  );
+  const models = useMemo(() => {
+    const d = details[providerKey];
+    return (d?.models ?? []).filter((m) =>
+      (m.capability || "").startsWith("image") &&
+      (sourceId ? m.editing?.img2img : true));
+  }, [details, providerKey, sourceId]);
+
+  // The latest generated asset for this shot — provenance carries the
+  // composed shot_generate block with the shot id.
+  const assets = useApp((s) => s.assetsPage?.items ?? []);
+  const latest = useMemo(() => assets.find((a) =>
+    a.kind === "image" &&
+    (a.provenance_json?.request as Record<string, unknown> | undefined)
+      ?.shot_generate &&
+    (((a.provenance_json?.request as Record<string, unknown> | undefined)
+      ?.shot_generate as Record<string, unknown> | undefined)?.shot_id === shot.id)),
+    [assets, shot.id]);
+  const running = useMemo(() => Object.values(jobs).find((j) =>
+    j.project_id === projectId && j.adapter_id === "cloud.image.sim" &&
+    (j.status === "queued" || j.status === "running")),
+    [jobs, projectId]);
+
+  function payload(): Record<string, unknown> {
+    return {
+      shot_id: shot.id,
+      provider_key: providerKey || undefined,
+      model_id: modelId || undefined,
+    };
+  }
+
+  async function preview() {
+    setBusy(true); setErr(null);
+    try {
+      const proposal = await previewCommand(projectId, "shot.generate", payload());
+      setPending({ payload: payload(), proposal });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approve() {
+    if (!pending) return;
+    setBusy(true); setErr(null);
+    try {
+      const rev = useApp.getState().currentProject()?.revision ?? 0;
+      const p = { ...pending.payload };
+      if (pending.proposal.resolved_references) {
+        p.expected_references = pending.proposal.resolved_references;
+        p.expected_set = pending.proposal.resolved_set;
+      }
+      await commitCommand(projectId, rev, "shot.generate", p, "storyboard");
+      setPending(null);
+      onDone();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-dashed border-line pt-3" data-testid="shot-generate">
+      <div className="flex items-center gap-2">
+        <h5 className="text-[10px] font-semibold uppercase tracking-wide text-faint">
+          Generate for this shot <SimBadge />
+        </h5>
+        {running && (
+          <span className="rounded bg-teal/15 px-1.5 py-0.5 text-[10px] text-teal">
+            {running.status === "running" ? `running ${Math.round(running.progress * 100)}%` : "queued"}
+          </span>
+        )}
+      </div>
+      <div className="mt-2 flex items-end gap-2">
+        <label className="block text-[11px] text-muted">Provider
+          <select value={providerKey} onChange={(e) => { setProviderKey(e.target.value); setModelId(""); }}
+            className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+            <option value="">Choose…</option>
+            {selectable.map((p) => <option key={p.key} value={p.key}>{p.label} (simulated)</option>)}
+          </select>
+        </label>
+        <label className="block text-[11px] text-muted">Model
+          <select value={modelId} onChange={(e) => setModelId(e.target.value)}
+            className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+            <option value="">Choose…</option>
+            {models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
+          </select>
+        </label>
+        <button
+          disabled={busy || !providerKey}
+          onClick={() => void preview()}
+          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:border-teal hover:text-teal disabled:opacity-40">
+          {busy ? "…" : "Preview"}
+        </button>
+      </div>
+      <p className="mt-1.5 text-[10px] text-faint">
+        {sourceId ? "Image-to-image using the bound source frame" : "Text-to-image"}
+        {setId ? " with the bound reference set" : ""}. Save the shot first —
+        generation uses the saved bindings, not this dialog's draft values.
+      </p>
+      {latest && (
+        <div className="mt-2 flex items-center gap-2">
+          <AuthImage pid={projectId} assetId={latest.id} alt="Latest generated"
+            className="h-14 w-20 rounded border border-line object-cover"
+            fallback={<div className="h-14 w-20 rounded border border-line bg-ink" />} />
+          <div className="text-[10px] text-muted">
+            <div className="font-medium text-fg">Latest output — {latest.name}</div>
+            <button onClick={() => { setWorkspaceTab("assets"); onDone(); }}
+              className="mt-0.5 text-teal hover:underline">
+              View in assets
+            </button>
+          </div>
+        </div>
+      )}
+      {pending && (
+        <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 p-2.5">
+          <div className="text-xs font-medium">Confirm simulated generation</div>
+          <div className="mt-1 text-[11px] text-muted">
+            {pending.proposal.summary}
+            {pending.proposal.cost_estimate?.est_cost_usd != null && (
+              <> · est ${pending.proposal.cost_estimate.est_cost_usd.toFixed(4)}</>
+            )}
+          </div>
+          {pending.proposal.resolved_references && (
+            <div className="mt-1 text-[10px] text-faint">
+              {pending.proposal.resolved_references.length} reference(s) pinned —
+              a set edit after this preview refuses the commit.
+            </div>
+          )}
+          <div className="mt-2 flex gap-2">
+            <button disabled={busy} onClick={() => void approve()}
+              className="rounded-md bg-teal px-3 py-1 text-xs font-medium text-ink disabled:opacity-40">
+              Approve and queue
+            </button>
+            <button disabled={busy} onClick={() => setPending(null)}
+              className="rounded-md border border-line px-3 py-1 text-xs text-muted">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {err && <p className="mt-2 text-xs text-danger">{err}</p>}
+    </div>
   );
 }
