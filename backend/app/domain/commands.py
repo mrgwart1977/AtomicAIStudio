@@ -2387,11 +2387,12 @@ def _job_request(session: Session, project: Project, command_type: str,
                     422, "reference_weights must match reference_asset_ids")
             for w in weights:
                 _validate_reference_weight(w)
-        refs, ref_paths = [], []
+        refs, ref_paths, ref_shas = [], [], []
         for rid in ref_ids:
             r, rp = _resolve_image(rid, "reference image")
             refs.append(r.id)
             ref_paths.append(str(rp))
+            ref_shas.append(r.sha256)
         req = {
             "command_type": command_type,
             "provider_key": provider["key"],
@@ -2416,6 +2417,7 @@ def _job_request(session: Session, project: Project, command_type: str,
             "source_path": str(src_path),
             "reference_asset_ids": refs,
             "reference_paths": ref_paths,
+            "reference_sha256": ref_shas,
             "reference_weights": payload.get("reference_weights") or [],
             "scene_id": payload.get("scene_id"),
             "shot_id": payload.get("shot_id"),

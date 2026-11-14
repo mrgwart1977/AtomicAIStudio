@@ -599,18 +599,31 @@ class SimCloudImg2ImgAdapter(SimCloudImageAdapter):
         return errors
 
     @staticmethod
-    def _load_inspected_b64(path: str) -> str:
+    def _load_inspected_b64(path: str, expected_sha256: str | None) -> str:
+        """Read + safety-inspect + hash-verify a CAS payload. The
+        recorded sha256 is re-checked at execution: an asset modified or
+        swapped after commit fails closed rather than silently editing
+        the wrong bytes."""
         data = Path(path).read_bytes()
         image_safety.inspect_image(data)  # raises on bad bytes
+        if expected_sha256:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != expected_sha256:
+                raise RuntimeError(
+                    f"CAS payload hash mismatch: expected "
+                    f"{expected_sha256[:16]}… got {actual[:16]}… — "
+                    "asset changed after commit, refusing")
         return base64.b64encode(data).decode("ascii")
 
     def _intent_request(self, req: dict[str, Any]) -> dict[str, Any]:
         out = super()._intent_request(req)
         out["mode"] = "img2img"
-        out["source_b64"] = self._load_inspected_b64(req["source_path"])
+        out["source_b64"] = self._load_inspected_b64(
+            req["source_path"], req.get("source_sha256"))
+        ref_shas = req.get("reference_sha256") or []
         out["reference_b64"] = [
-            self._load_inspected_b64(p)
-            for p in req.get("reference_paths") or []]
+            self._load_inspected_b64(p, ref_shas[i] if i < len(ref_shas) else None)
+            for i, p in enumerate(req.get("reference_paths") or [])]
         out["reference_weights"] = req.get("reference_weights") or []
         return out
 

@@ -374,3 +374,48 @@ def test_prompt_and_payload_validation(client, tmp_path):
     _preview(client, p["id"], "generate.image.img2img",
              {**GOOD, "source_asset_id": src["id"], "count": 2},
              expect=422)
+
+
+# =====================================================================
+# Execution-time integrity + i2v storage regression
+# =====================================================================
+
+def test_sha256_mismatch_at_execution_refuses(tmp_path):
+    """The CAS hash recorded at commit is re-verified when the adapter
+    loads the payload — a swapped or corrupted file fails closed."""
+    from app.adapters.cloud_image import SimCloudImg2ImgAdapter
+    from app.domain.workers.rest_simulated import (
+        build_simulated_img2img_providers)
+    adapter = SimCloudImg2ImgAdapter(build_simulated_img2img_providers())
+    f = _png(tmp_path / "x.png")
+    # Matching hash passes.
+    import hashlib
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    req = {"source_path": str(f), "source_sha256": sha,
+           "prompt": "x", "provider_key": "openai-images"}
+    out = adapter._intent_request(req)
+    assert out["source_b64"]
+    # Tampered hash record → refuse.
+    req["source_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        adapter._intent_request(req)
+
+
+def test_i2v_image_asset_resolves_storage_path(client, tmp_path):
+    """Regression: _job_request previously referenced `storage` without
+    accepting it — any i2v commit with image_asset_id raised NameError."""
+    from app.db.models import Project
+    from app.domain import commands as _c
+    p = make_project(client)
+    src = _import(client, p["id"], _png(tmp_path / "s.png"), "s.png")
+    storage = client.app.state.storage
+    with _sf(client)() as s:
+        proj = s.get(Project, p["id"])
+        req = _c._job_request(
+            s, proj, "generate.video",
+            {"model_key": "wan21.t2v.1_3b", "prompt": "drift",
+             "image_asset_id": src["id"]}, storage=storage)
+    assert Path(req["image_path"]).exists()
+    import hashlib
+    assert hashlib.sha256(
+        Path(req["image_path"]).read_bytes()).hexdigest() == src["sha256"]
