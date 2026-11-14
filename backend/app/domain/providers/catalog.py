@@ -438,7 +438,30 @@ IMAGES = [
                 # input_image per BFL docs; no mask/outpaint params.
                 "editing": _ed(img2img=True, refs=1,
                                note="Kontext edit: one input_image; "
-                                    "prompt-directed, no mask")}],
+                                    "prompt-directed, no mask")},
+               # C3-D3 — FLUX Fill: documented mask-inpaint model at
+               # POST /v1/flux-pro-1.0-fill (image + mask, bright region
+               # editable). Output = input dimensions (no size presets).
+               {"id": "flux-pro-1.0-fill", "capability": "image.edit",
+                "cost_table": {"unit": "per_image", "rate": 0.05,
+                               "checked": "2026-11-13",
+                               "source": "docs.bfl.ai FLUX Fill pricing",
+                               "note": "$0.05/image published rate; "
+                                       "synthetic estimate"},
+                "editing": _ed(mask=True,
+                               note="Fill: image+mask inpaint; mask "
+                                    "bright-region convention")},
+               # C3-D3 — FLUX Expand: documented outpaint model at
+               # POST /v1/flux-pro-1.0-expand (image + directional pad).
+               {"id": "flux-pro-1.0-expand", "capability": "image.edit",
+                "cost_table": {"unit": "per_image", "rate": 0.05,
+                               "checked": "2026-11-13",
+                               "source": "docs.bfl.ai FLUX Expand pricing",
+                               "note": "$0.05/image published rate; "
+                                       "synthetic estimate"},
+                "editing": _ed(outpaint=True,
+                               note="Expand: canvas extension via "
+                                    "top/bottom/left/right pad")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
                    _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate")]),
     _p("adobe-firefly", "Adobe Firefly", "image", "B", "adobe",

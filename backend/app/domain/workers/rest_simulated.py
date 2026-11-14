@@ -458,3 +458,18 @@ def build_simulated_img2img_providers(
                 api_key=api_key)
             for key in IMAGE_REST_KEYS
             if IMAGE_SPECS[key].edit_path is not None}
+
+
+def build_simulated_edit_providers(
+        *, api_key: str = "simulated-no-credential") -> dict:
+    """C3-D3 — only providers whose implemented contract documents an
+    inpaint or outpaint endpoint. A catalog editing declaration is NOT
+    sufficient — this is the contract gate."""
+    from app.domain.workers.rest_image_providers import (
+        IMAGE_REST_KEYS, IMAGE_SPECS, make_image_provider)
+    return {key: make_image_provider(
+                key, transport=simulated_image_transport(key),
+                api_key=api_key)
+            for key in IMAGE_REST_KEYS
+            if (IMAGE_SPECS[key].inpaint_path is not None
+                or IMAGE_SPECS[key].outpaint_path is not None)}

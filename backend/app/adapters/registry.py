@@ -58,6 +58,14 @@ class AdapterRegistry:
             build_simulated_img2img_providers)
         self.register(SimCloudImg2ImgAdapter(
             build_simulated_img2img_providers()))
+        # C3-D3 — simulated inpaint/outpaint on documented contracts
+        # (providers whose EndpointSpec declares inpaint_path or
+        # outpaint_path). Same two-layer fail-closed rule.
+        from app.adapters.cloud_image import SimCloudEditAdapter
+        from app.domain.workers.rest_simulated import (
+            build_simulated_edit_providers)
+        self.register(SimCloudEditAdapter(
+            build_simulated_edit_providers()))
         # M4.1 mock persistent adapter — dev/test only. Its worker is a
         # Python script spawned via sys.executable, which doesn't exist
         # as a usable interpreter in a frozen build (sys.executable is

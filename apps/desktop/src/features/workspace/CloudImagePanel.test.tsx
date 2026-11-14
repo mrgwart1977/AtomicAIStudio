@@ -55,6 +55,7 @@ vi.mock("../../stores/appStore", () => ({
 
 const PROVIDERS = [
   { key: "openai-images", label: "OpenAI Images", category: "image", access_class: "A", tier: "T1" },
+  { key: "bfl-flux", label: "FLUX / Black Forest Labs", category: "image", access_class: "A", tier: "T1" },
   { key: "gemini-images", label: "Gemini Images", category: "image", access_class: "A", tier: "T1" },
   { key: "canva", label: "Canva AI", category: "image", access_class: "B", tier: "T1" },
 ];
@@ -73,6 +74,20 @@ const DETAILS: Record<string, unknown> = {
       cost_table: { unit: "per_image", rates: { low: 0.02, medium: 0.07, high: 0.19 }, checked: "2026-11-13" },
     }],
   },
+  "bfl-flux": {
+    key: "bfl-flux", label: "FLUX / Black Forest Labs", access_class: "A",
+    strategies: [{ method: "official_api", tier: "T1", capabilities: ["image.generate", "image.edit"] }],
+    models: [
+      { id: "flux-pro-1.0-fill", capability: "image.edit",
+        editing: { img2img: false, mask_inpaint: true, outpaint: false,
+          max_reference_images: 0 },
+        cost_table: { unit: "per_image", rate: 0.05, checked: "2026-11-13" } },
+      { id: "flux-pro-1.0-expand", capability: "image.edit",
+        editing: { img2img: false, mask_inpaint: false, outpaint: true,
+          max_reference_images: 0 },
+        cost_table: { unit: "per_image", rate: 0.05, checked: "2026-11-13" } },
+    ],
+  },
   "gemini-images": {
     key: "gemini-images", label: "Gemini Images", access_class: "A",
     strategies: [{ method: "official_api", tier: "T1", capabilities: ["image.generate"] }],
@@ -89,6 +104,9 @@ const CONTRACTS = {
   implemented: ["openai-images"], adapter_id: "cloud.image.sim",
   img2img_implemented: ["openai-images"],
   img2img_adapter_id: "cloud.image.img2img.sim",
+  inpaint_implemented: ["openai-images", "bfl-flux"],
+  outpaint_implemented: ["bfl-flux"],
+  edit_adapter_id: "cloud.image.edit.sim",
   simulated: true, note: "simulated transports only",
 };
 
@@ -262,10 +280,11 @@ describe("CloudImagePanel — simulation honesty & provider selection", () => {
     expect(opts.find((o) => o.value === "openai-images")!.disabled).toBe(false);
     expect(opts.find((o) => o.value === "gemini-images")!.disabled).toBe(true);
     expect(opts.find((o) => o.value === "canva")!.disabled).toBe(true);
+    expect(opts.find((o) => o.value === "bfl-flux")!.disabled).toBe(true);
     expect(opts.find((o) => o.value === "gemini-images")!.textContent)
       .toContain("no implemented contract");
     expect(screen.getByTestId("ci-unavailable").textContent)
-      .toContain("2 catalog providers");
+      .toContain("3 catalog providers");
   });
 
   it("refuses to arm preview for an unimplemented provider", async () => {
@@ -655,5 +674,51 @@ describe("CloudImagePanel — C3-D2 image-to-image mode", () => {
     fireEvent.click(screen.getByTestId("ci-mode-img2img"));
     await waitFor(() => screen.getByTestId("ci-img2img-inputs"));
     expect((screen.getByTestId("ci-source") as HTMLSelectElement).value).toBe("");
+  });
+  it("inpaint sends mask + operation on generate.image.edit", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    fireEvent.click(screen.getByTestId("ci-mode-inpaint"));
+    await waitFor(() => screen.getByTestId("ci-inpaint-inputs"));
+    fireEvent.change(screen.getByTestId("ci-provider"), { target: { value: "openai-images" } });
+    await waitFor(() => screen.getByText("gpt-image-1"));
+    fireEvent.change(screen.getByTestId("ci-prompt"), { target: { value: "fill left half" } });
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    // Mask required before preview can arm.
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("ci-mask"), { target: { value: "asset-ref" } });
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByTestId("ci-preview-btn"));
+    await waitFor(() => screen.getByTestId("ci-approval"));
+    expect(previewCommand.mock.calls[0][1]).toBe("generate.image.edit");
+    const payload = previewCommand.mock.calls[0][2] as Record<string, unknown>;
+    expect(payload.operation).toBe("inpaint");
+    expect(payload.source_asset_id).toBe("asset-1");
+    expect(payload.mask_asset_id).toBe("asset-ref");
+  });
+
+  it("outpaint sends explicit canvas + placement; only implemented providers select", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByTestId("ci-unavailable"));
+    fireEvent.click(screen.getByTestId("ci-mode-outpaint"));
+    await waitFor(() => screen.getByTestId("ci-outpaint-inputs"));
+    const sel = screen.getByTestId("ci-provider") as HTMLSelectElement;
+    expect(Array.from(sel.options).find((o) => o.value === "bfl-flux")!.disabled).toBe(false);
+    expect(Array.from(sel.options).find((o) => o.value === "openai-images")!.disabled).toBe(true);
+    fireEvent.change(sel, { target: { value: "bfl-flux" } });
+    await waitFor(() => screen.getByText("flux-pro-1.0-expand"));
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    fireEvent.change(screen.getByTestId("ci-prompt"), { target: { value: "wider sky" } });
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("ci-outw"), { target: { value: "128" } });
+    fireEvent.change(screen.getByTestId("ci-outh"), { target: { value: "96" } });
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByTestId("ci-preview-btn"));
+    await waitFor(() => screen.getByTestId("ci-approval"));
+    const payload = previewCommand.mock.calls[0][2] as Record<string, unknown>;
+    expect(payload.operation).toBe("outpaint");
+    expect(payload.out_width).toBe(128);
+    expect(payload.placement).toBe("center");
+    expect(screen.getByTestId("ci-approval-source").textContent).toContain("128");
   });
 });

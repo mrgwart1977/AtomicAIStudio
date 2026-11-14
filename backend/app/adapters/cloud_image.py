@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from app.adapters.base import CapabilityProfile, JobHandle, JobCancelled
-from app.domain import image_safety
+from app.domain import image_edit, image_safety
 from app.domain import spend as _spend
 from app.domain.cloud_cost import image_tier_rate
 from app.domain.workers.remote import (RemoteProvider, RemoteStatus,
@@ -637,4 +637,109 @@ class SimCloudImg2ImgAdapter(SimCloudImageAdapter):
             "derived_from_sha256": req.get("source_sha256"),
             "reference_asset_ids": req.get("reference_asset_ids") or [],
             "reference_weights": req.get("reference_weights") or [],
+        }
+
+
+class SimCloudEditAdapter(SimCloudImg2ImgAdapter):
+    """C3-D3 — simulated mask-inpaint and outpaint on the documented
+    edit contracts of a provider (EndpointSpec.inpaint_path /
+    outpaint_path).
+
+    Same durable lifecycle and two-layer fail-closed negotiation as
+    img2img: the command layer checks the catalog model's
+    editing.mask_inpaint / editing.outpaint declaration AND the
+    implemented endpoint; this adapter re-checks the spec field so a
+    catalog flag alone can never route bytes to an unimplemented
+    surface. The mask contract is documented in app/domain/image_edit:
+    exact source-dimension match, luminance ≥ 128 = editable, no silent
+    resizing — re-verified here at execution against the CAS payloads.
+    """
+
+    profile = CapabilityProfile(
+        adapter_id="cloud.image.edit.sim",
+        display_name="Sim Cloud Edit (documented inpaint/outpaint contract, simulated transport)",
+        adapter_kind="cloud",
+        tasks=("image.inpaint", "image.outpaint"),
+        supports={"model_id": True, "remote_job": True, "seed": True,
+                  "size": True, "quality": True,
+                  "source_image": True, "reference_images": True,
+                  "mask": True, "outpaint": True},
+        limits={"max_prompt_chars": 8000, "images_per_job": 1,
+                "max_reference_images": 16,
+                "max_out_dim": image_edit.MAX_OUT_DIM},
+        requires_cloud=True,
+        cost_model="per_call",
+        lane="gen", needs_gpu=False,
+        worker_model="remote",
+        execution_scope="remote",
+        notes=("Documented inpaint/outpaint contract over injected "
+               "MockTransport — mask/dimension rules re-verified at "
+               "execution; output is a deterministic test PNG, never "
+               "verified_remote; source and mask assets untouched."),
+    )
+
+    async def validate(self, request: dict[str, Any]) -> list[str]:
+        errors = await SimCloudImageAdapter.validate(self, request)
+        mode = request.get("mode")
+        if mode not in ("inpaint", "outpaint"):
+            errors.append(f"unknown edit mode {mode!r}")
+            return errors
+        key = request.get("provider_key")
+        provider = self.providers.get(key) if key else None
+        if provider is not None:
+            path = (provider.spec.inpaint_path if mode == "inpaint"
+                    else provider.spec.outpaint_path)
+            if path is None:
+                errors.append(
+                    f"provider '{key}' has no implemented {mode} contract")
+        if not request.get("source_asset_id") or not request.get("source_path"):
+            errors.append("source image is required")
+        if mode == "inpaint" and not request.get("mask_path"):
+            errors.append("mask_path is required for inpaint")
+        if mode == "outpaint":
+            if not request.get("out_width") or not request.get("out_height"):
+                errors.append("out_width/out_height are required for outpaint")
+            if request.get("placement") not in image_edit.PLACEMENTS:
+                errors.append("a documented placement anchor is required")
+        return errors
+
+    def _intent_request(self, req: dict[str, Any]) -> dict[str, Any]:
+        out = super()._intent_request(req)
+        mode = req["mode"]
+        out["mode"] = mode
+        # Execution-time re-verification: source bytes are re-inspected
+        # for their true dimensions, then the mask/outpaint rules are
+        # checked against THEM — never against request metadata.
+        src_data = Path(req["source_path"]).read_bytes()
+        info = image_safety.inspect_image(src_data)
+        if mode == "inpaint":
+            mask_data = Path(req["mask_path"]).read_bytes()
+            # Convention check: exact dims match + ≥1 editable pixel.
+            mask_meta = image_edit.inspect_edit_mask(
+                mask_data, src_w=info.width, src_h=info.height)
+            out["mask_b64"] = self._load_inspected_b64(
+                req["mask_path"], req.get("mask_sha256"))
+            out["mask_editable"] = mask_meta
+        else:
+            out_w, out_h = int(req["out_width"]), int(req["out_height"])
+            # Convention check: expansion-only, bounded, anchored.
+            image_edit.validate_outpaint(
+                info.width, info.height, out_w, out_h)
+            out["out_width"], out["out_height"] = out_w, out_h
+            out["pad"] = req.get("pad") or image_edit.compute_pad(
+                info.width, info.height, out_w, out_h,
+                req.get("placement") or "center")
+        return out
+
+    def _media_extra(self, req: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "mode": req.get("mode"),
+            "derived_from_asset_id": req.get("source_asset_id"),
+            "derived_from_sha256": req.get("source_sha256"),
+            "mask_asset_id": req.get("mask_asset_id"),
+            "outpaint": ({"out_width": req.get("out_width"),
+                         "out_height": req.get("out_height"),
+                         "placement": req.get("placement")}
+                        if req.get("mode") == "outpaint" else None),
+            "reference_asset_ids": req.get("reference_asset_ids") or [],
         }
