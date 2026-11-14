@@ -99,6 +99,7 @@ CommandType = Literal[
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
+    "entity.assets.reorder", "entity.assets.update",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -258,6 +259,7 @@ class EntityAssetLinkOut(BaseModel):
     role: str
     label: str
     position: int
+    weight: float | None = None
     created_at: datetime
 
 

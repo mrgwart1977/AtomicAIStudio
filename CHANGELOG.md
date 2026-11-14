@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **C3-D1 — image reference foundation**: the provider catalog now
+  carries an explicit per-model `editing` declaration
+  (`img2img`, `max_reference_images`, `mask_inpaint`, `outpaint`,
+  `identity_reference`, `reference_weights`) — absent or False fails
+  closed, and `identity_reference` is never a claim of identity
+  consistency. `EntityAssetLink` gains an optional `weight`
+  (0.0–2.0, migration 0009) honored only by models declaring
+  `reference_weights`. New commands `entity.assets.reorder`
+  (complete-permutation ordering) and `entity.assets.update`
+  (label/weight edits); `entity.assets.link` accepts `weight`, requires
+  `kind="image"` for visual roles at preview, and decodes the real
+  bytes through the C3-A image-safety gate at commit. The character
+  detail panel gains reorder controls, a weight field, and a
+  "guidance ≠ identity guarantee" disclaimer.
 - **SEC-A3 — query-token authentication removed**: no endpoint accepts
   `?token=` anymore. REST is `X-Atomic-Token` header-only
   (`require_token` no longer falls back to query params); `/api/ws`

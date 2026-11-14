@@ -485,6 +485,7 @@ export interface EntityAssetLink {
   role: string;
   label: string;
   position: number;
+  weight: number | null;
   created_at: string;
 }
 
