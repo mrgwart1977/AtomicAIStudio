@@ -29,6 +29,10 @@ def _columns(conn, table: str) -> set[str]:
 
 def upgrade() -> None:
     conn = op.get_bind()
+    # Minimal/partial databases (e.g. a bare 0004-shaped shot_characters
+    # test DB) may lack the table entirely — nothing to do then.
+    if "entity_assets" not in sa.inspect(conn).get_table_names():
+        return
     if "weight" not in _columns(conn, "entity_assets"):
         op.add_column(
             "entity_assets",
@@ -38,5 +42,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
+    if "entity_assets" not in sa.inspect(conn).get_table_names():
+        return
     if "weight" in _columns(conn, "entity_assets"):
         op.drop_column("entity_assets", "weight")
