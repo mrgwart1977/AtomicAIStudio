@@ -448,8 +448,10 @@ export function GenerateStep({ state, shotsById, pid, commitFn, onGenerated, onS
 
 // ---------- 7. shot media (import) ----------
 
-export function MediaStep({ state, shotsById, assets, busy, onImport, onPickAsset }: {
+export function MediaStep({ state, shotsById, assets, busy, importJobs, onCancel, onImport, onPickAsset }: {
   state: FirstFilmState; shotsById: ShotInfo; assets: Asset[]; busy: string | null;
+  importJobs?: Record<string, { jobId: string; message: string }>;
+  onCancel?: (shotId: string) => Promise<void>;
   onImport: (shotId: string, path: string) => Promise<void>;
   onPickAsset: (shotId: string, assetId: string) => void;
 }) {
@@ -489,6 +491,17 @@ export function MediaStep({ state, shotsById, assets, busy, onImport, onPickAsse
                     onClick={() => void onImport(id, (paths[id] ?? "").trim())}>
                     {busy === `imp-${id}` ? "Importing…" : "Import"}
                   </button>
+                  {busy === `imp-${id}` && importJobs?.[id] && (
+                    <span className="text-xs text-sky">
+                      {importJobs[id].message}
+                      {onCancel && (
+                        <button className="ml-2 underline text-muted hover:text-fg"
+                          onClick={() => void onCancel(id)}>
+                          Cancel
+                        </button>
+                      )}
+                    </span>
+                  )}
                   {videos.length > 0 && (
                     <select className={input} defaultValue=""
                       onChange={(e) => e.target.value && onPickAsset(id, e.target.value)}

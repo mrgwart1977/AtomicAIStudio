@@ -44,6 +44,7 @@ export function FirstFilmPage() {
   const [tlDetail, setTlDetail] = useState<TimelineDetail | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [methods, setMethods] = useState<MethodOption[]>([]);
+  const [importJobs, setImportJobs] = useState<Record<string, { jobId: string; message: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<{ title: string; detail: string } | null>(null);
   const [showDetail, setShowDetail] = useState(false);
@@ -312,14 +313,25 @@ export function FirstFilmPage() {
             onError={fail} />
         )}
         {stepId === "media" && (
-          <MediaStep state={state} shotsById={shotsById} assets={assets} busy={busy}
+          <MediaStep state={state} shotsById={shotsById} assets={assets}
+            busy={busy} importJobs={importJobs}
+            onCancel={async (shotId) => {
+              const j = importJobs[shotId];
+              if (!j) return;
+              await apiFetch(`/api/jobs/${j.jobId}/cancel`, { method: "POST" })
+                .catch(() => {});
+            }}
             onImport={async (shotId, path) => {
               setBusy(`imp-${shotId}`); setErr(null);
               try {
                 const name = path.split(/[\\/]/).pop() || "clip";
                 const r = await commit("asset.import",
                   { source_path: path, name, kind: "video" });
-                const done = await pollJob(pid!, r.job_id!);
+                setImportJobs((x) => ({ ...x, [shotId]: { jobId: r.job_id!, message: "Importing…" } }));
+                const done = await pollJob(pid!, r.job_id!, undefined,
+                  (j) => setImportJobs((x) => x[shotId]
+                    ? { ...x, [shotId]: { jobId: j.id, message: j.message || "Importing…" } }
+                    : x));
                 const ap = await apiFetch<FFAssets>(`/api/projects/${pid}/assets?limit=200`);
                 setAssets(ap.items);
                 const a = ap.items.find((x) => x.id === done.output_asset_id)
@@ -330,6 +342,9 @@ export function FirstFilmPage() {
                   throw new Error("Import finished but the asset isn't visible — check the assets list.");
                 }
               } catch (e) { fail(e); return; }
+              finally {
+                setImportJobs((x) => { const { [shotId]: _d, ...rest } = x; return rest; });
+              }
               setBusy(null);
             }}
             onPickAsset={(shotId, assetId) =>
@@ -352,10 +367,13 @@ export function FirstFilmPage() {
                 }
                 if (!tid) throw new Error("timeline was not created");
                 const detail = await apiFetch<TimelineDetail>(`/api/projects/${pid}/timelines/${tid}`);
-                const have = new Set(detail.clips.map((c) => c.source_asset_id));
+                // Dedup on (shot, asset) pairs — re-running Build is
+                // idempotent, but two shots may legitimately share one file.
+                const have = new Set(
+                  detail.clips.map((c) => `${c.shot_id}:${c.source_asset_id}`));
                 for (const shotId of state.shot_ids) {
                   const aid = state.shot_assets[shotId];
-                  if (!aid || have.has(aid)) continue;
+                  if (!aid || have.has(`${shotId}:${aid}`)) continue;
                   await commit("timeline.clip.insert",
                     { timeline_id: tid, asset_id: aid, shot_id: shotId });
                 }
