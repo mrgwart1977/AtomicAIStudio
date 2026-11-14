@@ -29,9 +29,18 @@ def _columns(conn, table: str) -> set[str]:
 
 def upgrade() -> None:
     conn = op.get_bind()
-    # Minimal/partial databases (e.g. a bare 0004-shaped shot_characters
-    # test DB) may lack the table entirely — nothing to do then.
-    if "entity_assets" not in sa.inspect(conn).get_table_names():
+    tables = set(sa.inspect(conn).get_table_names())
+    if "entity_assets" not in tables:
+        # Every real ≥0004 database carries entity_assets alongside the
+        # M1 bible tables (projects/characters). A database that has the
+        # bible schema but lost this one table is corruption we must not
+        # silently conceal; minimal synthetic fixtures (a bare
+        # shot_characters test DB with no bible tables) legitimately
+        # skip.
+        if {"projects", "characters"} <= tables:
+            raise RuntimeError(
+                "entity_assets missing on an M1+-schema database — "
+                "refusing to conceal unexpected schema corruption")
         return
     if "weight" not in _columns(conn, "entity_assets"):
         op.add_column(
