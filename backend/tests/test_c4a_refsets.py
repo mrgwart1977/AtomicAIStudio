@@ -241,3 +241,58 @@ def test_weight_semantics_fail_closed(client, tmp_path):
                  {**IMG2IMG, "source_asset_id": src["id"],
                   "reference_set_id": sid}, expect=422)
     assert "reference weights" in str(r.json())
+
+
+def test_seed_change_invalidates_via_expected_set(client, tmp_path):
+    """A pinned-seed edit changes no member fingerprint — the approval
+    must still die via expected_set."""
+    pid, src, sid, ids, cid = _setup(client, tmp_path)
+    prev = _preview(client, pid, "generate.image.img2img",
+                    {**IMG2IMG, "source_asset_id": src["id"],
+                     "reference_set_id": sid})
+    resolved, rset = prev["resolved_references"], prev["resolved_set"]
+    assert rset["seed"] == 42
+    _commit(client, pid, "refset.update",
+            {"set_id": sid, "seed": 99}, key="c4a-seed-chg")
+    r = _commit(client, pid, "generate.image.img2img",
+                {**IMG2IMG, "source_asset_id": src["id"],
+                 "reference_set_id": sid,
+                 "expected_references": resolved,
+                 "expected_set": rset},
+                expect=422, key="c4a-gen-seed")
+    assert "changed since preview" in str(r.json())
+
+
+def test_resolved_entries_carry_content_hash(client, tmp_path):
+    """Approval fingerprints cover asset_id + weight + current sha256
+    of every member — a re-versioned asset is a different approval."""
+    pid, src, sid, ids, cid = _setup(client, tmp_path)
+    prev = _preview(client, pid, "generate.image.img2img",
+                    {**IMG2IMG, "source_asset_id": src["id"],
+                     "reference_set_id": sid})
+    for e in prev["resolved_references"]:
+        assert set(e) == {"asset_id", "weight", "sha256"}
+        assert len(e["sha256"]) == 64
+    # A caller-side lie about content identity is refused, not trusted.
+    fake = [dict(e, sha256="0" * 64)
+            for e in prev["resolved_references"]]
+    _commit(client, pid, "generate.image.img2img",
+            {**IMG2IMG, "source_asset_id": src["id"],
+             "reference_set_id": sid, "expected_references": fake},
+            expect=422, key="c4a-gen-fake")
+
+
+def test_full_expected_payload_commits(client, tmp_path):
+    """Happy path: preview-resolved entries + expected_set accepted."""
+    pid, src, sid, ids, cid = _setup(client, tmp_path)
+    prev = _preview(client, pid, "generate.image.img2img",
+                    {**IMG2IMG, "source_asset_id": src["id"],
+                     "reference_set_id": sid})
+    r = _commit(client, pid, "generate.image.img2img",
+                {**IMG2IMG, "source_asset_id": src["id"],
+                 "reference_set_id": sid,
+                 "expected_references": prev["resolved_references"],
+                 "expected_set": prev["resolved_set"]},
+                key="c4a-gen-full")
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded"

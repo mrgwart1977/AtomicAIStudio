@@ -144,6 +144,10 @@ class CommandProposalOut(BaseModel):
     # weights) so a UI approval can fingerprint the actual members, not
     # just the set id; None when no set was referenced.
     resolved_references: list[dict[str, Any]] | None = None
+    # C4-A — {id, seed, revision} of the previewed set: a pinned-seed
+    # or metadata edit changes no member fingerprint, so the approval
+    # pins set identity separately via expected_set at commit.
+    resolved_set: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):

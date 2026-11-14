@@ -257,7 +257,10 @@ export interface CommandProposal {
   /** C4-A — the actual ordered members of a previewed
    * reference_set_id; the approval commits this as
    * expected_references so a changed set can never slip through. */
-  resolved_references?: Array<{ asset_id: string; weight: number | null }> | null;
+  resolved_references?: Array<{ asset_id: string; weight: number | null; sha256: string }> | null;
+  /** C4-A — {id, seed, revision} of the previewed set; committed back
+   * as expected_set so pinned-seed/metadata edits invalidate too. */
+  resolved_set?: { id: string; seed: number | null; revision: number } | null;
 }
 
 export interface CommitResult {

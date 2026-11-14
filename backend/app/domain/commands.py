@@ -313,22 +313,35 @@ def _validate_refset_seed(seed) -> None:
 
 
 def _refset_refs(session: Session, project: Project, payload: dict) -> tuple:
-    """C4-A — resolve reference_set_id to ordered (ref_ids, weights).
+    """C4-A — resolve reference_set_id to (rs, entries, weights).
 
-    Returns the set row plus ordered member asset ids and an explicit
-    weight list: if ANY member carries a weight, the whole list is
-    explicit (missing members default to 1.0) so provider weight
-    semantics stay aligned; if none do, weights is []."""
+    ``entries`` is the ordered fingerprint a preview publishes and a
+    commit re-verifies — asset_id, link weight, and the CURRENT content
+    hash of each member — so membership, ordering, weight, and
+    underlying-content changes all invalidate a stale approval.
+    ``weights`` is the explicit provider-facing list: if ANY member
+    carries a weight, the whole list is explicit (missing members
+    default to 1.0) so provider weight semantics stay aligned; if none
+    do, weights is []."""
     rs = sb.get_refset(session, payload.get("reference_set_id") or "",
                        project.id)
     members = sb.set_members(session, rs.id, project.id)
-    ids = [l.asset_id for l in members]
+    entries = []
+    for l in members:
+        a = session.get(Asset, l.asset_id)
+        if a is None or a.project_id != project.id:
+            raise CommandError(404, "reference image asset not found "
+                                    "in project")
+        if a.kind != "image":
+            raise CommandError(422, "reference asset must be an image")
+        entries.append({"asset_id": l.asset_id, "weight": l.weight,
+                        "sha256": a.sha256})
     if any(l.weight is not None for l in members):
         weights = [l.weight if l.weight is not None else 1.0
                    for l in members]
     else:
         weights = []
-    return rs, ids, weights
+    return rs, entries, weights
 
 
 def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
@@ -559,10 +572,11 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                     422, "reference_set_id and reference_asset_ids "
                          "are mutually exclusive")
             try:
-                _, refs, refset_weights = _refset_refs(
+                _, entries, refset_weights = _refset_refs(
                     session, project, payload)
             except KeyError:
                 raise CommandError(404, "reference set not found in this project") from None
+            refs = [e["asset_id"] for e in entries]
             weights = refset_weights
         else:
             refs = list(payload.get("reference_asset_ids") or [])
@@ -1305,10 +1319,13 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
     # and refuses a mismatch against expected_references.
     if payload.get("reference_set_id"):
         try:
-            _, _ids, _ws = _refset_refs(session, project, payload)
-            out["resolved_references"] = [
-                {"asset_id": a, "weight": w}
-                for a, w in zip(_ids, _ws or [None] * len(_ids))]
+            _rs, _entries, _ws = _refset_refs(session, project, payload)
+            out["resolved_references"] = _entries
+            # Seed + revision ride alongside: a pinned-seed or metadata
+            # edit changes neither the member list nor the fingerprint,
+            # so the approval pins the set identity itself.
+            out["resolved_set"] = {"id": _rs.id, "seed": _rs.seed,
+                                   "revision": _rs.revision}
         except KeyError:
             pass  # _validate already reported the missing set
     return out
@@ -2651,19 +2668,26 @@ def _job_request(session: Session, project: Project, command_type: str,
                     422, "reference_set_id and reference_asset_ids "
                          "are mutually exclusive")
             try:
-                ref_set, ref_ids, refset_weights = _refset_refs(
+                ref_set, entries, refset_weights = _refset_refs(
                     session, project, payload)
             except KeyError:
                 raise CommandError(404, "reference set not found in this project") from None
+            ref_ids = [e["asset_id"] for e in entries]
             # Stale-approval guard: if the caller previewed a resolved
             # set and it changed since, refuse rather than silently
-            # generating against different references.
+            # generating against different references. Membership,
+            # ordering, weights, and content hashes live in
+            # expected_references; seed/revision live in expected_set.
             expected = payload.get("expected_references")
-            if expected is not None:
-                current = [{"asset_id": a, "weight": w}
-                           for a, w in zip(
-                               ref_ids, refset_weights or [None] * len(ref_ids))]
-                if expected != current:
+            if expected is not None and expected != entries:
+                raise CommandError(
+                    422, "reference set changed since preview — "
+                         "re-preview the exact resolved references")
+            expected_set = payload.get("expected_set")
+            if expected_set is not None:
+                current_set = {"id": ref_set.id, "seed": ref_set.seed,
+                               "revision": ref_set.revision}
+                if expected_set != current_set:
                     raise CommandError(
                         422, "reference set changed since preview — "
                              "re-preview the exact resolved references")

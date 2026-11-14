@@ -395,7 +395,8 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
         // payload: commit re-resolves and refuses if the set changed
         // since this preview.
         payload: proposal.resolved_references
-          ? { ...p, expected_references: proposal.resolved_references }
+          ? { ...p, expected_references: proposal.resolved_references,
+              expected_set: proposal.resolved_set }
           : p,
         proposal,
       }))

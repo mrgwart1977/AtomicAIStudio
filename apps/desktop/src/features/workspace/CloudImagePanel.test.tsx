@@ -684,9 +684,10 @@ describe("CloudImagePanel — C3-D2 image-to-image mode", () => {
         is_estimate: true, simulated: true, settlement: "usage-based" },
       current_revision: 7, launches_generation: true,
       resolved_references: [
-        { asset_id: "asset-ref", weight: null },
-        { asset_id: "asset-9", weight: null },
+        { asset_id: "asset-ref", weight: null, sha256: "a".repeat(64) },
+        { asset_id: "asset-9", weight: null, sha256: "b".repeat(64) },
       ],
+      resolved_set: { id: "rs1", seed: 42, revision: 1 },
     });
     fireEvent.click(screen.getByTestId("ci-preview-btn"));
     await waitFor(() => screen.getByTestId("ci-approval"));
@@ -699,9 +700,10 @@ describe("CloudImagePanel — C3-D2 image-to-image mode", () => {
     const committed = commitCommand.mock.calls[0][3] as Record<string, unknown>;
     expect(committed.reference_set_id).toBe("rs1");
     expect(committed.expected_references).toEqual([
-      { asset_id: "asset-ref", weight: null },
-      { asset_id: "asset-9", weight: null },
+      { asset_id: "asset-ref", weight: null, sha256: "a".repeat(64) },
+      { asset_id: "asset-9", weight: null, sha256: "b".repeat(64) },
     ]);
+    expect(committed.expected_set).toEqual({ id: "rs1", seed: 42, revision: 1 });
     // identity honesty copy is shown once a set is selected
     expect(document.body.textContent).toContain("do not guarantee identity");
   });
