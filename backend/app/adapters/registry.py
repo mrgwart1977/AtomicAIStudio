@@ -23,6 +23,7 @@ from app.adapters.ops import (
     BackupImportAdapter,
     BackupRestoreAdapter,
 )
+from app.adapters.timeline_export import TimelineExportAdapter
 
 
 class AdapterRegistry:
@@ -81,6 +82,7 @@ class AdapterRegistry:
                 BackupExportAdapter,
                 BackupImportAdapter,
                 BackupRestoreAdapter,
+                TimelineExportAdapter,
             ):
                 self.register(cls(session_factory, storage, settings))
         if session_factory is not None:

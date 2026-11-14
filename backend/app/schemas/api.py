@@ -115,6 +115,7 @@ CommandType = Literal[
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
+    "timeline.export",
 ]
 
 

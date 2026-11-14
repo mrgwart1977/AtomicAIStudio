@@ -131,3 +131,16 @@ deferred to a later stabilization PR; do not add a vector editor here.
 | 58 | Remove a clip | Confirmation explains the source asset is kept; remaining clips renumber |
 | 59 | Edit decision list | Deterministic `ade-edl/1` JSON: ordered clips, pinned version ids + sha256, integer frames, timebase |
 | 60 | History → Revert to an earlier revision | Timeline restores that edit state; the revert itself appears as a new revision |
+
+## C5-B — timeline export
+
+| # | Step | Expected |
+|---|------|----------|
+| 61 | Timeline with 2+ clips → Export… → Preview export | Preview shows clip count + profile + pinned EDL hash; Start export commits a durable job |
+| 62 | Start export → Jobs panel | ops.timeline.export job reports stages; output registers as a rendered video asset |
+| 63 | Edit the timeline between Preview export and Start export | Commit refuses — pins invalidate on any edit |
+| 64 | Exported asset → play/preview | Duration matches the EDL total; geometry matches the profile |
+| 65 | Cancel a queued/running export | Job ends cancelled; no partial output asset registered |
+| 66 | Two identical-spec untrimmed clips → export | Render path recorded as stream-copy on the output version |
+| 67 | A trimmed clip → export | Re-encode path; cut is frame-exact at the requested boundary |
+

@@ -270,7 +270,10 @@ export interface CommandProposal {
   resolved_params?: Record<string, unknown> | null;
   /** C5-A — timeline ops only: {id, revision, clip_count} pinned via
    * expected_timeline at commit. */
-  resolved_timeline?: { id: string; revision: number; clip_count: number } | null;
+  resolved_timeline?: {
+    id: string; revision: number; clip_count: number;
+    edl_sha256?: string;   // C5-B - timeline.export pins the EDL bytes
+  } | null;
 }
 
 export interface CommitResult {

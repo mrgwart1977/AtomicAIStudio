@@ -28,7 +28,10 @@ def probe(path: Path, *, timeout_s: float = 30.0,
     r = supervise.run(
         [tool["path"], "-v", "error", "-print_format", "json",
          "-show_format", "-show_streams", str(path)],
-        timeout_s=timeout_s, cancel=cancel)
+        timeout_s=timeout_s, cancel=cancel,
+        # Multi-stream files exceed the 4 KiB diagnostic tail; the JSON
+        # doc must parse whole.
+        capture_bytes=1 << 20)
     if r["timed_out"]:
         return {"ok": False, "reason": "ffprobe timed out"}
     if r["cancelled"]:
@@ -50,6 +53,12 @@ def probe(path: Path, *, timeout_s: float = 30.0,
     except (ValueError, ZeroDivisionError, AttributeError):
         fps = 0.0
     astreams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
+    # C5-B — copy-vs-encode needs the real stream descriptors, not
+    # just "looks like video": pixel format, stream timebase, VFR
+    # indication (avg vs base frame rate diverging), and per-stream
+    # audio descriptors for silence-fill/compat decisions.
+    avg = vstream.get("avg_frame_rate") or ""
+    base = vstream.get("r_frame_rate") or ""
     return {
         "ok": True,
         "duration_s": round(float(data.get("format", {}).get("duration") or 0), 3),
@@ -60,6 +69,19 @@ def probe(path: Path, *, timeout_s: float = 30.0,
         "container": (data.get("format", {}).get("format_name") or "").split(",")[0],
         "frames": int(vstream.get("nb_frames") or 0),
         "audio_streams": len(astreams),
+        "pix_fmt": vstream.get("pix_fmt") or "",
+        "time_base": vstream.get("time_base") or "",
+        "vfr": bool(avg and base and avg != base),
+        "audio": [
+            {
+                "codec": s.get("codec_name") or "",
+                "sample_rate": int(s.get("sample_rate") or 0),
+                "channels": int(s.get("channels") or 0),
+                "channel_layout": s.get("channel_layout") or "",
+                "time_base": s.get("time_base") or "",
+            }
+            for s in astreams
+        ],
         "probe_backend": "ffprobe",
     }
 
