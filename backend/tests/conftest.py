@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import collections
 import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,6 +15,17 @@ from app.config import Settings  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 TOKEN = "test-token"
+
+# Captured BEFORE any fixture patching — lets the real-hardware
+# integration path (test_m4_safety) restore the genuine psutil probe.
+REAL_VIRTUAL_MEMORY = psutil.virtual_memory
+
+_SVMEM = collections.namedtuple(
+    "svmem", ["total", "available", "percent", "used", "free"])
+_GIB = 1024 ** 3
+_ROOMY_SVMEM = _SVMEM(
+    total=64 * _GIB, available=48 * _GIB, percent=25.0,
+    used=16 * _GIB, free=48 * _GIB)
 
 
 @pytest.fixture()
@@ -55,10 +68,18 @@ def _roomy_memory(monkeypatch):
     """Deterministic memory headroom for every test: the safety preflight
     measures the REAL host — on a loaded 16 GB dev box that would make
     gen-job tests flaky. Tests that exercise the gate itself override
-    this with their own monkeypatch."""
+    this with their own monkeypatch.
+
+    Two admission sources exist and BOTH are pinned here:
+    - ``resources.system_memory`` — the command/job preflight gate.
+    - ``psutil.virtual_memory`` — the WorkerPool resident-worker RAM
+      probe (main.py wires ``ram_free_bytes=lambda:
+      psutil.virtual_memory().available``), plus firstrun_watchdog.
+    """
     from app.domain import resources
     monkeypatch.setattr(resources, "system_memory", lambda: {
         "total_phys_bytes": 64 * resources.GIB, "avail_phys_bytes": 48 * resources.GIB,
         "phys_load_pct": 25, "commit_limit_bytes": 128 * resources.GIB,
         "commit_charge_bytes": 16 * resources.GIB,
         "commit_headroom_bytes": 112 * resources.GIB})
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _ROOMY_SVMEM)
