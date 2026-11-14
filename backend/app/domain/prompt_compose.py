@@ -65,10 +65,13 @@ def _profile_text(char: Character, key: str) -> str:
     return _t(p.get(key))
 
 
-def _cast_rows(session: Session, shot: Shot) -> list[dict[str, Any]]:
+def _cast_rows(session: Session, shot: Shot,
+               warnings: list[str]) -> list[dict[str, Any]]:
     """Effective cast in deterministic order: own shot rows by
     (position, character_id), then scene-inherited rows by the same
-    key. Each entry carries the character row + optional shot state."""
+    key. Each entry carries the character row + optional shot state.
+    Members whose character is missing, archived, or from another
+    project are skipped with a warning — never composed silently."""
     own = session.execute(
         select(ShotCharacter).where(ShotCharacter.shot_id == shot.id)
     ).scalars().all()
@@ -77,16 +80,27 @@ def _cast_rows(session: Session, shot: Shot) -> list[dict[str, Any]]:
         select(SceneCharacter).where(SceneCharacter.scene_id == shot.scene_id)
     ).scalars().all()
     members: list[dict[str, Any]] = []
+
+    def _add(r, shot_row, scene_row):
+        c = session.get(Character, r.character_id)
+        if c is None or c.project_id != shot.project_id:
+            warnings.append(
+                "a cast member references an unavailable character — "
+                "skipped in prompt composition")
+            return
+        if c.status != "active":
+            warnings.append(
+                f"{_t(c.name) or 'A character'} is archived — its "
+                "guidance was skipped")
+            return
+        members.append({"character": c, "shot": shot_row,
+                        "scene": scene_row})
+
     for r in sorted(own, key=lambda r: (r.position, r.character_id)):
-        c = session.get(Character, r.character_id)
-        if c is not None:
-            members.append({"character": c, "shot": r, "scene": None})
+        _add(r, r, None)
     for r in sorted(inherited, key=lambda r: (r.position, r.character_id)):
-        if r.character_id in own_ids:
-            continue
-        c = session.get(Character, r.character_id)
-        if c is not None:
-            members.append({"character": c, "scene": r, "shot": None})
+        if r.character_id not in own_ids:
+            _add(r, None, r)
     return members
 
 
@@ -197,7 +211,7 @@ def compose_shot_prompt(session: Session, project, shot: Shot, *,
                 f"{key}: shot says '{sv[:60]}', scene says '{cv[:60]}' "
                 "— using the shot value")
             scene_cont.pop(key, None)
-    members = _cast_rows(session, shot)
+    members = _cast_rows(session, shot, warnings)
     for m in members:
         sc = m["shot"]
         if sc is None:
@@ -206,7 +220,8 @@ def compose_shot_prompt(session: Session, project, shot: Shot, *,
         if _t(sc.wardrobe_variant) and _t(cc.get("wardrobe")) \
                 and _t(sc.wardrobe_variant) != _t(cc["wardrobe"]):
             conflicts.append(
-                f"{m['name']} wardrobe: shot '{sc.wardrobe_variant[:50]}' "
+                f"{_t(m['character'].name) or 'Character'} wardrobe: "
+                f"shot '{sc.wardrobe_variant[:50]}' "
                 f"vs continuity '{_t(cc['wardrobe'])[:50]}' — using shot")
 
     # ---- build section payloads in precedence order ----------------
@@ -226,7 +241,8 @@ def compose_shot_prompt(session: Session, project, shot: Shot, *,
     # ---- budget ----------------------------------------------------
     used = len(user_prompt)
     budget = {"limit": limit, "used": used, "user": len(user_prompt)}
-    if len(user_prompt) > limit:
+    user_over_budget = len(user_prompt) > limit
+    if user_over_budget:
         warnings.append(
             f"prompt is {len(user_prompt)} chars — over the model's "
             f"{limit}-char budget; it will be sent in full but the model "
@@ -318,6 +334,7 @@ def compose_shot_prompt(session: Session, project, shot: Shot, *,
         "warnings": warnings,
         "omitted": omitted,
         "budget": budget,
+        "user_over_budget": user_over_budget,
     }
     out["prompt_sha256"] = hashlib.sha256(
         prompt.encode("utf-8")).hexdigest()

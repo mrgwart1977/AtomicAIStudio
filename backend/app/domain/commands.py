@@ -487,6 +487,17 @@ def _compose_shot_generate(session: Session, project: Project,
             raise CommandError(
                 422, "prompt context changed since preview — "
                      "re-preview shot.generate")
+        # The local img2img path's text encoder truncates user text
+        # beyond its context window with no declared hard cap — refuse
+        # oversized user text rather than silently losing it. Cloud
+        # image keeps its own real 8000-char cap in _validate, so its
+        # budget stays advisory (warning only).
+        if comp["user_over_budget"] and src:
+            raise CommandError(
+                422, f"prompt is {comp['budget']['user']} characters — "
+                     f"over this model's {comp['budget']['limit']}-char "
+                     "budget. Shorten the prompt or disable context "
+                     "composition (compose_prompt=false).")
     inner = ("generate.image.img2img" if src
              else "generate.image.cloud")
     composed = {
@@ -518,6 +529,7 @@ def _compose_shot_generate(session: Session, project: Project,
             "conflicts": comp["conflicts"],
             "warnings": comp["warnings"],
             "budget": comp["budget"],
+            "user_over_budget": comp["user_over_budget"],
         }
     if rs_id:
         composed["reference_set_id"] = rs_id
@@ -686,6 +698,18 @@ def _compose_shot_video(session: Session, project: Project,
             raise CommandError(
                 422, "prompt context changed since preview — "
                      "re-preview shot.video")
+        # No declared hard cap exists for video prompts, but the local
+        # text encoder truncates beyond its context window — silently
+        # losing user-authored text is not allowed, so oversized user
+        # text refuses here rather than degrading at the model. The
+        # documented escape hatch is compose_prompt=false + a shorter
+        # prompt. (Image models keep their own real 8000-char cap.)
+        if comp["user_over_budget"]:
+            raise CommandError(
+                422, f"prompt is {comp['budget']['user']} characters — "
+                     f"over this model's {comp['budget']['limit']}-char "
+                     "budget. Shorten the prompt or disable context "
+                     "composition (compose_prompt=false).")
     prompt = comp["prompt"] if comp else user_prompt
     if not prompt and not src:
         raise CommandError(
@@ -725,6 +749,7 @@ def _compose_shot_video(session: Session, project: Project,
             "conflicts": comp["conflicts"],
             "warnings": comp["warnings"],
             "budget": comp["budget"],
+            "user_over_budget": comp["user_over_budget"],
         }
     # Same approval-pin contract as shot.generate — a shot edit between
     # preview and commit refuses rather than silently regenerating.
@@ -1319,8 +1344,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _vshot, _vinner, _vcomposed = _compose_shot_video(
             session, project, payload)
         warnings += _validate(session, project, _vinner, _vcomposed)
-        if command_type == "shot.move" and payload.get("to_scene_id"):
-            _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
+    if command_type == "shot.move" and payload.get("to_scene_id"):
+        _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
         _get_shot(session, project, payload)
         _get_character(session, project, payload)
@@ -1954,7 +1979,9 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
             "sections": pc["sections"],
             "omitted": pc["omitted"],
             "conflicts": pc["conflicts"],
+            "warnings": pc["warnings"],
             "budget": pc["budget"],
+            "user_over_budget": pc["user_over_budget"],
         }
         out["warnings"] = out["warnings"] + pc["warnings"]
     if command_type == "shot.video" and _sh is not None:

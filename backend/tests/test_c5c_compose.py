@@ -246,3 +246,70 @@ def test_cross_project_shot_rejected(client, tmp_path):
     r = _preview(client, pid, "shot.generate",
                  {**GEN, "shot_id": sh2["shot"]["id"]}, expect=404)
     assert "not found" in str(r.json()).lower()
+
+
+def test_archived_character_skipped_with_warning(client, tmp_path):
+    """Missing/archived cast members never compose silently — they are
+    skipped and disclosed in warnings."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="duo")
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    _commit(client, pid, "character.archive",
+            {"character_id": c["id"]})
+    rp = _compose(client, pid, sh["shot"]["id"])
+    assert rp is not None
+    assert not any(s["id"] == "cast" for s in rp["sections"])
+    assert any("archived" in w for w in rp["warnings"])
+
+
+def test_video_user_over_budget_refuses(client, tmp_path):
+    """shot.video has no declared hard cap but the local text encoder
+    truncates silently — oversized user text refuses instead of losing
+    authored content at the model."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"],
+               prompt="x" * 2000)
+    r = _preview(client, pid, "shot.video",
+                 {"shot_id": sh["shot"]["id"],
+                  "model_key": "wan21.t2v.1_3b"}, expect=422)
+    assert "over this model's" in str(r.json())
+
+
+def test_img2img_user_over_budget_refuses(client, tmp_path):
+    """Local img2img's encoder truncates silently too — the refusal
+    applies there as well (cloud image keeps its own 8000 cap)."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"],
+               prompt="y" * 4500, source_asset_id=src["id"])
+    r = _preview(client, pid, "shot.generate",
+                 {**GEN, "shot_id": sh["shot"]["id"]}, expect=422)
+    assert "over this model's" in str(r.json())
+
+
+def test_cloud_advisory_budget_warns_not_refuses(client, tmp_path):
+    """Advisory vs hard-limit distinction: gpt-image-1's 4000 budget is
+    operational — over-budget user text warns but is NOT refused (the
+    real 8000 cap remains the refusal boundary)."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"],
+               prompt="z" * 4500)
+    rp = _compose(client, pid, sh["shot"]["id"])
+    assert rp is not None
+    assert rp["user_prompt"] == "z" * 4500
+    assert any("over the model's" in w for w in rp["warnings"])
+    assert rp["budget"]["user"] == 4500
+
+
+def test_cast_wardrobe_conflict_surfaced(client, tmp_path):
+    """Shot wardrobe_variant vs per-member continuity 'wardrobe'
+    disagrees → conflict is surfaced, not silently merged."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="clash")
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    _cast_update(client, pid, sh["shot"]["id"], c["id"],
+                 wardrobe_variant="red coat",
+                 continuity={"wardrobe": "blue coat"})
+    rp = _compose(client, pid, sh["shot"]["id"])
+    assert any("wardrobe" in cf for cf in rp["conflicts"])

@@ -286,7 +286,9 @@ export interface CommandProposal {
     sections: Array<Record<string, unknown>>;
     omitted: string[];
     conflicts: string[];
+    warnings: string[];
     budget: { limit: number; used: number; user: number };
+    user_over_budget: boolean;
   } | null;
 }
 
