@@ -662,7 +662,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
                 data-testid="ci-source"
                 onChange={(e) => {
                   setSourceAssetId(e.target.value);
-                  if (e.target.value === maskAssetId) setMaskAssetId("");
+                  setMaskAssetId("");   // source switch invalidates any prior mask
                 }}>
                 <option value="">Choose an image asset…</option>
                 {imageAssets.map((a) => (

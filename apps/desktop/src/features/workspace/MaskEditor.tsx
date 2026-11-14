@@ -35,6 +35,12 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const strokes = useRef<ImageData[]>([]);       // undo stack
   const redoStack = useRef<ImageData[]>([]);
+  // Bounded history: snapshots are w*h*4 bytes each — cap both count
+  // and total bytes so a large mask can't exhaust memory through
+  // unlimited undo. Oldest entries drop out (linear painting stays).
+  const UNDO_MAX = 20;
+  const UNDO_MAX_BYTES = 64 * 1024 * 1024;
+  const undoBytes = useRef(0);
   const painting = useRef(false);
   const [view, setView] = useState<ViewTransform>({ scale: 1, ox: 0, oy: 0 });
   const [tool, setTool] = useState<"brush" | "erase">("brush");
@@ -78,7 +84,7 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
       const m = document.createElement("canvas");
       m.width = w; m.height = h;
       maskRef.current = m;
-      strokes.current = []; redoStack.current = [];
+      strokes.current = []; redoStack.current = []; undoBytes.current = 0;
       setDims({ w, h }); setEditable(0);
       const canvas = viewRef.current;
       if (canvas) {
@@ -117,7 +123,15 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
       return;
     }
     const mctx = m.getContext("2d")!;
-    strokes.current.push(mctx.getImageData(0, 0, m.width, m.height));
+    const snap = mctx.getImageData(0, 0, m.width, m.height);
+    strokes.current.push(snap);
+    undoBytes.current += snap.data.byteLength;
+    while (strokes.current.length > UNDO_MAX
+           || undoBytes.current > UNDO_MAX_BYTES) {
+      const old = strokes.current.shift();
+      if (!old) break;
+      undoBytes.current -= old.data.byteLength;
+    }
     redoStack.current = [];
     painting.current = true;
     const r = e.currentTarget.getBoundingClientRect();
@@ -160,6 +174,7 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
   const undo = () => {
     const m = maskRef.current, prev = strokes.current.pop();
     if (!m || !prev) return;
+    undoBytes.current -= prev.data.byteLength;
     redoStack.current.push(m.getContext("2d")!.getImageData(0, 0, m.width, m.height));
     m.getContext("2d")!.putImageData(prev, 0, 0);
     setEditable(countEditable()); setDirty((d) => d + 1);
@@ -167,7 +182,9 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
   const redo = () => {
     const m = maskRef.current, next = redoStack.current.pop();
     if (!m || !next) return;
-    strokes.current.push(m.getContext("2d")!.getImageData(0, 0, m.width, m.height));
+    const again = m.getContext("2d")!.getImageData(0, 0, m.width, m.height);
+    strokes.current.push(again);
+    undoBytes.current += again.data.byteLength;
     m.getContext("2d")!.putImageData(next, 0, 0);
     setEditable(countEditable()); setDirty((d) => d + 1);
   };
