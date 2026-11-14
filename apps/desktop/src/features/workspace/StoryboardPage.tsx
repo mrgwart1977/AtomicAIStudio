@@ -13,6 +13,7 @@ import type {
   ReferenceSet,
   StoryboardScene,
   StoryboardShot,
+  Timeline,
 } from "../../api/types";
 import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -1085,6 +1086,14 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                 <ShotVideo shot={shot} projectId={projectId}
                   sourceId={shot.source_asset_id} onDone={onClose} />
               )}
+              {shot && entry?.generation?.latest_video_id && (
+                <SendToTimeline
+                  projectId={projectId}
+                  assetId={entry.generation.latest_video_id}
+                  shotId={shot.id}
+                  sceneId={scene.scene.id}
+                />
+              )}
             </div>
 
             {/* ---- cast ---- */}
@@ -1686,6 +1695,122 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
         </div>
       )}
       {err && <p className="mt-1.5 text-xs text-danger">{err}</p>}
+    </div>
+  );
+}
+
+
+// ---------- C5-A send to timeline ----------
+
+/** Send a generated video clip to a timeline. Preview → approve →
+ * commit with the timeline's resolved revision pinned; the server
+ * re-resolves the source version and provenance at commit. */
+function SendToTimeline({ projectId, assetId, shotId, sceneId }: {
+  projectId: string;
+  assetId: string;
+  shotId: string;
+  sceneId: string;
+}) {
+  const [timelines, setTimelines] = useState<Timeline[]>([]);
+  const [tlId, setTlId] = useState("");
+  const [pending, setPending] =
+    useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    apiFetch<Timeline[]>(`/api/projects/${projectId}/timelines`)
+      .then((tls) => {
+        if (!live) return;
+        setTimelines(tls.filter((t) => t.status === "active"));
+      })
+      .catch(() => { if (live) setTimelines([]); });
+    return () => { live = false; };
+  }, [projectId]);
+
+  function payload(timelineId: string): Record<string, unknown> {
+    return {
+      timeline_id: timelineId,
+      asset_id: assetId,
+      shot_id: shotId,
+      scene_id: sceneId,
+    };
+  }
+
+  async function preview() {
+    if (!tlId) return;
+    setBusy(true); setErr(null); setDone(false);
+    try {
+      const proposal = await previewCommand(
+        projectId, "timeline.clip.insert", payload(tlId));
+      setPending({ payload: payload(tlId), proposal });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally { setBusy(false); }
+  }
+
+  async function approve() {
+    if (!pending) return;
+    setBusy(true); setErr(null);
+    try {
+      const rev = useApp.getState().currentProject()?.revision ?? 0;
+      const p = { ...pending.payload };
+      if (pending.proposal.resolved_timeline) {
+        p.expected_timeline = pending.proposal.resolved_timeline;
+      }
+      await commitCommand(
+        projectId, rev, "timeline.clip.insert", p, "storyboard");
+      setPending(null); setDone(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally { setBusy(false); }
+  }
+
+  if (timelines.length === 0) {
+    return (
+      <p className="mt-2 text-[10px] text-faint" data-testid="send-to-timeline-empty">
+        Create a timeline to assemble this clip into a cut.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-dashed border-line pt-2"
+      data-testid="send-to-timeline">
+      <label className="text-[11px] text-muted">Send to
+        <select value={tlId} onChange={(e) => { setTlId(e.target.value); setPending(null); setDone(false); }}
+          aria-label="Destination timeline"
+          className="ml-1 rounded border border-line bg-card px-1.5 py-0.5 text-[11px] text-fg">
+          <option value="">Choose timeline…</option>
+          {timelines.map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </label>
+      {!pending && (
+        <button onClick={preview} disabled={busy || !tlId}
+          className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40">
+          Review insert
+        </button>
+      )}
+      {pending && (
+        <>
+          <span className="text-[10px] text-muted">{pending.proposal.summary}</span>
+          <button onClick={approve} disabled={busy}
+            className="rounded bg-action px-2 py-0.5 text-[11px] text-white disabled:opacity-40">
+            Approve insert
+          </button>
+          <button onClick={() => setPending(null)}
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted">
+            Cancel
+          </button>
+        </>
+      )}
+      {done && <span className="text-[10px] text-teal">Added to timeline</span>}
+      {err && <p className="w-full text-[10px] text-danger">{err}</p>}
     </div>
   );
 }

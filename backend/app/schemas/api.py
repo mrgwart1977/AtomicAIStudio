@@ -111,6 +111,10 @@ CommandType = Literal[
     "cloud.live.enable", "cloud.live.disable",
     "cloud.live.disable_all", "cloud.live.resume",
     "cloud.live.validate_arm", "cloud.live.validate_run",
+    "timeline.create", "timeline.update", "timeline.archive",
+    "timeline.unarchive", "timeline.revert", "timeline.duplicate",
+    "timeline.clip.insert", "timeline.clip.remove",
+    "timeline.clip.move", "timeline.clip.trim",
 ]
 
 
@@ -156,6 +160,9 @@ class CommandProposalOut(BaseModel):
     # (model, dims, duration, sampling, source) pinned via
     # expected_params at commit.
     resolved_params: dict[str, Any] | None = None
+    # C5-A — timeline ops only: {id, revision, clip_count} the approval
+    # pins via expected_timeline at commit.
+    resolved_timeline: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -612,3 +619,48 @@ class ResourceSettingsUpdate(BaseModel):
     critical_phys_gib: float | None = None
     min_disk_free_gib: float | None = None
     vram_headroom_gib: float | None = None
+
+
+# ---------- timelines (C5-A) ----------
+
+class TimelineClipOut(BaseModel):
+    id: str
+    project_id: str
+    timeline_id: str
+    position: int
+    source_asset_id: str
+    source_version_id: str
+    source_sha256: str
+    in_frame: int
+    out_frame: int
+    src_frames: int
+    src_fps_num: int
+    src_fps_den: int
+    src_duration_s: float
+    shot_id: str | None
+    scene_id: str | None
+    created_at: datetime
+
+
+class TimelineOut(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    description: str
+    fps_num: int
+    fps_den: int
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TimelineDetailOut(TimelineOut):
+    clips: list[TimelineClipOut]
+    total_duration_s: float
+
+
+class TimelineRevisionOut(BaseModel):
+    revision: int
+    summary: str
+    created_at: datetime

@@ -721,4 +721,55 @@ for _tbl, _ddl in (
     event.listen(_tbl, "after_create", DDL(_ddl))
 
 
+class Timeline(Base):
+    """C5-A — project-scoped edit decision list. Clips ride
+    timeline_clips (dense integer position); version history rides
+    entity_revisions (entity_type 'timeline') with the clip list
+    embedded in each snapshot.
+
+    Timebase is a rational fps (fps_num/fps_den); clip trims are
+    integer SOURCE frames — no float drift anywhere in the edit data.
+    """
+
+    __tablename__ = "timelines"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    fps_num: Mapped[int] = mapped_column(Integer, default=24)
+    fps_den: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TimelineClip(Base):
+    """Ordered, pinned reference to ONE asset version. The clip keeps
+    source_version_id + source_sha256 + the source's frame geometry
+    (src_frames/src_fps_*) captured at insert — later asset versions
+    never move a clip's pins, and trims keep validating against the
+    pinned geometry."""
+
+    __tablename__ = "timeline_clips"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    source_asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="RESTRICT"))
+    source_version_id: Mapped[str] = mapped_column(ForeignKey("asset_versions.id", ondelete="RESTRICT"))
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    in_frame: Mapped[int] = mapped_column(Integer, default=0)   # source frames, inclusive
+    out_frame: Mapped[int] = mapped_column(Integer)             # source frames, exclusive
+    src_frames: Mapped[int] = mapped_column(Integer)            # source total frames at insert
+    src_fps_num: Mapped[int] = mapped_column(Integer, default=24)
+    src_fps_den: Mapped[int] = mapped_column(Integer, default=1)
+    src_duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 project_children = relationship  # silence unused-import linters for future relationships
