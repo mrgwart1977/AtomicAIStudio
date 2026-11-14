@@ -19,7 +19,7 @@ import type {
 
 export type Page = "home" | "projects" | "models" | "providers" | "project";
 export type WorkspaceTab =
-  | "overview" | "storyboard" | "timeline" | "cast" | "worlds" | "locations"
+  | "first_film" | "overview" | "storyboard" | "timeline" | "cast" | "worlds" | "locations"
   | "generate" | "cloud" | "assets" | "backups" | "settings";
 export type WorkspaceMode = "guided" | "standard" | "advanced";
 
@@ -109,7 +109,13 @@ export const useApp = create<AppState>((set, get) => ({
     }
     void get().refreshProjectData();
   },
-  setWorkspaceMode: (workspaceMode) => set({ workspaceMode }),
+  setWorkspaceMode: (workspaceMode) => {
+    set({ workspaceMode });
+    // C5-D — "Guided" depth lands on the First Film wizard.
+    if (workspaceMode === "guided" && get().page === "project") {
+      get().setWorkspaceTab("first_film");
+    }
+  },
   setProjects: (projects) => set({ projects }),
   upsertJob: (j) => set((s) => ({ jobs: { ...s.jobs, [j.id]: j } })),
   setPromptDraft: (promptDraft) => set({ promptDraft }),

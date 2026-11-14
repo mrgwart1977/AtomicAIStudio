@@ -55,6 +55,24 @@ export function HomePage() {
           onClick={() => {
             if (latest) {
               setProject(latest.id);
+              useApp.getState().setWorkspaceTab("first_film");
+              setPage("project");
+            } else {
+              setKind("movie");
+              setDialog(true);
+            }
+          }}
+          className="rounded-lg border border-teal/40 bg-card p-5 text-left hover:border-teal hover:bg-card-hi"
+        >
+          <h2 className="text-lg font-semibold">Make my first film — guided</h2>
+          <p className="mt-1.5 text-sm text-muted">
+            Step-by-step wizard: shots, clips, timeline, export. No knowledge of the workspace needed.
+          </p>
+        </button>
+        <button
+          onClick={() => {
+            if (latest) {
+              setProject(latest.id);
               setPage("project");
             } else {
               setDialog(true);

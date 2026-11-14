@@ -156,3 +156,22 @@ deferred to a later stabilization PR; do not add a vector editor here.
 | 73 | Long guidance on a tight-budget model → Preview | Omitted items are listed explicitly; the user's text is never cut |
 | 74 | Shot continuity vs scene continuity disagree (e.g. lighting) | Conflict line surfaces in the preview; the shot value is the one used |
 | 75 | Storyboard → compare two adjacent shots | Differences now include scene style, blocking, action, and per-character continuity notes; cross-scene pairs flag the scene change |
+
+## C5-D — guided First Film workflow
+
+| # | Step | Expected |
+|---|------|----------|
+| 76 | Home → "Make my first film — guided" | Opens the project on the First Film tab at step 1; a progress bar shows 11 steps |
+| 77 | Rename the film + pick shape/frame rate → Save & continue | Project renamed + settings committed; step 2 loads |
+| 78 | Add a character (name + look) | Character appears checked in the list; visible in the Cast tab too |
+| 79 | Create a scene + add two shots with prompts | Scene and shots are ordinary storyboard rows (check Storyboard tab) |
+| 80 | Method step | "Import my own video clips" is Available; image models labelled Simulated; uninstalled video models are disabled and say so; planned models say "not operational" |
+| 81 | Choose Import → skip generate → attach an MP4 per shot | Each shot shows "Media attached ✓"; imports appear in Assets |
+| 82 | Build timeline | Timeline created with clips in shot order; Timeline tab shows the same timeline |
+| 83 | Arrange & trim: move a clip down, trim 10 frames off | Order and frame counts update; no page reload needed |
+| 84 | Export settings → pick 720p → Export | Durable job with progress bar; output lands in Assets as a rendered video |
+| 85 | Close and reopen the app mid-wizard | Wizard resumes on the same step with all entities intact |
+| 86 | Go Back to an earlier step and change a choice, then forward again | No duplicate characters/scenes/shots/timelines are created |
+| 87 | Delete a shot outside the wizard, then return to it | A notice says the shot was removed; the wizard continues cleanly |
+| 88 | Trigger an error (e.g. import a missing file path) | Plain-language message with an expandable technical-details section |
+| 89 | Keyboard-only: Tab through the wizard | Every control is reachable; focus order follows the steps |
