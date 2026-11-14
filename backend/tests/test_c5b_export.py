@@ -489,3 +489,28 @@ def test_export_cancel_terminates_and_preserves_sources(
     assert blob.read_bytes() == blob_bytes
     # repeated cancel is idempotent — terminal state stays cancelled
     assert client.post(f"/api/jobs/{jid}/cancel").status_code in (200, 409)
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_video_import_gains_measured_media(client, dev_ffmpeg, tmp_path):
+    """C5-B review: imported video must carry measured probe media so
+    timeline.clip.insert can validate trims; packaged validation exposed
+    that imports registered no duration/fps at all."""
+    src = _synth(dev_ffmpeg, tmp_path / "imp.mp4", dur=1.5, rate=24)
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, "asset.import",
+                {"source_path": str(src), "kind": "video",
+                 "name": "imp.mp4"})
+    job = wait_for_job(client, pid, r["job_id"], timeout=30)
+    assert job["status"] == "succeeded", job.get("error")
+    from app.db.models import Asset, AssetVersion
+    with client.app.state.session_factory() as s:
+        a = s.query(Asset).filter_by(project_id=pid).one()
+        v = s.get(AssetVersion, a.current_version_id)
+        probe = (v.media_json or {}).get("probe") or {}
+    assert probe.get("ok") and probe["fps"] == 24.0
+    assert abs(probe["duration_s"] - 1.5) < 0.1
+    assert probe["width"] == 64 and probe["height"] == 48
+    # the point: the imported asset is now insertable
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], {"id": a.id}, in_frame=0, out_frame=24)

@@ -132,6 +132,21 @@ class AssetImportAdapter(_OpsBase):
                     output["media"] = {**info.to_dict(), "source": "import"}
                 except Exception:
                     pass
+            # C5-B — imported video must carry measured duration/fps/
+            # geometry so timeline trims and exports have real source
+            # metadata; probe failure leaves the asset usable but
+            # untrimmable, matching the image path's non-fatal stance.
+            elif output["kind"] == "video":
+                try:
+                    from app.domain.media import engine
+                    info = await asyncio.to_thread(
+                        engine.probe, out_path,
+                        cancel=handle.cancel_event)
+                    if info.get("ok"):
+                        output["media"] = {"probe": info,
+                                           "source": "import"}
+                except Exception:
+                    pass
             if ext:
                 output["external_source"] = {
                     "provider_key": ext.get("provider_key"),
