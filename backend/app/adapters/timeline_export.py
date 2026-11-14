@@ -16,6 +16,7 @@ asset through the job engine's `_register_asset`.
 """
 from __future__ import annotations
 
+import asyncio
 import shutil
 from fractions import Fraction
 from pathlib import Path
@@ -71,6 +72,19 @@ class TimelineExportAdapter:
                 f"source file for clip {clip_id} is unavailable ({p.name})")
         return p
 
+    @staticmethod
+    def _verify_bytes(p: Path, sha: str, clip_id: str) -> None:
+        """The pinned sha must match the actual bytes at execution
+        time, not just the DB row — a mismatch means the blob on disk
+        was corrupted or replaced. Fail closed, never render other
+        bytes. Blocking I/O — callers run this via to_thread."""
+        from app.domain.storage import hash_file
+        actual, _ = hash_file(p)
+        if actual != sha:
+            raise ValueError(
+                f"source bytes for clip {clip_id} do not match the "
+                "pinned sha256 — refusing to render")
+
     def _seg_times(self, clip: dict) -> tuple[float, float]:
         src = clip.get("source") or {}
         fps = Fraction(int(src["fps_num"]), int(src["fps_den"]))
@@ -93,12 +107,19 @@ class TimelineExportAdapter:
         with self._sf() as s:
             paths = [self._source_path(s, c["sha256"], c["clip_id"])
                      for c in clips]
+        # Verify pinned bytes + probe off the event loop — hashing and
+        # ffprobe are blocking work that would stall the whole backend
+        # (and every cancel request) for the duration of a render.
+        for p, c in zip(paths, clips):
+            await asyncio.to_thread(
+                self._verify_bytes, p, c["sha256"], c["clip_id"])
         handle.check_cancel()
 
         yield {"progress": 0.12, "stage": "probing sources"}
         probes = []
         for p in paths:
-            meta = engine.probe(p, cancel=handle.cancel_event)
+            meta = await asyncio.to_thread(
+                engine.probe, p, cancel=handle.cancel_event)
             if not meta.get("ok"):
                 raise ValueError(
                     f"probe failed for {p.name}: {meta.get('reason')}")
@@ -134,7 +155,8 @@ class TimelineExportAdapter:
                                       str(out_path))
         else:
             target = tx.resolve_profile(edl, profile_name)
-            enc = tx.h264_encoder(ffmpeg["path"], supervise.run)
+            enc = await asyncio.to_thread(
+                tx.h264_encoder, ffmpeg["path"], supervise.run)
             segments = []
             for clip, meta, p in zip(clips, probes, paths):
                 in_s, dur_s = self._seg_times(clip)
@@ -144,8 +166,9 @@ class TimelineExportAdapter:
             argv = tx.build_encode_argv(ffmpeg["path"], segments, target,
                                         crf, str(out_path), encoder=enc)
 
-        r = supervise.run(argv, timeout_s=timeout_s,
-                          cancel=handle.cancel_event)
+        r = await asyncio.to_thread(
+            supervise.run, argv, timeout_s=timeout_s,
+            cancel=handle.cancel_event)
         if r["cancelled"]:
             out_path.unlink(missing_ok=True)
             raise JobCancelled()
@@ -160,7 +183,8 @@ class TimelineExportAdapter:
             raise ValueError("ffmpeg produced no output")
 
         yield {"progress": 0.9, "stage": "verifying output"}
-        meta = engine.probe(out_path, cancel=handle.cancel_event)
+        meta = await asyncio.to_thread(
+            engine.probe, out_path, cancel=handle.cancel_event)
         if not meta.get("ok"):
             out_path.unlink(missing_ok=True)
             raise ValueError("export output failed verification")

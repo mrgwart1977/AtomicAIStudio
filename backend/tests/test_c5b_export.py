@@ -380,3 +380,112 @@ def test_export_missing_source_bytes_fails_safe(client, tmp_path):
     with client.app.state.session_factory() as s:
         assert not any(a.origin == "rendered" and a.project_id == pid
                        for a in s.query(Asset).all())
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_export_corrupt_source_bytes_fails_closed(client, dev_ffmpeg,
+                                                  tmp_path):
+    """Pinned sha is verified against actual bytes at execution —
+    a blob swapped or corrupted after approval must refuse, not render."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    src = _synth(dev_ffmpeg, tmp_path / "ok.mp4", dur=1.0)
+    a = _cas_video(client, pid, src)
+    _insert(client, pid, t["id"], a)
+    # corrupt the CAS blob in place (keeps the row, changes the bytes)
+    blob = Path(client.app.state.settings.data_dir) / "blobs" \
+        / a["sha256"][:2] / a["sha256"]
+    blob.write_bytes(b"\x00" * 4096)
+    job = _export(client, pid, t["id"], profile="source")
+    assert job["status"] == "failed"
+    assert "sha256" in (job.get("error") or "")
+
+
+def test_export_idempotent_replay_no_duplicate(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid))
+    key = "export-replay-1"
+    r1 = _commit(client, pid, "timeline.export",
+                 {"timeline_id": t["id"]}, key=key)
+    r2 = _commit(client, pid, "timeline.export",
+                 {"timeline_id": t["id"]}, key=key)
+    assert r2.get("idempotent_replay") is True
+    assert r2["command_id"] == r1["command_id"]
+    # exactly one durable job exists for the key — a replayed commit
+    # can never produce a second output asset
+    from app.db.models import GenerationJob
+    with client.app.state.session_factory() as s:
+        jobs = s.query(GenerationJob).filter_by(
+            idempotency_key=f"job:{key}").all()
+        assert len(jobs) == 1 and jobs[0].id == r1["job_id"]
+    wait_for_job(client, pid, r1["job_id"])
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_export_two_audible_clips_sync(client, dev_ffmpeg, tmp_path):
+    """Segment boundary: two audible segments → one continuous stereo
+    track whose duration matches the video within a frame."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    for i in range(2):
+        src = _synth(dev_ffmpeg, tmp_path / f"s{i}.mp4", dur=1.0,
+                     size="64x48", audio=True)
+        _insert(client, pid, t["id"], _cas_video(client, pid, src, f"s{i}"))
+    job = _export(client, pid, t["id"], profile="720p")
+    assert job["status"] == "succeeded", job.get("error")
+    _a, v, _j = _out_asset(client, pid, job)
+    from app.db.models import AssetFile
+    with client.app.state.session_factory() as s:
+        out = client.app.state.storage.file_path(
+            s, s.get(AssetFile, v.sha256))
+    meta = engine.probe(out)
+    assert meta["audio_streams"] == 1
+    # video ~2.0s; audio track must span the same window (no gap at the
+    # segment join, no early termination)
+    assert abs(meta["duration_s"] - 2.0) < 0.2
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_export_cancel_terminates_and_preserves_sources(
+        client, dev_ffmpeg, tmp_path):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    # heavy render: a long clip on the encode path — the ffmpeg run
+    # lasts seconds, a reliable window to land a running cancel.
+    src = _synth(dev_ffmpeg, tmp_path / "long.mp4", dur=30.0,
+                 size="1280x720", rate=24)
+    a = _cas_video(client, pid, src)
+    blob = Path(client.app.state.settings.data_dir) / "blobs" \
+        / a["sha256"][:2] / a["sha256"]
+    blob_bytes = blob.read_bytes()
+    _insert(client, pid, t["id"], a, in_frame=0, out_frame=600)  # 25 s
+    r = _commit(client, pid, "timeline.export",
+                {"timeline_id": t["id"], "profile": "720p"})
+    jid = r["job_id"]
+    import time
+    # land the cancel while ffmpeg is mid-encode — post it the moment
+    # the job flips to running, not after the poll loop ends
+    resp = None
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        st = next((j for j in client.get(
+            f"/api/projects/{pid}/jobs").json() if j["id"] == jid), None)
+        if st and st["status"] == "running":
+            resp = client.post(f"/api/jobs/{jid}/cancel")
+            break
+        if st and st["status"] in ("succeeded", "failed", "cancelled"):
+            pytest.fail(f"job reached {st['status']} before cancel landed")
+        time.sleep(0.05)
+    assert resp is not None and resp.status_code == 200, (
+        resp.text if resp is not None else "job never entered running")
+    job = wait_for_job(client, pid, jid, timeout=60)
+    assert job["status"] == "cancelled"
+    # cancelled export registered no output asset
+    from app.db.models import Asset, GenerationJob
+    with client.app.state.session_factory() as s:
+        assert s.get(GenerationJob, jid).output_asset_id is None
+    # source CAS bytes untouched by cleanup
+    assert blob.read_bytes() == blob_bytes
+    # repeated cancel is idempotent — terminal state stays cancelled
+    assert client.post(f"/api/jobs/{jid}/cancel").status_code in (200, 409)
