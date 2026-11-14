@@ -5,13 +5,13 @@
 // entries only, and generated PNGs are deterministic test artifacts —
 // the UI must never present any of it as real provider output.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, fetchAssetObjectUrl } from "../../api/client";
+import { apiFetch, fetchAssetObjectUrl, listReferenceSets } from "../../api/client";
 import { MaskEditor } from "./MaskEditor";
 import { computePad } from "./editorMath";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
   CommandProposal, ImageContracts, Job,
-  ProviderDetail, ProviderSummary, SpendReservation, SpendSummary,
+  ProviderDetail, ProviderSummary, ReferenceSet, SpendReservation, SpendSummary,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { useAssetObjectUrl } from "../../components/AuthImage";
@@ -141,6 +141,12 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const [srcObjUrl, setSrcObjUrl] = useState<string | null>(null);
   const [refIds, setRefIds] = useState<string[]>([]);
   const [refWeights, setRefWeights] = useState<Record<string, string>>({});
+  // C4-A — a named character reference set may REPLACE manual ref
+  // selection (backend rejects both together). Members resolve
+  // server-side; the previewed contents ride along as
+  // expected_references so a later set edit invalidates the approval.
+  const [refSetId, setRefSetId] = useState("");
+  const [refSets, setRefSets] = useState<ReferenceSet[]>([]);
 
   // generate form — every field participates in the preview
   // fingerprint: touching ANY of them invalidates a pending approval.
@@ -221,7 +227,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   // Mode switch: drop selections that no longer apply so a stale model
   // or oversized reference set can never be committed by accident.
   useEffect(() => {
-    if (mode !== "img2img") { setRefIds([]); setRefWeights({}); }
+    if (mode !== "img2img") { setRefIds([]); setRefWeights({}); setRefSetId(""); }
     if (mode === "generate") { setSourceAssetId(""); setMaskAssetId(""); }
     if (mode !== "inpaint") setMaskAssetId("");
     if (providerKey && !selectable.some((p) => p.key === providerKey)) {
@@ -234,6 +240,18 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       setRefIds((r) => r.slice(0, maxRefs));
     }
   }, [mode, selectable, providerKey, modelId, models, maxRefs, refIds.length]);
+
+  // C4-A — load the selected character's reference sets. Changing the
+  // character drops the set selection (a set belongs to one character).
+  useEffect(() => {
+    setRefSetId("");
+    if (mode !== "img2img" || !characterId) { setRefSets([]); return; }
+    let live = true;
+    listReferenceSets(pid, characterId)
+      .then((s) => { if (live) setRefSets(s); })
+      .catch(() => { if (live) setRefSets([]); });
+    return () => { live = false; };
+  }, [mode, pid, characterId]);
 
   // C3-D4 — authenticated object URL for the painted-mask editor.
   useEffect(() => {
@@ -327,8 +345,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     } : {}),
     ...(mode === "img2img" ? {
       source_asset_id: sourceAssetId,
-      reference_asset_ids: refIds.length ? refIds : undefined,
-      reference_weights: caps.reference_weights && refIds.length
+      reference_set_id: refSetId || undefined,
+      reference_asset_ids: !refSetId && refIds.length ? refIds : undefined,
+      reference_weights: !refSetId && caps.reference_weights && refIds.length
         ? refIds.map((id) => {
             const w = parseFloat(refWeights[id] ?? "");
             return Number.isFinite(w) ? w : undefined;
@@ -341,7 +360,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     mode, providerKey, modelId, prompt, negativePrompt, size, quality,
     seed, sceneId, shotId, characterId, maxCost,
     sourceAssetId, maskAssetId, outW, outH, placement,
-    refIds, refWeights]);
+    refIds, refWeights, refSetId]);
 
   // Preview → approval integrity: ANY parameter change after a preview
   // drops the pending approval — a fresh preview is required. This is
@@ -370,8 +389,17 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     setBusy(true); setError(null); setNotice(null);
     const p = payload();
     previewCommand(pid, commandType, p)
-      .then((proposal) => setPending(
-        { fingerprint, payload: p, proposal, commandType }))
+      .then((proposal) => setPending({
+        fingerprint, commandType,
+        // C4-A — pin the resolved set contents into the committed
+        // payload: commit re-resolves and refuses if the set changed
+        // since this preview.
+        payload: proposal.resolved_references
+          ? { ...p, expected_references: proposal.resolved_references,
+              expected_set: proposal.resolved_set }
+          : p,
+        proposal,
+      }))
       .catch((e) => setError(`Preview failed: ${String(e)}`))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
@@ -602,10 +630,46 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
               )}
             </div>
             <div>
+              {/* C4-A — named reference set from the selected character;
+                  mutually exclusive with manual picks (backend-enforced). */}
+              {characterId && (
+                <div className="mb-2">
+                  <label className={labelCls} htmlFor="ci-refset">
+                    Character reference set (optional)
+                  </label>
+                  <select id="ci-refset" className={inputCls}
+                    data-testid="ci-refset"
+                    value={refSetId}
+                    onChange={(e) => {
+                      setRefSetId(e.target.value);
+                      if (e.target.value) { setRefIds([]); setRefWeights({}); }
+                    }}>
+                    <option value="">— manual picks below —</option>
+                    {refSets.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.member_count} ref{s.member_count === 1 ? "" : "s"})
+                      </option>
+                    ))}
+                  </select>
+                  {refSets.length === 0 && (
+                    <p className="mt-1 text-[10px] text-faint">
+                      This character has no reference sets — create one on the
+                      Characters page.
+                    </p>
+                  )}
+                  {refSetId && (
+                    <p className="mt-1 text-[10px] text-faint">
+                      References guide appearance — they do not guarantee
+                      identity. A pinned seed aids reproducibility only on
+                      models that support seeds.
+                    </p>
+                  )}
+                </div>
+              )}
               <span className={labelCls} id="ci-refs-label">
                 Reference images (optional{maxRefs ? `, up to ${maxRefs}` : ""})
               </span>
-              <ul className="max-h-32 overflow-auto rounded border border-line bg-card p-1"
+              <ul className={`max-h-32 overflow-auto rounded border border-line bg-card p-1${refSetId ? " opacity-40 pointer-events-none" : ""}`}
                 aria-labelledby="ci-refs-label" data-testid="ci-refs">
                 {imageAssets.filter((a) => a.id !== sourceAssetId).map((a) => {
                   const on = refIds.includes(a.id);

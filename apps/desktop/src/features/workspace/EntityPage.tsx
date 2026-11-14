@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { commitCommand } from "../../api/commands";
-import type { Asset, Entity, EntityAssetLink, EntityRevision } from "../../api/types";
+import { listReferenceSets } from "../../api/client";
+import type { Asset, Entity, EntityAssetLink, EntityRevision, ReferenceSet } from "../../api/types";
 import { AuthImage } from "../../components/AuthImage";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
@@ -407,6 +408,17 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                 />
               )}
 
+              {/* C4-A — named reference sets (characters only) */}
+              {!creating && entity && etype === "character" && (
+                <ReferenceSets
+                  links={selLinks}
+                  assets={imageAssets}
+                  projectId={project!.id}
+                  run={run}
+                  entityId={entity.id}
+                />
+              )}
+
               {/* version history */}
               {!creating && revs.length > 0 && (
                 <div className="mt-6 border-t border-line pt-4">
@@ -566,6 +578,169 @@ function ReferenceAssets({ links, assets, projectId, run, etype, entityId }: {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** C4-A — named reference sets. Membership is entity-asset links with
+ * set_id; this UI only groups/orders existing links — assets are never
+ * duplicated or deleted here. Identity copy stays honest: references
+ * and pinned seeds are guidance, not an identity guarantee. */
+function ReferenceSets({ links, assets, projectId, run, entityId }: {
+  links: EntityAssetLink[];
+  assets: Asset[];
+  projectId: string;
+  run: (t: string, p: Record<string, unknown>) => Promise<unknown>;
+  entityId: string;
+}) {
+  const [sets, setSets] = useState<ReferenceSet[]>([]);
+  const [name, setName] = useState("");
+  const [seed, setSeed] = useState("");
+  const [pick, setPick] = useState<Record<string, string>>({});
+  const [seedEdits, setSeedEdits] = useState<Record<string, string>>({});
+  const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? "asset";
+
+  const reload = () => {
+    listReferenceSets(projectId, entityId)
+      .then(setSets).catch(() => setSets([]));
+  };
+  // Reload when the entity or its links change — run() refreshes links.
+  useEffect(reload, [projectId, entityId, links]);
+
+  const membersOf = (sid: string) =>
+    links.filter((l) => l.set_id === sid);
+  const ungrouped = links.filter((l) => l.set_id === null);
+
+  const move = (sid: string, l: EntityAssetLink, dir: -1 | 1) => {
+    const ids = membersOf(sid).map((x) => x.id);
+    const i = ids.indexOf(l.id);
+    const j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    void run("entity.assets.reorder", {
+      entity_type: "character", entity_id: entityId,
+      ordered_link_ids: ids, set_id: sid,
+    });
+  };
+
+  return (
+    <div className="mt-6 border-t border-line pt-4">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+        Reference sets
+      </h4>
+      <p className="mt-1 text-[10px] text-faint">
+        Group reference images into named, ordered sets you can pick at
+        generation time. A pinned seed improves reproducibility on models
+        that support seeds — neither references nor a fixed seed
+        guarantees consistent identity across models or runs.
+      </p>
+
+      {sets.map((s) => {
+        const members = membersOf(s.id);
+        return (
+          <div key={s.id} className="mt-2 rounded-md border border-line bg-panel p-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium">{s.name}</span>
+              <div className="flex items-center gap-2 text-[10px] text-muted">
+                <label className="flex items-center gap-1">
+                  seed
+                  <input
+                    value={seedEdits[s.id] ?? (s.seed != null ? String(s.seed) : "")}
+                    onChange={(e) => setSeedEdits({ ...seedEdits, [s.id]: e.target.value })}
+                    placeholder="none"
+                    inputMode="numeric"
+                    title="Optional pinned seed — guidance only, applied when the model supports seeds"
+                    className="w-20 rounded border border-line bg-card px-1.5 py-0.5 text-[10px] text-fg" />
+                  <button
+                    onClick={() => {
+                      const t = (seedEdits[s.id] ?? "").trim();
+                      void run("refset.update", {
+                        set_id: s.id,
+                        seed: t === "" ? null : Number(t),
+                      });
+                    }}
+                    className="rounded border border-line px-1.5 py-0.5 hover:text-fg">save</button>
+                </label>
+                <button title="Delete set — member links stay as ungrouped references"
+                  onClick={() => void run("refset.delete", { set_id: s.id })}
+                  className="rounded border border-line px-1.5 py-0.5 hover:text-danger">✕</button>
+              </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {members.map((l, i) => (
+                <div key={l.id} className="relative w-20 rounded-md border border-line bg-card">
+                  <AuthImage pid={projectId} assetId={l.asset_id}
+                    alt={l.label || nameOf(l.asset_id)}
+                    className="h-14 w-full rounded-t-md object-cover"
+                    fallback={<div className="flex h-14 items-center justify-center text-[10px] text-faint">img</div>} />
+                  <div className="p-1">
+                    <div className="truncate text-[9px] font-medium">{l.label || nameOf(l.asset_id)}</div>
+                    <div className="text-[8px] text-faint">{l.weight != null ? `w${l.weight}` : "default weight"}</div>
+                    <div className="mt-0.5 flex justify-between text-[9px] text-muted">
+                      <button disabled={i === 0} onClick={() => move(s.id, l, -1)}
+                        className="rounded px-1 hover:text-fg disabled:opacity-30">◀</button>
+                      <button disabled={i === members.length - 1} onClick={() => move(s.id, l, 1)}
+                        className="rounded px-1 hover:text-fg disabled:opacity-30">▶</button>
+                    </div>
+                  </div>
+                  <button title="Remove from set (link is kept)"
+                    onClick={() => void run("entity.assets.update",
+                      { link_id: l.id, set_id: null })}
+                    className="absolute -right-1 -top-1 rounded-full border border-line bg-card px-1 text-[9px] text-muted hover:text-danger">
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {members.length === 0 && (
+                <p className="text-[10px] text-faint">Empty — add ungrouped references below.</p>
+              )}
+            </div>
+            {ungrouped.length > 0 && (
+              <div className="mt-2 flex items-center gap-2">
+                <select value={pick[s.id] ?? ""}
+                  onChange={(e) => setPick({ ...pick, [s.id]: e.target.value })}
+                  className="flex-1 rounded-md border border-line bg-card px-2 py-1 text-[11px] text-fg">
+                  <option value="">Add an existing reference…</option>
+                  {ungrouped.map((l) => (
+                    <option key={l.id} value={l.id}>{l.label || nameOf(l.asset_id)}</option>
+                  ))}
+                </select>
+                <button disabled={!pick[s.id]}
+                  onClick={() => {
+                    void run("entity.assets.update",
+                      { link_id: pick[s.id], set_id: s.id });
+                    setPick({ ...pick, [s.id]: "" });
+                  }}
+                  className="rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:text-fg disabled:opacity-40">
+                  Add
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div className="mt-2 flex items-center gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)}
+          placeholder="New set name (e.g. hero look)"
+          className="flex-1 rounded-md border border-line bg-panel px-2 py-1.5 text-xs text-fg" />
+        <input value={seed} onChange={(e) => setSeed(e.target.value)}
+          placeholder="seed (optional)" inputMode="numeric"
+          title="Optional pinned seed — reproducibility guidance only"
+          className="w-28 rounded-md border border-line bg-panel px-2 py-1.5 text-xs text-fg" />
+        <button
+          disabled={!name.trim()}
+          onClick={() => {
+            const t = seed.trim();
+            void run("refset.create", {
+              character_id: entityId, name: name.trim(),
+              ...(t !== "" ? { seed: Number(t) } : {}),
+            }).then(() => { setName(""); setSeed(""); reload(); });
+          }}
+          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg disabled:opacity-40">
+          + New set
+        </button>
+      </div>
     </div>
   );
 }

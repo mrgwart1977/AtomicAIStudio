@@ -41,6 +41,15 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return (await res.json()) as T;
 }
 
+/** C4-A — named reference sets for a character (or the whole project
+ * when no character filter is given). */
+export async function listReferenceSets(
+  projectId: string, characterId?: string,
+): Promise<import("./types").ReferenceSet[]> {
+  const q = characterId ? `?character_id=${characterId}` : "";
+  return apiFetch(`/api/projects/${projectId}/reference-sets${q}`);
+}
+
 // SEC-A1: `assetFileUrl` (token-in-query URLs) was removed — asset bytes
 // must be fetched with the X-Atomic-Token header via fetchAssetObjectUrl.
 

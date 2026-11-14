@@ -15,9 +15,11 @@ const setAssetKindFilter = vi.fn();
 const refreshAssets = vi.fn();
 
 const fetchAssetObjectUrl = vi.fn();
+const listReferenceSets = vi.fn();
 vi.mock("../../api/client", () => ({
   apiFetch: (...a: unknown[]) => apiFetch(...a),
   fetchAssetObjectUrl: (...a: unknown[]) => fetchAssetObjectUrl(...a),
+  listReferenceSets: (...a: unknown[]) => listReferenceSets(...a),
 }));
 vi.mock("../../api/commands", () => ({
   commitCommand: (...a: unknown[]) => commitCommand(...a),
@@ -241,6 +243,7 @@ beforeEach(() => {
   store.jobs = { ...JOBS };
   apiFetch.mockImplementation(route);
   fetchAssetObjectUrl.mockResolvedValue("blob:mock-thumb");
+  listReferenceSets.mockResolvedValue([]);
   previewCommand.mockResolvedValue({
     summary: "Simulate cloud image job for openai-images",
     warnings: ["Cost is an ESTIMATE only (~$0.1900, per_image)",
@@ -652,6 +655,57 @@ describe("CloudImagePanel — C3-D2 image-to-image mode", () => {
     expect(payload.reference_asset_ids).toEqual(["asset-ref"]);
     expect(screen.getByTestId("ci-approval-source").textContent)
       .toContain("1 reference");
+  });
+
+  it("C4-A — sends a character reference set and pins resolved contents", async () => {
+    listReferenceSets.mockResolvedValue([{
+      id: "rs1", project_id: "p1", character_id: "ch1", name: "Hero refs",
+      seed: 42, notes: "", position: 0, status: "active", revision: 1,
+      member_count: 2, created_at: "2026-01-01T00:00:00Z",
+    }]);
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    fireEvent.change(screen.getByTestId("ci-provider"), { target: { value: "openai-images" } });
+    await waitFor(() => screen.getByText("gpt-image-1"));
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    fireEvent.change(screen.getByTestId("ci-prompt"), { target: { value: "new backdrop" } });
+    // pick the character → its sets load into the set picker
+    fireEvent.change(screen.getByTestId("ci-character"), { target: { value: "ch1" } });
+    await waitFor(() => expect(listReferenceSets).toHaveBeenCalledWith("p1", "ch1"));
+    const setSel = await screen.findByTestId("ci-refset") as HTMLSelectElement;
+    expect(setSel.textContent).toContain("Hero refs (2 refs)");
+    fireEvent.change(setSel, { target: { value: "rs1" } });
+    // preview returns the resolved contents — they are pinned into commit
+    previewCommand.mockResolvedValueOnce({
+      summary: "s", warnings: [],
+      affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
+      cost_estimate: { est_cost_usd: 0.02, unit: "per_image", currency: "USD",
+        is_estimate: true, simulated: true, settlement: "usage-based" },
+      current_revision: 7, launches_generation: true,
+      resolved_references: [
+        { asset_id: "asset-ref", weight: null, sha256: "a".repeat(64) },
+        { asset_id: "asset-9", weight: null, sha256: "b".repeat(64) },
+      ],
+      resolved_set: { id: "rs1", seed: 42, revision: 1 },
+    });
+    fireEvent.click(screen.getByTestId("ci-preview-btn"));
+    await waitFor(() => screen.getByTestId("ci-approval"));
+    const prev = previewCommand.mock.calls[0][2] as Record<string, unknown>;
+    expect(prev.reference_set_id).toBe("rs1");
+    expect(prev.reference_asset_ids).toBeUndefined();
+    expect(prev.reference_weights).toBeUndefined();
+    fireEvent.click(screen.getByTestId("ci-approve"));
+    await waitFor(() => expect(commitCommand).toHaveBeenCalled());
+    const committed = commitCommand.mock.calls[0][3] as Record<string, unknown>;
+    expect(committed.reference_set_id).toBe("rs1");
+    expect(committed.expected_references).toEqual([
+      { asset_id: "asset-ref", weight: null, sha256: "a".repeat(64) },
+      { asset_id: "asset-9", weight: null, sha256: "b".repeat(64) },
+    ]);
+    expect(committed.expected_set).toEqual({ id: "rs1", seed: 42, revision: 1 });
+    // identity honesty copy is shown once a set is selected
+    expect(document.body.textContent).toContain("do not guarantee identity");
   });
 
   it("keeps non-img2img providers disabled in edit mode", async () => {

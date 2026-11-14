@@ -647,9 +647,22 @@ def shot_cast_remove(session: Session, shot: Shot, character_id: str) -> ShotCha
 
 # ---------- entity ↔ asset links ----------
 
+def _check_refset_membership(session: Session, project_id: str, *,
+                            entity_type: str, entity_id: str,
+                            set_id: str | None) -> str | None:
+    """A link may only join a set owned by the same project AND the same
+    entity — cross-entity membership would silently leak references."""
+    if not set_id:
+        return None
+    rs = get_refset(session, set_id, project_id)
+    if entity_type != "character" or rs.character_id != entity_id:
+        raise KeyError("reference set does not belong to this entity")
+    return rs.id
+
+
 def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
                       entity_id: str, asset_id: str, role: str, label: str = "",
-                      weight=_UNSET) -> EntityAssetLink:
+                      weight=_UNSET, set_id=_UNSET) -> EntityAssetLink:
     from app.db.models import Asset
     if entity_type not in ENTITY_ASSET_TYPES:
         raise ValueError(f"unsupported entity_type '{entity_type}'")
@@ -661,6 +674,11 @@ def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
     asset = session.get(Asset, asset_id)
     if asset is None or asset.project_id != project_id:
         raise KeyError("asset not found in this project")
+    checked_set = None
+    if set_id is not _UNSET:
+        checked_set = _check_refset_membership(
+            session, project_id, entity_type=entity_type,
+            entity_id=entity_id, set_id=set_id)
     row = session.execute(
         select(EntityAssetLink).where(
             EntityAssetLink.entity_type == entity_type,
@@ -674,6 +692,7 @@ def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
             id=new_id(), project_id=project_id, entity_type=entity_type,
             entity_id=entity_id, asset_id=asset_id, role=role, label=label,
             weight=weight if weight is not _UNSET else None,
+            set_id=checked_set,
             position=_next_position(
                 session, EntityAssetLink,
                 (EntityAssetLink.entity_type == entity_type) & (EntityAssetLink.entity_id == entity_id),
@@ -690,7 +709,8 @@ def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
 
 
 def update_entity_asset_link(session: Session, project_id: str, link_id: str, *,
-                             label=_UNSET, weight=_UNSET) -> EntityAssetLink:
+                             label=_UNSET, weight=_UNSET,
+                             set_id=_UNSET) -> EntityAssetLink:
     row = session.get(EntityAssetLink, link_id)
     if row is None or row.project_id != project_id:
         raise KeyError("link not found in this project")
@@ -698,16 +718,22 @@ def update_entity_asset_link(session: Session, project_id: str, link_id: str, *,
         row.label = label
     if weight is not _UNSET:
         row.weight = weight  # may be None — explicit clear
+    if set_id is not _UNSET:
+        row.set_id = _check_refset_membership(
+            session, project_id, entity_type=row.entity_type,
+            entity_id=row.entity_id, set_id=set_id)
     session.flush()
     return row
 
 
 def reorder_entity_asset_links(session: Session, project_id: str, *,
                                entity_type: str, entity_id: str,
-                               ordered_link_ids: list[str]) -> list[EntityAssetLink]:
+                               ordered_link_ids: list[str],
+                               set_id: str | None = None) -> list[EntityAssetLink]:
     """Assign positions 0..n-1 in the given order. The id list must be a
     COMPLETE permutation of the entity's links — a partial order would
-    leave the rest of the set ambiguous."""
+    leave the rest of the set ambiguous. With `set_id` the permutation
+    scopes to that set's members only."""
     links = session.execute(
         select(EntityAssetLink).where(
             EntityAssetLink.project_id == project_id,
@@ -715,6 +741,8 @@ def reorder_entity_asset_links(session: Session, project_id: str, *,
             EntityAssetLink.entity_id == entity_id,
         )
     ).scalars().all()
+    if set_id:
+        links = [l for l in links if l.set_id == set_id]
     by_id = {l.id: l for l in links}
     if set(ordered_link_ids) != set(by_id) or len(ordered_link_ids) != len(by_id):
         raise ValueError(
@@ -754,6 +782,24 @@ def duplicate_character(session: Session, character: Character, *, name: str | N
         name=(name or f"{character.name} (copy)"), summary=character.summary,
         data=dict(character.profile_json or {}), command_id=command_id,
     )
+    # C4-A — duplicate the character's reference sets first so member
+    # links can be remapped to the new set ids.
+    from app.db.models import ReferenceSet
+    set_map: dict[str, str] = {}
+    for rs in session.execute(
+        select(ReferenceSet).where(
+            ReferenceSet.character_id == character.id,
+            ReferenceSet.status != "archived",
+        )
+    ).scalars():
+        dup_rs = ReferenceSet(
+            id=new_id(), project_id=character.project_id,
+            character_id=dup.id, name=rs.name, seed=rs.seed,
+            notes=rs.notes, position=rs.position, revision=1,
+        )
+        session.add(dup_rs)
+        session.flush()
+        set_map[rs.id] = dup_rs.id
     for link in session.execute(
         select(EntityAssetLink).where(
             EntityAssetLink.entity_type == "character",
@@ -764,6 +810,7 @@ def duplicate_character(session: Session, character: Character, *, name: str | N
             id=new_id(), project_id=character.project_id, entity_type="character",
             entity_id=dup.id, asset_id=link.asset_id, role=link.role,
             label=link.label, position=link.position, weight=link.weight,
+            set_id=set_map.get(link.set_id),
         ))
     session.flush()
     return dup
@@ -852,3 +899,62 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
             "shots": [shot_entry(sh) for sh in sh_by_scene.get(s.id, [])],
         })
     return out
+
+
+# ---------- reference sets (C4-A) ----------
+
+def get_refset(session: Session, set_id: str, project_id: str):
+    """Project-scoped ReferenceSet lookup — raises KeyError like every
+    other get_* helper here (commands turn it into 404)."""
+    from app.db.models import ReferenceSet
+    rs = session.get(ReferenceSet, set_id or "")
+    if rs is None or rs.project_id != project_id or rs.status != "active":
+        raise KeyError("reference set not found in this project")
+    return rs
+
+
+def create_refset(session: Session, project_id: str, character: Character, *,
+                  name: str, seed=None, notes: str = ""):
+    from app.db.models import ReferenceSet
+    rs = ReferenceSet(
+        id=new_id(), project_id=project_id, character_id=character.id,
+        name=name, seed=seed, notes=notes or "", revision=1,
+        position=_next_position(
+            session, ReferenceSet,
+            (ReferenceSet.project_id == project_id)
+            & (ReferenceSet.character_id == character.id)),
+    )
+    session.add(rs)
+    session.flush()
+    return rs
+
+
+def list_refsets(session: Session, project_id: str, *,
+                 character_id: str | None = None):
+    from app.db.models import ReferenceSet
+    q = select(ReferenceSet).where(
+        ReferenceSet.project_id == project_id,
+        ReferenceSet.status != "archived")
+    if character_id:
+        q = q.where(ReferenceSet.character_id == character_id)
+    return session.execute(q.order_by(ReferenceSet.position)).scalars().all()
+
+
+def set_members(session: Session, set_id: str, project_id: str):
+    """Ordered links belonging to a set (position order)."""
+    return session.execute(
+        select(EntityAssetLink).where(
+            EntityAssetLink.set_id == set_id,
+            EntityAssetLink.project_id == project_id,
+        ).order_by(EntityAssetLink.position)
+    ).scalars().all()
+
+
+def delete_refset(session: Session, rs) -> None:
+    """Deleting a set keeps its links — they fall back to ungrouped
+    references rather than disappearing from the character."""
+    for link in set_members(session, rs.id, rs.project_id):
+        link.set_id = None
+    rs.status = "archived"
+    rs.revision += 1
+    session.flush()

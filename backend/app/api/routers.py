@@ -51,6 +51,7 @@ from app.schemas.api import (
     CommandPreviewRequest,
     CommandProposalOut,
     EntityAssetLinkOut,
+    ReferenceSetOut,
     EntityOut,
     EntityRevisionOut,
     GpuSettingsOut,
@@ -1035,6 +1036,22 @@ def list_entity_asset_links(
 ):
     from app.domain import storyboard as sb
     return sb.list_entity_assets(db, project.id, entity_type=entity_type, entity_id=entity_id)
+
+
+@api_router.get("/api/projects/{project_id}/reference-sets",
+                response_model=list[ReferenceSetOut])
+def list_reference_sets(
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+    character_id: str | None = None,
+):
+    """C4-A — a character's named reference sets + member counts."""
+    from app.domain import storyboard as sb
+    out = []
+    for rs in sb.list_refsets(db, project.id, character_id=character_id):
+        d = {c.name: getattr(rs, c.name) for c in rs.__table__.columns}
+        d["member_count"] = len(sb.set_members(db, rs.id, project.id))
+        out.append(d)
+    return out
 
 
 # ---------- bibles ----------

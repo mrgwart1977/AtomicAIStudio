@@ -102,6 +102,7 @@ CommandType = Literal[
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
+    "refset.create", "refset.update", "refset.delete",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -139,6 +140,14 @@ class CommandProposalOut(BaseModel):
     cost_estimate: dict[str, Any] | None = None
     current_revision: int
     launches_generation: bool
+    # C4-A — resolved contents of reference_set_id (ordered asset ids +
+    # weights) so a UI approval can fingerprint the actual members, not
+    # just the set id; None when no set was referenced.
+    resolved_references: list[dict[str, Any]] | None = None
+    # C4-A — {id, seed, revision} of the previewed set: a pinned-seed
+    # or metadata edit changes no member fingerprint, so the approval
+    # pins set identity separately via expected_set at commit.
+    resolved_set: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -258,10 +267,26 @@ class EntityAssetLinkOut(BaseModel):
     entity_type: str
     entity_id: str
     asset_id: str
+    set_id: str | None = None
     role: str
     label: str
     position: int
     weight: float | None = None
+    created_at: datetime
+
+
+class ReferenceSetOut(BaseModel):
+    """C4-A — named character reference set + identity guidance."""
+    id: str
+    project_id: str
+    character_id: str
+    name: str
+    seed: int | None = None
+    notes: str
+    position: int
+    status: str
+    revision: int
+    member_count: int = 0
     created_at: datetime
 
 
