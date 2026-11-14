@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **C3-D4 — visual image editor**: Cloud Studio's inpaint mode gains a
+  canvas mask painter — brush/eraser strokes land in a source-resolution
+  bitmap (zoom/pan never distort it), wheel zoom, shift/middle-drag pan,
+  overlay opacity, undo/redo, and "Use as inpaint mask" which exports a
+  PNG at exact source dims, stages it via the new
+  `assets/upload-source` endpoint (safety-inspected, server-named,
+  project-namespaced), and imports through the standard `asset.import`
+  job — no parallel ingest path. Outpaint mode gains a visual placement
+  preview mirroring the backend's nine-anchor pad rules
+  (`editorMath.computePad`/`outpaintValid` kept in lockstep and unit
+  tested). Mask export refuses empty masks (0 editable pixels).
 - **C3-D3 — simulated inpaint & outpaint (`generate.image.edit`)**:
   mask-based region editing and canvas extension on documented edit
   contracts, same two-layer fail-closed negotiation — the catalog model
