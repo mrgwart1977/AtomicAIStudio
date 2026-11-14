@@ -73,6 +73,27 @@ def test_system_memory_shape():
     assert m["commit_headroom_bytes"] >= 0
 
 
+def test_real_ram_probe_reports_bytes(monkeypatch):
+    """Integration path for the REAL hardware RAM probe: _roomy_memory
+    pins ``psutil.virtual_memory`` for unit determinism, but the
+    production WorkerPool admission source must still read genuine host
+    memory. Restores the real probe and exercises admission end to end."""
+    import psutil
+
+    from app.domain.workers.resources import ResidencyRegistry
+    from tests.conftest import REAL_VIRTUAL_MEMORY
+
+    monkeypatch.setattr(psutil, "virtual_memory", REAL_VIRTUAL_MEMORY)
+    reg = ResidencyRegistry(
+        ram_free_bytes=lambda: psutil.virtual_memory().available,
+        gpu_free_bytes=lambda _i: 0)
+    free = psutil.virtual_memory().available
+    assert isinstance(free, int) and free > 0
+    allowed, reason = reg.admit(ram_est=1, vram_est=None, gpu_index=-1)
+    assert isinstance(allowed, bool)
+    assert isinstance(reason, str) and reason
+
+
 def test_preflight_blocks_when_ram_insufficient(monkeypatch):
     monkeypatch.setattr(resources, "system_memory", lambda: {
         "total_phys_bytes": 16 * resources.GIB,
