@@ -161,3 +161,84 @@ def test_sweep_all_staged_reports_totals(client):
         client.app.state.session_factory, dd)
     assert total["deleted"] == 1 and total["kept"] >= 1
     assert total["reclaimed_bytes"] > 0
+
+
+def _refjob(s, pid, jid, status, path):
+    s.add(GenerationJob(
+        id=jid, project_id=pid, kind="import",
+        adapter_id="ops.asset.import", status=status,
+        request_json={"command_type": "asset.import", "source_path": path},
+        idempotency_key=f"k-{jid}"))
+    s.commit()
+
+
+def test_running_job_references_protected(client):
+    """'running' is also recoverable — reconcile_interrupted re-queues
+    it after a crash, so its staging file must survive."""
+    p = make_project(client)
+    pid = p["id"]
+    staged = _stage(client, pid)["path"]
+    _age(staged)
+    sf = client.app.state.session_factory
+    dd = client.app.state.settings.data_dir
+    with sf() as s:
+        _refjob(s, pid, "s2-run-1", "running", staged)
+        r = upload_staging.cleanup_project_staged(s, dd, pid)
+    assert r["deleted"] == 0 and os.path.exists(staged)
+
+
+def test_unlink_failure_keeps_file_and_counts(client, monkeypatch):
+    """A file that refuses unlink (e.g. held open by a live import
+    read) is kept this round and counted — the sweep never raises."""
+    from pathlib import Path
+    p = make_project(client)
+    pid = p["id"]
+    staged = _stage(client, pid)["path"]
+    _age(staged)
+    dd = client.app.state.settings.data_dir
+    real_unlink = Path.unlink
+
+    def flaky(self, *a, **kw):
+        if str(self) == staged:
+            raise OSError("file in use")
+        return real_unlink(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", flaky)
+    with client.app.state.session_factory() as s:
+        r = upload_staging.cleanup_project_staged(s, dd, pid)
+    assert r["deleted"] == 0 and r["kept"] == 1
+    assert os.path.exists(staged)
+
+
+def test_symlinks_never_deleted_or_followed(client, tmp_path):
+    """A planted symlink inside staging is skipped entirely — neither
+    the link nor its outside target is touched by the sweeper."""
+    p = make_project(client)
+    pid = p["id"]
+    dd = client.app.state.settings.data_dir
+    up = upload_staging.uploads_dir(dd, pid)
+    up.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"keep me")
+    link = up / "link.png"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlink creation not permitted")
+    _age(up / "decoy.png") if (up / "decoy.png").write_bytes(b"x") else None
+    with client.app.state.session_factory() as s:
+        r = upload_staging.cleanup_project_staged(s, dd, pid)
+    assert link.exists() or link.is_symlink()
+    assert outside.read_bytes() == b"keep me"
+
+
+def test_repeated_sweep_is_idempotent(client):
+    p = make_project(client)
+    pid = p["id"]
+    staged = _stage(client, pid)["path"]
+    _age(staged)
+    dd = client.app.state.settings.data_dir
+    with client.app.state.session_factory() as s:
+        r1 = upload_staging.cleanup_project_staged(s, dd, pid)
+        r2 = upload_staging.cleanup_project_staged(s, dd, pid)
+    assert r1["deleted"] == 1 and r2["deleted"] == 0

@@ -89,7 +89,10 @@ def cleanup_project_staged(
     refs = referenced_paths(db, project_id)
     cutoff = now - retention.total_seconds()
     for entry in up.iterdir():          # flat — never recurse
-        if not entry.is_file():
+        # Symlinks are never followed or unlinked — a planted link can
+        # neither redirect deletion outside staging nor be cleaned
+        # itself; foreign entries (dirs, junctions) are also skipped.
+        if entry.is_symlink() or not entry.is_file():
             continue
         try:
             st = entry.stat()
