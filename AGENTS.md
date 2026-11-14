@@ -17,6 +17,7 @@
 - Backend session token: `X-Atomic-Token` header only — `?token=` was removed in A3; the WS authenticates via a first-frame `{"type":"auth","token":...}` message.
 - No model downloads, cloud calls, or paid work without explicit owner approval.
 - C3-D2 img2img: `generate.image.img2img` → `cloud.image.img2img.sim`; the provider's `EndpointSpec.edit_path` is the implemented-contract gate — catalog `editing.img2img` alone never enables the mode.
+- C3-D3 edit: `generate.image.edit` (`operation: inpaint|outpaint`) → `cloud.image.edit.sim`; gates on `EndpointSpec.inpaint_path`/`outpaint_path`. Mask convention in `app/domain/image_edit.py` — exact source-dims match (never resized), luminance ≥128 = editable; outpaint is expansion-only ≤4096 px with a documented placement anchor.
 
 ## Milestone state
 - M0 + M0.1 approved and merged in PR #2; **M1 implemented** on `feat/m1-projects` (project mgmt, bibles, CAS storage, backups, workspace UI).
