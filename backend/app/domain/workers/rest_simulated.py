@@ -275,7 +275,8 @@ def simulated_image_handler(provider_key: str,
 
         def handler(req: httpx.Request) -> httpx.Response:
             if req.method == "POST" \
-                    and req.url.path == "/v1/images/generations":
+                    and req.url.path in ("/v1/images/generations",
+                                         "/v1/images/edits"):
                 return routes["submit"](req)
             return _json({"error": {"type": "not_found",
                                     "message": "route"}}, 404)
@@ -443,3 +444,17 @@ def build_simulated_image_providers(
                 key, transport=simulated_image_transport(key),
                 api_key=api_key)
             for key in IMAGE_REST_KEYS}
+
+
+def build_simulated_img2img_providers(
+        *, api_key: str = "simulated-no-credential") -> dict:
+    """C3-D2 — only providers whose implemented contract documents an
+    image-edits endpoint (spec.edit_path). A catalog declaration of
+    editing.img2img is NOT sufficient — this is the contract gate."""
+    from app.domain.workers.rest_image_providers import (
+        IMAGE_REST_KEYS, IMAGE_SPECS, make_image_provider)
+    return {key: make_image_provider(
+                key, transport=simulated_image_transport(key),
+                api_key=api_key)
+            for key in IMAGE_REST_KEYS
+            if IMAGE_SPECS[key].edit_path is not None}

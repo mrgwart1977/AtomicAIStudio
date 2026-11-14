@@ -136,6 +136,10 @@ class EndpointSpec:
     # artifact retrieval is implemented for this provider — URL-only
     # results stay artifact_pending_retrieval.
     artifact_hosts: tuple[str, ...] = ()
+    # C3-D2: documented img2img/edits endpoint. None = the provider's
+    # implemented contract has no image-edit surface — requests for the
+    # mode fail closed before submit, whatever the catalog declares.
+    edit_path: str | None = None
 
 
 OPENAI_RESPONSES_SPEC = EndpointSpec(
@@ -372,9 +376,19 @@ class RestRemoteProvider:
         return body, resp.headers
 
     async def submit(self, intent: SubmissionIntent) -> RemoteHandle:
+        # C3-D2 — img2img requests route to the provider's documented
+        # edits endpoint; providers without one fail closed here, before
+        # any bytes leave the adapter.
+        if (intent.request.get("mode") == "img2img"
+                and self.spec.edit_path is None):
+            raise UnsupportedRemoteOp(
+                f"{self.name}: no documented img2img edits endpoint")
+        spec_path = (self.spec.edit_path
+                     if intent.request.get("mode") == "img2img"
+                     else self.spec.submit_path)
         # Paths without placeholders format to themselves; Gemini
         # embeds the model in the URL ({model}:generateContent).
-        path = self.spec.submit_path.format(
+        path = spec_path.format(
             model=intent.request.get("model_id") or "")
         payload = {**self._submit_body(intent.request),
                    **self.spec.submit_extra}

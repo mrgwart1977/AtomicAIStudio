@@ -47,6 +47,10 @@ OPENAI_IMAGES_SPEC = EndpointSpec(
     submit_extra={"n": 1},
     idempotency="none",
     docs="https://platform.openai.com/docs/api-reference/images",
+    # C3-D2 — documented image-edits surface: POST /v1/images/edits
+    # takes the source image; the documented contract is multipart,
+    # simulated here as JSON fields of the same names.
+    edit_path="/v1/images/edits",
 )
 
 # C3-C — Google image generation on the shared Gemini API host.
@@ -122,6 +126,9 @@ BFL_FLUX_SPEC = EndpointSpec(
     idempotency="none",
     docs="https://docs.bfl.ai/flux_models/flux_1_1_pro",
     artifact_hosts=("delivery.bfl.ai", "api.bfl.ai"),
+    # C3-D2 — flux-kontext models accept input_image on the same
+    # /v1/{model} route (documented img2img contract).
+    edit_path="/v1/{model}",
 )
 
 IMAGE_SPECS = {s.provider_key: s for s in (
@@ -162,6 +169,17 @@ class OpenAIImagesProvider(RestRemoteProvider):
     def _submit_body(self, req: dict[str, Any]) -> dict[str, Any]:
         body = {"model": req.get("model_id"),
                 "prompt": req.get("prompt") or ""}
+        if req.get("mode") == "img2img":
+            # Documented edits contract carries the source image (the
+            # real API posts multipart image fields; the simulated
+            # contract carries the same values as b64 JSON).
+            body["image"] = req.get("source_b64") or ""
+            refs = req.get("reference_b64") or []
+            if refs:
+                body["image[]"] = refs
+            weights = req.get("reference_weights") or []
+            if weights:
+                body["reference_weights"] = weights
         if req.get("size"):
             body["size"] = req["size"]
         if req.get("quality"):
@@ -420,6 +438,9 @@ class BflFluxProvider(RestRemoteProvider):
         body: dict[str, Any] = {"prompt": req.get("prompt") or "",
                                 "prompt_upsampling": False,
                                 "safety_tolerance": 2}
+        if req.get("mode") == "img2img":
+            # Documented Kontext contract: input_image as base64.
+            body["input_image"] = req.get("source_b64") or ""
         size = req.get("size") or ""
         # Documented dimension range 256–1440, multiples of 32; the
         # catalog only declares compliant "WxH" presets.

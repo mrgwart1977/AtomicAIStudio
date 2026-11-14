@@ -185,6 +185,21 @@ class SimCloudImageAdapter:
                           "cost_is_provider_billed": False,
                           "transport": "mock_transport"}}, micro, basis
 
+    def _intent_request(self, req: dict[str, Any]) -> dict[str, Any]:
+        return {"provider_key": req["provider_key"],
+                "model_id": req.get("model_id"),
+                "prompt": req.get("prompt") or "",
+                "negative_prompt": req.get("negative_prompt"),
+                "size": req.get("size"),
+                "quality": req.get("quality"),
+                "seed": req.get("seed"),
+                "cost_table": req.get("cost_table")}
+
+    def _media_extra(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Provenance keys the subclass (img2img) adds to the output
+        asset's media record — empty for text-to-image."""
+        return {}
+
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         req = handle.request
         provider_key = req["provider_key"]
@@ -193,14 +208,7 @@ class SimCloudImageAdapter:
             job_id=handle.job_id,
             idempotency_key=req["job_idempotency_key"],
             adapter_id=self.profile.adapter_id,
-            request={"provider_key": provider_key,
-                     "model_id": req.get("model_id"),
-                     "prompt": req.get("prompt") or "",
-                     "negative_prompt": req.get("negative_prompt"),
-                     "size": req.get("size"),
-                     "quality": req.get("quality"),
-                     "seed": req.get("seed"),
-                     "cost_table": req.get("cost_table")},
+            request=self._intent_request(req),
             est_cost_usd=req.get("est_cost_usd"),
             max_cost_usd=req.get("est_cost_usd"),
         )
@@ -517,6 +525,7 @@ class SimCloudImageAdapter:
                     "actual_height": info.height,
                     "revised_prompt": detail.get("revised_prompt"),
                     "reference_asset_id": req.get("reference_asset_id"),
+                    **self._media_extra(req),
                     "scene_id": req.get("scene_id"),
                     "shot_id": req.get("shot_id"),
                     "character_id": req.get("character_id"),
@@ -535,4 +544,97 @@ class SimCloudImageAdapter:
                     "remote_id_synthetic": bool(rh.remote_id),
                 },
             },
+        }
+
+
+class SimCloudImg2ImgAdapter(SimCloudImageAdapter):
+    """C3-D2 — simulated image-to-image on the documented edits
+    contract of a provider (EndpointSpec.edit_path).
+
+    Same durable lifecycle as text-to-image: intent → classified submit
+    → safety-inspected bytes → CAS. Capability negotiation is
+    fail-closed at BOTH layers: the command layer checks the catalog
+    model's editing.img2img declaration AND the provider key's presence
+    in this adapter's providers dict (i.e. an implemented edits
+    contract); this layer re-checks spec.edit_path so a catalog flag can
+    never conjure an endpoint the contract does not document. Source
+    and reference bytes come from CAS paths resolved at commit time —
+    re-inspected here at run time, never trusted from request metadata.
+    """
+
+    profile = CapabilityProfile(
+        adapter_id="cloud.image.img2img.sim",
+        display_name="Sim Cloud Img2Img (documented edits contract, simulated transport)",
+        adapter_kind="cloud",
+        tasks=("image.img2img",),
+        supports={"model_id": True, "remote_job": True, "seed": True,
+                  "size": True, "quality": True,
+                  "source_image": True, "reference_images": True,
+                  "reference_weights": True},
+        limits={"max_prompt_chars": 8000, "images_per_job": 1,
+                "max_reference_images": 16},
+        requires_cloud=True,
+        cost_model="per_call",
+        lane="gen", needs_gpu=False,
+        worker_model="remote",
+        execution_scope="remote",
+        notes=("Documented image-edits contract over injected "
+               "MockTransport — source/reference bytes are real CAS "
+               "payloads re-validated by the safety gate; output is a "
+               "deterministic test PNG, never verified_remote, and "
+               "every output is a NEW asset (source untouched)."),
+    )
+
+    async def validate(self, request: dict[str, Any]) -> list[str]:
+        errors = await super().validate(request)
+        key = request.get("provider_key")
+        provider = self.providers.get(key) if key else None
+        if provider is not None and provider.spec.edit_path is None:
+            errors.append(
+                f"provider '{key}' has no implemented img2img contract")
+        if not request.get("source_asset_id"):
+            errors.append("source_asset_id is required for img2img")
+        if not request.get("source_path"):
+            errors.append("source_path is required for img2img")
+        return errors
+
+    @staticmethod
+    def _load_inspected_b64(path: str, expected_sha256: str | None) -> str:
+        """Read + safety-inspect + hash-verify a CAS payload. The
+        recorded sha256 is re-checked at execution: an asset modified or
+        swapped after commit fails closed rather than silently editing
+        the wrong bytes."""
+        data = Path(path).read_bytes()
+        image_safety.inspect_image(data)  # raises on bad bytes
+        if expected_sha256:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != expected_sha256:
+                raise RuntimeError(
+                    f"CAS payload hash mismatch: expected "
+                    f"{expected_sha256[:16]}… got {actual[:16]}… — "
+                    "asset changed after commit, refusing")
+        return base64.b64encode(data).decode("ascii")
+
+    def _intent_request(self, req: dict[str, Any]) -> dict[str, Any]:
+        out = super()._intent_request(req)
+        out["mode"] = "img2img"
+        out["source_b64"] = self._load_inspected_b64(
+            req["source_path"], req.get("source_sha256"))
+        ref_shas = req.get("reference_sha256") or []
+        out["reference_b64"] = [
+            self._load_inspected_b64(p, ref_shas[i] if i < len(ref_shas) else None)
+            for i, p in enumerate(req.get("reference_paths") or [])]
+        out["reference_weights"] = req.get("reference_weights") or []
+        return out
+
+    def _media_extra(self, req: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "mode": "img2img",
+            # Source→output lineage: the generated asset records the
+            # exact assets it derived from; the source itself is never
+            # mutated — this output is always a new CAS asset.
+            "derived_from_asset_id": req.get("source_asset_id"),
+            "derived_from_sha256": req.get("source_sha256"),
+            "reference_asset_ids": req.get("reference_asset_ids") or [],
+            "reference_weights": req.get("reference_weights") or [],
         }

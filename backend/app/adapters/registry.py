@@ -49,6 +49,15 @@ class AdapterRegistry:
             build_simulated_image_providers)
         self.register(SimCloudImageAdapter(
             build_simulated_image_providers()))
+        # C3-D2 — simulated img2img on documented edits contracts only
+        # (providers whose EndpointSpec declares edit_path). Smaller set
+        # by design: a catalog capability flag cannot enable a mode the
+        # contract does not implement.
+        from app.adapters.cloud_image import SimCloudImg2ImgAdapter
+        from app.domain.workers.rest_simulated import (
+            build_simulated_img2img_providers)
+        self.register(SimCloudImg2ImgAdapter(
+            build_simulated_img2img_providers()))
         # M4.1 mock persistent adapter — dev/test only. Its worker is a
         # Python script spawned via sys.executable, which doesn't exist
         # as a usable interpreter in a frozen build (sys.executable is

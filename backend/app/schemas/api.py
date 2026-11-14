@@ -83,6 +83,7 @@ CommandType = Literal[
     "project.update_settings", "project.duplicate", "project.delete",
     "generate.image.mock", "generate.image", "generate.image.persistent",
     "generate.video", "generate.text.cloud", "generate.image.cloud",
+    "generate.image.img2img",
     "character.create", "character.update", "character.archive",
     "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive",

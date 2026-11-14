@@ -92,6 +92,19 @@ export interface ProviderDetail extends Omit<ProviderSummary, "capabilities"> {
      * model's negative_prompt field (C3-C). */
     negative_prompt?: boolean;
     seed?: boolean;
+    /** C3-D1 — catalog-declared editing capabilities. A declaration is
+     * intent metadata only: img2img additionally requires the provider
+     * to have an implemented edits contract (image-contracts
+     * img2img_implemented list) before the mode can run. */
+    editing?: {
+      img2img?: boolean;
+      max_reference_images?: number;
+      mask_inpaint?: boolean;
+      outpaint?: boolean;
+      reference_weights?: boolean;
+      identity_reference?: boolean;
+      note?: string;
+    };
     cost_table?: {
       unit?: string;                       // per_image | per_mpixel | per_mtok | per_credit
       rate?: number;
@@ -179,6 +192,10 @@ export interface ProviderTestResult {
  * all contracts run on simulated transports in this build. */
 export interface ImageContracts {
   implemented: string[];
+  /** C3-D2 — strict subset of `implemented`: providers whose contract
+   * implements an image-edits (img2img) endpoint. */
+  img2img_implemented: string[];
+  img2img_adapter_id: string;
   adapter_id: string;
   simulated: boolean;
   note: string;
