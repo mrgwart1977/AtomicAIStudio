@@ -28,7 +28,9 @@ from app.db.models import (
     Project,
     ProjectRevision,
     PromptDraft,
+    Scene,
     SharedAssetLink,
+    Shot,
     SpendReservation,
     StorageLocation,
     new_id,
@@ -1383,7 +1385,47 @@ def _validate_timeline(session: Session, project: Project,
     if command_type == "timeline.clip.insert":
         if not payload.get("asset_id"):
             raise CommandError(422, "asset_id is required")
-        # Full source/trim/duplicate validation happens at commit.
+        # Run the same read-only resolution the commit path runs so a
+        # preview surfaces the real refusal, not a surprise at commit.
+        try:
+            asset, ver, geo = tld.resolve_clip_source(
+                session, project.id, payload["asset_id"],
+                payload.get("version_id"))
+            src = geo["frames"]
+            i = payload.get("in_frame")
+            o = payload.get("out_frame")
+            if i is not None:
+                tld._check_int(i, "in_frame", 0, src - 1)
+            if o is not None:
+                tld._check_int(o, "out_frame", 1, src)
+            if (i if i is not None else 0) >= (o if o is not None else src):
+                raise tld.TimelineError("in_frame must be before out_frame")
+            if payload.get("position") is not None:
+                tld._check_int(payload["position"], "position", 0,
+                               len(tld.list_clips(session, tl.id)))
+            if tl.status != "active":
+                raise tld.TimelineError("timeline is archived")
+            if not payload.get("allow_duplicate") and any(
+                    c.source_asset_id == asset.id
+                    and c.source_version_id == ver.id
+                    for c in tld.list_clips(session, tl.id)):
+                raise tld.TimelineError(
+                    "this source is already on the timeline — "
+                    "pass allow_duplicate to repeat it intentionally")
+            if payload.get("shot_id") is not None:
+                shot = session.get(Shot, payload["shot_id"])
+                if shot is None or shot.project_id != project.id:
+                    raise tld.TimelineError(
+                        "shot not found in this project")
+            if payload.get("scene_id") is not None:
+                scene = session.get(Scene, payload["scene_id"])
+                if scene is None or scene.project_id != project.id:
+                    raise tld.TimelineError(
+                        "scene not found in this project")
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
     elif command_type in ("timeline.clip.remove", "timeline.clip.move",
                           "timeline.clip.trim"):
         if not payload.get("clip_id"):

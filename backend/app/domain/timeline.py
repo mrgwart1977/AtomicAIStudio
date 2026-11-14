@@ -16,6 +16,7 @@ after every mutation — ordering is therefore always deterministic.
 """
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -269,14 +270,17 @@ def source_geometry(version: AssetVersion) -> dict[str, Any]:
 
 
 def _fps_to_rational(fps: float) -> tuple[int, int]:
-    """Common fps to exact rationals; odd rates stay integer-ish."""
+    """Probe fps → exact rational. NTSC rates map to their canonical
+    /1001 forms; any other non-integer rate keeps its rational value
+    (denominator ≤ 1001) instead of being rounded to a whole number."""
     known = {24: (24, 1), 25: (25, 1), 30: (30, 1), 48: (48, 1),
              60: (60, 1), 23.976: (24000, 1001), 29.97: (30000, 1001),
              59.94: (60000, 1001)}
     for k, v in known.items():
         if abs(fps - k) < 0.01:
             return v
-    return (max(1, round(fps)), 1)
+    f = Fraction(fps).limit_denominator(1001)
+    return (max(1, f.numerator), max(1, f.denominator))
 
 
 def resolve_clip_source(session: Session, project_id: str, asset_id: str,
@@ -400,20 +404,43 @@ def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
 
 # ---------- edit decision list ----------
 
+def clip_duration_frac(clip: TimelineClip) -> Fraction:
+    """Exact rational clip duration in seconds: trimmed source frames
+    ÷ source fps as (num/den). All timeline math uses this — floats only
+    ever appear at the JSON boundary."""
+    return Fraction(clip.out_frame - clip.in_frame, 1) * Fraction(
+        clip.src_fps_den, clip.src_fps_num)
+
+
 def clip_duration_s(clip: TimelineClip) -> float:
-    return ((clip.out_frame - clip.in_frame)
-            * clip.src_fps_den / clip.src_fps_num)
+    return float(clip_duration_frac(clip))
+
+
+def total_duration_frac(clips: list[TimelineClip]) -> Fraction:
+    return sum((clip_duration_frac(c) for c in clips), Fraction(0))
 
 
 def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
     """Deterministic `ade-edl/1` serialization — same timeline state
-    produces byte-identical JSON (no timestamps, no random ordering)."""
+    produces byte-identical JSON (no timestamps, no random ordering).
+
+    Timebase rules: each clip's trims are integer frames in ITS OWN
+    source rate (src_fps_num/src_fps_den, preserved exactly — 30000/1001
+    stays 30000/1001). Clip seconds = (out-in)·den/num as an exact
+    Fraction; the timeline total is the exact sum across mixed rates.
+    Floats appear only at the boundary, rounded to 6 dp — the integer
+    frames in the document are always the authoritative cut points.
+    """
     clips_out = []
-    total = 0.0
+    total = Fraction(0)
     for c in list_clips(session, tl.id):
-        dur = clip_duration_s(c)
+        dur = clip_duration_frac(c)
         total += dur
         ver = session.get(AssetVersion, c.source_version_id)
+        if ver is not None and ver.sha256 != c.source_sha256:
+            raise TimelineError(
+                f"clip {c.id}: pinned sha does not match its version — "
+                "timeline data is inconsistent")
         media = (ver.media_json or {}) if ver else {}
         probe = media.get("probe") or {}
         clips_out.append({
@@ -422,7 +449,7 @@ def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
             "version_id": c.source_version_id,
             "sha256": c.source_sha256,
             "in_frame": c.in_frame, "out_frame": c.out_frame,
-            "duration_s": round(dur, 6),
+            "duration_s": round(float(dur), 6),
             "source": {
                 "fps_num": c.src_fps_num, "fps_den": c.src_fps_den,
                 "frames": c.src_frames, "duration_s": c.src_duration_s,
@@ -438,5 +465,5 @@ def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
         "name": tl.name,
         "timebase": {"num": tl.fps_num, "den": tl.fps_den},
         "clips": clips_out,
-        "total_duration_s": round(total, 6),
+        "total_duration_s": round(float(total), 6),
     }

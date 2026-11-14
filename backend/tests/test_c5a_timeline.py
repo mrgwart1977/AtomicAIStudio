@@ -305,3 +305,76 @@ def test_timeline_isolation_cross_project(client):
     assert r.status_code == 404
     _commit(client, pid2, "timeline.update",
             {"timeline_id": t["id"], "name": "hijack"}, expect=404)
+
+
+def test_mixed_frame_rates_exact_rational_total(client):
+    """24/1 + 30000/1001 + 24000/1001 clips sum exactly — no float drift
+    in the total, and each clip keeps its own rational rate."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"],
+            _video(client, pid, "a.mp4", sha="aa" * 32,
+                   frames=48, fps=24.0, duration=2.0))
+    _insert(client, pid, t["id"],
+            _video(client, pid, "b.mp4", sha="ab" * 32,
+                   frames=60, fps=29.97, duration=2.002))
+    _insert(client, pid, t["id"],
+            _video(client, pid, "c.mp4", sha="ac" * 32,
+                   frames=48, fps=23.976, duration=2.002))
+    d = _detail(client, pid, t["id"])
+    rates = [(c["src_fps_num"], c["src_fps_den"]) for c in d["clips"]]
+    assert rates == [(24, 1), (30000, 1001), (24000, 1001)]
+    # exact: 48/24 + 60*1001/30000 + 48*1001/24000 = 2 + 2.002 + 2.002
+    assert d["total_duration_s"] == pytest.approx(6.004, abs=1e-6)
+    e = client.get(f"/api/projects/{pid}/timelines/{t['id']}/edl").json()
+    assert e["total_duration_s"] == pytest.approx(6.004, abs=1e-6)
+    # non-integer rates keep rationals (12.5 → 25/2, not 12/1)
+    _insert(client, pid, t["id"],
+            _video(client, pid, "odd.mp4", sha="ad" * 32,
+                   frames=25, fps=12.5, duration=2.0))
+    c = _detail(client, pid, t["id"])["clips"][3]
+    assert (c["src_fps_num"], c["src_fps_den"]) == (25, 2)
+
+
+def test_edl_sha_mismatch_fails_closed(client):
+    """If a clip's pinned sha ever diverged from its version row the EDL
+    refuses rather than emitting wrong provenance."""
+    from app.db.models import TimelineClip
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v = _video(client, pid)
+    _insert(client, pid, t["id"], v)
+    with client.app.state.session_factory() as s:
+        clip = s.query(TimelineClip).first()
+        clip.source_sha256 = "f" * 64
+        s.commit()
+    r = client.get(f"/api/projects/{pid}/timelines/{t['id']}/edl")
+    assert r.status_code == 409 and "inconsistent" in r.text
+
+
+def test_preview_deep_validates_insert(client):
+    """Preview surfaces the real refusal — same error as commit."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    bad = _video(client, pid, "np.mp4", sha="ae" * 32, probe_ok=False)
+    r = _preview(client, pid, "timeline.clip.insert",
+                 {"timeline_id": t["id"], "asset_id": bad["id"]},
+                 expect=422)
+    assert "no measured duration" in r.text
+    # good source previews clean and pins the timeline revision
+    good = _video(client, pid, "ok.mp4", sha="af" * 32)
+    p = _preview(client, pid, "timeline.clip.insert",
+                 {"timeline_id": t["id"], "asset_id": good["id"]})
+    assert p["resolved_timeline"]["id"] == t["id"]
+
+
+def test_edl_is_read_only(client):
+    """EDL generation must not mutate timeline state."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid))
+    before = _detail(client, pid, t["id"])
+    client.get(f"/api/projects/{pid}/timelines/{t['id']}/edl")
+    client.get(f"/api/projects/{pid}/timelines/{t['id']}/edl")
+    after = _detail(client, pid, t["id"])
+    assert before == after

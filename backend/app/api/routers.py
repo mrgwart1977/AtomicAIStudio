@@ -1194,8 +1194,9 @@ def get_timeline(timeline_id: str,
     d = {c.name: getattr(tl, c.name) for c in tl.__table__.columns}
     clips = tld.list_clips(db, tl.id)
     d["clips"] = clips
+    # exact rational accumulation — floats only at the boundary
     d["total_duration_s"] = round(
-        sum(tld.clip_duration_s(c) for c in clips), 6)
+        float(tld.total_duration_frac(clips)), 6)
     return d
 
 
@@ -1210,7 +1211,10 @@ def timeline_edl(timeline_id: str,
         tl = tld.get_timeline(db, project.id, timeline_id)
     except KeyError:
         raise HTTPException(404, "timeline not found in this project") from None
-    return tld.edl_json(db, tl)
+    try:
+        return tld.edl_json(db, tl)
+    except tld.TimelineError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @api_router.get("/api/projects/{project_id}/timelines/{timeline_id}/revisions",
