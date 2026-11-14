@@ -265,6 +265,9 @@ export interface CommandProposal {
    * (prompt/source/cast/continuity/revision). Commit pins this as
    * expected_shot — a shot edit after preview refuses the commit. */
   resolved_shot?: Record<string, unknown> | null;
+  /** C4-D — shot.video only: resolved generation parameters
+   * (model/dims/duration/sampling/source) pinned via expected_params. */
+  resolved_params?: Record<string, unknown> | null;
 }
 
 export interface CommitResult {

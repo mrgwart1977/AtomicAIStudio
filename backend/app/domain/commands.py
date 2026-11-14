@@ -488,16 +488,76 @@ def _shot_gen_fingerprint(session: Session, shot, composed: dict) -> dict:
     membership lives in shot_characters and doesn't bump the row —
     it is fingerprinted explicitly. The source key covers both image
     (source_asset_id) and video (image_asset_id) compositions."""
+    from app.db.models import Asset
+    src_id = (composed.get("source_asset_id")
+              or composed.get("image_asset_id"))
+    src_sha = None
+    if src_id:
+        _a = session.get(Asset, src_id)
+        src_sha = _a.sha256 if _a else None
     return {
         "shot_id": shot.id,
         "revision": shot.revision,
         "prompt": composed.get("prompt"),
-        "source_asset_id": (composed.get("source_asset_id")
-                            or composed.get("image_asset_id")),
+        "source_asset_id": src_id,
+        # C4-D — a NEW VERSION of the same source asset changes the
+        # bytes that would drive generation; pin the content hash too.
+        "source_sha256": src_sha,
         "reference_set_id": composed.get("reference_set_id"),
         "continuity": shot.continuity_json or {},
         "cast": sorted(_shot_cast_ids(session, shot)),
     }
+
+
+def _shot_video_params(composed: dict) -> dict:
+    """C4-D — the generation-parameter subset a shot.video approval
+    pins via expected_params: model, dims, duration, sampling, source.
+    Shot STATE is pinned separately by expected_shot."""
+    return {k: composed.get(k) for k in (
+        "model_key", "negative_prompt", "width", "height", "frames",
+        "fps", "steps", "cfg", "seed", "sampler", "device",
+        "image_asset_id")}
+
+
+def _video_default_size(session: Session, spec, image_asset_id,
+                        storage=None) -> tuple:
+    """C4-D — default output dims for a video request: for i2v, the
+    catalog preset whose aspect is nearest the source image's (no
+    silent stretch); otherwise the first preset / 832×480."""
+    from app.db.models import Asset, AssetVersion
+    presets = ((spec.capabilities.get("sizes") or {}).get("presets")
+               or []) if spec else []
+    if image_asset_id:
+        a = session.get(Asset, image_asset_id)
+        sw = sh = None
+        if a is not None and a.current_version_id:
+            v = session.get(AssetVersion, a.current_version_id)
+            mj = (v.media_json or {}) if v else {}
+            sw, sh = mj.get("width"), mj.get("height")
+        if a is not None and not (sw and sh) and storage is not None:
+            # Same header-only probe as the asset-list backfill —
+            # media_json predates dimension capture on some rows.
+            try:
+                path = storage.asset_path(session, a)
+                if path is not None and path.exists():
+                    from PIL import Image
+                    with Image.open(path) as im:
+                        sw, sh = im.width, im.height
+            except Exception:
+                sw = sh = None
+        if sw and sh:
+            import math
+            aspect = math.log(sw / sh)
+            best = min(
+                presets,
+                key=lambda p: abs(math.log(
+                    p.get("w", 832) / p.get("h", 480)) - aspect),
+                default=None)
+            if best:
+                return best.get("w", 832), best.get("h", 480)
+    if presets:
+        return presets[0].get("w", 832), presets[0].get("h", 480)
+    return 832, 480
 
 
 def _compose_shot_video(session: Session, project: Project,
@@ -544,6 +604,7 @@ def _compose_shot_video(session: Session, project: Project,
         "steps": payload.get("steps"),
         "cfg": payload.get("cfg"),
         "seed": payload.get("seed"),
+        "sampler": payload.get("sampler"),
         "device": payload.get("device", "auto"),
         "image_asset_id": src,
         "shot_id": shot.id,
@@ -563,6 +624,14 @@ def _compose_shot_video(session: Session, project: Project,
             expected_shot != _shot_gen_fingerprint(session, shot, composed):
         raise CommandError(
             422, "shot changed since preview — re-preview shot.video")
+    # Parameters are pinned too — approving a 33-frame preview and
+    # committing 129 frames is a stale approval, not a new choice.
+    expected_params = payload.get("expected_params")
+    if expected_params is not None and \
+            expected_params != _shot_video_params(composed):
+        raise CommandError(
+            422, "generation parameters changed since preview — "
+                 "re-preview shot.video")
     return shot, "generate.video", composed
 
 
@@ -1436,11 +1505,84 @@ def _check_video_generation(session: Session, project: Project, payload: dict) -
         a = session.get(Asset, image_asset_id)
         if a is None or a.project_id != project.id or a.kind != "image":
             raise CommandError(404, "source image not found in this project")
+    elif spec.modes and "text2video" not in spec.modes:
+        # i2v-only model — a prompt alone cannot run it.
+        raise CommandError(
+            422, f"{spec.display_name} has no text-to-video mode — "
+                 "a source image is required")
 
     frames = int(payload.get("frames") or spec.capabilities.get("frames", {}).get("default", 33))
     fc = spec.capabilities.get("frames", {})
     if not fc.get("min", 1) <= frames <= fc.get("max", 129):
         raise CommandError(422, f"frames {frames} outside {fc.get('min', 1)}–{fc.get('max', 129)} for this model")
+
+    # C4-D review — the rest of the declared contract is enforced, not
+    # just frames: output dims must be a catalog preset (explicit — no
+    # silent stretch/crop of the source), and fps/steps/cfg/sampler are
+    # bounded by the catalog entry.
+    caps = spec.capabilities
+    w, h = payload.get("width"), payload.get("height")
+    if (w is None) != (h is None):
+        raise CommandError(422, "width and height must be given together")
+    if w is not None:
+        try:
+            w, h = int(w), int(h)
+        except (TypeError, ValueError):
+            raise CommandError(422, "width/height must be integers")
+        presets = (caps.get("sizes") or {}).get("presets") or []
+        if presets:
+            if not any(p.get("w") == w and p.get("h") == h
+                       for p in presets):
+                raise CommandError(
+                    422, f"{w}×{h} is not a supported size for "
+                         f"{spec.display_name} — presets: "
+                         + ", ".join(f"{p.get('w')}×{p.get('h')}"
+                                     for p in presets))
+        elif not (64 <= w <= 2048 and 64 <= h <= 2048):
+            raise CommandError(422, f"{w}×{h} outside 64–2048 bounds")
+    fps_v = payload.get("fps")
+    if fps_v is not None:
+        try:
+            fps_v = int(fps_v)
+        except (TypeError, ValueError):
+            raise CommandError(422, "fps must be an integer")
+        fp = caps.get("fps", {})
+        opts = fp.get("options")
+        if opts and fps_v not in opts:
+            raise CommandError(
+                422, f"fps {fps_v} unsupported — options: {opts}")
+        if not opts and not fp.get("min", 1) <= fps_v <= fp.get("max", 60):
+            raise CommandError(
+                422, f"fps {fps_v} outside "
+                     f"{fp.get('min', 1)}–{fp.get('max', 60)}")
+    steps_v = payload.get("steps")
+    if steps_v is not None:
+        try:
+            steps_v = int(steps_v)
+        except (TypeError, ValueError):
+            raise CommandError(422, "steps must be an integer")
+        sc = caps.get("steps", {})
+        if not sc.get("min", 1) <= steps_v <= sc.get("max", 100):
+            raise CommandError(
+                422, f"steps {steps_v} outside "
+                     f"{sc.get('min', 1)}–{sc.get('max', 100)}")
+    cfg_v = payload.get("cfg")
+    if cfg_v is not None:
+        try:
+            cfg_v = float(cfg_v)
+        except (TypeError, ValueError):
+            raise CommandError(422, "cfg must be a number")
+        cc = caps.get("cfg", {})
+        if not cc.get("min", 0.0) <= cfg_v <= cc.get("max", 30.0):
+            raise CommandError(
+                422, f"cfg {cfg_v} outside "
+                     f"{cc.get('min', 0.0)}–{cc.get('max', 30.0)}")
+    sampler = payload.get("sampler")
+    if sampler is not None and caps.get("samplers") \
+            and sampler not in caps["samplers"]:
+        raise CommandError(
+            422, f"sampler '{sampler}' unsupported — "
+                 f"options: {caps['samplers']}")
 
     device = payload.get("device", "auto")
     if isinstance(device, str) and device not in ("auto", "cpu"):
@@ -1591,6 +1733,11 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         # state (prompt, source, cast, continuity); set fingerprints
         # alone can't see those edits.
         out["resolved_shot"] = _shot_gen_fingerprint(session, _sh, eff)
+    if command_type == "shot.video" and _sh is not None:
+        # C4-D — the approval pins the resolved generation parameters
+        # (model, dims, duration, sampling) via expected_params at
+        # commit; shot state is pinned separately by expected_shot.
+        out["resolved_params"] = _shot_video_params(eff)
     return out
 
 
@@ -3203,13 +3350,20 @@ def _job_request(session: Session, project: Project, command_type: str,
     elif command_type == "generate.video":
         from app.domain import compatibility, model_catalog
         spec = model_catalog.get(payload.get("model_key") or "")
+        i2v_src = payload.get("image_asset_id")
+        w, h = payload.get("width"), payload.get("height")
+        if w is None and h is None:
+            # C4-D review — for i2v, the default output size follows the
+            # SOURCE's aspect (nearest catalog preset) rather than a
+            # blind 832×480; explicit dims are validated elsewhere.
+            w, h = _video_default_size(session, spec, i2v_src, storage)
         req = {
             "command_type": command_type,
             "model_key": payload["model_key"],
             "prompt": payload.get("prompt") or "",
             "negative_prompt": payload.get("negative_prompt") or "",
-            "width": int(payload.get("width", 832)),
-            "height": int(payload.get("height", 480)),
+            "width": int(w),
+            "height": int(h),
             "frames": int(payload.get("frames", 33)),
             "fps": int(payload.get("fps", 24)),
             "steps": int(payload.get("steps", 30)),
@@ -3225,19 +3379,22 @@ def _job_request(session: Session, project: Project, command_type: str,
             "max_vram_gib": payload.get("max_vram_gib"),
             "memory_risk_acknowledged": bool(payload.get("memory_risk_acknowledged")),
             "est_vram_bytes": compatibility.estimate_vram(
-                spec, int(payload.get("width", 832)), int(payload.get("height", 480)), 1,
+                spec, int(w), int(h), 1,
                 payload.get("residency_mode")) if spec else None,
             "allow_cpu": False,  # Wan-class video on CPU is days, not minutes
         }
         # i2v: resolve the project image asset to an on-disk path for the
-        # worker via the CAS resolver (location root + blob rel_path).
+        # worker via the CAS resolver (location root + blob rel_path);
+        # pin the content hash so provenance records WHICH bytes drove it.
         if payload.get("image_asset_id"):
             from app.db.models import Asset
             a = session.get(Asset, payload["image_asset_id"])
-            if a is not None and storage is not None:
-                p = storage.asset_path(session, a)
-                if p is not None:
-                    req["image_path"] = str(p)
+            if a is not None:
+                req["source_sha256"] = a.sha256
+                if storage is not None:
+                    p = storage.asset_path(session, a)
+                    if p is not None:
+                        req["image_path"] = str(p)
     if command_type == "backup.export":
         req["kind"] = payload.get("kind", "backup")
     if command_type == "bridge.import":

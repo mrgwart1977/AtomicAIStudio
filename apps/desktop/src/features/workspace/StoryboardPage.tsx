@@ -1621,6 +1621,7 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
       const rev = useApp.getState().currentProject()?.revision ?? 0;
       const p = { ...pending.payload };
       if (pending.proposal.resolved_shot) p.expected_shot = pending.proposal.resolved_shot;
+      if (pending.proposal.resolved_params) p.expected_params = pending.proposal.resolved_params;
       await commitCommand(projectId, rev, "shot.video", p, "storyboard");
       setPending(null);
       onDone();
@@ -1639,7 +1640,11 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
         <label className="block text-[11px] text-muted">Model
           <select value={model?.key ?? ""} onChange={(e) => setModelKey(e.target.value)}
             className="mt-0.5 w-44 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
-            {installed.map((m) => <option key={m.key} value={m.key}>{m.display_name ?? m.key}</option>)}
+            {installed.map((m) => (
+              <option key={m.key} value={m.key}>
+                {m.display_name ?? m.key}
+                {sourceId && !(m.modes || []).includes("image2video") ? " — text-to-video only" : ""}
+              </option>))}
           </select>
         </label>
         <label className="block text-[11px] text-muted">Frames
