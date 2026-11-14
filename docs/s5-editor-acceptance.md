@@ -144,3 +144,15 @@ deferred to a later stabilization PR; do not add a vector editor here.
 | 66 | Two identical-spec untrimmed clips → export | Render path recorded as stream-copy on the output version |
 | 67 | A trimmed clip → export | Re-encode path; cut is frame-exact at the requested boundary |
 
+## C5-C — prompt composition and continuity guidance
+
+| # | Step | Expected |
+|---|------|----------|
+| 68 | Shot with cast + bound set → Generate → Preview | "Prompt the model will see" shows the user's text first, then composed context (identity, wardrobe, location, lighting, continuity) |
+| 69 | Same shot → Preview twice | Identical composed prompt both times — deterministic order, no reshuffling |
+| 70 | Untick "Add scene, character & continuity context" → Preview → Approve | Model receives only the user-authored prompt; no composed context |
+| 71 | Edit a cast member's appearance between Preview and Approve → Approve | Commit refused as stale; re-preview shows the updated guidance |
+| 72 | Shot with two cast members → Preview | Each character keeps its own identity/wardrobe block in cast order; the bound set's notes appear only under its own character |
+| 73 | Long guidance on a tight-budget model → Preview | Omitted items are listed explicitly; the user's text is never cut |
+| 74 | Shot continuity vs scene continuity disagree (e.g. lighting) | Conflict line surfaces in the preview; the shot value is the one used |
+| 75 | Storyboard → compare two adjacent shots | Differences now include scene style, blocking, action, and per-character continuity notes; cross-scene pairs flag the scene change |

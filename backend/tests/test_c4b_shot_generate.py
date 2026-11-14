@@ -359,7 +359,10 @@ def test_shot_state_change_invalidates_preview(client, tmp_path):
                     {**GEN, "shot_id": sh["shot"]["id"]})
     fp = prev["resolved_shot"]
     assert fp["shot_id"] == sh["shot"]["id"]
-    assert fp["prompt"] == "misty dawn"
+    # C5-C — the fingerprint pins the COMPOSED prompt (user text first,
+    # composed context appended); resolved_prompt carries the same text.
+    assert fp["prompt"].startswith("misty dawn")
+    assert fp["prompt"] == prev["resolved_prompt"]["prompt"]
     assert fp["source_asset_id"] == src["id"]
     assert fp["reference_set_id"] == sid
     _commit(client, pid, "shot.update",

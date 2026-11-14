@@ -164,6 +164,10 @@ class CommandProposalOut(BaseModel):
     # C5-A — timeline ops only: {id, revision, clip_count} the approval
     # pins via expected_timeline at commit.
     resolved_timeline: dict[str, Any] | None = None
+    # C5-C — shot.generate/shot.video only: the composed prompt
+    # (sections, omissions, conflicts, budget) the approval pins via
+    # expected_prompt at commit.
+    resolved_prompt: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):

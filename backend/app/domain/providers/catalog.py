@@ -352,6 +352,10 @@ IMAGES = [
                 "sizes": ["auto", "1024x1024", "1536x1024",
                           "1024x1536"],
                 "qualities": ["auto", "low", "medium", "high"],
+                # C5-C — operational prompt budget for composed prompts
+                # (the API hard limit is far higher; keep film prompts
+                # tight rather than maxing the contract).
+                "prompt_max_chars": 4000,
                 # Token-billed upstream; per-image equivalents from the
                 # pricing doc — conservative, always the higher tier.
                 "cost_table": {"unit": "per_image",
@@ -377,6 +381,8 @@ IMAGES = [
                 "sizes": ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5",
                           "5:4", "9:16", "16:9", "21:9"],
                 "qualities": ["auto"],
+                # C5-C — operational prompt budget for composed prompts.
+                "prompt_max_chars": 2000,
                 "cost_table": {"unit": "per_image", "rate": 0.039,
                                "checked": "2026-11-13",
                                "source": "ai.google.dev/gemini-api/docs/pricing",
@@ -393,6 +399,9 @@ IMAGES = [
                 # Imagen :predict — 5 documented aspect ratios.
                 "sizes": ["1:1", "3:4", "4:3", "9:16", "16:9"],
                 "qualities": ["auto"],
+                # C5-C — operational prompt budget (Imagen documents a
+                # 1024-token prompt ceiling; ~4 chars/token).
+                "prompt_max_chars": 4000,
                 "cost_table": {"unit": "per_image", "rate": 0.04,
                                "checked": "2026-11-13",
                                "source": "developers.googleblog.com/en/"

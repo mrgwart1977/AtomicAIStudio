@@ -563,6 +563,9 @@ MODELS: dict[str, ModelSpec] = {
             "cfg": {"min": 1.0, "max": 15.0, "default": 6.0},
             "samplers": ["euler"],
             "audio": False,
+            # C5-C — operational prompt budget for composed prompts
+            # (umt5 handles longer, but quality guidance stays concise).
+            "prompt_max_chars": 1024,
             "ref_images": False,  # I2V needs the separate 14B model
             "lora": False,
             "precision": ["fp16"],
@@ -627,6 +630,8 @@ MODELS: dict[str, ModelSpec] = {
             "ref_images": True,       # image-to-video / last-frame conditioning
             "lora": False,
             "character_consistency": True,  # multi-shot holds character identity
+            # C5-C — operational prompt budget for composed prompts.
+            "prompt_max_chars": 1024,
             "precision": ["bf16", "fp8"],
             "cpu_fallback": True,
         },
@@ -676,6 +681,8 @@ MODELS: dict[str, ModelSpec] = {
             "ref_images": True,
             "lora": True,
             "character_consistency": False,
+            # C5-C — operational prompt budget for composed prompts.
+            "prompt_max_chars": 1024,
             "precision": ["fp16", "fp8", "q8_0"],
             "cpu_fallback": True,
         },

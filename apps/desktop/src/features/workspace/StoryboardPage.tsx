@@ -1297,6 +1297,7 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
   const [contracts, setContracts] = useState<string[]>([]);
   const [providerKey, setProviderKey] = useState("");
   const [modelId, setModelId] = useState("");
+  const [compose, setCompose] = useState(true);
   const [pending, setPending] = useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1356,6 +1357,10 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
       shot_id: shot.id,
       provider_key: providerKey || undefined,
       model_id: modelId || undefined,
+      // C5-C — compose_prompt=false sends only the user-authored text;
+      // the toggle is part of the previewed payload so preview and
+      // commit always agree.
+      compose_prompt: compose,
     };
   }
 
@@ -1386,6 +1391,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
       // cast, continuity edits since preview refuse the commit.
       if (pending.proposal.resolved_shot) {
         p.expected_shot = pending.proposal.resolved_shot;
+      }
+      // C5-C — pin the composed prompt too: a character/scene/context
+      // edit between preview and approve refuses the commit.
+      if (pending.proposal.resolved_prompt) {
+        p.expected_prompt = pending.proposal.resolved_prompt.prompt_sha256;
       }
       await commitCommand(projectId, rev, "shot.generate", p, "storyboard");
       setPending(null);
@@ -1432,6 +1442,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
           {busy ? "…" : "Preview"}
         </button>
       </div>
+      <label className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+        <input type="checkbox" checked={compose}
+          onChange={(e) => setCompose(e.target.checked)} />
+        Add scene, character & continuity context to the prompt
+      </label>
       <p className="mt-1.5 text-[10px] text-faint">
         {sourceId ? "Image-to-image using the bound source frame" : "Text-to-image"}
         {setId ? " with the bound reference set" : ""}. Save the shot first —
@@ -1464,6 +1479,35 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
             <div className="mt-1 text-[10px] text-faint">
               {pending.proposal.resolved_references.length} reference(s) pinned —
               a set edit after this preview refuses the commit.
+            </div>
+          )}
+          {pending.proposal.resolved_prompt && (
+            <div className="mt-2 rounded border border-line/60 bg-panel p-2"
+              data-testid="composed-prompt">
+              <div className="text-[10px] font-medium text-muted">Prompt the model will see</div>
+              <p className="mt-1 whitespace-pre-wrap text-[11px] text-fg">
+                {pending.proposal.resolved_prompt.prompt}
+              </p>
+              {pending.proposal.resolved_prompt.context_text && (
+                <p className="mt-1 text-[10px] text-faint">
+                  Your text stays verbatim; the rest is composed guidance
+                  ({pending.proposal.resolved_prompt.budget.used}/
+                  {pending.proposal.resolved_prompt.budget.limit} chars) —
+                  a hint, not a guarantee of identity preservation.
+                </p>
+              )}
+              {pending.proposal.resolved_prompt.conflicts.length > 0 && (
+                <ul className="mt-1 space-y-0.5">
+                  {pending.proposal.resolved_prompt.conflicts.map((c, i) => (
+                    <li key={i} className="text-[10px] text-warn">⚠ {c}</li>
+                  ))}
+                </ul>
+              )}
+              {pending.proposal.resolved_prompt.omitted.length > 0 && (
+                <p className="mt-1 text-[10px] text-warn">
+                  Omitted for budget: {pending.proposal.resolved_prompt.omitted.join("; ")}
+                </p>
+              )}
             </div>
           )}
           <div className="mt-2 flex gap-2">
@@ -1529,6 +1573,14 @@ function CompareDialog({ prev, next, onClose }: {
               <p className="mt-0.5 text-sm text-warn">{d.prevLocation} → {d.nextLocation}</p>
             </div>
           )}
+          {d.sceneChanged && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Scene</h4>
+              <p className="mt-0.5 text-sm text-warn">
+                Different scenes — style and intent come from each shot's own scene.
+              </p>
+            </div>
+          )}
           {d.castChanges.length > 0 && (
             <div className="mt-3">
               <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Cast state changes</h4>
@@ -1559,7 +1611,8 @@ function CompareDialog({ prev, next, onClose }: {
             </div>
           )}
           {d.fields.length === 0 && d.castChanges.length === 0 &&
-            !d.locationChanged && d.onlyPrev.length === 0 && d.onlyNext.length === 0 && (
+            !d.locationChanged && !d.sceneChanged &&
+            d.onlyPrev.length === 0 && d.onlyNext.length === 0 && (
             <p className="mt-4 text-sm text-muted">
               No continuity differences recorded between these shots.
             </p>
@@ -1592,6 +1645,7 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
     [models]);
   const [modelKey, setModelKey] = useState("");
   const [motion, setMotion] = useState("");
+  const [compose, setCompose] = useState(true);
   const [frames, setFrames] = useState(33);
   const [fps, setFps] = useState(24);
   const [pending, setPending] = useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
@@ -1609,6 +1663,7 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
       model_key: model?.key,
       motion_prompt: motion.trim() || undefined,
       frames, fps,
+      compose_prompt: compose,
     };
   }
 
@@ -1631,6 +1686,9 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
       const p = { ...pending.payload };
       if (pending.proposal.resolved_shot) p.expected_shot = pending.proposal.resolved_shot;
       if (pending.proposal.resolved_params) p.expected_params = pending.proposal.resolved_params;
+      if (pending.proposal.resolved_prompt) {
+        p.expected_prompt = pending.proposal.resolved_prompt.prompt_sha256;
+      }
       await commitCommand(projectId, rev, "shot.video", p, "storyboard");
       setPending(null);
       onDone();
@@ -1676,6 +1734,11 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
           {busy ? "…" : "Preview"}
         </button>
       </div>
+      <label className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+        <input type="checkbox" checked={compose}
+          onChange={(e) => setCompose(e.target.checked)} />
+        Add scene, character & continuity context to the prompt
+      </label>
       <p className="mt-1 text-[10px] text-faint">
         {sourceId ? "Image-to-video from the bound source frame" : "Text-to-video from the shot prompt"}.
         Reference sets aren't video inputs — identity is never implied.
@@ -1684,6 +1747,27 @@ function ShotVideo({ shot, projectId, sourceId, onDone }: {
         <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 p-2.5">
           <div className="text-xs font-medium">Confirm video generation</div>
           <div className="mt-1 text-[11px] text-muted">{pending.proposal.summary}</div>
+          {pending.proposal.resolved_prompt && (
+            <div className="mt-2 rounded border border-line/60 bg-panel p-2"
+              data-testid="composed-prompt">
+              <div className="text-[10px] font-medium text-muted">Prompt the model will see</div>
+              <p className="mt-1 whitespace-pre-wrap text-[11px] text-fg">
+                {pending.proposal.resolved_prompt.prompt}
+              </p>
+              {pending.proposal.resolved_prompt.conflicts.length > 0 && (
+                <ul className="mt-1 space-y-0.5">
+                  {pending.proposal.resolved_prompt.conflicts.map((c, i) => (
+                    <li key={i} className="text-[10px] text-warn">⚠ {c}</li>
+                  ))}
+                </ul>
+              )}
+              {pending.proposal.resolved_prompt.omitted.length > 0 && (
+                <p className="mt-1 text-[10px] text-warn">
+                  Omitted for budget: {pending.proposal.resolved_prompt.omitted.join("; ")}
+                </p>
+              )}
+            </div>
+          )}
           <div className="mt-2 flex gap-2">
             <button disabled={busy} onClick={() => void approve()}
               className="rounded-md bg-teal px-3 py-1 text-xs font-medium text-ink disabled:opacity-40">
