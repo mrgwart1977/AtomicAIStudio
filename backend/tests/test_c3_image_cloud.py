@@ -635,7 +635,10 @@ class TestSensitiveUrlRedaction:
         _budget(client, pid)
         _override(client, monkeypatch, _status_handler(200, _URL_BODY))
         events = []
-        with client.websocket_connect("/api/ws?token=test-token") as ws:
+        with client.websocket_connect("/api/ws") as ws:
+            ws.send_text(json.dumps(
+                {"type": "auth", "token": "test-token"}))
+            assert ws.receive_json() == {"type": "auth_ok"}
             r = _gen(client, pid)
             jid = r.json()["job_id"]
             # drain job.progress events until the job reaches terminal

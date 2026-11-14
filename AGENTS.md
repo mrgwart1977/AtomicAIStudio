@@ -14,7 +14,7 @@
 - Every mutation goes through the command system (preview → commit → audit).
 - Jobs are durable rows in `generation_jobs`; idempotent via `idempotency_key`.
 - Mock adapters are labeled `adapter_kind="mock"` — never present them as inference.
-- Backend session token: `X-Atomic-Token` header (or `?token=` for WS/file URLs).
+- Backend session token: `X-Atomic-Token` header only — `?token=` was removed in A3; the WS authenticates via a first-frame `{"type":"auth","token":...}` message.
 - No model downloads, cloud calls, or paid work without explicit owner approval.
 
 ## Milestone state

@@ -1,23 +1,23 @@
 """Session-token auth for the loopback API.
 
 The desktop shell generates a token per launch and injects it into the UI.
-Requests must present it as the X-Atomic-Token header; the WebSocket and
-image/file endpoints also accept ?token= because browser tags cannot set
-headers. /health stays open so the shell can poll readiness.
+Requests must present it as the X-Atomic-Token header — never in a URL.
+/health stays open so the shell can poll readiness.
 
-A2.1 — WebSocket first-frame authentication: clients that omit the
-legacy ``?token=`` must send ``{"type":"auth","token":...}`` as their
-FIRST frame inside a strict timeout, under a bounded unauthenticated
-connection pool. No subscription or event delivery exists before that
-point; the token is never logged. The query-token path is preserved
-temporarily for compatibility — A3 removes it.
+A2.1 — WebSocket first-frame authentication: every client sends
+``{"type":"auth","token":...}`` as its FIRST frame inside a strict
+timeout, under a bounded unauthenticated connection pool. No
+subscription or event delivery exists before that point; the token is
+never logged.
+
+A3 — query-token authentication is fully removed: no endpoint accepts
+``?token=`` anymore (REST is header-only; the WS requires the auth
+frame regardless of query parameters).
 """
 
 from __future__ import annotations
 
-from fastapi import (
-    Depends, HTTPException, Request, WebSocket, WebSocketDisconnect,
-    status)
+from fastapi import Depends, HTTPException, Request, status
 
 from app.config import Settings
 
@@ -27,17 +27,9 @@ def get_app_settings(request: Request) -> Settings:
 
 
 async def require_token(request: Request, settings: Settings = Depends(get_app_settings)) -> None:
-    token = request.headers.get("x-atomic-token") or request.query_params.get("token")
+    token = request.headers.get("x-atomic-token")
     if token != settings.session_token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session token")
-
-
-async def require_token_ws(websocket: WebSocket) -> None:
-    settings: Settings = websocket.app.state.settings
-    token = websocket.query_params.get("token")
-    if token != settings.session_token:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        raise WebSocketDisconnect(code=status.WS_1008_POLICY_VIOLATION)
 
 
 # A2.1 first-frame WS auth limits.

@@ -3,8 +3,8 @@
 Covers the UNAUTHENTICATED → AUTHENTICATED → CLOSED state machine:
 auth before subscription, strict timeout/size bounds, malformed and
 duplicate frames, the bounded unauthenticated pool, origin policy,
-legacy ?token= compatibility, disconnect cleanup, and the guarantee
-that the session token never reaches logs.
+disconnect cleanup, and the guarantee that the session token never
+reaches logs. (A3: ?token= carries no meaning — see TestQueryTokenRemoved.)
 """
 from __future__ import annotations
 
@@ -131,18 +131,21 @@ class TestUnauthenticatedPoolBound:
                 _connect(client).__enter__()
             assert e.value.code == 1008
 
-    def test_authenticated_clients_not_blocked(self, client,
-                                               monkeypatch):
-        """The bound applies to UNAUTHENTICATED sockets only — a legacy
-        ?token= client still connects while the pool is full."""
+    def test_pool_refusal_is_temporary(self, client, monkeypatch):
+        """A refused client can connect once the slot holder
+        authenticates — legitimate clients are never blocked
+        indefinitely by the unauthenticated bound."""
         import contextlib
         monkeypatch.setattr(sec, "WS_MAX_UNAUTHENTICATED", 1)
         with contextlib.ExitStack() as stack:
-            stack.enter_context(_connect(client))   # holds the 1 slot
-            with client.websocket_connect(
-                    f"/api/ws?token={TOKEN}") as ws2:
-                _publish(client, "legacy")
-                assert ws2.receive_json()["payload"]["id"] == "legacy"
+            ws1 = stack.enter_context(_connect(client))  # holds the slot
+            with pytest.raises(WebSocketDisconnect):
+                _connect(client).__enter__()             # refused
+            ws1.send_text(AUTH)                    # holder auths → frees
+            assert ws1.receive_json() == {"type": "auth_ok"}
+            ws2 = stack.enter_context(_connect(client))
+            ws2.send_text(AUTH)
+            assert ws2.receive_json() == {"type": "auth_ok"}
 
     def test_slot_released_after_auth(self, client, monkeypatch):
         """An authenticating client holds the slot only during the
@@ -220,17 +223,30 @@ class TestOriginPolicy:
                 ws.receive_text()
 
 
-class TestLegacyCompat:
-    def test_query_token_still_works(self, client):
-        with client.websocket_connect(
-                f"/api/ws?token={TOKEN}") as ws:
-            _publish(client, "legacy")
-            evt = ws.receive_json()
-            assert evt["event"] == "job.updated"
+class TestQueryTokenRemoved:
+    """A3 — ``?token=`` carries no meaning: every client must complete
+    first-frame authentication regardless of query parameters."""
 
-    def test_bad_query_token_refused(self, client):
-        with pytest.raises(WebSocketDisconnect):
-            client.websocket_connect("/api/ws?token=wrong").__enter__()
+    def test_query_token_alone_does_not_authenticate(self, client,
+                                                     monkeypatch):
+        """A correct query token WITHOUT the auth frame still hits the
+        authentication timeout — query params are ignored entirely."""
+        monkeypatch.setattr(sec, "WS_AUTH_TIMEOUT_S", 0.2)
+        with pytest.raises(WebSocketDisconnect) as e:
+            with client.websocket_connect(
+                    f"/api/ws?token={TOKEN}") as ws:
+                ws.receive_text()
+        assert e.value.code == 1008
+
+    def test_wrong_query_token_plus_valid_frame_authenticates(
+            self, client):
+        """The query param is ignored even when wrong — the auth frame
+        is the only credential channel."""
+        with client.websocket_connect("/api/ws?token=wrong") as ws:
+            ws.send_text(AUTH)
+            assert ws.receive_json() == {"type": "auth_ok"}
+            _publish(client, "authed")
+            assert ws.receive_json()["event"] == "job.updated"
 
 
 class TestTokenHygiene:
