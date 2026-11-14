@@ -51,6 +51,11 @@ OPENAI_IMAGES_SPEC = EndpointSpec(
     # takes the source image; the documented contract is multipart,
     # simulated here as JSON fields of the same names.
     edit_path="/v1/images/edits",
+    # C3-D3 — the same edits endpoint documents a `mask` field for
+    # inpainting (transparent/white region = editable). The Images API
+    # documents NO canvas-extension surface, so outpaint_path stays None
+    # and outpaint requests fail closed for this provider.
+    inpaint_path="/v1/images/edits",
 )
 
 # C3-C — Google image generation on the shared Gemini API host.
@@ -129,6 +134,11 @@ BFL_FLUX_SPEC = EndpointSpec(
     # C3-D2 — flux-kontext models accept input_image on the same
     # /v1/{model} route (documented img2img contract).
     edit_path="/v1/{model}",
+    # C3-D3 — BFL documents /v1/flux-pro-1.0-fill (image+mask inpaint)
+    # and /v1/flux-pro-1.0-expand (image + top/bottom/left/right canvas
+    # extension) on the same {model}-routed surface.
+    inpaint_path="/v1/{model}",
+    outpaint_path="/v1/{model}",
 )
 
 IMAGE_SPECS = {s.provider_key: s for s in (
@@ -180,6 +190,14 @@ class OpenAIImagesProvider(RestRemoteProvider):
             weights = req.get("reference_weights") or []
             if weights:
                 body["reference_weights"] = weights
+        if req.get("mode") == "inpaint":
+            # Documented edits contract: `image` is the source, `mask` the
+            # editable-region image (the real API posts multipart fields;
+            # the simulated contract carries the same values as b64 JSON).
+            body["image"] = req.get("source_b64") or ""
+            # mask_provider_b64 — the adapter's explicit translation to
+            # the documented transparent=editable wire format.
+            body["mask"] = req.get("mask_provider_b64") or ""
         if req.get("size"):
             body["size"] = req["size"]
         if req.get("quality"):
@@ -441,6 +459,19 @@ class BflFluxProvider(RestRemoteProvider):
         if req.get("mode") == "img2img":
             # Documented Kontext contract: input_image as base64.
             body["input_image"] = req.get("source_b64") or ""
+        if req.get("mode") == "inpaint":
+            # Documented FLUX Fill contract: image + mask (bright region
+            # = editable), same /v1/{model} route.
+            body["image"] = req.get("source_b64") or ""
+            body["mask"] = req.get("mask_provider_b64") or ""
+        if req.get("mode") == "outpaint":
+            # Documented FLUX Expand contract: image + directional pad.
+            body["image"] = req.get("source_b64") or ""
+            pad = req.get("pad") or {}
+            body["top"] = int(pad.get("top") or 0)
+            body["bottom"] = int(pad.get("bottom") or 0)
+            body["left"] = int(pad.get("left") or 0)
+            body["right"] = int(pad.get("right") or 0)
         size = req.get("size") or ""
         # Documented dimension range 256–1440, multiples of 32; the
         # catalog only declares compliant "WxH" presets.

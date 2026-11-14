@@ -123,12 +123,19 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const [details, setDetails] = useState<Record<string, ProviderDetail>>({});
   const [contracts, setContracts] = useState<string[]>([]);
   const [img2imgContracts, setImg2imgContracts] = useState<string[]>([]);
+  const [inpaintContracts, setInpaintContracts] = useState<string[]>([]);
+  const [outpaintContracts, setOutpaintContracts] = useState<string[]>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
   // C3-D2 — mode: "generate" (text→image) or "img2img" (edit an
   // existing project image). Everything about img2img stays simulated.
-  const [mode, setMode] = useState<"generate" | "img2img">("generate");
+  // C3-D3 — inpaint/outpaint extend the edit surface (generate.image.edit).
+  const [mode, setMode] = useState<"generate" | "img2img" | "inpaint" | "outpaint">("generate");
   const [sourceAssetId, setSourceAssetId] = useState("");
+  const [maskAssetId, setMaskAssetId] = useState("");
+  const [outW, setOutW] = useState("");
+  const [outH, setOutH] = useState("");
+  const [placement, setPlacement] = useState("center");
   const [refIds, setRefIds] = useState<string[]>([]);
   const [refWeights, setRefWeights] = useState<Record<string, string>>({});
 
@@ -169,6 +176,8 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       .then((c) => {
         setContracts(c.implemented);
         setImg2imgContracts(c.img2img_implemented ?? []);
+        setInpaintContracts(c.inpaint_implemented ?? []);
+        setOutpaintContracts(c.outpaint_implemented ?? []);
       })
       .catch((e) => setLoadErr(`image contracts: ${String(e)}`));
   };
@@ -180,7 +189,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   // with the reason, never presented as operational. In img2img mode
   // the implemented-contract list narrows to providers with a real
   // edits endpoint — a catalog editing flag alone is never enough.
-  const activeContracts = mode === "img2img" ? img2imgContracts : contracts;
+  const activeContracts = mode === "img2img" ? img2imgContracts
+    : mode === "inpaint" ? inpaintContracts
+    : mode === "outpaint" ? outpaintContracts : contracts;
   const selectable = useMemo(
     () => providers.filter((p) =>
       activeContracts.includes(p.key) && details[p.key] && t1ImageEligible(details[p.key])),
@@ -193,8 +204,10 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
   const detail = providerKey ? details[providerKey] : undefined;
   const models = useMemo(
-    () => imageModels(detail).filter(
-      (m) => mode !== "img2img" || m.editing?.img2img === true),
+    () => imageModels(detail).filter((m) =>
+      mode === "img2img" ? m.editing?.img2img === true
+      : mode === "inpaint" ? m.editing?.mask_inpaint === true
+      : mode === "outpaint" ? m.editing?.outpaint === true : true),
     [detail, mode],
   );
 
@@ -205,14 +218,16 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   // Mode switch: drop selections that no longer apply so a stale model
   // or oversized reference set can never be committed by accident.
   useEffect(() => {
-    if (mode !== "img2img") { setSourceAssetId(""); setRefIds([]); setRefWeights({}); }
+    if (mode !== "img2img") { setRefIds([]); setRefWeights({}); }
+    if (mode === "generate") { setSourceAssetId(""); setMaskAssetId(""); }
+    if (mode !== "inpaint") setMaskAssetId("");
     if (providerKey && !selectable.some((p) => p.key === providerKey)) {
       setProviderKey(""); setModelId("");
     }
     if (modelId && !models.some((m) => m.id === modelId)) {
       setModelId(models[0]?.id ?? "");
     }
-    if (mode === "img2img" && refIds.length > maxRefs) {
+    if ((mode === "img2img" || mode === "inpaint") && refIds.length > maxRefs) {
       setRefIds((r) => r.slice(0, maxRefs));
     }
   }, [mode, selectable, providerKey, modelId, models, maxRefs, refIds.length]);
@@ -264,8 +279,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     [entities],
   );
 
-  const commandType = mode === "img2img"
-    ? "generate.image.img2img" : "generate.image.cloud";
+  const isEdit = mode === "inpaint" || mode === "outpaint";
+  const commandType = mode === "img2img" ? "generate.image.img2img"
+    : isEdit ? "generate.image.edit" : "generate.image.cloud";
 
   const payload = (): Record<string, unknown> => ({
     provider_key: providerKey,
@@ -280,6 +296,15 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     shot_id: shotId || undefined,
     character_id: characterId || undefined,
     max_cost_usd: maxCost.trim() === "" ? undefined : maxCostNum,
+    ...(isEdit ? {
+      operation: mode,
+      source_asset_id: sourceAssetId,
+      ...(mode === "inpaint" ? { mask_asset_id: maskAssetId } : {
+        out_width: outW.trim() === "" ? undefined : Number(outW),
+        out_height: outH.trim() === "" ? undefined : Number(outH),
+        placement,
+      }),
+    } : {}),
     ...(mode === "img2img" ? {
       source_asset_id: sourceAssetId,
       reference_asset_ids: refIds.length ? refIds : undefined,
@@ -295,7 +320,8 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const fingerprint = JSON.stringify([
     mode, providerKey, modelId, prompt, negativePrompt, size, quality,
     seed, sceneId, shotId, characterId, maxCost,
-    sourceAssetId, refIds, refWeights]);
+    sourceAssetId, maskAssetId, outW, outH, placement,
+    refIds, refWeights]);
 
   // Preview → approval integrity: ANY parameter change after a preview
   // drops the pending approval — a fresh preview is required. This is
@@ -306,7 +332,11 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
   const genReady = !!providerKey && selectable.some((p) => p.key === providerKey)
     && !!prompt.trim() && prompt.length <= 8000
-    && (mode !== "img2img" || !!sourceAssetId);
+    && ((mode === "img2img" || isEdit) ? !!sourceAssetId : true)
+    && (mode !== "inpaint" || !!maskAssetId)
+    && (mode !== "outpaint"
+        || (!!outW.trim() && !!outH.trim()
+            && Number(outW) > 0 && Number(outH) > 0));
 
   // If the backend previewed but could not price (a path that exists
   // for future billing units), approving cannot be offered — the
@@ -385,6 +415,18 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           onClick={() => setMode("img2img")}>
           Edit an existing image
         </button>
+        <button type="button"
+          className={mode === "inpaint" ? btnCls : ghostBtn}
+          data-testid="ci-mode-inpaint"
+          onClick={() => setMode("inpaint")}>
+          Inpaint region
+        </button>
+        <button type="button"
+          className={mode === "outpaint" ? btnCls : ghostBtn}
+          data-testid="ci-mode-outpaint"
+          onClick={() => setMode("outpaint")}>
+          Outpaint canvas
+        </button>
       </div>
       {mode === "img2img" && (
         <p className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted"
@@ -392,6 +434,24 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           Image-to-image transforms one of your project images into a new
           asset — the original is never changed. Only providers with an
           implemented edits contract appear below.
+        </p>
+      )}
+      {mode === "inpaint" && (
+        <p className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted"
+          data-testid="ci-inpaint-note">
+          Inpainting regenerates only the masked region — the mask is a
+          project image where bright pixels (luminance ≥ 128) mark what
+          may change. Mask must match the source dimensions exactly;
+          neither source nor mask is ever modified. Output is a new asset.
+        </p>
+      )}
+      {mode === "outpaint" && (
+        <p className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted"
+          data-testid="ci-outpaint-note">
+          Outpainting extends the canvas — the original image region is
+          preserved and the new border is generated. Choose explicit
+          target dimensions and where the original sits. Output is a
+          new asset; the source is never modified.
         </p>
       )}
 
@@ -403,7 +463,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       {pending && (
         <section className="mt-4 rounded-md border border-amber/60 bg-panel p-4" data-testid="ci-approval">
           <h3 className="text-sm font-semibold">
-            Review — {pending.commandType === "generate.image.img2img"
+            Review — {pending.commandType === "generate.image.edit"
+              ? `${String(pending.payload.operation ?? "edit")} (simulated)`
+              : pending.commandType === "generate.image.img2img"
               ? "image-to-image edit" : "generate cloud image"}
           </h3>
           <SimBadge className="mt-2" />
@@ -414,6 +476,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
             <div className="flex justify-between"><dt className="text-faint">Output</dt><dd className="text-fg">1 image · test PNG{pending.commandType === "generate.image.img2img" ? " · new asset" : ""}</dd></div>
             {pending.commandType === "generate.image.img2img" && (
               <div className="flex justify-between"><dt className="text-faint">Source</dt><dd className="text-fg" data-testid="ci-approval-source">{String(pending.payload.source_asset_id)}{Array.isArray(pending.payload.reference_asset_ids) && (pending.payload.reference_asset_ids as unknown[]).length > 0 ? ` · ${(pending.payload.reference_asset_ids as unknown[]).length} reference(s)` : ""}</dd></div>
+            )}
+            {pending.commandType === "generate.image.edit" && (
+              <div className="flex justify-between"><dt className="text-faint">Source</dt><dd className="text-fg" data-testid="ci-approval-source">{String(pending.payload.source_asset_id)}{pending.payload.mask_asset_id ? ` · mask ${String(pending.payload.mask_asset_id)}` : ""}{pending.payload.out_width ? ` · → ${String(pending.payload.out_width)}×${String(pending.payload.out_height)} ${String(pending.payload.placement ?? "")}` : ""}</dd></div>
             )}
             <div className="flex justify-between"><dt className="text-faint">Size</dt><dd className="text-fg">{String(pending.payload.size ?? "provider default")}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Quality</dt><dd className="text-fg">{String(pending.payload.quality ?? "provider default")}</dd></div>
@@ -430,6 +495,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
             <button onClick={doCommit} disabled={busy || unpriced} className={btnCls}
               data-testid="ci-approve">
               {pending.commandType === "generate.image.img2img"
+                || pending.commandType === "generate.image.edit"
                 ? "Approve & generate simulated edit"
                 : "Approve & generate simulated image"}
             </button>
@@ -557,6 +623,96 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
                   but do not guarantee identity.
                 </p>
               )}
+            </div>
+          </div>
+        </fieldset>
+      )}
+
+      {/* ---------- C3-D3: source + mask (inpaint) ---------- */}
+      {mode === "inpaint" && (
+        <fieldset className="mt-3 rounded-md border border-line bg-panel p-3"
+          data-testid="ci-inpaint-inputs">
+          <legend className="px-1 text-xs font-medium text-muted">
+            Source &amp; mask
+          </legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className={labelCls} htmlFor="ci-source">Source image *</label>
+              <select id="ci-source" className={inputCls} value={sourceAssetId}
+                data-testid="ci-source"
+                onChange={(e) => {
+                  setSourceAssetId(e.target.value);
+                  if (e.target.value === maskAssetId) setMaskAssetId("");
+                }}>
+                <option value="">Choose an image asset…</option>
+                {imageAssets.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="ci-mask">Mask image *</label>
+              <select id="ci-mask" className={inputCls} value={maskAssetId}
+                data-testid="ci-mask"
+                onChange={(e) => setMaskAssetId(e.target.value)}>
+                <option value="">Choose a mask asset…</option>
+                {imageAssets.filter((a) => a.id !== sourceAssetId).map((a) => (
+                  <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-faint">
+                Same dimensions as the source; bright pixels mark the
+                editable region (import a mask PNG via Assets first).
+              </p>
+            </div>
+          </div>
+        </fieldset>
+      )}
+
+      {/* ---------- C3-D3: source + canvas (outpaint) ---------- */}
+      {mode === "outpaint" && (
+        <fieldset className="mt-3 rounded-md border border-line bg-panel p-3"
+          data-testid="ci-outpaint-inputs">
+          <legend className="px-1 text-xs font-medium text-muted">
+            Source &amp; canvas
+          </legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <div className="sm:col-span-2">
+              <label className={labelCls} htmlFor="ci-source">Source image *</label>
+              <select id="ci-source" className={inputCls} value={sourceAssetId}
+                data-testid="ci-source"
+                onChange={(e) => setSourceAssetId(e.target.value)}>
+                <option value="">Choose an image asset…</option>
+                {imageAssets.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="ci-outw">Target W×H *</label>
+              <div className="flex items-center gap-1">
+                <input id="ci-outw" type="number" min="1" max="4096"
+                  className={inputCls} value={outW} data-testid="ci-outw"
+                  placeholder="width" onChange={(e) => setOutW(e.target.value)} />
+                <span className="text-xs text-faint">×</span>
+                <input id="ci-outh" type="number" min="1" max="4096"
+                  className={inputCls} value={outH} data-testid="ci-outh"
+                  placeholder="height" onChange={(e) => setOutH(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="ci-placement">Placement *</label>
+              <select id="ci-placement" className={inputCls} value={placement}
+                data-testid="ci-placement"
+                onChange={(e) => setPlacement(e.target.value)}>
+                {["center", "top", "bottom", "left", "right",
+                  "top_left", "top_right", "bottom_left", "bottom_right"]
+                  .map((p2) => <option key={p2} value={p2}>{p2.replace("_", " ")}</option>)}
+              </select>
+              <p className="mt-1 text-[10px] text-faint">
+                Where the original sits inside the new canvas — its pixels
+                are preserved; only the expansion is generated.
+              </p>
             </div>
           </div>
         </fieldset>

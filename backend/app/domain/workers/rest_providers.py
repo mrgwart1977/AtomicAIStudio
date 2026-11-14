@@ -140,6 +140,11 @@ class EndpointSpec:
     # implemented contract has no image-edit surface — requests for the
     # mode fail closed before submit, whatever the catalog declares.
     edit_path: str | None = None
+    # C3-D3: documented mask-inpaint / outpaint endpoints. Same
+    # fail-closed rule as edit_path — a catalog declaration alone can
+    # never conjure an endpoint the contract does not implement.
+    inpaint_path: str | None = None
+    outpaint_path: str | None = None
 
 
 OPENAI_RESPONSES_SPEC = EndpointSpec(
@@ -376,16 +381,17 @@ class RestRemoteProvider:
         return body, resp.headers
 
     async def submit(self, intent: SubmissionIntent) -> RemoteHandle:
-        # C3-D2 — img2img requests route to the provider's documented
-        # edits endpoint; providers without one fail closed here, before
-        # any bytes leave the adapter.
-        if (intent.request.get("mode") == "img2img"
-                and self.spec.edit_path is None):
+        # C3-D2/D3 — edit-mode requests route to the provider's documented
+        # endpoint for that mode; providers without one fail closed here,
+        # before any bytes leave the adapter.
+        mode = intent.request.get("mode")
+        spec_path = {"img2img": self.spec.edit_path,
+                     "inpaint": self.spec.inpaint_path,
+                     "outpaint": self.spec.outpaint_path,
+                     }.get(mode, self.spec.submit_path)
+        if spec_path is None:
             raise UnsupportedRemoteOp(
-                f"{self.name}: no documented img2img edits endpoint")
-        spec_path = (self.spec.edit_path
-                     if intent.request.get("mode") == "img2img"
-                     else self.spec.submit_path)
+                f"{self.name}: no documented {mode} endpoint")
         # Paths without placeholders format to themselves; Gemini
         # embeds the model in the URL ({model}:generateContent).
         path = spec_path.format(

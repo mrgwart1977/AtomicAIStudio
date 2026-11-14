@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **C3-D3 — simulated inpaint & outpaint (`generate.image.edit`)**:
+  mask-based region editing and canvas extension on documented edit
+  contracts, same two-layer fail-closed negotiation — the catalog model
+  must declare `editing.mask_inpaint` / `editing.outpaint` AND the
+  provider must implement the endpoint (`EndpointSpec.inpaint_path` /
+  `outpaint_path`; `openai-images` → inpaint only, `bfl-flux` →
+  `flux-pro-1.0-fill` / `flux-pro-1.0-expand` models newly catalogued).
+  Mask convention (documented in `app/domain/image_edit.py`): exact
+  source-dimension match — never silently resized; luminance ≥ 128 =
+  editable; alpha ignored; ≥1 editable pixel. Outpaint requires
+  explicit `out_width`/`out_height` (expansion-only, ≤4096 px) and a
+  documented placement anchor; original pixels preserved. Mask and
+  outpaint rules are re-verified at commit AND execution; every output
+  is a new CAS asset with source/mask lineage — neither input is ever
+  modified. Cloud Studio gains "Inpaint region" and "Outpaint canvas"
+  modes with source/mask pickers, explicit canvas + placement, cost
+  preview, and job history.
 - **C3-D2 — simulated image-to-image (`generate.image.img2img`)**:
   edit an existing project image through a documented provider edits
   contract on the simulated transport. Capability negotiation fails

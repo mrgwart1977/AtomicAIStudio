@@ -86,6 +86,14 @@ def image_contracts():
             # provider operation the contract does not implement.
             "img2img_implemented": img2img,
             "img2img_adapter_id": "cloud.image.img2img.sim",
+            # C3-D3 — implemented inpaint/outpaint contracts (strict
+            # subsets of `implemented`; openai-images has inpaint but no
+            # outpaint surface, bfl-flux documents both).
+            "inpaint_implemented": [k for k in IMAGE_REST_KEYS
+                                    if IMAGE_SPECS[k].inpaint_path is not None],
+            "outpaint_implemented": [k for k in IMAGE_REST_KEYS
+                                     if IMAGE_SPECS[k].outpaint_path is not None],
+            "edit_adapter_id": "cloud.image.edit.sim",
             "adapter_id": "cloud.image.sim",
             "simulated": True,
             "note": "Implemented image REST contracts — simulated "

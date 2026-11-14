@@ -196,6 +196,10 @@ export interface ImageContracts {
    * implements an image-edits (img2img) endpoint. */
   img2img_implemented: string[];
   img2img_adapter_id: string;
+  /** C3-D3 — implemented inpaint/outpaint contract subsets. */
+  inpaint_implemented?: string[];
+  outpaint_implemented?: string[];
+  edit_adapter_id?: string;
   adapter_id: string;
   simulated: boolean;
   note: string;
