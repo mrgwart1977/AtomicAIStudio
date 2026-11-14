@@ -117,3 +117,56 @@ def test_cross_project_generation_isolation(client, tmp_path):
                  if x["shot"]["id"] == sh["shot"]["id"])
     assert entry["generation"]["output_count"] == 0
     assert entry["generation"]["latest_job_status"] is None
+
+
+def test_failed_recent_job_keeps_earlier_success(client, tmp_path):
+    """Latest-job status and latest-successful output are INDEPENDENT:
+    a failed newer job must not hide the earlier succeeded image."""
+    from app.db.models import GenerationJob
+    p = make_project(client)
+    pid = p["id"]
+    scene = _scene(client, pid)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="x")
+    r = _commit(client, pid, "shot.generate",
+                {**GEN, "shot_id": sh["shot"]["id"]})
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded", job
+    before = next(x for s in _board(client, pid) for x in s["shots"]
+                  if x["shot"]["id"] == sh["shot"]["id"])["generation"]
+    assert before["latest_asset_id"] is not None
+    # A NEWER failed job lands on top — status flips, asset stays.
+    with client.app.state.session_factory() as s:
+        s.add(GenerationJob(
+            id="deadbeef-0000-4000-8000-0000000000f2",
+            project_id=pid, adapter_id="cloud.image.sim",
+            kind="image", status="failed",
+            error="simulated failure",
+            idempotency_key="c4c-fake-failed-2",
+            request_json={"shot_generate": {"shot_id": sh["shot"]["id"]},
+                          "shot_id": sh["shot"]["id"]}))
+        s.commit()
+    after = next(x for s in _board(client, pid) for x in s["shots"]
+                 if x["shot"]["id"] == sh["shot"]["id"])["generation"]
+    assert after["latest_job_status"] == "failed"
+    assert after["latest_asset_id"] == before["latest_asset_id"]
+    assert after["output_count"] == before["output_count"]  # failed adds none
+
+
+def test_output_count_accumulates_across_jobs(client, tmp_path):
+    """Two successful jobs keep distinct outputs — count is unique
+    successful assets, not job count."""
+    p = make_project(client)
+    pid = p["id"]
+    scene = _scene(client, pid)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="x")
+    for _ in range(2):
+        r = _commit(client, pid, "shot.generate",
+                    {**GEN, "shot_id": sh["shot"]["id"]})
+        job = wait_for_job(client, pid, r["job_id"])
+        assert job["status"] == "succeeded", job
+    gen = next(x for s in _board(client, pid) for x in s["shots"]
+               if x["shot"]["id"] == sh["shot"]["id"])["generation"]
+    # At least one new asset per job — count grew past the first run.
+    assert gen["output_count"] >= 2
+    # latest_job_id is the SECOND job — jobs remain distinguishable.
+    assert gen["latest_job_id"] == job["id"]

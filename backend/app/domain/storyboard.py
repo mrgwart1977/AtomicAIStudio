@@ -909,7 +909,10 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 continue
             counts[sid] = counts.get(sid, 0) + 1
             cur = latest.get(sid)
-            if cur is None or a.created_at > cur.created_at:
+            # Deterministic pick: newest created_at wins; id breaks ties
+            # (two outputs of one job can share a timestamp).
+            if (cur is None or a.created_at > cur.created_at
+                    or (a.created_at == cur.created_at and a.id > cur.id)):
                 latest[sid] = a
         for sid in shot_id_set:
             g = gen.setdefault(sid, {})

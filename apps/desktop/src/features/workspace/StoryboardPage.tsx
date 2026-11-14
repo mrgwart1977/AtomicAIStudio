@@ -98,13 +98,18 @@ export function StoryboardPage() {
   // card picks up the new latest_asset/status without a manual refresh.
   const settledRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    // One pass, one refresh — a remount seeing N settled jobs refreshes
+    // the board once, not N times. Deduped ids make repeat WS events
+    // and StrictMode double-effects no-ops.
+    let newly = 0;
     for (const j of Object.values(jobs)) {
       if (settledRef.current.has(j.id)) continue;
       if (j.status === "succeeded" || j.status === "failed" || j.status === "cancelled") {
         settledRef.current.add(j.id);
-        void refresh();
+        newly += 1;
       }
     }
+    if (newly > 0) void refresh();
   }, [jobs, refresh]);
   const [showArchived, setShowArchived] = useState(false);
   const drag = useRef<{ shotId: string; sceneId: string } | null>(null);
@@ -248,7 +253,7 @@ export function StoryboardPage() {
             {/* shot strip */}
             <div className="flex flex-wrap items-stretch gap-2 p-3">
               {row.shots.map((entry, j) => (
-                <div key={entry.shot.id} className="flex items-stretch gap-2">
+                <div key={entry.shot.id} data-shotwrap className="flex items-stretch gap-2">
                   <DropZone
                     active={dropAt?.sceneId === row.scene.id && dropAt.index === j}
                     onDragOver={(e) => { e.preventDefault(); setDropAt({ sceneId: row.scene.id, index: j }); }}
@@ -380,13 +385,28 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
       onDragEnd={onDragEnd}
       onClick={onClick}
       onKeyDown={(e) => {
-        // C4-C — keyboard reorder + open, no drag required.
+        // C4-C — keyboard support without accidental reorders:
+        //   arrows       = move FOCUS between cards (navigation only)
+        //   Ctrl+arrows  = reorder via shot.move
+        //   Enter/Space  = open the shot dialog
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
-        else if (e.key === "ArrowLeft" && canLeft) { e.stopPropagation(); onMoveLeft(); }
-        else if (e.key === "ArrowRight" && canRight) { e.stopPropagation(); onMoveRight(); }
+        else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.stopPropagation();
+          if (e.ctrlKey || e.metaKey) {
+            if (e.key === "ArrowLeft" && canLeft) onMoveLeft();
+            else if (e.key === "ArrowRight" && canRight) onMoveRight();
+          } else {
+            // Focus the adjacent card — plain navigation, no command.
+            const el = e.currentTarget.closest("[data-shotwrap]");
+            const sib = e.key === "ArrowLeft"
+              ? el?.previousElementSibling : el?.nextElementSibling;
+            (sib?.querySelector("[data-shotcard]") as HTMLElement | null)?.focus();
+          }
+        }
       }}
       tabIndex={0}
       role="button"
+      data-shotcard
       aria-label={`Shot ${s.title || "untitled"} — ${s.shot_type.replace("_", " ")}`}
       title={s.description || s.title || "Edit shot"}
       className="group w-44 cursor-grab rounded-md border border-line bg-panel transition-colors hover:border-teal focus-visible:border-teal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal/50 active:cursor-grabbing"
@@ -744,11 +764,17 @@ function SceneCast({ row, characters, run }: {
 
 /** C4-C — continuity_json from the dialog's structured fields. Keys
  * stay descriptive-only; empty strings are dropped so the json stays
- * tidy for the comparison view. */
-function shotContinuity(form: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const k of ["appearance", "wardrobe", "lighting", "camera", "mood",
-                   "notes", "changes"] as const) {
+ * tidy for the comparison view. Unknown legacy keys in the existing
+ * record are preserved untouched. */
+function shotContinuity(form: Record<string, string>,
+                        existing?: Record<string, unknown>): Record<string, unknown> {
+  const KNOWN = new Set(["appearance", "wardrobe", "lighting", "camera",
+                         "mood", "notes", "changes"]);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(existing ?? {})) {
+    if (!KNOWN.has(k)) out[k] = v;  // legacy/unknown keys survive
+  }
+  for (const k of KNOWN) {
     const v = (form[`continuity_${k}`] ?? "").trim();
     if (v) out[k] = v;
   }
@@ -853,7 +879,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         thumbnail_asset_id: form.thumbnail_asset_id || null,
         reference_set_id: form.reference_set_id || null,
         source_asset_id: form.source_asset_id || null,
-        continuity: shotContinuity(form),
+        continuity: shotContinuity(form, shot?.continuity_json),
       }]);
     }
     for (const cid of removed) {
