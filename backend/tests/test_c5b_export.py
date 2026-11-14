@@ -260,7 +260,7 @@ def _cas_video(client, pid, src: Path, name="clip.mp4"):
         a = Asset(id=new_id(), project_id=pid, name=name, kind="video",
                   origin="generated", uri=str(rel).replace("\\", "/"),
                   sha256=sha, byte_size=src.stat().st_size,
-                  status="active")
+                  status="ready")
         s.add(a)
         s.flush()
         v = AssetVersion(id=new_id(), asset_id=a.id, version_no=1,

@@ -6,7 +6,7 @@ from tests.test_c4b_shot_generate import _board, _commit, _preview, _rev
 
 
 def _video(client, pid, name="clip.mp4", *, sha=None, frames=72, fps=24.0,
-           duration=3.0, status="active", probe_ok=True):
+           duration=3.0, status="ready", probe_ok=True):
     """Synthetic video asset: AssetFile → Asset → AssetVersion(probe)."""
     from app.db.models import (Asset, AssetFile, AssetVersion,
                                StorageLocation, new_id)

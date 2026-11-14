@@ -290,7 +290,9 @@ def resolve_clip_source(session: Session, project_id: str, asset_id: str,
         raise KeyError("source asset not found in this project")
     if asset.kind != "video":
         raise TimelineError("timeline clips require a video asset")
-    if asset.status != "active":
+    # Asset vocabulary is ready|missing|deleted — 'ready' is the only
+    # usable state; archived/missing/deleted sources refuse.
+    if asset.status != "ready":
         raise TimelineError(
             f"source asset is {asset.status} — restore it before use")
     ver = (session.get(AssetVersion, version_id) if version_id
