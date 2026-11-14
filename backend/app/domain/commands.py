@@ -1255,6 +1255,11 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         audit["after"]["link"] = sb._cols(link)
         return
     if command_type == "entity.assets.reorder":
+        audit["before"]["order"] = [
+            l.id for l in sb.list_entity_assets(
+                session, project.id,
+                entity_type=payload["entity_type"],
+                entity_id=payload["entity_id"])]
         try:
             links = sb.reorder_entity_asset_links(
                 session, project.id,
@@ -2512,7 +2517,25 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
                 entity_type=snap["entity_type"], entity_id=snap["entity_id"],
                 asset_id=snap["asset_id"], role=snap["role"],
                 label=snap.get("label", ""), position=snap.get("position", 0),
+                weight=snap.get("weight"),
             ))
+        return
+
+    if ct == "entity.assets.update":
+        snap = before.get("link") or {}
+        link = session.get(EntityAssetLink, snap.get("id", ""))
+        if link is not None and link.project_id == project.id:
+            link.label = snap.get("label", "")
+            link.weight = snap.get("weight")
+            session.flush()
+        return
+
+    if ct == "entity.assets.reorder":
+        for pos, lid in enumerate(before.get("order") or []):
+            link = session.get(EntityAssetLink, lid)
+            if link is not None and link.project_id == project.id:
+                link.position = pos
+        session.flush()
         return
 
 

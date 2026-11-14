@@ -173,6 +173,50 @@ class TestReferenceLinks:
                 {"entity_type": "character", "entity_id": c["id"],
                  "ordered_link_ids": [rev_ids[0]] * 3}, "p-7", expect=422)
 
+    def test_reorder_undo_restores_positions(self, client, tmp_path):
+        p = make_project(client, "Undo")
+        c = _char(client, p["id"], "Ada", "ur-1")
+        ids = [_import(client, p["id"], _png(tmp_path / f"{n}.png"),
+                       kind="image")["id"] for n in "ab"]
+        _link(client, p["id"], c["id"], ids[0], "ur-2", role="reference")
+        _link(client, p["id"], c["id"], ids[1], "ur-3", role="reference")
+        before = [l["id"] for l in _links(client, p["id"], c["id"])]
+        res = _commit(client, p["id"], "entity.assets.reorder",
+                      {"entity_type": "character", "entity_id": c["id"],
+                       "ordered_link_ids": before[::-1]}, "ur-4")
+        assert [l["id"] for l in _links(client, p["id"], c["id"])] == before[::-1]
+        r = client.post(
+            f"/api/projects/{p['id']}/commands/{res['command_id']}/undo")
+        assert r.status_code == 200, r.text
+        assert [l["id"] for l in _links(client, p["id"], c["id"])] == before
+
+    def test_update_and_unlink_undo_restore_weight(self, client, tmp_path):
+        p = make_project(client, "UndoW")
+        c = _char(client, p["id"], "Ada", "uw-1")
+        a = _import(client, p["id"], _png(tmp_path / "a.png"), kind="image")
+        _link(client, p["id"], c["id"], a["id"], "uw-2",
+              role="reference", weight=1.0, label="kept")
+        link = _links(client, p["id"], c["id"])[0]
+
+        res = _commit(client, p["id"], "entity.assets.update",
+                      {"link_id": link["id"], "weight": 0.2,
+                       "label": "faded"}, "uw-3")
+        r = client.post(
+            f"/api/projects/{p['id']}/commands/{res['command_id']}/undo")
+        assert r.status_code == 200, r.text
+        back = _links(client, p["id"], c["id"])[0]
+        assert back["weight"] == pytest.approx(1.0)
+        assert back["label"] == "kept"
+
+        res = _commit(client, p["id"], "entity.assets.unlink",
+                      {"link_id": link["id"]}, "uw-4")
+        r = client.post(
+            f"/api/projects/{p['id']}/commands/{res['command_id']}/undo")
+        assert r.status_code == 200, r.text
+        restored = _links(client, p["id"], c["id"])
+        assert len(restored) == 1
+        assert restored[0]["weight"] == pytest.approx(1.0)
+
     def test_update_weight_and_label(self, client, tmp_path):
         p = make_project(client, "Upd")
         c = _char(client, p["id"], "Ada", "u-1")
