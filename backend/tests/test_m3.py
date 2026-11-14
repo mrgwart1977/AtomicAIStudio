@@ -5,6 +5,7 @@ adapter end-to-end against a fake worker, app-level model-download jobs,
 storyboard-thumbnail apply_command, and migration 0006."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -521,6 +522,16 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
         return {"bytes": dest.stat().st_size, "sha256": "0" * 64}
     monkeypatch.setattr(model_files, "download_to", fake_dl)
 
+    # Release resolution hits the live GitHub releases API — keep ordinary CI
+    # deterministic by returning a fixed asset (real-network coverage lives in
+    # the opt-in ATOMIC_TEST_NETWORK integration test).
+    def fake_resolve(spec, flavor, *, fetch=None):
+        return {"url": "https://example.com/runtime.zip",
+                "name": "runtime-win.zip", "size": 1024,
+                "tag": "test-tag", "pinned": False,
+                "resolved_from": "mock", "resolved_at": "2026-01-01T00:00:00"}
+    monkeypatch.setattr(model_files, "resolve_release_asset", fake_resolve)
+
     def fake_rt_install(session, settings, spec, flavor, asset, cancel_check=None):
         d = settings.data_dir / "runtimes" / f"{spec.key}-{flavor}"
         d.mkdir(parents=True, exist_ok=True)
@@ -616,6 +627,19 @@ def test_pinned_release_resolution():
     assert a["pinned"] is True and a["tag"] == "master-1073-991f825"
 
 
+@pytest.mark.network
+@pytest.mark.skipif(not os.environ.get("ATOMIC_TEST_NETWORK"),
+                    reason="real-network integration — run with ATOMIC_TEST_NETWORK=1")
+def test_release_resolution_real_github():
+    """Opt-in: resolve a pinned runtime release against the live GitHub API.
+    Exercises the unmocked fetch path ordinary CI keeps offline."""
+    from app.domain import model_catalog, model_files
+    spec = model_catalog.get_runtime("sdcpp")
+    a = model_files.resolve_release_asset(spec, "vulkan")
+    assert a["url"].startswith("https://") and a["size"] > 0
+    assert a["pinned"] and a["tag"] == spec.release_tag
+
+
 def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_path, monkeypatch):
     """Selection order: manual request > fastest measured installed >
     installed (catalog order) > probe default."""
@@ -652,7 +676,15 @@ def test_pick_flavor_prefers_manual_then_measured_then_installed(client, tmp_pat
     assert fl == spec.backends[0] and "benchmark" in reason.lower()
 
 
-def test_runtime_only_install_endpoint(client):
+def test_runtime_only_install_endpoint(client, monkeypatch):
+    from app.domain import model_files
+    # Keep the enqueued install job off the live GitHub releases API.
+    monkeypatch.setattr(
+        model_files, "resolve_release_asset",
+        lambda spec, flavor, *, fetch=None: {
+            "url": "https://example.com/runtime.zip", "name": "runtime-win.zip",
+            "size": 1024, "tag": "test-tag", "pinned": False,
+            "resolved_from": "mock", "resolved_at": "2026-01-01T00:00:00"})
     r = client.post("/api/runtimes/sdcpp/install", json={"flavor": "cuda"})
     assert r.status_code in (200, 409), r.text
     if r.status_code == 200:

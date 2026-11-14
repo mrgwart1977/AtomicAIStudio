@@ -38,6 +38,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "network: opt-in tests that perform real network requests (run only via ATOMIC_TEST_NETWORK=1)",
+]
 
 [tool.ruff]
 line-length = 110
