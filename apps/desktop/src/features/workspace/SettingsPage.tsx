@@ -4,6 +4,7 @@ import { apiFetch } from "../../api/client";
 import type { BackupDestination, StorageLocation } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { fmtBytes } from "./BackupsPage";
+import { ResourceSection } from "./ResourceSection";
 
 const FORMATS = [
   { label: "16:9 — 1920×1080", ratio: "16:9", w: 1920, h: 1080 },
@@ -259,6 +260,7 @@ export function SettingsPage() {
       </div>
 
       <GpuSection setMsg={setMsg} setError={setError} />
+      <ResourceSection setError={setError} />
 
       {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
       {msg && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{msg}</p>}
@@ -372,3 +374,4 @@ function GpuSection({ setMsg, setError }: {
     </div>
   );
 }
+

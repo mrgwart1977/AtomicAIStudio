@@ -107,3 +107,14 @@ deferred to a later stabilization PR; do not add a vector editor here.
   (S4); a permanently offline socket still completes via fallback.
 - Reference-image tray selection is covered in CloudImagePanel tests;
   per-model reference limits are enforced backend-side.
+
+## C4-E — resource status and queueing
+
+| # | Step | Expected |
+|---|------|----------|
+| 47 | Settings → System resources | GPU(s) with VRAM free/total, RAM free + pressure label, disk free on work/media volumes — all measured values |
+| 48 | Queue two GPU-heavy jobs on one GPU | Second job shows queued + a plain-language wait reason; first completes; second starts — never both at once |
+| 49 | Advanced admission thresholds → set VRAM headroom → run a job near the limit | Headroom honored: the job queues with a device-fit reason instead of running |
+| 50 | Nearly-full drive → submit a generation job | Job fails honestly at admission with a disk-space reason — no partial output, no crash |
+| 51 | Kill the app mid-job → relaunch | Interrupted resumable jobs re-queue; non-resumable jobs fail with partial work files purged; CAS assets untouched |
+| 52 | Refresh during a queued job | Wait reason visible without opening the job list |

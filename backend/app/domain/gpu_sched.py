@@ -113,10 +113,14 @@ class GpuScheduler:
         if not free:
             self.last_reason = "all GPU slots are busy"
             return None
+        # C4-E — a configurable headroom subtracts from the driver-
+        # reported usable figure before admission (driver free-memory
+        # numbers lag real allocation).
+        headroom = int(prefs.get("vram_headroom_bytes") or 0)
         scored = []
         for g in free:
             usable = compatibility.usable_vram(g) or 0
-            scored.append((usable, g))
+            scored.append((max(0, usable - headroom), g))
         # Prefer devices that fit the estimate; if none measurably fit and
         # every GPU is measurable, refuse rather than risk a hard OOM.
         fits = [(u, g) for u, g in scored if est_vram is None or u >= est_vram]

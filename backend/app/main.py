@@ -145,9 +145,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             def _gpu_prefs() -> dict:
                 with sf() as s:
+                    vram_hr = _get_setting(s, "res_vram_headroom_gib")
                     return {
                         "mode": _get_setting(s, "gpu_mode") or "auto",
                         "preferred_gpu": _get_setting(s, "preferred_gpu"),
+                        # C4-E — user-configured VRAM admission headroom
+                        "vram_headroom_bytes": int(float(vram_hr) * (1024 ** 3))
+                                               if vram_hr else 0,
                     }
 
             app.state.gpu_scheduler = gpu_sched.GpuScheduler(

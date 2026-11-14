@@ -595,3 +595,20 @@ class GpuSettingsOut(BaseModel):
 class GpuSettingsUpdate(BaseModel):
     mode: str | None = None
     preferred_gpu: int | None = None
+
+
+class ResourceSettingsOut(BaseModel):
+    """C4-E — user-configured admission thresholds (GiB; None = default)."""
+    os_headroom_gib: float | None = None
+    critical_commit_gib: float | None = None
+    critical_phys_gib: float | None = None
+    min_disk_free_gib: float | None = None
+    vram_headroom_gib: float | None = None
+
+
+class ResourceSettingsUpdate(BaseModel):
+    os_headroom_gib: float | None = None
+    critical_commit_gib: float | None = None
+    critical_phys_gib: float | None = None
+    min_disk_free_gib: float | None = None
+    vram_headroom_gib: float | None = None
