@@ -45,6 +45,13 @@ SHOT_TYPES = (
 
 ENTITY_ASSET_TYPES = ("character", "world", "location")
 ENTITY_ASSET_ROLES = ("reference", "identity", "wardrobe", "voice", "style")
+# C3-D1 — roles whose asset must be a safely decodable image.
+ENTITY_ASSET_IMAGE_ROLES = ("reference", "identity", "wardrobe", "style")
+# Optional per-link guidance strength bounds (C3-D1); NULL = provider
+# default, honored only where the model declares reference_weights.
+REFERENCE_WEIGHT_MIN = 0.0
+REFERENCE_WEIGHT_MAX = 2.0
+_UNSET = object()  # distinguishes "key absent" from "explicit null"
 
 ENTITY_MODELS = {"character": Character, "world": World, "location": Location}
 
@@ -641,7 +648,8 @@ def shot_cast_remove(session: Session, shot: Shot, character_id: str) -> ShotCha
 # ---------- entity ↔ asset links ----------
 
 def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
-                      entity_id: str, asset_id: str, role: str, label: str = "") -> EntityAssetLink:
+                      entity_id: str, asset_id: str, role: str, label: str = "",
+                      weight=_UNSET) -> EntityAssetLink:
     from app.db.models import Asset
     if entity_type not in ENTITY_ASSET_TYPES:
         raise ValueError(f"unsupported entity_type '{entity_type}'")
@@ -665,6 +673,7 @@ def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
         row = EntityAssetLink(
             id=new_id(), project_id=project_id, entity_type=entity_type,
             entity_id=entity_id, asset_id=asset_id, role=role, label=label,
+            weight=weight if weight is not _UNSET else None,
             position=_next_position(
                 session, EntityAssetLink,
                 (EntityAssetLink.entity_type == entity_type) & (EntityAssetLink.entity_id == entity_id),
@@ -672,7 +681,48 @@ def link_entity_asset(session: Session, project_id: str, *, entity_type: str,
         )
         session.add(row)
         session.flush()
+    elif weight is not _UNSET:
+        # Re-linking the same (entity, asset, role) updates the stored
+        # guidance weight rather than creating a duplicate row.
+        row.weight = weight
+        session.flush()
     return row
+
+
+def update_entity_asset_link(session: Session, project_id: str, link_id: str, *,
+                             label=_UNSET, weight=_UNSET) -> EntityAssetLink:
+    row = session.get(EntityAssetLink, link_id)
+    if row is None or row.project_id != project_id:
+        raise KeyError("link not found in this project")
+    if label is not _UNSET:
+        row.label = label
+    if weight is not _UNSET:
+        row.weight = weight  # may be None — explicit clear
+    session.flush()
+    return row
+
+
+def reorder_entity_asset_links(session: Session, project_id: str, *,
+                               entity_type: str, entity_id: str,
+                               ordered_link_ids: list[str]) -> list[EntityAssetLink]:
+    """Assign positions 0..n-1 in the given order. The id list must be a
+    COMPLETE permutation of the entity's links — a partial order would
+    leave the rest of the set ambiguous."""
+    links = session.execute(
+        select(EntityAssetLink).where(
+            EntityAssetLink.project_id == project_id,
+            EntityAssetLink.entity_type == entity_type,
+            EntityAssetLink.entity_id == entity_id,
+        )
+    ).scalars().all()
+    by_id = {l.id: l for l in links}
+    if set(ordered_link_ids) != set(by_id) or len(ordered_link_ids) != len(by_id):
+        raise ValueError(
+            "ordered_link_ids must be the complete set of this entity's links")
+    for pos, lid in enumerate(ordered_link_ids):
+        by_id[lid].position = pos
+    session.flush()
+    return [by_id[lid] for lid in ordered_link_ids]
 
 
 def unlink_entity_asset(session: Session, project_id: str, link_id: str) -> EntityAssetLink:
@@ -713,7 +763,7 @@ def duplicate_character(session: Session, character: Character, *, name: str | N
         session.add(EntityAssetLink(
             id=new_id(), project_id=character.project_id, entity_type="character",
             entity_id=dup.id, asset_id=link.asset_id, role=link.role,
-            label=link.label, position=link.position,
+            label=link.label, position=link.position, weight=link.weight,
         ))
     session.flush()
     return dup

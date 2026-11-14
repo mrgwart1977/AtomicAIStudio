@@ -77,6 +77,7 @@ SUPPORTED_COMMANDS = {
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
+    "entity.assets.reorder", "entity.assets.update",
 }
 
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
@@ -137,6 +138,7 @@ UNDOABLE = {
     "shot.update", "shot.archive", "shot.unarchive", "shot.move",
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
     "entity.assets.link", "entity.assets.unlink",
+    "entity.assets.reorder", "entity.assets.update",
 }
 
 PROJECT_FORMAT_FIELDS = ("kind", "aspect_ratio", "width", "height", "fps_num", "fps_den", "style")
@@ -277,6 +279,21 @@ def _summary(command_type: str, payload: dict) -> str:
             return f"Revert {etype} to revision {payload.get('to_revision')}"
         return f"{op.capitalize()} {etype}"
     return command_type
+
+
+def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
+    """C3-D1 — optional per-link guidance strength must be a real
+    number inside the declared range; bools and non-numerics refuse."""
+    if weight is None:
+        if allow_none:
+            return
+        return  # absent weight is fine on link (defaults to NULL)
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        raise CommandError(422, "weight must be a number")
+    if not (sb.REFERENCE_WEIGHT_MIN <= weight <= sb.REFERENCE_WEIGHT_MAX):
+        raise CommandError(
+            422, f"weight must be {sb.REFERENCE_WEIGHT_MIN}–"
+                 f"{sb.REFERENCE_WEIGHT_MAX} (got {weight})")
 
 
 def _validate(session: Session, project: Project, command_type: str, payload: dict) -> list[str]:
@@ -589,11 +606,53 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         asset = session.get(Asset, payload["asset_id"])
         if asset is None or asset.project_id != project.id:
             raise CommandError(404, "asset not found in this project")
+        # C3-D1 — visual roles must point at an image asset; the
+        # byte-level safe-decode gate runs at commit (storage is not
+        # reachable from preview validation).
+        role = payload.get("role", "reference")
+        if role in sb.ENTITY_ASSET_IMAGE_ROLES and asset.kind != "image":
+            raise CommandError(
+                422, f"role '{role}' requires an image asset "
+                     f"(got kind '{asset.kind}')")
+        _validate_reference_weight(payload.get("weight"))
     if command_type == "entity.assets.unlink":
         from app.db.models import EntityAssetLink
         link = session.get(EntityAssetLink, payload.get("link_id") or "")
         if link is None or link.project_id != project.id:
             raise CommandError(404, "link not found in this project")
+    if command_type == "entity.assets.update":
+        from app.db.models import EntityAssetLink
+        link = session.get(EntityAssetLink, payload.get("link_id") or "")
+        if link is None or link.project_id != project.id:
+            raise CommandError(404, "link not found in this project")
+        label = payload.get("label")
+        if label is not None and len(label) > 200:
+            raise CommandError(422, "label must be ≤ 200 characters")
+        if "weight" in payload:
+            _validate_reference_weight(payload["weight"], allow_none=True)
+    if command_type == "entity.assets.reorder":
+        from app.db.models import EntityAssetLink
+        etype = payload.get("entity_type")
+        if etype not in sb.ENTITY_ASSET_TYPES:
+            raise CommandError(422, f"unsupported entity_type '{etype}'")
+        ent = session.get(sb.ENTITY_MODELS[etype], payload.get("entity_id") or "")
+        if ent is None or ent.project_id != project.id:
+            raise CommandError(404, f"{etype} not found in this project")
+        ids = payload.get("ordered_link_ids")
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(i, str) for i in ids)):
+            raise CommandError(422, "ordered_link_ids must be a non-empty "
+                                    "list of link ids")
+        existing = {
+            l.id for l in session.execute(
+                select(EntityAssetLink).where(
+                    EntityAssetLink.project_id == project.id,
+                    EntityAssetLink.entity_type == etype,
+                    EntityAssetLink.entity_id == ent.id)).scalars()
+        }
+        if len(set(ids)) != len(ids) or set(ids) != existing:
+            raise CommandError(422, "ordered_link_ids must be exactly the "
+                                    "complete set of this entity's links")
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -1072,7 +1131,7 @@ def _duplicate_project(session: Session, project: Project, new_name: str, comman
         session.add(EntityAssetLink(
             id=new_id(), project_id=clone.id, entity_type=link.entity_type,
             entity_id=new_ent, asset_id=new_asset, role=link.role,
-            label=link.label, position=link.position,
+            label=link.label, position=link.position, weight=link.weight,
         ))
 
     session.add(
@@ -1084,8 +1143,33 @@ def _duplicate_project(session: Session, project: Project, new_name: str, comman
     return clone
 
 
+def _inspect_reference_image(session: Session, asset_id: str, storage) -> None:
+    """C3-D1 — byte-level safe-decode gate for visual reference links.
+    Reads at most MAX_IMAGE_BYTES+1 of the current asset bytes and runs
+    the same inspection a provider image must pass; ImageRejected
+    becomes a 422."""
+    from app.domain import image_safety
+    from app.db.models import Asset
+
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise CommandError(404, "asset not found in this project")
+    if storage is None:
+        raise CommandError(500, "storage unavailable for image validation")
+    path = storage.asset_path(session, asset)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise CommandError(422, f"asset bytes unreadable: {exc}") from exc
+    try:
+        image_safety.inspect_image(data[:image_safety.MAX_IMAGE_BYTES + 1])
+    except image_safety.ImageRejected as exc:
+        raise CommandError(422, f"reference image rejected: {exc}") from exc
+
+
 def _commit_storyboard(session: Session, project: Project, command: CreativeCommand,
-                       command_type: str, payload: dict, audit: dict) -> None:
+                       command_type: str, payload: dict, audit: dict,
+                       storage=None) -> None:
     """Scene/shot/cast/entity-asset mutations. Cast ops also bump the parent
     scene/shot revision so history shows cast changes."""
     from app.db.models import EntityAssetLink
@@ -1139,11 +1223,18 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         return
 
     if command_type == "entity.assets.link":
+        role = payload.get("role", "reference")
+        if role in sb.ENTITY_ASSET_IMAGE_ROLES:
+            # C3-D1 — byte-level safe-decode gate at commit (preview
+            # validated kind only): the linked bytes must survive
+            # format/size/pixel inspection like any provider image.
+            _inspect_reference_image(session, payload["asset_id"], storage)
         link = sb.link_entity_asset(
             session, project.id,
             entity_type=payload["entity_type"], entity_id=payload["entity_id"],
-            asset_id=payload["asset_id"], role=payload.get("role", "reference"),
+            asset_id=payload["asset_id"], role=role,
             label=payload.get("label", ""),
+            weight=(payload["weight"] if "weight" in payload else sb._UNSET),
         )
         audit["after"]["link_id"] = link.id
         return
@@ -1153,6 +1244,31 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
             raise CommandError(404, "link not found in this project")
         audit["before"]["link"] = sb._cols(link)
         session.delete(link)
+        return
+    if command_type == "entity.assets.update":
+        audit["before"]["link"] = sb._cols(
+            session.get(EntityAssetLink, payload["link_id"]))
+        link = sb.update_entity_asset_link(
+            session, project.id, payload["link_id"],
+            label=(payload["label"] if "label" in payload else sb._UNSET),
+            weight=(payload["weight"] if "weight" in payload else sb._UNSET))
+        audit["after"]["link"] = sb._cols(link)
+        return
+    if command_type == "entity.assets.reorder":
+        audit["before"]["order"] = [
+            l.id for l in sb.list_entity_assets(
+                session, project.id,
+                entity_type=payload["entity_type"],
+                entity_id=payload["entity_id"])]
+        try:
+            links = sb.reorder_entity_asset_links(
+                session, project.id,
+                entity_type=payload["entity_type"],
+                entity_id=payload["entity_id"],
+                ordered_link_ids=payload["ordered_link_ids"])
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from exc
+        audit["after"]["order"] = [l.id for l in links]
         return
 
     # --- scene-level ops ---
@@ -1635,7 +1751,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
 
     elif command_type.startswith(("scene.", "shot.", "entity.assets.")) or command_type == "character.duplicate":
-        _commit_storyboard(session, project, command, command_type, payload, audit)
+        _commit_storyboard(session, project, command, command_type, payload,
+                           audit, storage=storage)
 
     elif parts:
         _commit_entity(session, project, command, parts[0], parts[1], payload, audit)
@@ -2400,7 +2517,25 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
                 entity_type=snap["entity_type"], entity_id=snap["entity_id"],
                 asset_id=snap["asset_id"], role=snap["role"],
                 label=snap.get("label", ""), position=snap.get("position", 0),
+                weight=snap.get("weight"),
             ))
+        return
+
+    if ct == "entity.assets.update":
+        snap = before.get("link") or {}
+        link = session.get(EntityAssetLink, snap.get("id", ""))
+        if link is not None and link.project_id == project.id:
+            link.label = snap.get("label", "")
+            link.weight = snap.get("weight")
+            session.flush()
+        return
+
+    if ct == "entity.assets.reorder":
+        for pos, lid in enumerate(before.get("order") or []):
+            link = session.get(EntityAssetLink, lid)
+            if link is not None and link.project_id == project.id:
+                link.position = pos
+        session.flush()
         return
 
 

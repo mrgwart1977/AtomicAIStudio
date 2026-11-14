@@ -413,14 +413,17 @@ def test_undo_shot_update_and_scene_move(client):
 
 # ---------- entity assets ----------
 
-def _import_asset(client, pid, path: Path, name: str | None = None) -> dict:
+def _import_asset(client, pid, path: Path, name: str | None = None,
+                  kind: str | None = None) -> dict:
     import time
     rev = client.get(f"/api/projects/{pid}").json()["revision"]
     r = client.post(
         f"/api/projects/{pid}/commands/commit",
         json={
             "command_type": "asset.import",
-            "payload": {"source_path": str(path), **({"name": name} if name else {})},
+            "payload": {"source_path": str(path),
+                        **({"name": name} if name else {}),
+                        **({"kind": kind} if kind else {})},
             "scope": "project",
             "expected_revision": rev,
             "idempotency_key": f"imp-{path.name}-{rev}-{time.time_ns()}",
@@ -434,11 +437,13 @@ def _import_asset(client, pid, path: Path, name: str | None = None) -> dict:
 
 
 def test_entity_asset_links(client, tmp_path):
+    # C3-D1 — visual-role links require a real decodable image asset.
+    from PIL import Image
     p = make_project(client, "RefImgs")
     hero = _char(client, p["id"], "Ada", "e-1")
     img = tmp_path / "ada-ref.png"
-    img.write_bytes(b"\x89PNG" + b"\x00" * 1024)
-    asset = _import_asset(client, p["id"], img, "ada-ref.png")
+    Image.new("RGB", (8, 8), (200, 30, 30)).save(img)
+    asset = _import_asset(client, p["id"], img, "ada-ref.png", kind="image")
 
     _commit(client, p["id"], "entity.assets.link",
             {"entity_type": "character", "entity_id": hero["id"],

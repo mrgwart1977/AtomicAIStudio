@@ -412,6 +412,9 @@ class EntityAssetLink(Base):
     role: Mapped[str] = mapped_column(String(30), default="reference")  # reference|identity|wardrobe|voice|style
     label: Mapped[str] = mapped_column(String(200), default="")
     position: Mapped[int] = mapped_column(Integer, default=0)
+    # C3-D1 — optional guidance strength (0.0–2.0; NULL = provider
+    # default). Honored only by models declaring editing.reference_weights.
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (
         UniqueConstraint("entity_type", "entity_id", "asset_id", "role", name="uq_entity_asset"),

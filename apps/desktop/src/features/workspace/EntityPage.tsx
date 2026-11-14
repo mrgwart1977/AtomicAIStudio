@@ -474,17 +474,33 @@ function ReferenceAssets({ links, assets, projectId, run, etype, entityId }: {
   const [assetId, setAssetId] = useState("");
   const [role, setRole] = useState("reference");
   const [label, setLabel] = useState("");
+  const [weight, setWeight] = useState("");
   const linkedIds = new Set(links.map((l) => l.asset_id));
   const avail = assets.filter((a) => !linkedIds.has(a.id));
   const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? "asset";
+
+  const move = (l: EntityAssetLink, dir: -1 | 1) => {
+    const ids = links.map((x) => x.id);
+    const i = ids.indexOf(l.id);
+    const j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    void run("entity.assets.reorder", {
+      entity_type: etype, entity_id: entityId, ordered_link_ids: ids,
+    });
+  };
 
   return (
     <div className="mt-6 border-t border-line pt-4">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
         Reference images & identity assets
       </h4>
+      <p className="mt-1 text-[10px] text-faint">
+        References guide generation — they improve consistency but do not
+        guarantee identity preservation.
+      </p>
       <div className="mt-2 flex flex-wrap gap-2">
-        {links.map((l) => (
+        {links.map((l, i) => (
           <div key={l.id} className="relative w-24 rounded-md border border-line bg-panel">
             <AuthImage pid={projectId} assetId={l.asset_id}
               alt={l.label || nameOf(l.asset_id)}
@@ -492,10 +508,20 @@ function ReferenceAssets({ links, assets, projectId, run, etype, entityId }: {
               fallback={<div className="flex h-16 items-center justify-center text-[10px] text-faint">img</div>} />
             <div className="p-1">
               <div className="truncate text-[9px] font-medium">{l.label || nameOf(l.asset_id)}</div>
-              <div className="text-[8px] uppercase text-faint">{l.role}</div>
+              <div className="text-[8px] uppercase text-faint">
+                {l.role}{l.weight != null ? ` · w${l.weight}` : ""}
+              </div>
+              <div className="mt-0.5 flex justify-between text-[9px] text-muted">
+                <button title="Move earlier" disabled={i === 0}
+                  onClick={() => move(l, -1)}
+                  className="rounded px-1 hover:text-fg disabled:opacity-30">◀</button>
+                <button title="Move later" disabled={i === links.length - 1}
+                  onClick={() => move(l, 1)}
+                  className="rounded px-1 hover:text-fg disabled:opacity-30">▶</button>
+              </div>
             </div>
             <button
-              title="Unlink"
+              title="Unlink (asset is kept)"
               onClick={() => void run("entity.assets.unlink", { link_id: l.id })}
               className="absolute -right-1 -top-1 rounded-full border border-line bg-card px-1 text-[9px] text-muted hover:text-danger">
               ✕
@@ -519,14 +545,21 @@ function ReferenceAssets({ links, assets, projectId, run, etype, entityId }: {
           </select>
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label"
             className="w-28 rounded-md border border-line bg-panel px-2 py-1.5 text-xs text-fg" />
+          <input value={weight} onChange={(e) => setWeight(e.target.value)}
+            placeholder="weight" title="Optional guidance strength 0–2 (empty = provider default)"
+            inputMode="decimal"
+            className="w-16 rounded-md border border-line bg-panel px-2 py-1.5 text-xs text-fg" />
           <button
             disabled={!assetId}
             onClick={() => {
+              const w = weight.trim() === "" ? undefined : Number(weight);
+              if (w !== undefined && (Number.isNaN(w) || w < 0 || w > 2)) return;
               void run("entity.assets.link", {
                 entity_type: etype, entity_id: entityId,
                 asset_id: assetId, role, label,
+                ...(w !== undefined ? { weight: w } : {}),
               });
-              setAssetId(""); setLabel("");
+              setAssetId(""); setLabel(""); setWeight("");
             }}
             className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg disabled:opacity-40">
             Link

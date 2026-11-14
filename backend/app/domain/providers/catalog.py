@@ -131,6 +131,45 @@ _INFO = "external_info"
 _T2 = dict(automation="user_initiated", interaction="submit")
 _T3 = dict(automation="user_initiated", interaction="all")
 
+
+def _ed(*, img2img=False, refs=0, mask=False, outpaint=False,
+        identity=False, weights=False, note=""):
+    """C3-D1 — explicit per-model image-editing capability declaration.
+    Every image-capability model carries one; a missing block or a
+    False/zero field means UNSUPPORTED and must fail closed downstream.
+    ``identity_reference`` records only that a provider accepts
+    identity-aimed reference input — it is NEVER a claim of guaranteed
+    character identity consistency."""
+    return {"img2img": img2img, "max_reference_images": refs,
+            "mask_inpaint": mask, "outpaint": outpaint,
+            "identity_reference": identity,
+            "reference_weights": weights, "note": note}
+
+
+# Fields a normalized editing record always carries (fail-closed defaults).
+EDITING_DEFAULTS = _ed()
+
+
+def editing_caps(model: dict | None) -> dict:
+    """Normalized editing capabilities for a catalog model row.
+    Absent/partial records resolve to the all-False defaults — an
+    undeclared capability is an unsupported capability."""
+    caps = dict(EDITING_DEFAULTS)
+    if isinstance(model, dict) and isinstance(model.get("editing"), dict):
+        for k in EDITING_DEFAULTS:
+            if k in model["editing"]:
+                caps[k] = model["editing"][k]
+    return caps
+
+
+def model_editing_caps(provider_key: str, model_id: str) -> dict:
+    """Editing caps by provider+model id; unknown rows fail closed."""
+    p = get_provider(provider_key) or {}
+    for m in p.get("models") or []:
+        if m.get("id") == model_id:
+            return editing_caps(m)
+    return dict(EDITING_DEFAULTS)
+
 # =====================================================================
 # TEXT & WRITING (15)
 # =====================================================================
@@ -320,7 +359,12 @@ IMAGES = [
                                          "high": 0.19},
                                "checked": "2026-11-13",
                                "note": "per-image equivalents of token "
-                                       "billing; estimate"}}],
+                                       "billing; estimate"},
+                # C3-D1 — Images API edits: array of input images
+                # (documented up to 16) + mask for inpainting.
+                "editing": _ed(img2img=True, refs=16, mask=True,
+                               note="edits endpoint: input-image array "
+                                    "≤16 + transparent-mask inpaint")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"])]),
     _p("gemini-images", "Gemini Images / Nano Banana", "image", "A", "google",
        auth=["api_key"], creds=_key_credential("shared Google credential"),
@@ -340,7 +384,11 @@ IMAGES = [
                                        "tokens, 1290/img). Deprecated "
                                        "— shutdown Mar 15 2027; "
                                        "successor: Gemini 3.1 Flash "
-                                       "Lite Image"}},
+                                       "Lite Image"},
+                # C3-D1 — multi-image fusion documented to 3 inputs.
+                "editing": _ed(img2img=True, refs=3,
+                               note="multi-image fusion: up to 3 input "
+                                    "images; no mask/outpaint surface")},
                {"id": "imagen-4.0-generate-001", "capability": "image",
                 # Imagen :predict — 5 documented aspect ratios.
                 "sizes": ["1:1", "3:4", "4:3", "9:16", "16:9"],
@@ -350,7 +398,9 @@ IMAGES = [
                                "source": "developers.googleblog.com/en/"
                                          "imagen-4-now-available",
                                "note": "$0.04/image; Vertex docs list "
-                                       "retirement Jun 30 2026"}},
+                                       "retirement Jun 30 2026"},
+                "editing": _ed(note=":predict is generation-only — no "
+                                    "image inputs declared")},
                {"id": "imagen-4.0-ultra-generate-001", "capability": "image",
                 "sizes": ["1:1", "3:4", "4:3", "9:16", "16:9"],
                 "qualities": ["auto"],
@@ -358,7 +408,9 @@ IMAGES = [
                                "checked": "2026-11-13",
                                "source": "developers.googleblog.com/en/"
                                          "imagen-4-now-available",
-                               "note": "$0.06/image Ultra tier"}}],
+                               "note": "$0.06/image Ultra tier"},
+                "editing": _ed(note="generation-only — no image inputs "
+                                    "declared")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"])]),
     _p("bfl-flux", "FLUX / Black Forest Labs", "image", "A", "bfl",
        auth=["api_key"], creds=_key_credential("api.bfl.ai key"),
@@ -375,11 +427,18 @@ IMAGES = [
                                "source": "docs.bfl.ai FLUX1.1 [pro] "
                                          "pricing",
                                "note": "$0.04/image flat per BFL "
-                                       "published rate"}},
+                                       "published rate"},
+                "editing": _ed(note="generation-only — no image inputs "
+                                    "declared")},
                # Editing model (image-to-image) — outside the C3-C
                # generation contract; NO cost_table so commit fails
                # closed (pricing_unavailable) rather than guessing.
-               {"id": "flux-kontext", "capability": "image.edit"}],
+               {"id": "flux-kontext", "capability": "image.edit",
+                # C3-D1 — Kontext: prompt-directed edit, single
+                # input_image per BFL docs; no mask/outpaint params.
+                "editing": _ed(img2img=True, refs=1,
+                               note="Kontext edit: one input_image; "
+                                    "prompt-directed, no mask")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
                    _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate")]),
     _p("adobe-firefly", "Adobe Firefly", "image", "B", "adobe",
@@ -400,7 +459,11 @@ IMAGES = [
                 # so NO cost_table is declared and this provider has no
                 # implemented contract in this build.
                 "notes": "API pricing not published per-image; "
-                         "contract intentionally unimplemented"}],
+                         "contract intentionally unimplemented",
+                # C3-D1 — no editing contract is declared either;
+                # everything fails closed alongside generation.
+                "editing": _ed(note="no contract declared — all editing "
+                                    "capabilities unsupported")}],
        strategies=[_s(_API, "T1", ["image.generate"], note="S2S OAuth scope"),
                    _s(_ASSIST, "T2", ["image.generate"], connection={"launch_url": "https://firefly.adobe.com"}, **_T2)]),
     _p("ideogram", "Ideogram", "image", "A", "ideogram",
@@ -424,7 +487,13 @@ IMAGES = [
                                "source": "ideogram.ai/pricing "
                                          "(API pricing tab)",
                                "note": "3.0 per-image rates: "
-                                       "$0.03/$0.06/$0.09 by speed"}}],
+                                       "$0.03/$0.06/$0.09 by speed"},
+                # C3-D1 — Ideogram 3.0 edit (image+mask) and extend
+                # (outpaint) endpoints are documented.
+                "editing": _ed(img2img=True, refs=1, mask=True,
+                               outpaint=True,
+                               note="edit (image+mask) + extend "
+                                    "(outpaint) endpoints")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit", "image.remix"])]),
     _p("canva", "Canva AI", "image", "B", "canva",
        auth=["oauth"], creds=[{"name": "oauth_token", "secret": True, "required": True,
@@ -432,15 +501,21 @@ IMAGES = [
        base_url="https://api.canva.com", job_model="async_poll", pricing="per_credit",
        tos="https://www.canva.com/policies/canva-developer-terms/",
        status_reason="Connect API in preview — public apps can't pass review yet.",
-       models=[{"id": "craft-1", "capability": "image"},
-               {"id": "lucid-origin", "capability": "image"}],
+       models=[{"id": "craft-1", "capability": "image",
+                "editing": _ed(note="no editing surface declared in "
+                                    "the preview API")},
+               {"id": "lucid-origin", "capability": "image",
+                "editing": _ed(note="no editing surface declared in "
+                                    "the preview API")}],
        strategies=[_s(_API, "T1", ["image.generate"], note="preview API, private apps"),
                    _s(_ASSIST, "T2", ["image.export"], connection={"launch_url": "https://www.canva.com"}, **_T2)]),
     _p("meta-ai", "Meta AI", "image", "B", "meta",
        auth=["api_key"], creds=_key_credential("dev.meta.ai key"),
        base_url="https://api.meta.ai/v1", job_model="sync", pricing="per_image",
        status_reason="Meta Model API (Muse) — new; onboarding unverified.",
-       models=[{"id": "muse-image-1.0", "capability": "image"}],
+       models=[{"id": "muse-image-1.0", "capability": "image",
+                "editing": _ed(note="generation-only — onboarding "
+                                    "unverified; no edit surface")}],
        strategies=[_s(_API, "T1", ["image.generate"])]),
     _p("recraft", "Recraft", "image", "A", "recraft",
        auth=["api_key"], creds=_key_credential("api.recraft.ai key"),
@@ -460,7 +535,13 @@ IMAGES = [
                                "source": "recraft.ai/docs/api-reference/"
                                          "pricing",
                                "note": "V4.1 raster $0.035/img "
-                                       "(35 API units; $1 = 1000)"}},
+                                       "(35 API units; $1 = 1000)"},
+                # C3-D1 — imageToImage (documented strength 0–1 acts
+                # as the reference weight) + inpaint (image+mask).
+                "editing": _ed(img2img=True, refs=1, mask=True,
+                               weights=True,
+                               note="imageToImage strength param + "
+                                    "inpaint (image+mask) endpoints")},
                {"id": "recraftv3", "capability": "image",
                 # V3 documents negative_prompt; V4.x does not.
                 "negative_prompt": True,
@@ -476,15 +557,23 @@ IMAGES = [
                                          "pricing",
                                "note": "V3 raster $0.04/img (40 units); "
                                        "only line with documented "
-                                       "negative_prompt"}}],
+                                       "negative_prompt"},
+                "editing": _ed(img2img=True, refs=1, mask=True,
+                               weights=True,
+                               note="imageToImage strength param + "
+                                    "inpaint (image+mask) endpoints")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.style"])]),
     _p("leonardo", "Leonardo AI", "image", "A", "leonardo",
        auth=["api_key"], creds=_key_credential("cloud.leonardo.ai key"),
        base_url="https://cloud.leonardo.ai/api/rest/v2", job_model="async_poll",
        pricing="per_credit", docs="https://docs.leonardo.ai",
        notes="Also serves Lucid Origin as model id 'lucid-origin'.",
-       models=[{"id": "phoenix", "capability": "image"},
-               {"id": "lucid-origin", "capability": "image"}],
+       models=[{"id": "phoenix", "capability": "image",
+                "editing": _ed(note="canvas strategy exists but no "
+                                    "documented per-model edit surface")},
+               {"id": "lucid-origin", "capability": "image",
+                "editing": _ed(note="canvas strategy exists but no "
+                                    "documented per-model edit surface")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.canvas"])]),
     _p("openart", "OpenArt", "image", "C", "openart",
        auth=["oauth"], creds=[],
@@ -499,20 +588,28 @@ IMAGES = [
        auth=["api_key"], creds=_key_credential("x-freepik-api-key"),
        base_url="https://api.freepik.com", job_model="async_poll", pricing="per_credit",
        docs="https://docs.freepik.com",
-       models=[{"id": "mystic", "capability": "image"}],
+       models=[{"id": "mystic", "capability": "image",
+                "editing": _ed(img2img=True, refs=1,
+                               note="provider declares image.edit "
+                                    "strategy; single reference image")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit", "video.generate"])]),
     _p("grok-imagine", "Grok Imagine", "image", "A", "xai",
        auth=["api_key"], creds=_key_credential("shared xAI API key"),
        base_url="https://api.x.ai", job_model="sync", pricing="per_image",
        notes="Uses the shared xAI credential.",
-       models=[{"id": "grok-imagine-image-2.0", "capability": "image"}],
+       models=[{"id": "grok-imagine-image-2.0", "capability": "image",
+                "editing": _ed(note="generation-only documented")}],
        strategies=[_s(_API, "T1", ["image.generate", "video.generate"])]),
     _p("qwen-image", "Qwen Image", "image", "A", "dashscope",
        auth=["api_key"], creds=_key_credential("Alibaba Model Studio key"),
        base_url="https://dashscope-intl.aliyuncs.com", job_model="async_poll",
        pricing="per_image", region=True,
        notes="Region-pinned DashScope key (SG/BJ/TYO/HK).",
-       models=[{"id": "qwen-image-3.0", "capability": "image"}],
+       models=[{"id": "qwen-image-3.0", "capability": "image",
+                "editing": _ed(img2img=True, refs=1,
+                               note="provider declares image.edit "
+                                    "(qwen-image-edit surface); single "
+                                    "reference image")}],
        strategies=[_s(_API, "T1", ["image.generate", "image.edit"]),
                    _s(_AGGR, "T1", ["image.generate"], note="fal/Replicate",
                       tos_url="https://www.alibabacloud.com/help/en/model-studio/",
@@ -520,7 +617,9 @@ IMAGES = [
     _p("lucid-origin", "Lucid Origin", "image", "A", "leonardo",
        status_reason="A model on the Leonardo account — not a separate provider.",
        notes="Catalog alias of Leonardo; no separate credentials.",
-       models=[{"id": "lucid-origin", "capability": "image"}],
+       models=[{"id": "lucid-origin", "capability": "image",
+                "editing": _ed(note="alias of Leonardo lucid-origin — "
+                                    "no documented edit surface")}],
        strategies=[_s(_API, "T1", ["image.generate"], note="via Leonardo REST v2")]),
 ]
 
@@ -844,4 +943,41 @@ def validate_catalog() -> list[str]:
                         ".." in PurePosixPath(d.replace("\\", "/")).parts):
                     errs.append(f"{p['key']}: unsafe cli install_hint_dir "
                                 f"{d!r}")
+        # C3-D1 — every image-capability model must carry an explicit
+        # editing declaration; absent = structurally incomplete.
+        for m in p.get("models") or []:
+            mid = m.get("id") or "?"
+            cap = m.get("capability") or ""
+            if not cap.startswith("image"):
+                continue
+            ed = m.get("editing")
+            if not isinstance(ed, dict):
+                errs.append(f"{p['key']}/{mid}: image model missing "
+                            "'editing' capability declaration")
+                continue
+            for f in ("img2img", "mask_inpaint", "outpaint",
+                      "identity_reference", "reference_weights"):
+                if not isinstance(ed.get(f), bool):
+                    errs.append(f"{p['key']}/{mid}: editing.{f} must be "
+                                "a boolean")
+            refs = ed.get("max_reference_images")
+            if not isinstance(refs, int) or isinstance(refs, bool) or refs < 0:
+                errs.append(f"{p['key']}/{mid}: editing."
+                            "max_reference_images must be an int ≥ 0")
+                refs = 0
+            if refs and not any(ed.get(f) for f in (
+                    "img2img", "mask_inpaint", "outpaint",
+                    "identity_reference")):
+                errs.append(f"{p['key']}/{mid}: editing declares "
+                            "reference images but no capability that "
+                            "accepts them")
+            if ed.get("identity_reference") and not refs:
+                errs.append(f"{p['key']}/{mid}: identity_reference "
+                            "requires max_reference_images ≥ 1")
+            if ed.get("reference_weights") and not refs:
+                errs.append(f"{p['key']}/{mid}: reference_weights "
+                            "requires max_reference_images ≥ 1")
+            if not isinstance(ed.get("note", ""), str):
+                errs.append(f"{p['key']}/{mid}: editing.note must be "
+                            "a string")
     return errs
