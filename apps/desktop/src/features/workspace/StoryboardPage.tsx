@@ -500,8 +500,16 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
             ▶
           </button>
           {gen && gen.output_count > 0 && (
-            <span className="ml-0.5 text-[9px] text-faint" title={`${gen.output_count} generated output(s)`}>
+            <span className="ml-0.5 text-[9px] text-faint" title={`${gen.output_count} generated image(s)`}>
               ✦{gen.output_count}
+            </span>
+          )}
+          {gen && gen.video_count > 0 && (
+            <span
+              className="ml-0.5 text-[9px] text-teal"
+              title={`${gen.video_count} generated clip(s)${
+                gen.latest_video_duration_s ? ` — latest ${gen.latest_video_duration_s}s` : ""}`}>
+              ▶{gen.video_count}{gen.latest_video_duration_s ? ` ${gen.latest_video_duration_s}s` : ""}
             </span>
           )}
           {hasPrev && (
@@ -1073,6 +1081,10 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                   onDone={onClose}
                 />
               )}
+              {shot && (
+                <ShotVideo shot={shot} projectId={projectId}
+                  sourceId={shot.source_asset_id} onDone={onClose} />
+              )}
             </div>
 
             {/* ---- cast ---- */}
@@ -1550,5 +1562,130 @@ function CompareDialog({ prev, next, onClose }: {
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+
+// ---------- C4-D shot video ----------
+
+/** Compact video-from-shot section: installed video models only
+ * (local gen.video.sdcpp pipeline composed server-side from the shot's
+ * saved bindings — source image when bound = i2v, else t2v). */
+function ShotVideo({ shot, projectId, sourceId, onDone }: {
+  shot: { id: string; prompt: string };
+  projectId: string;
+  sourceId: string | null;
+  onDone: () => void;
+}) {
+  const models = useApp((s) => s.models);
+  const installed = useMemo(
+    () => models.filter((m) => m.modality === "video" && m.install?.status === "installed"),
+    [models]);
+  const [modelKey, setModelKey] = useState("");
+  const [motion, setMotion] = useState("");
+  const [frames, setFrames] = useState(33);
+  const [fps, setFps] = useState(24);
+  const [pending, setPending] = useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const model = installed.find((m) => m.key === modelKey) ?? installed[0];
+  const frameCaps = (model?.capabilities as
+    Record<string, { min?: number; max?: number; default?: number } | undefined> | undefined)?.frames;
+
+  if (installed.length === 0) return null;  // no functional control to offer
+
+  function payload(): Record<string, unknown> {
+    return {
+      shot_id: shot.id,
+      model_key: model?.key,
+      motion_prompt: motion.trim() || undefined,
+      frames, fps,
+    };
+  }
+
+  async function preview() {
+    setBusy(true); setErr(null);
+    try {
+      const proposal = await previewCommand(projectId, "shot.video", payload());
+      setPending({ payload: payload(), proposal });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally { setBusy(false); }
+  }
+
+  async function approve() {
+    if (!pending) return;
+    setBusy(true); setErr(null);
+    try {
+      const rev = useApp.getState().currentProject()?.revision ?? 0;
+      const p = { ...pending.payload };
+      if (pending.proposal.resolved_shot) p.expected_shot = pending.proposal.resolved_shot;
+      if (pending.proposal.resolved_params) p.expected_params = pending.proposal.resolved_params;
+      await commitCommand(projectId, rev, "shot.video", p, "storyboard");
+      setPending(null);
+      onDone();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="mt-2 border-t border-dashed border-line pt-2" data-testid="shot-video">
+      <h5 className="text-[10px] font-semibold uppercase tracking-wide text-faint">
+        Video for this shot (local model)
+      </h5>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="block text-[11px] text-muted">Model
+          <select value={model?.key ?? ""} onChange={(e) => setModelKey(e.target.value)}
+            className="mt-0.5 w-44 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+            {installed.map((m) => (
+              <option key={m.key} value={m.key}>
+                {m.display_name ?? m.key}
+                {sourceId && !(m.modes || []).includes("image2video") ? " — text-to-video only" : ""}
+              </option>))}
+          </select>
+        </label>
+        <label className="block text-[11px] text-muted">Frames
+          <input type="number" min={frameCaps?.min ?? 1} max={frameCaps?.max ?? 129}
+            value={frames} onChange={(e) => setFrames(Number(e.target.value))}
+            className="mt-0.5 w-16 rounded border border-line bg-card px-2 py-1 text-xs text-fg" />
+        </label>
+        <label className="block text-[11px] text-muted">FPS
+          <input type="number" min={1} max={60} value={fps}
+            onChange={(e) => setFps(Number(e.target.value))}
+            className="mt-0.5 w-14 rounded border border-line bg-card px-2 py-1 text-xs text-fg" />
+        </label>
+        <label className="block flex-1 text-[11px] text-muted">Motion (optional)
+          <input value={motion} onChange={(e) => setMotion(e.target.value)}
+            placeholder="slow push in, camera pans left…"
+            className="mt-0.5 w-full rounded border border-line bg-card px-2 py-1 text-xs text-fg" />
+        </label>
+        <button disabled={busy || !model} onClick={() => void preview()}
+          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:border-teal hover:text-teal disabled:opacity-40">
+          {busy ? "…" : "Preview"}
+        </button>
+      </div>
+      <p className="mt-1 text-[10px] text-faint">
+        {sourceId ? "Image-to-video from the bound source frame" : "Text-to-video from the shot prompt"}.
+        Reference sets aren't video inputs — identity is never implied.
+      </p>
+      {pending && (
+        <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 p-2.5">
+          <div className="text-xs font-medium">Confirm video generation</div>
+          <div className="mt-1 text-[11px] text-muted">{pending.proposal.summary}</div>
+          <div className="mt-2 flex gap-2">
+            <button disabled={busy} onClick={() => void approve()}
+              className="rounded-md bg-teal px-3 py-1 text-xs font-medium text-ink disabled:opacity-40">
+              Approve and queue
+            </button>
+            <button disabled={busy} onClick={() => setPending(null)}
+              className="rounded-md border border-line px-3 py-1 text-xs text-muted">Cancel</button>
+          </div>
+        </div>
+      )}
+      {err && <p className="mt-1.5 text-xs text-danger">{err}</p>}
+    </div>
   );
 }

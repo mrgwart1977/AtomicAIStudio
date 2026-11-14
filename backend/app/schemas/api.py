@@ -103,7 +103,7 @@ CommandType = Literal[
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
-    "shot.generate",
+    "shot.generate", "shot.video",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -152,6 +152,10 @@ class CommandProposalOut(BaseModel):
     # C4-B — shot.generate only: the shot's generation-relevant state
     # fingerprint (prompt/source/cast/continuity/revision).
     resolved_shot: dict[str, Any] | None = None
+    # C4-D — shot.video only: the resolved generation-parameter set
+    # (model, dims, duration, sampling, source) pinned via
+    # expected_params at commit.
+    resolved_params: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):

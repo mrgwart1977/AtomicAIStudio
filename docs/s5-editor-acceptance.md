@@ -64,6 +64,17 @@ containing at least one image asset.
 | 39 | Shot dialog → continuity guidance fields | Appearance/wardrobe/lighting/camera/mood persist in `continuity_json`; disclaimer visible |
 | 40 | Restart the app → reopen the storyboard | Generation status, latest outputs, and bindings all restored from durable rows — no transient state |
 
+## C4-D — shot video workflow
+
+| # | Step | Expected |
+|---|------|----------|
+| 41 | Shot dialog → video section, no video model installed | Section hidden entirely — no dead control |
+| 42 | Shot dialog → video: pick installed model, set frames/fps/motion → Preview | Backend cost + proposal shown; nothing runs until approve |
+| 43 | Preview → edit the shot's prompt or source → approve the stale preview | Refused 422 — re-preview required |
+| 44 | Shot with bound source image → video section | Copy says "image-to-video from the bound source frame"; a t2v-only model selection is rejected at preview |
+| 45 | Approve → watch the shot card | Job badge shows video job status; on success a teal `▶n  xs` clip badge appears next to `✦n` — card never downloads the full clip |
+| 46 | Fail/cancel a video job | Failed badge; clip count unchanged; a later success adds exactly one clip |
+
 ## Memory measurements
 
 Undo history is bounded by `UNDO_MAX = 20` snapshots AND

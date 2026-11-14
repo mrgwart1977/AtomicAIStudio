@@ -896,32 +896,65 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
             if sid in shot_id_set and sid not in gen:
                 gen[sid] = {"latest_job_id": j.id,
                             "latest_job_status": j.status,
+                            "latest_job_kind": j.kind,
                             "latest_job_at": j.created_at}
-        img_assets = session.execute(
+        media_assets = session.execute(
             select(Asset).where(Asset.project_id == project_id,
-                                Asset.kind == "image")
+                                Asset.kind.in_(["image", "video"]))
         ).scalars().all()
         counts: dict[str, int] = {}
         latest: dict[str, Asset] = {}
-        for a in img_assets:
+        vcounts: dict[str, int] = {}
+        vlatest: dict[str, Asset] = {}
+        for a in media_assets:
             sid = _req_shot((a.provenance_json or {}).get("request"))
             if sid not in shot_id_set:
                 continue
-            counts[sid] = counts.get(sid, 0) + 1
-            cur = latest.get(sid)
-            # Deterministic pick: newest created_at wins; id breaks ties
-            # (two outputs of one job can share a timestamp).
-            if (cur is None or a.created_at > cur.created_at
-                    or (a.created_at == cur.created_at and a.id > cur.id)):
-                latest[sid] = a
+            # Images and videos tracked separately — the card must
+            # never confuse an image output for a clip.
+            if a.kind == "video":
+                vcounts[sid] = vcounts.get(sid, 0) + 1
+                cur = vlatest.get(sid)
+                if (cur is None or a.created_at > cur.created_at
+                        or (a.created_at == cur.created_at and a.id > cur.id)):
+                    vlatest[sid] = a
+            else:
+                counts[sid] = counts.get(sid, 0) + 1
+                cur = latest.get(sid)
+                # Deterministic pick: newest created_at wins; id breaks
+                # ties (two outputs of one job can share a timestamp).
+                if (cur is None or a.created_at > cur.created_at
+                        or (a.created_at == cur.created_at and a.id > cur.id)):
+                    latest[sid] = a
+        # C4-D — clip duration comes from the produced version's media
+        # probe (validated by the media engine at job completion).
+        vdur: dict[str, Any] = {}
+        if vlatest:
+            from app.db.models import AssetVersion
+            ver_ids = [a.current_version_id for a in vlatest.values()
+                       if a.current_version_id]
+            vers = {v.id: v for v in session.execute(
+                select(AssetVersion).where(AssetVersion.id.in_(ver_ids))
+            ).scalars().all()} if ver_ids else {}
+            for sid, a in vlatest.items():
+                v = vers.get(a.current_version_id or "")
+                probe = ((v.media_json or {}).get("probe") or {}) if v else {}
+                d = probe.get("duration_s") or probe.get("duration")
+                if d is not None:
+                    vdur[sid] = d
         for sid in shot_id_set:
             g = gen.setdefault(sid, {})
             a = latest.get(sid)
+            va = vlatest.get(sid)
             g["output_count"] = counts.get(sid, 0)
             g["latest_asset_id"] = a.id if a else None
             g["latest_asset_at"] = a.created_at if a else None
+            g["video_count"] = vcounts.get(sid, 0)
+            g["latest_video_id"] = va.id if va else None
+            g["latest_video_duration_s"] = vdur.get(sid)
             g.setdefault("latest_job_id", None)
             g.setdefault("latest_job_status", None)
+            g.setdefault("latest_job_kind", None)
             g.setdefault("latest_job_at", None)
 
     sc_by_scene: dict[str, list] = {}
@@ -963,7 +996,10 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 "generation": {
                     "output_count": 0, "latest_asset_id": None,
                     "latest_asset_at": None, "latest_job_id": None,
-                    "latest_job_status": None, "latest_job_at": None,
+                    "latest_job_status": None, "latest_job_kind": None,
+                    "latest_job_at": None, "video_count": 0,
+                    "latest_video_id": None,
+                    "latest_video_duration_s": None,
                     **(gen.get(sh.id) or {})},
             }
 
