@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../../api/client";
-import { commitCommand } from "../../api/commands";
+import { commitCommand, previewCommand } from "../../api/commands";
 import type {
-  Timeline, TimelineClip, TimelineDetail, TimelineRevision,
+  CommandProposal, Timeline, TimelineClip, TimelineDetail,
+  TimelineRevision,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -34,6 +35,11 @@ export function TimelinePage() {
   const [edl, setEdl] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameTo, setRenameTo] = useState("");
+  const [showExport, setShowExport] = useState(false);
+  const [exportProfile, setExportProfile] = useState("source");
+  const [exportPending, setExportPending] =
+    useState<CommandProposal | null>(null);
+  const [exportJobId, setExportJobId] = useState<string | null>(null);
 
   const refreshList = useCallback(async () => {
     if (!project) return;
@@ -98,6 +104,40 @@ export function TimelinePage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function previewExport() {
+    if (!project || !selTl) return;
+    setError(null); setBusy(true); setExportJobId(null);
+    try {
+      const p = await previewCommand(project.id, "timeline.export",
+        { timeline_id: selTl.id, profile: exportProfile });
+      setExportPending(p);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setExportPending(null);
+    } finally { setBusy(false); }
+  }
+
+  async function runExport() {
+    if (!project || !selTl || !exportPending) return;
+    setError(null); setBusy(true);
+    try {
+      const rev = useApp.getState().currentProject()?.revision
+        ?? project.revision;
+      const rt = exportPending.resolved_timeline ?? undefined;
+      const r = await commitCommand(project.id, rev, "timeline.export", {
+        timeline_id: selTl.id,
+        profile: exportProfile,
+        expected_timeline: rt && { id: rt.id, revision: rt.revision },
+        expected_edl_sha: rt?.edl_sha256,
+      }, "timeline");
+      setExportJobId(r.job_id);
+      setExportPending(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setExportPending(null);
+    } finally { setBusy(false); }
   }
 
   const active = useMemo(
@@ -248,6 +288,12 @@ export function TimelinePage() {
                   className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-fg">
                   {showEdl ? "Hide EDL" : "Edit decision list"}
                 </button>
+                {selTl.status === "active" && detail.clips.length > 0 && (
+                  <button onClick={() => { setShowExport((v) => !v); setExportPending(null); }}
+                    className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-fg">
+                    Export…
+                  </button>
+                )}
                 <button onClick={() => setShowHistory((v) => !v)}
                   className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-fg">
                   {showHistory ? "Hide history" : "History"}
@@ -267,6 +313,54 @@ export function TimelinePage() {
               </div>
             </div>
 
+            {showExport && (
+              <div className="mt-3 rounded border border-line bg-card p-3"
+                data-testid="export-panel">
+                <p className="text-xs text-muted">
+                  Render this cut to a single MP4 video file. Clips that
+                  match exactly are copied losslessly; anything else is
+                  normalized to the chosen profile.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <label className="text-[11px] text-muted">Profile
+                    <select value={exportProfile}
+                      onChange={(e) => { setExportProfile(e.target.value); setExportPending(null); }}
+                      aria-label="Export profile"
+                      className="ml-1 rounded border border-line bg-panel px-2 py-1 text-xs">
+                      <option value="source">Source quality</option>
+                      <option value="1080p">1080p H.264 MP4</option>
+                      <option value="720p">720p H.264 MP4</option>
+                    </select>
+                  </label>
+                  <button disabled={busy} onClick={() => void previewExport()}
+                    className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-teal disabled:opacity-40">
+                    Preview export
+                  </button>
+                </div>
+                {exportPending && (
+                  <div className="mt-2 rounded border border-teal/40 bg-teal/5 p-2 text-[11px] text-muted"
+                    data-testid="export-preview">
+                    <p>
+                      Export {exportPending.resolved_timeline?.clip_count ?? 0} clip(s)
+                      as {exportProfile} · EDL pinned
+                      {" "}{exportPending.resolved_timeline?.edl_sha256?.slice(0, 10)}…
+                    </p>
+                    <p className="mt-0.5 text-faint">
+                      Any timeline edit after this point cancels the export request.
+                    </p>
+                    <button disabled={busy} onClick={() => void runExport()}
+                      className="mt-1.5 rounded bg-action px-2.5 py-1 text-[11px] text-white disabled:opacity-40">
+                      Start export
+                    </button>
+                  </div>
+                )}
+                {exportJobId && (
+                  <p className="mt-2 text-[11px] text-teal" data-testid="export-started">
+                    Export queued — watch progress in the Jobs panel.
+                  </p>
+                )}
+              </div>
+            )}
             {detail.clips.length === 0 && (
               <p className="mt-8 text-center text-sm text-muted">
                 This timeline is empty. Generate a video clip on the

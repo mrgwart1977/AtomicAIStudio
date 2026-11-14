@@ -92,6 +92,8 @@ SUPPORTED_COMMANDS = {
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
+    # C5-B — durable FFmpeg render of a pinned EDL
+    "timeline.export",
 }
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
@@ -103,7 +105,9 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "shot.generate",
                        # C4-D — shot-scoped composition of generate.video
                        # (local installed video models, i2v optional).
-                       "shot.video"}
+                       "shot.video",
+                       # C5-B — timeline export launches a durable job.
+                       "timeline.export"}
 
 # Commands whose commit transaction must begin BEGIN IMMEDIATE — they
 # check-then-act on financial state, so the budget-check SELECT must
@@ -156,6 +160,8 @@ JOB_COMMANDS = {
     "backup.export": "ops.backup.export",
     "backup.import": "ops.backup.import",
     "backup.restore": "ops.backup.restore",
+    # C5-B — local supervised-ffmpeg timeline render.
+    "timeline.export": "ops.timeline.export",
 }
 
 # Commands that can be safely undone (jobs/compute can never be unspent).
@@ -1442,6 +1448,17 @@ def _validate_timeline(session: Session, project: Project,
                                fields.get("fps_den", tl.fps_den))
             except tld.TimelineError as exc:
                 raise CommandError(422, str(exc)) from exc
+    elif command_type == "timeline.export":
+        from app.domain import timeline_export as tx
+        if payload.get("profile", "source") not in tx.PROFILES:
+            raise CommandError(
+                422, "export profile must be one of "
+                + ", ".join(sorted(tx.PROFILES)))
+        crf = payload.get("crf", tx.CRF_DEFAULT)
+        if (not isinstance(crf, int) or isinstance(crf, bool)
+                or not (tx.CRF_MIN <= crf <= tx.CRF_MAX)):
+            raise CommandError(
+                422, f"crf must be an integer {tx.CRF_MIN}..{tx.CRF_MAX}")
 
 
 def _get_timeline(session: Session, project: Project, payload: dict):
@@ -1860,6 +1877,11 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
             out["resolved_timeline"] = {
                 "id": tl.id, "revision": tl.revision,
                 "clip_count": len(tld.list_clips(session, tl.id))}
+            if command_type == "timeline.export":
+                # C5-B — pin the exact EDL bytes this preview saw so a
+                # commit after any timeline edit refuses.
+                out["resolved_timeline"]["edl_sha256"] = _edl_sha(
+                    session, tl)
         except CommandError:
             pass
     return out
@@ -2827,7 +2849,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _commit_storyboard(session, project, command, command_type, payload,
                            audit, storage=storage)
 
-    elif command_type.startswith("timeline."):
+    elif (command_type.startswith("timeline.")
+          # C5-B — export enqueues a durable job; the JOB_COMMANDS
+          # branch below must see it, not _commit_timeline.
+          and command_type != "timeline.export"):
         _commit_timeline(session, project, command, command_type, payload,
                          audit)
 
@@ -2869,7 +2894,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
-                    "generate.image.img2img", "generate.image.edit"),
+                    "generate.image.img2img", "generate.image.edit",
+                    # C5-B — an interrupted export restarts from
+                    # scratch; never mid-file.
+                    "timeline.export"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -3156,6 +3184,7 @@ def _job_kind(command_type: str) -> str:
         "backup.export": "backup",
         "backup.import": "import",
         "backup.restore": "restore",
+        "timeline.export": "export",
     }[command_type]
 
 
@@ -3170,9 +3199,48 @@ def _cloud_adapter_id(registry, provider_key: str) -> str:
     return JOB_COMMANDS["generate.text.cloud"]
 
 
+def _edl_sha(session: Session, tl) -> str:
+    """Deterministic hash of the canonical EDL document."""
+    import hashlib
+    from app.domain import timeline as tld
+    return hashlib.sha256(json.dumps(
+        tld.edl_json(session, tl), sort_keys=True).encode()).hexdigest()
+
+
 def _job_request(session: Session, project: Project, command_type: str,
                  payload: dict, storage=None) -> dict:
     req: dict[str, Any] = {"command_type": command_type, **payload}
+    if command_type == "timeline.export":
+        # C5-B — the request embeds the pinned EDL (timeline revision +
+        # EDL hash rechecked here, execution-time, not at preview).
+        from app.domain import timeline as tld
+        from app.domain import timeline_export as tx
+        tl = _get_timeline(session, project, payload)
+        exp = payload.get("expected_timeline")
+        if exp is not None and (
+                exp.get("id") != tl.id
+                or exp.get("revision") != tl.revision):
+            raise CommandError(
+                422, "timeline changed since preview — re-preview")
+        edl = tld.edl_json(session, tl)
+        edl_sha = _edl_sha(session, tl)
+        exp_sha = payload.get("expected_edl_sha")
+        if exp_sha is not None and exp_sha != edl_sha:
+            raise CommandError(
+                422, "timeline edit-decision list changed since preview"
+                     " — re-preview")
+        profile = payload.get("profile", "source")
+        req.update({
+            "timeline_id": tl.id,
+            "timeline_revision": tl.revision,
+            "timeline_name": tl.name,
+            "edl": edl,
+            "edl_sha256": edl_sha,
+            "profile": profile,
+            "crf": payload.get("crf", tx.CRF_DEFAULT),
+            "est_output_bytes": tx.est_output_bytes(edl, profile),
+        })
+        return req
     if command_type == "shot.generate":
         # C4-B — compose the shot's bindings into an existing image
         # command, then let that pipeline build its own request (caps,

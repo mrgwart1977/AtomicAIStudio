@@ -25,11 +25,15 @@ class MediaToolError(RuntimeError):
 
 
 def run(argv: list[str], *, timeout_s: float = _DEFAULT_TIMEOUT_S,
-        cancel: threading.Event | None = None) -> dict[str, Any]:
+        cancel: threading.Event | None = None,
+        capture_bytes: int = _TAIL_BYTES) -> dict[str, Any]:
     """Run argv under job-object supervision. Never uses a shell.
 
-    Returns {exit, output, timed_out, cancelled, elapsed_ms}. `exit` is
-    None when the process never completed (timeout/cancel killed it)."""
+    Returns {exit, output_tail, timed_out, cancelled, elapsed_ms}.
+    `exit` is None when the process never completed (timeout/cancel
+    killed it). `capture_bytes` bounds the returned output tail —
+    ffprobe JSON needs more than the 4 KiB diagnostic default on
+    multi-stream files."""
     started = time.monotonic()
     try:
         proc = proc_guard.spawn_supervised(argv, stdout=subprocess.PIPE)
@@ -67,7 +71,7 @@ def run(argv: list[str], *, timeout_s: float = _DEFAULT_TIMEOUT_S,
     text = output.decode("utf-8", "replace")
     return {
         "exit": proc.returncode if not (timed_out or cancelled) else None,
-        "output_tail": text[-_TAIL_BYTES:],
+        "output_tail": text[-capture_bytes:],
         "timed_out": timed_out,
         "cancelled": cancelled,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
