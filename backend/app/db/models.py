@@ -396,6 +396,31 @@ class ShotCharacter(Base):
     __table_args__ = (UniqueConstraint("shot_id", "character_id", name="uq_shot_character"),)
 
 
+class ReferenceSet(Base):
+    """C4-A — named grouping of a character's entity-asset reference
+    links plus per-set identity guidance. Membership lives on
+    entity_assets.set_id (links keep role/weight/ordering); this row
+    only carries set identity: name, optional pinned seed, notes.
+
+    A pinned seed is GENERATION GUIDANCE, not an identity guarantee —
+    it is recorded in job provenance and fed to workflows that accept
+    a seed parameter, and the UI must say so."""
+
+    __tablename__ = "reference_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    character_id: Mapped[str] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class EntityAssetLink(Base):
     """Explicit link between a bible entity and a project asset —
     character reference images, identity plates, wardrobe refs, world
@@ -409,6 +434,10 @@ class EntityAssetLink(Base):
     entity_type: Mapped[str] = mapped_column(String(30), index=True)  # character | world | location
     entity_id: Mapped[str] = mapped_column(String(36), index=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    # C4-A — optional membership in a named ReferenceSet. SET NULL keeps
+    # the link as an ungrouped reference when its set is deleted.
+    set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("reference_sets.id", ondelete="SET NULL"), nullable=True)
     role: Mapped[str] = mapped_column(String(30), default="reference")  # reference|identity|wardrobe|voice|style
     label: Mapped[str] = mapped_column(String(200), default="")
     position: Mapped[int] = mapped_column(Integer, default=0)

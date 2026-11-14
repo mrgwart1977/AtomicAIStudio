@@ -254,6 +254,10 @@ export interface CommandProposal {
   } | null;
   current_revision: number;
   launches_generation: boolean;
+  /** C4-A — the actual ordered members of a previewed
+   * reference_set_id; the approval commits this as
+   * expected_references so a changed set can never slip through. */
+  resolved_references?: Array<{ asset_id: string; weight: number | null }> | null;
 }
 
 export interface CommitResult {
@@ -507,6 +511,24 @@ export interface EntityAssetLink {
   label: string;
   position: number;
   weight: number | null;
+  set_id: string | null;
+  created_at: string;
+}
+
+/** C4-A — named character reference set. Membership lives on the
+ * entity-asset links (set_id); the set row carries the group metadata
+ * plus the optional pinned-seed guidance. */
+export interface ReferenceSet {
+  id: string;
+  project_id: string;
+  character_id: string;
+  name: string;
+  seed: number | null;
+  notes: string;
+  position: number;
+  status: string;
+  revision: number;
+  member_count: number;
   created_at: string;
 }
 

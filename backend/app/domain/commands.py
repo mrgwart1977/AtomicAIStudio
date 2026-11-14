@@ -79,9 +79,9 @@ SUPPORTED_COMMANDS = {
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
+    # C4-A — named character reference sets + identity guidance
+    "refset.create", "refset.update", "refset.delete",
 }
-
-# Command types that enqueue paid/GPU-visible work; preview must stay free.
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
                        "generate.text.cloud", "generate.image.cloud",
@@ -148,6 +148,7 @@ UNDOABLE = {
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
+    "refset.create", "refset.update", "refset.delete",
 }
 
 PROJECT_FORMAT_FIELDS = ("kind", "aspect_ratio", "width", "height", "fps_num", "fps_den", "style")
@@ -286,6 +287,11 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Link asset to {payload.get('entity_type', 'entity')} ({payload.get('role', 'reference')})"
     if command_type == "entity.assets.unlink":
         return "Unlink asset from entity"
+    if command_type.startswith("refset."):
+        op = command_type.rsplit(".", 1)[1]
+        if op == "create":
+            return f"Create reference set '{payload.get('name', '')}'"
+        return f"{op.capitalize()} reference set"
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -295,6 +301,34 @@ def _summary(command_type: str, payload: dict) -> str:
             return f"Revert {etype} to revision {payload.get('to_revision')}"
         return f"{op.capitalize()} {etype}"
     return command_type
+
+
+def _validate_refset_seed(seed) -> None:
+    """Optional pinned seed — integer ≥ 0, or None to clear. Guidance
+    only; never marketed as an identity guarantee."""
+    if seed is None:
+        return
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise CommandError(422, "seed must be a non-negative integer or null")
+
+
+def _refset_refs(session: Session, project: Project, payload: dict) -> tuple:
+    """C4-A — resolve reference_set_id to ordered (ref_ids, weights).
+
+    Returns the set row plus ordered member asset ids and an explicit
+    weight list: if ANY member carries a weight, the whole list is
+    explicit (missing members default to 1.0) so provider weight
+    semantics stay aligned; if none do, weights is []."""
+    rs = sb.get_refset(session, payload.get("reference_set_id") or "",
+                       project.id)
+    members = sb.set_members(session, rs.id, project.id)
+    ids = [l.asset_id for l in members]
+    if any(l.weight is not None for l in members):
+        weights = [l.weight if l.weight is not None else 1.0
+                   for l in members]
+    else:
+        weights = []
+    return rs, ids, weights
 
 
 def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
@@ -519,7 +553,20 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             raise CommandError(404, "source image asset not found in project")
         if src.kind != "image":
             raise CommandError(422, "source asset must be an image")
-        refs = list(payload.get("reference_asset_ids") or [])
+        if payload.get("reference_set_id"):
+            if payload.get("reference_asset_ids"):
+                raise CommandError(
+                    422, "reference_set_id and reference_asset_ids "
+                         "are mutually exclusive")
+            try:
+                _, refs, refset_weights = _refset_refs(
+                    session, project, payload)
+            except KeyError:
+                raise CommandError(404, "reference set not found in this project") from None
+            weights = refset_weights
+        else:
+            refs = list(payload.get("reference_asset_ids") or [])
+            weights = payload.get("reference_weights")
         if len(refs) > int(caps.get("max_reference_images") or 0):
             raise CommandError(
                 422, f"model accepts at most "
@@ -536,7 +583,6 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                                         "in project")
             if r.kind != "image":
                 raise CommandError(422, "reference asset must be an image")
-        weights = payload.get("reference_weights")
         if weights:
             if not caps.get("reference_weights"):
                 raise CommandError(
@@ -875,6 +921,14 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                 422, f"role '{role}' requires an image asset "
                      f"(got kind '{asset.kind}')")
         _validate_reference_weight(payload.get("weight"))
+        if payload.get("set_id"):
+            try:
+                rs = sb.get_refset(session, payload["set_id"], project.id)
+            except KeyError:
+                raise CommandError(404, "reference set not found in this project") from None
+            if payload["entity_type"] != "character" or rs.character_id != payload["entity_id"]:
+                raise CommandError(
+                    422, "reference set does not belong to this entity")
     if command_type == "entity.assets.unlink":
         from app.db.models import EntityAssetLink
         link = session.get(EntityAssetLink, payload.get("link_id") or "")
@@ -890,6 +944,14 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             raise CommandError(422, "label must be ≤ 200 characters")
         if "weight" in payload:
             _validate_reference_weight(payload["weight"], allow_none=True)
+        if "set_id" in payload and payload["set_id"]:
+            try:
+                rs = sb.get_refset(session, payload["set_id"], project.id)
+            except KeyError:
+                raise CommandError(404, "reference set not found in this project") from None
+            if link.entity_type != "character" or rs.character_id != link.entity_id:
+                raise CommandError(
+                    422, "reference set does not belong to this entity")
     if command_type == "entity.assets.reorder":
         from app.db.models import EntityAssetLink
         etype = payload.get("entity_type")
@@ -910,9 +972,42 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                     EntityAssetLink.entity_type == etype,
                     EntityAssetLink.entity_id == ent.id)).scalars()
         }
+        if payload.get("set_id"):
+            try:
+                rs = sb.get_refset(session, payload["set_id"], project.id)
+            except KeyError:
+                raise CommandError(404, "reference set not found in this project") from None
+            existing = {
+                l.id for l in sb.set_members(session, rs.id, project.id)}
         if len(set(ids)) != len(ids) or set(ids) != existing:
             raise CommandError(422, "ordered_link_ids must be exactly the "
                                     "complete set of this entity's links")
+    # ---- C4-A: character reference sets ----
+    if command_type == "refset.create":
+        if not (payload.get("name") or "").strip():
+            raise CommandError(422, "name is required")
+        if len(payload["name"].strip()) > 120:
+            raise CommandError(422, "name must be ≤ 120 characters")
+        try:
+            sb.get_character(session, payload.get("character_id") or "",
+                             project.id)
+        except KeyError:
+            raise CommandError(404, "character not found in this project") from None
+        _validate_refset_seed(payload.get("seed"))
+    if command_type == "refset.update":
+        try:
+            sb.get_refset(session, payload.get("set_id") or "", project.id)
+        except KeyError:
+            raise CommandError(404, "reference set not found in this project") from None
+        if "name" in payload and not (payload["name"] or "").strip():
+            raise CommandError(422, "name may not be empty")
+        if "seed" in payload:
+            _validate_refset_seed(payload["seed"])
+    if command_type == "refset.delete":
+        try:
+            sb.get_refset(session, payload.get("set_id") or "", project.id)
+        except KeyError:
+            raise CommandError(404, "reference set not found in this project") from None
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -1185,7 +1280,7 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
     if command_type not in SUPPORTED_COMMANDS:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
     warnings = _validate(session, project, command_type, payload)
-    return {
+    out = {
         "command": {
             "project_id": project.id,
             "command_type": command_type,
@@ -1204,6 +1299,19 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         "current_revision": project.revision,
         "launches_generation": command_type in GENERATION_COMMANDS,
     }
+    # C4-A — surface the resolved set contents so a UI approval can
+    # fingerprint the ACTUAL assets+weights, not merely the set id; a
+    # later set edit then changes the fingerprint. Commit re-resolves
+    # and refuses a mismatch against expected_references.
+    if payload.get("reference_set_id"):
+        try:
+            _, _ids, _ws = _refset_refs(session, project, payload)
+            out["resolved_references"] = [
+                {"asset_id": a, "weight": w}
+                for a, w in zip(_ids, _ws or [None] * len(_ids))]
+        except KeyError:
+            pass  # _validate already reported the missing set
+    return out
 
 
 # ---------- commit helpers ----------
@@ -1496,6 +1604,7 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
             asset_id=payload["asset_id"], role=role,
             label=payload.get("label", ""),
             weight=(payload["weight"] if "weight" in payload else sb._UNSET),
+            set_id=(payload["set_id"] if "set_id" in payload else sb._UNSET),
         )
         audit["after"]["link_id"] = link.id
         return
@@ -1512,8 +1621,35 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         link = sb.update_entity_asset_link(
             session, project.id, payload["link_id"],
             label=(payload["label"] if "label" in payload else sb._UNSET),
-            weight=(payload["weight"] if "weight" in payload else sb._UNSET))
+            weight=(payload["weight"] if "weight" in payload else sb._UNSET),
+            set_id=(payload["set_id"] if "set_id" in payload else sb._UNSET))
         audit["after"]["link"] = sb._cols(link)
+        return
+    # ---- C4-A: reference sets ----
+    if command_type == "refset.create":
+        c = character()
+        rs = sb.create_refset(
+            session, project.id, c,
+            name=payload["name"].strip(),
+            seed=payload.get("seed"),
+            notes=payload.get("notes") or "")
+        audit["after"]["set_id"] = rs.id
+        return
+    if command_type == "refset.update":
+        rs = sb.get_refset(session, payload["set_id"], project.id)
+        audit["before"]["set"] = sb._cols(rs)
+        for f in ("name", "seed", "notes"):
+            if f in payload:
+                setattr(rs, f, payload[f])
+        rs.revision += 1
+        session.flush()
+        audit["after"]["set"] = sb._cols(rs)
+        return
+    if command_type == "refset.delete":
+        rs = sb.get_refset(session, payload["set_id"], project.id)
+        audit["before"]["set"] = sb._cols(rs)
+        sb.delete_refset(session, rs)
+        audit["after"]["set_id"] = rs.id
         return
     if command_type == "entity.assets.reorder":
         audit["before"]["order"] = [
@@ -1526,7 +1662,8 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
                 session, project.id,
                 entity_type=payload["entity_type"],
                 entity_id=payload["entity_id"],
-                ordered_link_ids=payload["ordered_link_ids"])
+                ordered_link_ids=payload["ordered_link_ids"],
+                set_id=payload.get("set_id"))
         except ValueError as exc:
             raise CommandError(422, str(exc)) from exc
         audit["after"]["order"] = [l.id for l in links]
@@ -2011,7 +2148,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
 
-    elif command_type.startswith(("scene.", "shot.", "entity.assets.")) or command_type == "character.duplicate":
+    elif command_type.startswith(("scene.", "shot.", "entity.assets.", "refset.")) or command_type == "character.duplicate":
         _commit_storyboard(session, project, command, command_type, payload,
                            audit, storage=storage)
 
@@ -2507,14 +2644,39 @@ def _job_request(session: Session, project: Project, command_type: str,
             payload.get("source_asset_id") or "", "source image")
         # Commit-time re-check of the preview gates — a direct commit
         # must not carry a combination preview would have refused.
-        ref_ids = list(payload.get("reference_asset_ids") or [])
+        ref_set = None
+        if payload.get("reference_set_id"):
+            if payload.get("reference_asset_ids"):
+                raise CommandError(
+                    422, "reference_set_id and reference_asset_ids "
+                         "are mutually exclusive")
+            try:
+                ref_set, ref_ids, refset_weights = _refset_refs(
+                    session, project, payload)
+            except KeyError:
+                raise CommandError(404, "reference set not found in this project") from None
+            # Stale-approval guard: if the caller previewed a resolved
+            # set and it changed since, refuse rather than silently
+            # generating against different references.
+            expected = payload.get("expected_references")
+            if expected is not None:
+                current = [{"asset_id": a, "weight": w}
+                           for a, w in zip(
+                               ref_ids, refset_weights or [None] * len(ref_ids))]
+                if expected != current:
+                    raise CommandError(
+                        422, "reference set changed since preview — "
+                             "re-preview the exact resolved references")
+            weights = refset_weights
+        else:
+            ref_ids = list(payload.get("reference_asset_ids") or [])
+            weights = payload.get("reference_weights") or []
         if len(ref_ids) > int(caps.get("max_reference_images") or 0):
             raise CommandError(
                 422, "reference count exceeds the model's declared limit")
         if src.id in ref_ids or len(set(ref_ids)) != len(ref_ids):
             raise CommandError(
                 422, "duplicate asset in source/references")
-        weights = payload.get("reference_weights") or []
         if weights:
             if not caps.get("reference_weights"):
                 raise CommandError(
@@ -2541,7 +2703,11 @@ def _job_request(session: Session, project: Project, command_type: str,
             "execution_target": "cloud",
             "size": payload.get("size"),
             "quality": payload.get("quality"),
-            "seed": payload.get("seed"),
+            # C4-A — the set's pinned seed is guidance used only when no
+            # explicit seed was given; never an identity guarantee.
+            "seed": payload.get("seed")
+                if payload.get("seed") is not None
+                else (ref_set.seed if ref_set else None),
             "count": 1,
             "est_cost_usd": est["est_cost_usd"],
             "cost_table": model.get("cost_table"),
@@ -2555,7 +2721,10 @@ def _job_request(session: Session, project: Project, command_type: str,
             "reference_asset_ids": refs,
             "reference_paths": ref_paths,
             "reference_sha256": ref_shas,
-            "reference_weights": payload.get("reference_weights") or [],
+            "reference_weights": weights,
+            # C4-A provenance: which set produced the resolved list.
+            "reference_set_id": ref_set.id if ref_set else None,
+            "reference_set_revision": ref_set.revision if ref_set else None,
             "scene_id": payload.get("scene_id"),
             "shot_id": payload.get("shot_id"),
             "character_id": payload.get("character_id"),
