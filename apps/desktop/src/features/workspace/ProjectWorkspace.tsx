@@ -8,10 +8,12 @@ import { GeneratePage } from "./GeneratePage";
 import { OverviewPage } from "./OverviewPage";
 import { SettingsPage } from "./SettingsPage";
 import { StoryboardPage } from "./StoryboardPage";
+import { TimelinePage } from "./TimelinePage";
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "storyboard", label: "Storyboard" },
+  { id: "timeline", label: "Timeline" },
   { id: "generate", label: "Generate" },
   { id: "cloud", label: "Cloud" },
   { id: "cast", label: "Cast" },
@@ -56,7 +58,7 @@ export function ProjectWorkspace() {
             {project.status === "archived" ? " · archived" : ""}
           </p>
         </div>
-        {/* 10 tabs can't always fit at the 1100px minimum — the nav
+        {/* The tabs can't always fit at the 1100px minimum — the nav
             scrolls horizontally instead of pushing the header wide.
             Keyboard focus auto-scrolls an off-screen tab into view;
             every tab remains a real button. */}
@@ -81,6 +83,7 @@ export function ProjectWorkspace() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "overview" && <OverviewPage />}
         {tab === "storyboard" && <StoryboardPage />}
+        {tab === "timeline" && <TimelinePage />}
         {tab === "generate" && <GeneratePage />}
         {tab === "cloud" && <CloudPage />}
         {tab === "cast" && <EntityPage etype="character" title="Cast" />}

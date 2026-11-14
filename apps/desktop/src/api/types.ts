@@ -268,6 +268,9 @@ export interface CommandProposal {
   /** C4-D â€” shot.video only: resolved generation parameters
    * (model/dims/duration/sampling/source) pinned via expected_params. */
   resolved_params?: Record<string, unknown> | null;
+  /** C5-A — timeline ops only: {id, revision, clip_count} pinned via
+   * expected_timeline at commit. */
+  resolved_timeline?: { id: string; revision: number; clip_count: number } | null;
 }
 
 export interface CommitResult {
@@ -803,4 +806,49 @@ export interface SpendReservation {
   reconcile_count: number;
   reconcile_note: string | null;
   created_at: string | null;
+}
+
+// ---------- timelines (C5-A) ----------
+
+export interface TimelineClip {
+  id: string;
+  project_id: string;
+  timeline_id: string;
+  position: number;
+  source_asset_id: string;
+  source_version_id: string;
+  source_sha256: string;
+  in_frame: number;
+  out_frame: number;
+  src_frames: number;
+  src_fps_num: number;
+  src_fps_den: number;
+  src_duration_s: number;
+  shot_id: string | null;
+  scene_id: string | null;
+  created_at: string;
+}
+
+export interface Timeline {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  fps_num: number;
+  fps_den: number;
+  status: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TimelineDetail extends Timeline {
+  clips: TimelineClip[];
+  total_duration_s: number;
+}
+
+export interface TimelineRevision {
+  revision: number;
+  summary: string;
+  created_at: string;
 }

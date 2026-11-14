@@ -118,3 +118,16 @@ deferred to a later stabilization PR; do not add a vector editor here.
 | 50 | Nearly-full drive → submit a generation job | Job fails honestly at admission with a disk-space reason — no partial output, no crash |
 | 51 | Kill the app mid-job → relaunch | Interrupted resumable jobs re-queue; non-resumable jobs fail with partial work files purged; CAS assets untouched |
 | 52 | Refresh during a queued job | Wait reason visible without opening the job list |
+
+## C5-A — timeline assembly
+
+| # | Step | Expected |
+|---|------|----------|
+| 53 | Timeline tab → + New → name "Rough cut" | Timeline appears in the list; selected shows empty state |
+| 54 | Storyboard → a shot with a generated video clip → Send to → pick "Rough cut" → Review insert → Approve insert | Clip appears on the timeline with shot provenance; no generation runs |
+| 55 | Try sending the same clip again | Refused with "already on the timeline" — a deliberate repeat needs the duplicate path |
+| 56 | Add a second clip, then reorder with ◀▶ | Positions swap; order survives a page reload |
+| 57 | Trim a clip: set In/Out frames → Apply | Card shows the new range and updated duration; out-of-range or non-integer values are rejected |
+| 58 | Remove a clip | Confirmation explains the source asset is kept; remaining clips renumber |
+| 59 | Edit decision list | Deterministic `ade-edl/1` JSON: ordered clips, pinned version ids + sha256, integer frames, timebase |
+| 60 | History → Revert to an earlier revision | Timeline restores that edit state; the revert itself appears as a new revision |
