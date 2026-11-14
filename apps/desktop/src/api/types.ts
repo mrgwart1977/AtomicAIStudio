@@ -486,6 +486,15 @@ export interface StoryboardShot {
   cast: CastMember[];
   /** Scene-cast members without an own row in this shot — inherited state. */
   inherited: CastMember[];
+  /** C4-C — durable per-shot generation state (backend-authoritative). */
+  generation?: {
+    output_count: number;
+    latest_asset_id: string | null;
+    latest_asset_at: string | null;
+    latest_job_id: string | null;
+    latest_job_status: string | null;
+    latest_job_at: string | null;
+  } | null;
 }
 
 export interface Scene {

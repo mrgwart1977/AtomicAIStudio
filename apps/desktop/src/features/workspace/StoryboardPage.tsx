@@ -12,10 +12,12 @@ import type {
   ProviderSummary,
   ReferenceSet,
   StoryboardScene,
+  StoryboardShot,
 } from "../../api/types";
 import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
+import { compareShots } from "./continuity";
 
 const SHOT_TYPES = [
   "establishing", "wide", "medium", "medium_close", "close", "extreme_close",
@@ -90,6 +92,20 @@ export function StoryboardPage() {
   const [sceneDlg, setSceneDlg] = useState<{ mode: "new" } | { mode: "edit"; row: StoryboardScene } | null>(null);
   const [shotDlg, setShotDlg] = useState<{ scene: StoryboardScene; entry: StoryboardScene["shots"][number] | null } | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => void } | null>(null);
+  const [compare, setCompare] = useState<{ prev: StoryboardShot; next: StoryboardShot } | null>(null);
+  const jobs = useApp((s) => s.jobs);
+  // C4-C — when a generation job settles, pull the fresh board so the
+  // card picks up the new latest_asset/status without a manual refresh.
+  const settledRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const j of Object.values(jobs)) {
+      if (settledRef.current.has(j.id)) continue;
+      if (j.status === "succeeded" || j.status === "failed" || j.status === "cancelled") {
+        settledRef.current.add(j.id);
+        void refresh();
+      }
+    }
+  }, [jobs, refresh]);
   const [showArchived, setShowArchived] = useState(false);
   const drag = useRef<{ shotId: string; sceneId: string } | null>(null);
   const [dropAt, setDropAt] = useState<{ sceneId: string; index: number } | null>(null);
@@ -250,6 +266,12 @@ export function StoryboardPage() {
                       setGenerateShotId(entry.shot.id);
                       setWorkspaceTab("generate");
                     }}
+                    canLeft={j > 0}
+                    canRight={j < row.shots.length - 1}
+                    hasPrev={j > 0}
+                    onMoveLeft={() => void run("shot.move", { shot_id: entry.shot.id, to_index: j - 1 })}
+                    onMoveRight={() => void run("shot.move", { shot_id: entry.shot.id, to_index: j + 1 })}
+                    onCompare={() => setCompare({ prev: row.shots[j - 1], next: entry })}
                   />
                 </div>
               ))}
@@ -304,6 +326,10 @@ export function StoryboardPage() {
           run={run}
         />
       )}
+      {compare && (
+        <CompareDialog prev={compare.prev} next={compare.next}
+          onClose={() => setCompare(null)} />
+      )}
       <ConfirmDialog
         open={confirm !== null}
         onOpenChange={(o) => !o && setConfirm(null)}
@@ -332,26 +358,43 @@ function DropZone({ active, tail, onDragOver, onLeave, onDrop }: {
   );
 }
 
-function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate }: {
+function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate,
+                   onMoveLeft, onMoveRight, onCompare, canLeft, canRight, hasPrev }: {
   entry: StoryboardScene["shots"][number];
   projectId: string;
   onDragStart: () => void; onDragEnd: () => void; onClick: () => void; onDuplicate: () => void;
   onGenerate: () => void;
+  onMoveLeft: () => void; onMoveRight: () => void; onCompare: () => void;
+  canLeft: boolean; canRight: boolean; hasPrev: boolean;
 }) {
   const s = entry.shot;
+  const gen = entry.generation;
+  // Latest generated output takes precedence over the hand-picked
+  // thumbnail — it's the freshest visual state for this shot.
+  const thumbId = gen?.latest_asset_id ?? s.thumbnail_asset_id;
+  const jobStatus = gen?.latest_job_status;
   return (
     <div
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onClick}
+      onKeyDown={(e) => {
+        // C4-C — keyboard reorder + open, no drag required.
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+        else if (e.key === "ArrowLeft" && canLeft) { e.stopPropagation(); onMoveLeft(); }
+        else if (e.key === "ArrowRight" && canRight) { e.stopPropagation(); onMoveRight(); }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-label={`Shot ${s.title || "untitled"} — ${s.shot_type.replace("_", " ")}`}
       title={s.description || s.title || "Edit shot"}
-      className="group w-44 cursor-grab rounded-md border border-line bg-panel transition-colors hover:border-teal active:cursor-grabbing"
+      className="group w-44 cursor-grab rounded-md border border-line bg-panel transition-colors hover:border-teal focus-visible:border-teal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal/50 active:cursor-grabbing"
     >
       <div className="relative h-20 overflow-hidden rounded-t-md bg-ink">
         <AuthImage
           pid={projectId}
-          assetId={s.thumbnail_asset_id}
+          assetId={thumbId}
           alt=""
           className="h-full w-full object-cover"
           draggable={false}
@@ -369,17 +412,28 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
             {s.duration_sec}s
           </span>
         )}
+        {/* C4-C — durable job status badge (failed / in-flight). */}
+        {jobStatus && jobStatus !== "succeeded" && (
+          <span
+            title={jobStatus === "failed" ? "Latest generation failed" : `Generation ${jobStatus}`}
+            className={`absolute left-1 bottom-1 rounded px-1.5 py-0.5 text-[9px] font-semibold text-white ${
+              jobStatus === "failed" ? "bg-danger/90" : "bg-teal/80"}`}>
+            {jobStatus === "running" ? "▸" : jobStatus === "queued" ? "…" : "✕"} {jobStatus}
+          </span>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); onDuplicate(); }}
           title="Duplicate shot"
-          className="absolute bottom-1 right-1 hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block"
+          aria-label="Duplicate shot"
+          className="absolute bottom-1 right-1 hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block group-focus-within:block"
         >
           ⧉
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); onGenerate(); }}
           title="Generate an image for this shot"
-          className="absolute bottom-1 left-1 hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block"
+          aria-label="Generate image for this shot"
+          className={`absolute bottom-1 ${jobStatus && jobStatus !== "succeeded" ? "left-16" : "left-1"} hidden rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white group-hover:block group-focus-within:block`}
         >
           ✦
         </button>
@@ -405,6 +459,39 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
           ))}
           {entry.location_name && (
             <span className="ml-auto truncate text-[9px] text-faint">{entry.location_name}</span>
+          )}
+        </div>
+        {/* C4-C — reorder without drag + compare-to-previous. */}
+        <div className="mt-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          <button
+            disabled={!canLeft}
+            onClick={(e) => { e.stopPropagation(); onMoveLeft(); }}
+            title="Move shot earlier"
+            aria-label="Move shot earlier"
+            className="rounded border border-line px-1 text-[10px] text-muted hover:border-teal hover:text-teal disabled:opacity-30">
+            ◀
+          </button>
+          <button
+            disabled={!canRight}
+            onClick={(e) => { e.stopPropagation(); onMoveRight(); }}
+            title="Move shot later"
+            aria-label="Move shot later"
+            className="rounded border border-line px-1 text-[10px] text-muted hover:border-teal hover:text-teal disabled:opacity-30">
+            ▶
+          </button>
+          {gen && gen.output_count > 0 && (
+            <span className="ml-0.5 text-[9px] text-faint" title={`${gen.output_count} generated output(s)`}>
+              ✦{gen.output_count}
+            </span>
+          )}
+          {hasPrev && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onCompare(); }}
+              title="Compare continuity with previous shot"
+              aria-label="Compare continuity with previous shot"
+              className="ml-auto rounded border border-line px-1.5 py-0 text-[9px] text-muted hover:border-teal hover:text-teal">
+              ⇄ prev
+            </button>
           )}
         </div>
       </div>
@@ -654,6 +741,20 @@ function SceneCast({ row, characters, run }: {
 
 // ---------- shot dialog ----------
 
+
+/** C4-C — continuity_json from the dialog's structured fields. Keys
+ * stay descriptive-only; empty strings are dropped so the json stays
+ * tidy for the comparison view. */
+function shotContinuity(form: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of ["appearance", "wardrobe", "lighting", "camera", "mood",
+                   "notes", "changes"] as const) {
+    const v = (form[`continuity_${k}`] ?? "").trim();
+    if (v) out[k] = v;
+  }
+  return out;
+}
+
 function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets, projectId, run }: {
   scene: StoryboardScene;
   entry: StoryboardScene["shots"][number] | null;
@@ -677,6 +778,11 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     source_asset_id: shot?.source_asset_id ?? "",
     continuity_notes: String(shot?.continuity_json?.notes ?? ""),
     continuity_changes: String(shot?.continuity_json?.changes ?? ""),
+    continuity_appearance: String(shot?.continuity_json?.appearance ?? ""),
+    continuity_wardrobe: String(shot?.continuity_json?.wardrobe ?? ""),
+    continuity_lighting: String(shot?.continuity_json?.lighting ?? ""),
+    continuity_camera: String(shot?.continuity_json?.camera ?? ""),
+    continuity_mood: String(shot?.continuity_json?.mood ?? ""),
   });
   // C4-B — the project's reference sets, filtered to this shot's cast
   // (own + inherited). Membership lives server-side; the picker only
@@ -747,7 +853,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         thumbnail_asset_id: form.thumbnail_asset_id || null,
         reference_set_id: form.reference_set_id || null,
         source_asset_id: form.source_asset_id || null,
-        continuity: { notes: form.continuity_notes, changes: form.continuity_changes },
+        continuity: shotContinuity(form),
       }]);
     }
     for (const cid of removed) {
@@ -777,7 +883,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         location_id: form.location_id || null,
         reference_set_id: form.reference_set_id || null,
         source_asset_id: form.source_asset_id || null,
-        continuity: { notes: form.continuity_notes, changes: form.continuity_changes },
+        continuity: shotContinuity(form),
       });
     }
     setBusy(false);
@@ -858,19 +964,49 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                 </select>
               </label>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="block text-sm text-muted">Continuity — stays consistent
-                <textarea rows={2} value={form.continuity_notes}
-                  onChange={(e) => setForm({ ...form, continuity_notes: e.target.value })}
-                  placeholder="appearance, props, lighting…"
-                  className="mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg" />
-              </label>
-              <label className="block text-sm text-muted">Continuity — what changed
-                <textarea rows={2} value={form.continuity_changes}
-                  onChange={(e) => setForm({ ...form, continuity_changes: e.target.value })}
-                  placeholder="since the previous shot…"
-                  className="mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg" />
-              </label>
+            {/* C4-C — structured continuity guidance. Descriptive only:
+             * these notes inform your eye and future prompts; no model
+             * contract enforces them, and the UI says so. */}
+            <div className="mt-3 rounded-md border border-line p-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Continuity guidance
+              </h4>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {([
+                  ["appearance", "Appearance", "silver jacket, scar…"],
+                  ["wardrobe", "Wardrobe", "same coat as shot 2…"],
+                  ["lighting", "Lighting", "overcast noon…"],
+                  ["camera", "Camera framing", "low angle, 35mm…"],
+                  ["mood", "Mood & atmosphere", "tense, quiet…"],
+                ] as const).map(([k, label, ph]) => (
+                  <label key={k} className="block text-[11px] text-muted">
+                    {label}
+                    <input
+                      value={form[`continuity_${k}` as keyof typeof form]}
+                      onChange={(e) => setForm({ ...form, [`continuity_${k}`]: e.target.value })}
+                      placeholder={ph}
+                      className="mt-0.5 w-full rounded border border-line bg-card px-2 py-1 text-xs text-fg" />
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <label className="block text-sm text-muted">Stays consistent
+                  <textarea rows={2} value={form.continuity_notes}
+                    onChange={(e) => setForm({ ...form, continuity_notes: e.target.value })}
+                    placeholder="props, set dressing…"
+                    className="mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg" />
+                </label>
+                <label className="block text-sm text-muted">What changed
+                  <textarea rows={2} value={form.continuity_changes}
+                    onChange={(e) => setForm({ ...form, continuity_changes: e.target.value })}
+                    placeholder="since the previous shot…"
+                    className="mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg" />
+                </label>
+              </div>
+              <p className="mt-1.5 text-[10px] text-faint">
+                Descriptive guidance for you and the prompt — no current
+                model contract enforces it.
+              </p>
             </div>
 
             {/* ---- C4-B generation bindings ---- */}
@@ -1297,5 +1433,96 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
       )}
       {err && <p className="mt-2 text-xs text-danger">{err}</p>}
     </div>
+  );
+}
+
+
+// ---------- C4-C continuity comparison ----------
+
+function CompareDialog({ prev, next, onClose }: {
+  prev: StoryboardShot; next: StoryboardShot; onClose: () => void;
+}) {
+  const d = compareShots(prev, next);
+  const pTitle = prev.shot.title || "untitled";
+  const nTitle = next.shot.title || "untitled";
+  return (
+    <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 bg-black/60" />
+        <Dialog.Content
+          aria-label={`Continuity comparison: ${pTitle} to ${nTitle}`}
+          className="fixed left-1/2 top-1/2 max-h-[80vh] w-[520px] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-line bg-panel p-5 shadow-xl">
+          <Dialog.Title className="text-lg font-semibold">
+            Continuity — {pTitle} → {nTitle}
+          </Dialog.Title>
+          <p className="mt-1 text-[11px] text-faint">
+            Notes for your eye — the app diffs metadata only and does not
+            verify visual consistency.
+          </p>
+          {d.sharedCharacters.length > 0 && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Shared characters</h4>
+              <p className="mt-0.5 text-sm">{d.sharedCharacters.join(", ")}</p>
+            </div>
+          )}
+          {(d.onlyPrev.length > 0 || d.onlyNext.length > 0) && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Cast changes</h4>
+              {d.onlyPrev.map((n) => (
+                <p key={n} className="mt-0.5 text-sm text-danger">− {n} (leaves)</p>
+              ))}
+              {d.onlyNext.map((n) => (
+                <p key={n} className="mt-0.5 text-sm text-teal">+ {n} (enters)</p>
+              ))}
+            </div>
+          )}
+          {d.locationChanged && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Location</h4>
+              <p className="mt-0.5 text-sm text-warn">{d.prevLocation} → {d.nextLocation}</p>
+            </div>
+          )}
+          {d.castChanges.length > 0 && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Cast state changes</h4>
+              {d.castChanges.map((c, i) => (
+                <p key={i} className="mt-0.5 text-sm">
+                  <span className="font-medium">{c.name}</span>{" "}
+                  <span className="text-muted">{c.prev}</span> →{" "}
+                  <span className="text-warn">{c.next}</span>
+                </p>
+              ))}
+            </div>
+          )}
+          {d.fields.length > 0 && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Continuity fields</h4>
+              <ul className="mt-1 space-y-1">
+                {d.fields.map((f) => (
+                  <li key={f.label} className="text-sm">
+                    <span className="font-medium">{f.label}</span>
+                    <div className="text-[11px] text-muted">
+                      <span className={f.prev ? "" : "italic"}>{f.prev || "unset"}</span>
+                      {" → "}
+                      <span className={f.next ? "text-warn" : "italic"}>{f.next || "unset"}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {d.fields.length === 0 && d.castChanges.length === 0 &&
+            !d.locationChanged && d.onlyPrev.length === 0 && d.onlyNext.length === 0 && (
+            <p className="mt-4 text-sm text-muted">
+              No continuity differences recorded between these shots.
+            </p>
+          )}
+          <button onClick={onClose} autoFocus
+            className="mt-4 rounded-md border border-line px-4 py-1.5 text-sm text-muted hover:text-fg">
+            Close
+          </button>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
