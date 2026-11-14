@@ -11,8 +11,66 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../../api/client";
 import { commitCommand } from "../../api/commands";
+import { useApp } from "../../stores/appStore";
 import { clampImage, editablePixels, viewToImage } from "./editorMath";
 import type { ViewTransform } from "./editorMath";
+
+/** S4 — watch a durable job to completion on the shared authenticated
+ * WebSocket feed (App.tsx already streams `job.progress` into the
+ * store's jobs map — no second socket, no token in any URL).
+ * A bounded reconciliation poll remains as the fallback for a missed
+ * event or a dropped connection; it stops the moment the WS delivers
+ * a terminal state. Returns an unsubscribe/cancel handle. */
+export function watchImportJob(
+  jobId: string,
+  cbs: { onDone: (outputAssetId: string) => void; onFail: (msg: string) => void },
+): () => void {
+  const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const settle = (status: string, outId: string | null) => {
+    if (settled) return;
+    settled = true;
+    unsub();
+    if (timer !== null) clearTimeout(timer);
+    if (status === "succeeded" && outId) cbs.onDone(outId);
+    else cbs.onFail(`Mask import job ${status}`);
+  };
+  const unsub = useApp.subscribe((s) => {
+    const j = s.jobs[jobId];
+    if (j && TERMINAL.has(j.status)) settle(j.status, j.output_asset_id);
+  });
+  // The event may have landed before we subscribed.
+  const cur = useApp.getState().jobs[jobId];
+  if (cur && TERMINAL.has(cur.status)) {
+    settle(cur.status, cur.output_asset_id);
+    return () => {};
+  }
+  // Bounded fallback: a few slow polls only — if the socket delivers
+  // first, this never fires again after settle().
+  let tries = 0;
+  const poll = async () => {
+    if (settled) return;
+    try {
+      const jobs = await apiFetch<
+        { id: string; status: string; output_asset_id?: string | null }[]
+      >("/api/jobs");
+      const j = jobs.find((x) => x.id === jobId);
+      if (j && TERMINAL.has(j.status)) {
+        settle(j.status, j.output_asset_id ?? null);
+        return;
+      }
+    } catch { /* transient — retry below */ }
+    if (++tries < 4) timer = setTimeout(poll, 5000);
+    else if (!settled) settle("failed", null);
+  };
+  timer = setTimeout(poll, 5000);
+  return () => {
+    settled = true;
+    unsub();
+    if (timer !== null) clearTimeout(timer);
+  };
+}
 
 const btnCls = "rounded-md bg-teal px-3 py-1.5 text-sm font-medium text-black hover:bg-teal/80 disabled:opacity-50";
 const ghostBtn = "rounded-md border border-line px-3 py-1.5 text-sm text-fg hover:bg-panel disabled:opacity-50";
@@ -50,6 +108,10 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
   const [dirty, setDirty] = useState(0);          // bump to repaint
   const [editable, setEditable] = useState(0);
   const [busy, setBusy] = useState(false);
+  // Live job watcher (WS-driven); cancelled on unmount and before a
+  // second export so two watchers can never coexist.
+  const watchRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => watchRef.current?.(), []);
 
   const pan = useRef<{ x: number; y: number } | null>(null);
 
@@ -205,26 +267,27 @@ export function MaskEditor({ pid, revision, imageUrl, onMaskImported, onNotice, 
         source_path: up.path, name: "painted-mask.png", kind: "image",
       });
       const jobId = (r as { job_id?: string }).job_id;
-      if (jobId) {
-        // Poll briefly for the durable import job to materialize the row.
-        for (let i = 0; i < 40; i++) {
-          await new Promise((s) => setTimeout(s, 300));
-          const jobs = await apiFetch<{ id: string; status: string; output_asset_id?: string }[]>(
-            "/api/jobs");
-          const j = jobs.find((x) => x.id === jobId);
-          if (j?.status === "succeeded" && j.output_asset_id) {
-            onMaskImported(j.output_asset_id);
-            onNotice?.("Mask imported — selected as the inpaint mask.");
-            setBusy(false);
-            return;
-          }
-          if (j && (j.status === "failed" || j.status === "cancelled")) break;
-        }
+      if (!jobId) {
+        onError?.("Mask import job did not complete");
+        setBusy(false);
+        return;
       }
-      onError?.("Mask import job did not complete");
+      // S4 — completion arrives on the shared WS feed; busy stays set
+      // until the watcher settles. A second export replaces the watch.
+      watchRef.current?.();
+      watchRef.current = watchImportJob(jobId, {
+        onDone: (assetId) => {
+          onMaskImported(assetId);
+          onNotice?.("Mask imported — selected as the inpaint mask.");
+          setBusy(false);
+        },
+        onFail: (msg) => {
+          onError?.(msg);
+          setBusy(false);
+        },
+      });
     } catch (e) {
       onError?.(String(e));
-    } finally {
       setBusy(false);
     }
   };
