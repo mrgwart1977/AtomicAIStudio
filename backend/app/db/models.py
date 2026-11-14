@@ -358,6 +358,11 @@ class Shot(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")
     location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id", ondelete="SET NULL"), nullable=True)
     thumbnail_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    # C4-B — generation bindings: the character reference set to apply
+    # (membership stays on entity_assets; SET NULL on set archive/drop)
+    # and the source image for img2img shot generation.
+    reference_set_id: Mapped[str | None] = mapped_column(ForeignKey("reference_sets.id", ondelete="SET NULL"), nullable=True)
+    source_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
     continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

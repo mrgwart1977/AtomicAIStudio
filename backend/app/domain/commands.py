@@ -81,11 +81,17 @@ SUPPORTED_COMMANDS = {
     "entity.assets.reorder", "entity.assets.update",
     # C4-A — named character reference sets + identity guidance
     "refset.create", "refset.update", "refset.delete",
+    # C4-B — shot-scoped image generation (composes existing pipelines)
+    "shot.generate",
 }
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
                        "generate.text.cloud", "generate.image.cloud",
-                       "generate.image.img2img", "generate.image.edit"}
+                       "generate.image.img2img", "generate.image.edit",
+                       # C4-B — shot-scoped composition of the same
+                       # simulated image pipelines (img2img when a
+                       # source is bound, else cloud text-to-image).
+                       "shot.generate"}
 
 # Commands whose commit transaction must begin BEGIN IMMEDIATE — they
 # check-then-act on financial state, so the budget-check SELECT must
@@ -93,7 +99,7 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
 # _spend_isolation). Everything else stays deferred.
 SPEND_GUARDED_COMMANDS = {
     "generate.text.cloud", "generate.image.cloud",
-    "generate.image.img2img", "generate.image.edit",
+    "generate.image.img2img", "generate.image.edit", "shot.generate",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
     # live-gate mutations check-then-act on budgets + gate state
     "cloud.live.enable", "cloud.live.disable",
@@ -125,6 +131,9 @@ JOB_COMMANDS = {
     "generate.image.img2img": "cloud.image.img2img.sim",
     # C3-D3 — simulated inpaint/outpaint on documented contracts.
     "generate.image.edit": "cloud.image.edit.sim",
+    # C4-B — maps to the base sim adapter; the composed request
+    # overrides to img2img when a source image is bound.
+    "shot.generate": "cloud.image.sim",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -281,6 +290,8 @@ def _summary(command_type: str, payload: dict) -> str:
             op = command_type.rsplit(".", 1)[1]
             return f"{op.capitalize()} character in shot cast"
         return f"{command_type.split('.', 1)[1].capitalize()} shot"
+    if command_type == "shot.generate":
+        return "Generate image for shot (simulated)"
     if command_type == "character.duplicate":
         return "Duplicate character (with its linked assets)"
     if command_type == "entity.assets.link":
@@ -342,6 +353,139 @@ def _refset_refs(session: Session, project: Project, payload: dict) -> tuple:
     else:
         weights = []
     return rs, entries, weights
+
+
+def _shot_cast_ids(session: Session, shot) -> set[str]:
+    """C4-B — a shot's effective cast: its own shot_characters UNION
+    the scene-level cast it inherits (mirrors the storyboard payload's
+    cast + inherited lists)."""
+    from app.db.models import SceneCharacter, ShotCharacter
+    own = {r.character_id for r in session.execute(
+        select(ShotCharacter).where(ShotCharacter.shot_id == shot.id)
+    ).scalars()}
+    inherited = {r.character_id for r in session.execute(
+        select(SceneCharacter).where(SceneCharacter.scene_id == shot.scene_id)
+    ).scalars()}
+    return own | inherited
+
+
+def _check_shot_bindings(session: Session, project: Project, shot,
+                         payload: dict, *, cast_known: bool) -> None:
+    """C4-B — validate reference_set_id / source_asset_id bindings on
+    shot.create/shot.update. The set's character must be in the shot's
+    effective cast whenever that cast is non-empty; empty cast stays
+    permissive (beginner flow — nothing to contradict)."""
+    if "reference_set_id" in payload and payload["reference_set_id"] is not None:
+        try:
+            rs = sb.get_refset(session, payload["reference_set_id"],
+                               project.id)
+        except KeyError:
+            raise CommandError(
+                404, "reference set not found in this project") from None
+        if cast_known:
+            cast = _shot_cast_ids(session, shot)
+            if cast and rs.character_id not in cast:
+                raise CommandError(
+                    422, "reference set's character is not in this "
+                         "shot's cast")
+    if "source_asset_id" in payload and payload["source_asset_id"] is not None:
+        a = session.get(Asset, payload["source_asset_id"])
+        if a is None or a.project_id != project.id:
+            raise CommandError(404, "source asset not found in this project")
+        if a.kind != "image":
+            raise CommandError(422, "shot source asset must be an image")
+
+
+def _compose_shot_generate(session: Session, project: Project,
+                           payload: dict) -> tuple:
+    """C4-B — resolve a shot.generate call into the equivalent existing
+    image command + effective payload. Returns (shot, inner_type,
+    composed). Composition is server-side only: bindings come from the
+    shot row, never the client."""
+    try:
+        shot = sb.get_shot(session, payload.get("shot_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "shot not found in this project") from None
+    if shot.status != "active":
+        raise CommandError(422, "cannot generate from an archived shot")
+    # Payload may explicitly override the bound set; otherwise use the
+    # shot's binding. A deleted/archived set resolves nowhere — 404.
+    rs_id = payload.get("reference_set_id") or shot.reference_set_id
+    char_id = None
+    if rs_id:
+        try:
+            rs = sb.get_refset(session, rs_id, project.id)
+        except KeyError:
+            raise CommandError(
+                404, "reference set not found in this project") from None
+        # Generate-time is STRICT, unlike bind-time: a bound set whose
+        # character was removed from the effective cast (own ∪ scene
+        # inherited) must refuse — never fall back to unrelated refs.
+        cast = _shot_cast_ids(session, shot)
+        if rs.character_id not in cast:
+            raise CommandError(
+                422, "reference set's character is not in this shot's "
+                     "cast")
+        char_id = rs.character_id
+    src = payload.get("source_asset_id") or shot.source_asset_id
+    prompt = (payload.get("prompt") or shot.prompt or "").strip()
+    if not prompt:
+        raise CommandError(
+            422, "shot has no prompt — write one or pass prompt")
+    inner = ("generate.image.img2img" if src
+             else "generate.image.cloud")
+    composed = {
+        "provider_key": payload.get("provider_key"),
+        "model_id": payload.get("model_id"),
+        "prompt": prompt,
+        "negative_prompt": payload.get("negative_prompt"),
+        "execution_target": "cloud",
+        "size": payload.get("size"),
+        "quality": payload.get("quality"),
+        "seed": payload.get("seed"),
+        "max_cost_usd": payload.get("max_cost_usd"),
+        "scene_id": shot.scene_id,
+        "shot_id": shot.id,
+        "character_id": char_id or payload.get("character_id"),
+        "location_id": shot.location_id,
+    }
+    if src:
+        composed["source_asset_id"] = src
+    if rs_id:
+        composed["reference_set_id"] = rs_id
+        # Forward the caller's stale-approval pins untouched — the
+        # inner pipeline re-resolves and compares them.
+        for k in ("expected_references", "expected_set"):
+            if k in payload:
+                composed[k] = payload[k]
+    # Shot-state staleness: expected_references fingerprints the SET,
+    # but a prompt/source/cast edit between preview and approve would
+    # otherwise sail through. The approval pins the shot fingerprint
+    # (revision + effective cast + composed bindings); commit recompiles
+    # and refuses a mismatch — composition runs again in _job_request,
+    # so the check also gates job creation.
+    expected_shot = payload.get("expected_shot")
+    if expected_shot is not None and \
+            expected_shot != _shot_gen_fingerprint(session, shot, composed):
+        raise CommandError(
+            422, "shot changed since preview — re-preview shot.generate")
+    return shot, inner, composed
+
+
+def _shot_gen_fingerprint(session: Session, shot, composed: dict) -> dict:
+    """C4-B — the generation-relevant shot state an approval pins.
+    shot.revision catches prompt/source/continuity edits, but cast
+    membership lives in shot_characters and doesn't bump the row —
+    it is fingerprinted explicitly."""
+    return {
+        "shot_id": shot.id,
+        "revision": shot.revision,
+        "prompt": composed.get("prompt"),
+        "source_asset_id": composed.get("source_asset_id"),
+        "reference_set_id": composed.get("reference_set_id"),
+        "continuity": shot.continuity_json or {},
+        "cast": sorted(_shot_cast_ids(session, shot)),
+    }
 
 
 def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
@@ -896,12 +1040,22 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _get_scene(session, project, payload)
         _check_storyboard_links(session, project, payload)
         _check_shot_fields(payload)
+        _check_shot_bindings(session, project, None, payload,
+                             cast_known=False)
     if command_type in ("shot.update", "shot.archive", "shot.unarchive",
                         "shot.revert", "shot.duplicate", "shot.move"):
-        _get_shot(session, project, payload)
+        shot = _get_shot(session, project, payload)
         if command_type == "shot.update":
             _check_storyboard_links(session, project, payload)
             _check_shot_fields(payload)
+            _check_shot_bindings(session, project, shot, payload,
+                                 cast_known=True)
+    if command_type == "shot.generate":
+        # C4-B — compose bindings → effective payload, then run the
+        # REAL inner-pipeline validation (caps, refs, cost, seed).
+        _shot, _inner, _composed = _compose_shot_generate(
+            session, project, payload)
+        warnings += _validate(session, project, _inner, _composed)
         if command_type == "shot.move" and payload.get("to_scene_id"):
             _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -1294,6 +1448,17 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
     if command_type not in SUPPORTED_COMMANDS:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
     warnings = _validate(session, project, command_type, payload)
+    # C4-B — shot.generate composes an inner image command; estimate and
+    # resolved-reference surfacing run on the COMPOSED payload so the
+    # approval reflects exactly what commit will build.
+    eff, est_type = payload, command_type
+    _sh = None
+    if command_type == "shot.generate":
+        try:
+            _sh, est_type, eff = _compose_shot_generate(
+                session, project, payload)
+        except CommandError:
+            est_type, eff = command_type, payload
     out = {
         "command": {
             "project_id": project.id,
@@ -1309,7 +1474,7 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         "warnings": warnings,
         "diff": _diff_for(command_type, payload),
         "estimated_cost": {"compute": "local", "currency_usd": 0.0, "requires_approval": False},
-        "cost_estimate": _preview_cost_estimate(command_type, payload),
+        "cost_estimate": _preview_cost_estimate(est_type, eff),
         "current_revision": project.revision,
         "launches_generation": command_type in GENERATION_COMMANDS,
     }
@@ -1317,9 +1482,9 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
     # fingerprint the ACTUAL assets+weights, not merely the set id; a
     # later set edit then changes the fingerprint. Commit re-resolves
     # and refuses a mismatch against expected_references.
-    if payload.get("reference_set_id"):
+    if eff.get("reference_set_id"):
         try:
-            _rs, _entries, _ws = _refset_refs(session, project, payload)
+            _rs, _entries, _ws = _refset_refs(session, project, eff)
             out["resolved_references"] = _entries
             # Seed + revision ride alongside: a pinned-seed or metadata
             # edit changes neither the member list nor the fingerprint,
@@ -1328,6 +1493,11 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                                    "revision": _rs.revision}
         except KeyError:
             pass  # _validate already reported the missing set
+    if command_type == "shot.generate" and _sh is not None:
+        # C4-B — the approval also pins the SHOT's generation-relevant
+        # state (prompt, source, cast, continuity); set fingerprints
+        # alone can't see those edits.
+        out["resolved_shot"] = _shot_gen_fingerprint(session, _sh, eff)
     return out
 
 
@@ -1599,6 +1769,22 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
             location_id=payload.get("location_id"), continuity=payload.get("continuity"),
             command_id=command.id,
         )
+        # C4-B — creation-time generation bindings follow the same
+        # validation as shot.update (validated in _check_shot_bindings).
+        if payload.get("reference_set_id") is not None \
+                or payload.get("source_asset_id") is not None:
+            try:
+                sb.update_shot(
+                    session, sh, fields={},
+                    reference_set_id=payload.get("reference_set_id"),
+                    source_asset_id=payload.get("source_asset_id"),
+                    command_id=command.id,
+                    change_summary="Bound generation references",
+                )
+            except KeyError as exc:
+                raise CommandError(404, str(exc).strip("'")) from None
+            except ValueError as exc:
+                raise CommandError(422, str(exc)) from None
         audit["after"]["shot_id"] = sh.id
         return
 
@@ -1774,6 +1960,8 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
                 session, sh, fields=fields,
                 location_id=payload.get("location_id", ...),
                 thumbnail_asset_id=payload.get("thumbnail_asset_id", ...),
+                reference_set_id=payload.get("reference_set_id", ...),
+                source_asset_id=payload.get("source_asset_id", ...),
                 continuity=payload.get("continuity"), command_id=command.id,
                 change_summary=payload.get("change_summary") or "Updated shot",
             )
@@ -2165,7 +2353,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
 
-    elif command_type.startswith(("scene.", "shot.", "entity.assets.", "refset.")) or command_type == "character.duplicate":
+    elif (command_type != "shot.generate"
+          and (command_type.startswith(
+              ("scene.", "shot.", "entity.assets.", "refset."))
+              or command_type == "character.duplicate")):
         _commit_storyboard(session, project, command, command_type, payload,
                            audit, storage=storage)
 
@@ -2182,7 +2373,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _adapter_id = (_cloud_adapter_id(job_engine._registry,
                                          payload["provider_key"])
                        if command_type == "generate.text.cloud"
-                       else JOB_COMMANDS[command_type])
+                       # C4-B — the composed request decides which
+                       # simulated image adapter runs (img2img when a
+                       # source bound, else cloud text-to-image).
+                       else ("cloud.image.img2img.sim"
+                             if command_type == "shot.generate"
+                             and request.get("mode") == "img2img"
+                             else JOB_COMMANDS[command_type]))
         try:
             job = job_engine.enqueue(
                 session,
@@ -2479,6 +2676,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image.cloud": "image",
         "generate.image.img2img": "image",
         "generate.image.edit": "image",
+        "shot.generate": "image",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -2503,6 +2701,22 @@ def _cloud_adapter_id(registry, provider_key: str) -> str:
 def _job_request(session: Session, project: Project, command_type: str,
                  payload: dict, storage=None) -> dict:
     req: dict[str, Any] = {"command_type": command_type, **payload}
+    if command_type == "shot.generate":
+        # C4-B — compose the shot's bindings into an existing image
+        # command, then let that pipeline build its own request (caps,
+        # refs, est, provenance). Nothing about the pipeline is
+        # duplicated — the request IS the inner command's request plus
+        # shot.generate provenance.
+        _shot, _inner, _composed = _compose_shot_generate(
+            session, project, payload)
+        req = _job_request(session, project, _inner, _composed,
+                           storage=storage)
+        req["origin_command_type"] = "shot.generate"
+        req["shot_generate"] = {
+            "shot_id": _shot.id, "scene_id": _shot.scene_id,
+            "reference_set_id": _composed.get("reference_set_id"),
+        }
+        return req
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
         if payload.get("shot_id"):
