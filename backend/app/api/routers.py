@@ -75,6 +75,9 @@ from app.schemas.api import (
     StorageLocationOut,
     StorageLocationUpdate,
     StoryboardSceneOut,
+    TimelineDetailOut,
+    TimelineOut,
+    TimelineRevisionOut,
 )
 
 # /health stays token-free so the desktop shell can poll readiness.
@@ -1166,6 +1169,67 @@ def list_reference_sets(
         d["member_count"] = len(sb.set_members(db, rs.id, project.id))
         out.append(d)
     return out
+
+
+# ---------- timelines (C5-A) ----------
+
+@api_router.get("/api/projects/{project_id}/timelines",
+                response_model=list[TimelineOut])
+def list_timelines(project: Project = Depends(get_project),
+                   db: Session = Depends(get_db)):
+    from app.domain import timeline as tld
+    return tld.list_timelines(db, project.id)
+
+
+@api_router.get("/api/projects/{project_id}/timelines/{timeline_id}",
+                response_model=TimelineDetailOut)
+def get_timeline(timeline_id: str,
+                 project: Project = Depends(get_project),
+                 db: Session = Depends(get_db)):
+    from app.domain import timeline as tld
+    try:
+        tl = tld.get_timeline(db, project.id, timeline_id)
+    except KeyError:
+        raise HTTPException(404, "timeline not found in this project") from None
+    d = {c.name: getattr(tl, c.name) for c in tl.__table__.columns}
+    clips = tld.list_clips(db, tl.id)
+    d["clips"] = clips
+    # exact rational accumulation — floats only at the boundary
+    d["total_duration_s"] = round(
+        float(tld.total_duration_frac(clips)), 6)
+    return d
+
+
+@api_router.get("/api/projects/{project_id}/timelines/{timeline_id}/edl")
+def timeline_edl(timeline_id: str,
+                 project: Project = Depends(get_project),
+                 db: Session = Depends(get_db)):
+    """Stable `ade-edl/1` edit-decision serialization — deterministic
+    JSON, integer source frames, pinned versions/hashes."""
+    from app.domain import timeline as tld
+    try:
+        tl = tld.get_timeline(db, project.id, timeline_id)
+    except KeyError:
+        raise HTTPException(404, "timeline not found in this project") from None
+    try:
+        return tld.edl_json(db, tl)
+    except tld.TimelineError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@api_router.get("/api/projects/{project_id}/timelines/{timeline_id}/revisions",
+                response_model=list[TimelineRevisionOut])
+def timeline_revisions(timeline_id: str,
+                       project: Project = Depends(get_project),
+                       db: Session = Depends(get_db)):
+    from app.domain import timeline as tld
+    try:
+        tl = tld.get_timeline(db, project.id, timeline_id)
+    except KeyError:
+        raise HTTPException(404, "timeline not found in this project") from None
+    return [{"revision": r.revision, "summary": r.summary,
+             "created_at": r.created_at}
+            for r in tld.revision_history(db, tl.id)]
 
 
 # ---------- bibles ----------

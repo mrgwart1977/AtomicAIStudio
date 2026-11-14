@@ -1,4 +1,4 @@
-// C3-B review-hardening — the 10-tab workspace nav must remain fully
+// C3-B review-hardening — the workspace nav must remain fully
 // reachable at the 1100px minimum width: every tab is a real button
 // (keyboard-focusable, screen-reader friendly) inside a horizontally
 // scrollable nav — nothing is dropped, hidden, or collapsed into a
@@ -21,6 +21,7 @@ vi.mock("./GeneratePage", () => ({ GeneratePage: () => null }));
 vi.mock("./OverviewPage", () => ({ OverviewPage: () => null }));
 vi.mock("./SettingsPage", () => ({ SettingsPage: () => null }));
 vi.mock("./StoryboardPage", () => ({ StoryboardPage: () => null }));
+vi.mock("./TimelinePage", () => ({ TimelinePage: () => null }));
 
 const store: Record<string, unknown> = {
   workspaceTab: "cloud",
@@ -36,8 +37,8 @@ vi.mock("../../stores/appStore", () => ({
 }));
 
 const TAB_LABELS = [
-  "Overview", "Storyboard", "Generate", "Cloud", "Cast", "Worlds",
-  "Locations", "Assets", "Backups", "Settings",
+  "Overview", "Storyboard", "Timeline", "Generate", "Cloud", "Cast",
+  "Worlds", "Locations", "Assets", "Backups", "Settings",
 ];
 
 describe("ProjectWorkspace — tab navigation at minimum width", () => {
@@ -47,7 +48,7 @@ describe("ProjectWorkspace — tab navigation at minimum width", () => {
     store.workspaceTab = "cloud";
   });
 
-  it("renders all ten tabs as real, focusable buttons", () => {
+  it("renders all eleven tabs as real, focusable buttons", () => {
     render(createElement(ProjectWorkspace));
     const nav = screen.getByRole("navigation", { name: "Workspace" });
     for (const label of TAB_LABELS) {

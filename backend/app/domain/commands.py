@@ -28,7 +28,9 @@ from app.db.models import (
     Project,
     ProjectRevision,
     PromptDraft,
+    Scene,
     SharedAssetLink,
+    Shot,
     SpendReservation,
     StorageLocation,
     new_id,
@@ -85,6 +87,11 @@ SUPPORTED_COMMANDS = {
     "shot.generate",
     # C4-D — shot-scoped video generation (composes generate.video)
     "shot.video",
+    # C5-A — timeline assembly (edit decisions, not rendering)
+    "timeline.create", "timeline.update", "timeline.archive",
+    "timeline.unarchive", "timeline.revert", "timeline.duplicate",
+    "timeline.clip.insert", "timeline.clip.remove",
+    "timeline.clip.move", "timeline.clip.trim",
 }
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
@@ -313,6 +320,21 @@ def _summary(command_type: str, payload: dict) -> str:
         if op == "create":
             return f"Create reference set '{payload.get('name', '')}'"
         return f"{op.capitalize()} reference set"
+    if command_type.startswith("timeline."):
+        if command_type == "timeline.create":
+            return f"Create timeline '{payload.get('name', '')}'"
+        if command_type == "timeline.revert":
+            return f"Revert timeline to revision {payload.get('to_revision')}"
+        if command_type == "timeline.duplicate":
+            return "Duplicate timeline (with its clips)"
+        if command_type.startswith("timeline.clip."):
+            op = command_type.rsplit(".", 1)[1]
+            if op == "insert":
+                return "Add clip to timeline"
+            if op == "move":
+                return f"Move clip to position {(payload.get('to_index') or 0) + 1}"
+            return f"{op.capitalize()} clip"
+        return f"{command_type.split('.', 1)[1].capitalize()} timeline"
     parts = _entity_parts(command_type)
     if parts:
         etype, op = parts
@@ -1340,7 +1362,95 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                 bibles.get_entity(session, etype, payload.get(f"{etype}_id") or "", project.id)
             except KeyError:
                 raise CommandError(404, f"{etype} not found in this project") from None
+    if command_type.startswith("timeline."):
+        _validate_timeline(session, project, command_type, payload)
     return warnings
+
+
+def _validate_timeline(session: Session, project: Project,
+                       command_type: str, payload: dict) -> None:
+    """C5-A — shape checks + existence. Deep trim/duplicate checks run
+    at commit inside _commit_timeline against the pinned geometry."""
+    from app.domain import timeline as tld
+    if command_type == "timeline.create":
+        if not (payload.get("name") or "").strip():
+            raise CommandError(422, "timeline name is required")
+        try:
+            tld._check_fps(payload.get("fps_num", 24),
+                           payload.get("fps_den", 1))
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
+        return
+    tl = _get_timeline(session, project, payload)
+    if command_type == "timeline.clip.insert":
+        if not payload.get("asset_id"):
+            raise CommandError(422, "asset_id is required")
+        # Run the same read-only resolution the commit path runs so a
+        # preview surfaces the real refusal, not a surprise at commit.
+        try:
+            asset, ver, geo = tld.resolve_clip_source(
+                session, project.id, payload["asset_id"],
+                payload.get("version_id"))
+            src = geo["frames"]
+            i = payload.get("in_frame")
+            o = payload.get("out_frame")
+            if i is not None:
+                tld._check_int(i, "in_frame", 0, src - 1)
+            if o is not None:
+                tld._check_int(o, "out_frame", 1, src)
+            if (i if i is not None else 0) >= (o if o is not None else src):
+                raise tld.TimelineError("in_frame must be before out_frame")
+            if payload.get("position") is not None:
+                tld._check_int(payload["position"], "position", 0,
+                               len(tld.list_clips(session, tl.id)))
+            if tl.status != "active":
+                raise tld.TimelineError("timeline is archived")
+            if not payload.get("allow_duplicate") and any(
+                    c.source_asset_id == asset.id
+                    and c.source_version_id == ver.id
+                    for c in tld.list_clips(session, tl.id)):
+                raise tld.TimelineError(
+                    "this source is already on the timeline — "
+                    "pass allow_duplicate to repeat it intentionally")
+            if payload.get("shot_id") is not None:
+                shot = session.get(Shot, payload["shot_id"])
+                if shot is None or shot.project_id != project.id:
+                    raise tld.TimelineError(
+                        "shot not found in this project")
+            if payload.get("scene_id") is not None:
+                scene = session.get(Scene, payload["scene_id"])
+                if scene is None or scene.project_id != project.id:
+                    raise tld.TimelineError(
+                        "scene not found in this project")
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+    elif command_type in ("timeline.clip.remove", "timeline.clip.move",
+                          "timeline.clip.trim"):
+        if not payload.get("clip_id"):
+            raise CommandError(422, "clip_id is required")
+    elif command_type == "timeline.revert":
+        if payload.get("to_revision") is None:
+            raise CommandError(422, "to_revision is required")
+    elif command_type == "timeline.update":
+        fields = {f: payload[f] for f in ("fps_num", "fps_den")
+                  if f in payload}
+        if fields:
+            try:
+                tld._check_fps(fields.get("fps_num", tl.fps_num),
+                               fields.get("fps_den", tl.fps_den))
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+
+
+def _get_timeline(session: Session, project: Project, payload: dict):
+    from app.domain import timeline as tld
+    try:
+        return tld.get_timeline(
+            session, project.id, payload.get("timeline_id") or "")
+    except KeyError:
+        raise CommandError(404, "timeline not found in this project") from None
 
 
 # ---- M2 validation helpers (project isolation is the invariant) ----
@@ -1738,6 +1848,20 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         # (model, dims, duration, sampling) via expected_params at
         # commit; shot state is pinned separately by expected_shot.
         out["resolved_params"] = _shot_video_params(eff)
+    if (command_type.startswith("timeline.")
+            and command_type != "timeline.create"
+            and payload.get("timeline_id")):
+        # C5-A — pin the timeline's revision so a clip op committed
+        # after another timeline mutation refuses rather than applying
+        # on a stale edit view.
+        try:
+            from app.domain import timeline as tld
+            tl = _get_timeline(session, project, payload)
+            out["resolved_timeline"] = {
+                "id": tl.id, "revision": tl.revision,
+                "clip_count": len(tld.list_clips(session, tl.id))}
+        except CommandError:
+            pass
     return out
 
 
@@ -2278,6 +2402,109 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
     raise CommandError(422, f"unsupported command_type '{command_type}'")
 
 
+def _commit_timeline(session: Session, project: Project, command: CreativeCommand,
+                     command_type: str, payload: dict, audit: dict) -> None:
+    """C5-A — timeline + clip mutations. Clip ops revalidate against the
+    PINNED source geometry (src_frames captured at insert), never
+    against the asset's current version."""
+    from app.domain import timeline as tld
+
+    def tl():
+        return _get_timeline(session, project, payload)
+
+    def _expect(t):
+        """Stale-approval guard — preview emits resolved_timeline; a
+        commit after any other timeline mutation refuses."""
+        exp = payload.get("expected_timeline")
+        if exp is not None and (
+                exp.get("id") != t.id
+                or exp.get("revision") != t.revision):
+            raise CommandError(
+                422, "timeline changed since preview — re-preview")
+
+    try:
+        if command_type == "timeline.create":
+            t = tld.create_timeline(
+                session, project.id, name=payload["name"],
+                description=payload.get("description", ""),
+                fps_num=payload.get("fps_num", 24),
+                fps_den=payload.get("fps_den", 1),
+                command_id=command.id)
+            audit["after"]["timeline_id"] = t.id
+            return
+        t = tl()
+        _expect(t)
+        if command_type == "timeline.update":
+            fields = {f: payload[f] for f in
+                      ("name", "description", "fps_num", "fps_den")
+                      if f in payload}
+            before = tld.update_timeline(
+                session, t, fields=fields, command_id=command.id,
+                change_summary=payload.get("change_summary")
+                or "Updated timeline")
+            audit["before"]["snapshot"] = before
+        elif command_type in ("timeline.archive", "timeline.unarchive"):
+            before = tld.set_timeline_archived(
+                session, t, archived=command_type == "timeline.archive",
+                command_id=command.id)
+            audit["before"]["status"] = before
+        elif command_type == "timeline.duplicate":
+            dup = tld.duplicate_timeline(
+                session, t, name=payload.get("name"),
+                command_id=command.id)
+            audit["after"]["duplicated_timeline_id"] = dup.id
+        elif command_type == "timeline.revert":
+            try:
+                tld.revert_timeline(
+                    session, t, int(payload["to_revision"]),
+                    command_id=command.id)
+            except KeyError:
+                raise CommandError(404, "revision not found") from None
+            audit["after"]["reverted_to"] = int(payload["to_revision"])
+        elif command_type == "timeline.clip.insert":
+            clip = tld.insert_clip(
+                session, t, project_id=project.id,
+                asset_id=payload["asset_id"],
+                version_id=payload.get("version_id"),
+                in_frame=payload.get("in_frame"),
+                out_frame=payload.get("out_frame"),
+                position=payload.get("position"),
+                shot_id=payload.get("shot_id"),
+                scene_id=payload.get("scene_id"),
+                allow_duplicate=bool(payload.get("allow_duplicate")),
+                command_id=command.id)
+            audit["after"]["clip_id"] = clip.id
+            audit["after"]["position"] = clip.position
+        elif command_type == "timeline.clip.remove":
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            tld.remove_clip(session, t, clip, command_id=command.id)
+        elif command_type == "timeline.clip.move":
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            tld.move_clip(session, t, clip,
+                          to_index=payload.get("to_index"),
+                          command_id=command.id)
+        elif command_type == "timeline.clip.trim":
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            tld.trim_clip(session, t, clip,
+                          in_frame=payload.get("in_frame"),
+                          out_frame=payload.get("out_frame"),
+                          command_id=command.id)
+        audit["after"]["timeline_id"] = t.id
+    except tld.TimelineError as exc:
+        raise CommandError(422, str(exc)) from exc
+    except KeyError as exc:
+        raise CommandError(404, str(exc).strip("'")) from None
+
+
 def _scene_cast_row(session: Session, scene_id: str, character_id: str):
     from app.db.models import SceneCharacter
     row = session.execute(
@@ -2599,6 +2826,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
               or command_type == "character.duplicate")):
         _commit_storyboard(session, project, command, command_type, payload,
                            audit, storage=storage)
+
+    elif command_type.startswith("timeline."):
+        _commit_timeline(session, project, command, command_type, payload,
+                         audit)
 
     elif parts:
         _commit_entity(session, project, command, parts[0], parts[1], payload, audit)
