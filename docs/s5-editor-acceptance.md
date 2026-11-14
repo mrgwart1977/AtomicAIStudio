@@ -44,6 +44,26 @@ containing at least one image asset.
 | 24 | Dims beyond 4096 or invalid aspect | Refused |
 | 25 | Change dims/placement after approval | Approval fingerprint invalidates — re-preview required |
 
+## C4 — reference sets, shots, and storyboard
+
+| # | Step | Expected |
+|---|------|----------|
+| 26 | Character page → create a named reference set, link 2 reference images | Set appears with ordered thumbs; links carry set membership |
+| 27 | Reorder refs / edit a weight / pin a seed | Order and values persist after reload; seed shown as guidance, not an identity guarantee |
+| 28 | Character page → duplicate the character | Copy carries its sets + memberships; deleting a set ungroups links — assets are never deleted |
+| 29 | Cloud Studio img2img → pick the reference set | Preview lists `resolved_references`; approve → job provenance records set id + resolved asset ids |
+| 30 | Edit the set (add/remove/reorder/seed) after preview → commit the stale approval | Refused 422 — re-preview required |
+| 31 | Storyboard → shot dialog → bind the set + a source image | Pickers show cast-scoped sets + project images only; binding persists on the shot row |
+| 32 | Bind a set, then remove its character from the effective cast, then generate | Refused — invalid bindings never fall back to unrelated references |
+| 33 | Shot dialog → Generate (simulated) → preview → approve | Cost shown; job runs through the normal engine; output asset appears linked to the shot |
+| 34 | Preview shot.generate → edit the shot's prompt/cast → commit the stale approval | Refused 422 — shot-state changes invalidate the approval |
+| 35 | Shot card after generation | Latest generated image on the card; status badge gone once succeeded; `✦n` output count |
+| 36 | Inject/encounter a failed generation | Card shows the failed badge — never a pending-looking or succeeded-looking state |
+| 37 | Reorder shots with ◀▶ buttons and keyboard arrows (no drag) | Order changes persist via `shot.move`; focus ring visible; cards are Tab-reachable |
+| 38 | ⇄ prev on a shot card | Comparison dialog: shared cast, enters/leaves, wardrobe/expression diffs, location change, continuity-field diffs — worded as metadata only |
+| 39 | Shot dialog → continuity guidance fields | Appearance/wardrobe/lighting/camera/mood persist in `continuity_json`; disclaimer visible |
+| 40 | Restart the app → reopen the storyboard | Generation status, latest outputs, and bindings all restored from durable rows — no transient state |
+
 ## Memory measurements
 
 Undo history is bounded by `UNDO_MAX = 20` snapshots AND

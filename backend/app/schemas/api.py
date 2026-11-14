@@ -371,6 +371,9 @@ class StoryboardShotOut(BaseModel):
     location_name: str
     cast: list[CastMemberOut]
     inherited: list[CastMemberOut] = []  # scene-cast members without an own row
+    # C4-C — durable per-shot generation state (job status + latest
+    # produced asset); {}-valued when nothing was generated yet.
+    generation: dict[str, Any] | None = None
 
 
 class SceneOut(BaseModel):

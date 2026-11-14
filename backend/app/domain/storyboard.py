@@ -25,9 +25,11 @@ from app.domain.cast_state import (
 )
 
 from app.db.models import (
+    Asset,
     Character,
     EntityAssetLink,
     EntityRevision,
+    GenerationJob,
     Location,
     Scene,
     SceneCharacter,
@@ -869,6 +871,59 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
         l.id: l for l in session.execute(select(Location).where(Location.id.in_(loc_ids))).scalars().all()
     } if loc_ids else {}
 
+    # C4-C — per-shot generation state for the board. Association is
+    # backend-authoritative: jobs carry shot linkage in request_json
+    # (shot_generate.shot_id for shot.generate, plain shot_id for the
+    # composed image request) and outputs carry it in
+    # provenance_json.request — both durable rows, so the board shows
+    # real state after restart, never transient UI memory.
+    shot_id_set = set(shot_ids)
+
+    def _req_shot(req: dict | None) -> str | None:
+        req = req or {}
+        return ((req.get("shot_generate") or {}).get("shot_id")
+                or req.get("shot_id"))
+
+    gen: dict[str, dict] = {}
+    if shot_id_set:
+        jobs = session.execute(
+            select(GenerationJob)
+            .where(GenerationJob.project_id == project_id)
+            .order_by(GenerationJob.created_at.desc())
+        ).scalars().all()
+        for j in jobs:
+            sid = _req_shot(j.request_json)
+            if sid in shot_id_set and sid not in gen:
+                gen[sid] = {"latest_job_id": j.id,
+                            "latest_job_status": j.status,
+                            "latest_job_at": j.created_at}
+        img_assets = session.execute(
+            select(Asset).where(Asset.project_id == project_id,
+                                Asset.kind == "image")
+        ).scalars().all()
+        counts: dict[str, int] = {}
+        latest: dict[str, Asset] = {}
+        for a in img_assets:
+            sid = _req_shot((a.provenance_json or {}).get("request"))
+            if sid not in shot_id_set:
+                continue
+            counts[sid] = counts.get(sid, 0) + 1
+            cur = latest.get(sid)
+            # Deterministic pick: newest created_at wins; id breaks ties
+            # (two outputs of one job can share a timestamp).
+            if (cur is None or a.created_at > cur.created_at
+                    or (a.created_at == cur.created_at and a.id > cur.id)):
+                latest[sid] = a
+        for sid in shot_id_set:
+            g = gen.setdefault(sid, {})
+            a = latest.get(sid)
+            g["output_count"] = counts.get(sid, 0)
+            g["latest_asset_id"] = a.id if a else None
+            g["latest_asset_at"] = a.created_at if a else None
+            g.setdefault("latest_job_id", None)
+            g.setdefault("latest_job_status", None)
+            g.setdefault("latest_job_at", None)
+
     sc_by_scene: dict[str, list] = {}
     for c in scene_cast:
         sc_by_scene.setdefault(c.scene_id, []).append(c)
@@ -905,6 +960,11 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                     for c in own
                 ],
                 "inherited": inherited,
+                "generation": {
+                    "output_count": 0, "latest_asset_id": None,
+                    "latest_asset_at": None, "latest_job_id": None,
+                    "latest_job_status": None, "latest_job_at": None,
+                    **(gen.get(sh.id) or {})},
             }
 
         out.append({
