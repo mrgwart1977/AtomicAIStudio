@@ -96,6 +96,7 @@ interface Pending {
   fingerprint: string;
   payload: Record<string, unknown>;
   proposal: CommandProposal;
+  commandType: string;
 }
 
 /** Authenticated thumbnail loader — shared implementation lives in
@@ -121,7 +122,15 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [details, setDetails] = useState<Record<string, ProviderDetail>>({});
   const [contracts, setContracts] = useState<string[]>([]);
+  const [img2imgContracts, setImg2imgContracts] = useState<string[]>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+
+  // C3-D2 — mode: "generate" (text→image) or "img2img" (edit an
+  // existing project image). Everything about img2img stays simulated.
+  const [mode, setMode] = useState<"generate" | "img2img">("generate");
+  const [sourceAssetId, setSourceAssetId] = useState("");
+  const [refIds, setRefIds] = useState<string[]>([]);
+  const [refWeights, setRefWeights] = useState<Record<string, string>>({});
 
   // generate form — every field participates in the preview
   // fingerprint: touching ANY of them invalidates a pending approval.
@@ -157,7 +166,10 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       })
       .catch((e) => setLoadErr(`providers: ${String(e)}`));
     apiFetch<ImageContracts>("/api/providers/image-contracts")
-      .then((c) => setContracts(c.implemented))
+      .then((c) => {
+        setContracts(c.implemented);
+        setImg2imgContracts(c.img2img_implemented ?? []);
+      })
       .catch((e) => setLoadErr(`image contracts: ${String(e)}`));
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,11 +177,14 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
   // A provider is selectable only when the catalog marks it eligible
   // AND a contract is implemented — everything else is listed disabled
-  // with the reason, never presented as operational.
+  // with the reason, never presented as operational. In img2img mode
+  // the implemented-contract list narrows to providers with a real
+  // edits endpoint — a catalog editing flag alone is never enough.
+  const activeContracts = mode === "img2img" ? img2imgContracts : contracts;
   const selectable = useMemo(
     () => providers.filter((p) =>
-      contracts.includes(p.key) && details[p.key] && t1ImageEligible(details[p.key])),
-    [providers, contracts, details],
+      activeContracts.includes(p.key) && details[p.key] && t1ImageEligible(details[p.key])),
+    [providers, activeContracts, details],
   );
   const unavailable = useMemo(
     () => providers.filter((p) => !selectable.some((s) => s.key === p.key)),
@@ -177,8 +192,36 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   );
 
   const detail = providerKey ? details[providerKey] : undefined;
-  const models = useMemo(() => imageModels(detail), [detail]);
+  const models = useMemo(
+    () => imageModels(detail).filter(
+      (m) => mode !== "img2img" || m.editing?.img2img === true),
+    [detail, mode],
+  );
+
   const model = models.find((m) => m.id === modelId);
+  const caps = model?.editing ?? {};
+  const maxRefs = mode === "img2img" ? (caps.max_reference_images ?? 0) : 0;
+
+  // Mode switch: drop selections that no longer apply so a stale model
+  // or oversized reference set can never be committed by accident.
+  useEffect(() => {
+    if (mode !== "img2img") { setSourceAssetId(""); setRefIds([]); setRefWeights({}); }
+    if (providerKey && !selectable.some((p) => p.key === providerKey)) {
+      setProviderKey(""); setModelId("");
+    }
+    if (modelId && !models.some((m) => m.id === modelId)) {
+      setModelId(models[0]?.id ?? "");
+    }
+    if (mode === "img2img" && refIds.length > maxRefs) {
+      setRefIds((r) => r.slice(0, maxRefs));
+    }
+  }, [mode, selectable, providerKey, modelId, models, maxRefs, refIds.length]);
+
+  // Project image assets usable as img2img source/references.
+  const imageAssets = useMemo(
+    () => assetsPage.items.filter((a) => a.kind === "image"),
+    [assetsPage],
+  );
 
   const sizes = model?.sizes ?? [];
   const qualities = useMemo(() => {
@@ -221,6 +264,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     [entities],
   );
 
+  const commandType = mode === "img2img"
+    ? "generate.image.img2img" : "generate.image.cloud";
+
   const payload = (): Record<string, unknown> => ({
     provider_key: providerKey,
     model_id: modelId || undefined,
@@ -234,11 +280,22 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     shot_id: shotId || undefined,
     character_id: characterId || undefined,
     max_cost_usd: maxCost.trim() === "" ? undefined : maxCostNum,
+    ...(mode === "img2img" ? {
+      source_asset_id: sourceAssetId,
+      reference_asset_ids: refIds.length ? refIds : undefined,
+      reference_weights: caps.reference_weights && refIds.length
+        ? refIds.map((id) => {
+            const w = parseFloat(refWeights[id] ?? "");
+            return Number.isFinite(w) ? w : undefined;
+          })
+        : undefined,
+    } : {}),
   });
 
   const fingerprint = JSON.stringify([
-    providerKey, modelId, prompt, negativePrompt, size, quality,
-    seed, sceneId, shotId, characterId, maxCost]);
+    mode, providerKey, modelId, prompt, negativePrompt, size, quality,
+    seed, sceneId, shotId, characterId, maxCost,
+    sourceAssetId, refIds, refWeights]);
 
   // Preview → approval integrity: ANY parameter change after a preview
   // drops the pending approval — a fresh preview is required. This is
@@ -248,7 +305,8 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   }, [fingerprint, pending]);
 
   const genReady = !!providerKey && selectable.some((p) => p.key === providerKey)
-    && !!prompt.trim() && prompt.length <= 8000;
+    && !!prompt.trim() && prompt.length <= 8000
+    && (mode !== "img2img" || !!sourceAssetId);
 
   // If the backend previewed but could not price (a path that exists
   // for future billing units), approving cannot be offered — the
@@ -261,9 +319,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     inFlight.current = true;
     setBusy(true); setError(null); setNotice(null);
     const p = payload();
-    previewCommand(pid, "generate.image.cloud", p)
+    previewCommand(pid, commandType, p)
       .then((proposal) => setPending(
-        { fingerprint, payload: p, proposal }))
+        { fingerprint, payload: p, proposal, commandType }))
       .catch((e) => setError(`Preview failed: ${String(e)}`))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
@@ -274,9 +332,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     if (!pending || pending.fingerprint !== fingerprint || inFlight.current) return;
     inFlight.current = true;
     setBusy(true); setError(null); setNotice(null);
-    commitCommand(pid, revision, "generate.image.cloud", pending.payload)
+    commitCommand(pid, revision, pending.commandType, pending.payload)
       .then((r) => {
-        setNotice(`Committed generate.image.cloud — job ${r.job_id?.slice(0, 8) ?? ""} (simulated)`);
+        setNotice(`Committed ${pending.commandType} — job ${r.job_id?.slice(0, 8) ?? ""} (simulated)`);
         setPending(null);
         onCommitted();
       })
@@ -286,7 +344,8 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
   const imageJobs = useMemo(
     () => Object.values(jobs)
-      .filter((j) => j.adapter_id === "cloud.image.sim")
+      .filter((j) => j.adapter_id === "cloud.image.sim"
+        || j.adapter_id === "cloud.image.img2img.sim")
       .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [jobs],
   );
@@ -312,6 +371,30 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
         image, not real provider output. Simulated accounting only.
       </p>
 
+      {/* ---------- C3-D2: mode toggle ---------- */}
+      <div className="mt-3 flex gap-2" role="group" aria-label="Generation mode">
+        <button type="button"
+          className={mode === "generate" ? btnCls : ghostBtn}
+          data-testid="ci-mode-generate"
+          onClick={() => setMode("generate")}>
+          New image from text
+        </button>
+        <button type="button"
+          className={mode === "img2img" ? btnCls : ghostBtn}
+          data-testid="ci-mode-img2img"
+          onClick={() => setMode("img2img")}>
+          Edit an existing image
+        </button>
+      </div>
+      {mode === "img2img" && (
+        <p className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted"
+          data-testid="ci-img2img-note">
+          Image-to-image transforms one of your project images into a new
+          asset — the original is never changed. Only providers with an
+          implemented edits contract appear below.
+        </p>
+      )}
+
       {loadErr && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{loadErr}</p>}
       {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
       {notice && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{notice}</p>}
@@ -319,17 +402,23 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       {/* ---------- approval card (fresh preview required on change) ---------- */}
       {pending && (
         <section className="mt-4 rounded-md border border-amber/60 bg-panel p-4" data-testid="ci-approval">
-          <h3 className="text-sm font-semibold">Review — generate cloud image</h3>
+          <h3 className="text-sm font-semibold">
+            Review — {pending.commandType === "generate.image.img2img"
+              ? "image-to-image edit" : "generate cloud image"}
+          </h3>
           <SimBadge className="mt-2" />
           <dl className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 rounded border border-line bg-card p-2.5 text-xs sm:grid-cols-2" data-testid="ci-approval-detail">
             <div className="flex justify-between"><dt className="text-faint">Provider</dt><dd className="text-fg">{String(pending.payload.provider_key)}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Model</dt><dd className="text-fg">{String(pending.payload.model_id ?? "provider default")}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Simulation status</dt><dd className="text-amber">simulated — mocked transport</dd></div>
-            <div className="flex justify-between"><dt className="text-faint">Output</dt><dd className="text-fg">1 image · test PNG</dd></div>
+            <div className="flex justify-between"><dt className="text-faint">Output</dt><dd className="text-fg">1 image · test PNG{pending.commandType === "generate.image.img2img" ? " · new asset" : ""}</dd></div>
+            {pending.commandType === "generate.image.img2img" && (
+              <div className="flex justify-between"><dt className="text-faint">Source</dt><dd className="text-fg" data-testid="ci-approval-source">{String(pending.payload.source_asset_id)}{Array.isArray(pending.payload.reference_asset_ids) && (pending.payload.reference_asset_ids as unknown[]).length > 0 ? ` · ${(pending.payload.reference_asset_ids as unknown[]).length} reference(s)` : ""}</dd></div>
+            )}
             <div className="flex justify-between"><dt className="text-faint">Size</dt><dd className="text-fg">{String(pending.payload.size ?? "provider default")}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Quality</dt><dd className="text-fg">{String(pending.payload.quality ?? "provider default")}</dd></div>
             <div className="flex justify-between"><dt className="text-faint">Est. cost</dt><dd className="text-fg" data-testid="ci-approval-cost">{pending.proposal.cost_estimate?.est_cost_usd != null ? `$${pending.proposal.cost_estimate.est_cost_usd.toFixed(4)} (authoritative preview — estimate, not a charge)` : "not priced — commit may refuse"}</dd></div>
-            <div className="flex justify-between"><dt className="text-faint">Data out</dt><dd className="text-fg">prompt text (~{String(pending.payload.prompt ?? "").length} chars) — nothing else sent</dd></div>
+            <div className="flex justify-between"><dt className="text-faint">Data out</dt><dd className="text-fg">prompt text (~{String(pending.payload.prompt ?? "").length} chars){pending.commandType === "generate.image.img2img" ? " + image bytes" : ""} — nothing else sent</dd></div>
           </dl>
           <p className="mt-2 text-sm text-fg">{pending.proposal.summary}</p>
           {pending.proposal.warnings.length > 0 && (
@@ -340,7 +429,9 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
           <div className="mt-3 flex gap-2">
             <button onClick={doCommit} disabled={busy || unpriced} className={btnCls}
               data-testid="ci-approve">
-              Approve &amp; generate simulated image
+              {pending.commandType === "generate.image.img2img"
+                ? "Approve & generate simulated edit"
+                : "Approve & generate simulated image"}
             </button>
             <button onClick={() => setPending(null)} disabled={busy} className={ghostBtn}>
               Discard preview
@@ -397,8 +488,84 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
         </div>
       </div>
 
+      {/* ---------- C3-D2: source + references (img2img only) ---------- */}
+      {mode === "img2img" && (
+        <fieldset className="mt-3 rounded-md border border-line bg-panel p-3"
+          data-testid="ci-img2img-inputs">
+          <legend className="px-1 text-xs font-medium text-muted">
+            Source &amp; references
+          </legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className={labelCls} htmlFor="ci-source">Source image *</label>
+              <select id="ci-source" className={inputCls} value={sourceAssetId}
+                data-testid="ci-source"
+                onChange={(e) => {
+                  setSourceAssetId(e.target.value);
+                  setRefIds((r) => r.filter((id) => id !== e.target.value));
+                }}>
+                <option value="">Choose an image asset…</option>
+                {imageAssets.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                ))}
+              </select>
+              {imageAssets.length === 0 && (
+                <p className="mt-1 text-xs text-faint">
+                  No image assets in this project yet — import one first.
+                </p>
+              )}
+            </div>
+            <div>
+              <span className={labelCls} id="ci-refs-label">
+                Reference images (optional{maxRefs ? `, up to ${maxRefs}` : ""})
+              </span>
+              <ul className="max-h-32 overflow-auto rounded border border-line bg-card p-1"
+                aria-labelledby="ci-refs-label" data-testid="ci-refs">
+                {imageAssets.filter((a) => a.id !== sourceAssetId).map((a) => {
+                  const on = refIds.includes(a.id);
+                  const full = !on && refIds.length >= maxRefs;
+                  return (
+                    <li key={a.id} className="flex items-center gap-2 px-1 py-0.5">
+                      <label className="flex flex-1 items-center gap-2 text-xs text-fg">
+                        <input type="checkbox" checked={on} disabled={full}
+                          data-testid={`ci-ref-${a.id}`}
+                          onChange={() => setRefIds((r) =>
+                            on ? r.filter((x) => x !== a.id) : [...r, a.id])} />
+                        {a.name || a.id}
+                      </label>
+                      {on && caps.reference_weights && (
+                        <input type="number" min="0" max="2" step="0.1"
+                          className="w-16 rounded border border-line bg-card px-1 py-0.5 text-xs text-fg"
+                          aria-label={`weight for ${a.name || a.id}`}
+                          data-testid={`ci-refw-${a.id}`}
+                          value={refWeights[a.id] ?? "1"}
+                          onChange={(e) => setRefWeights(
+                            (w) => ({ ...w, [a.id]: e.target.value }))} />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+              {maxRefs === 0 && (
+                <p className="mt-1 text-xs text-faint">
+                  This model accepts no reference images.
+                </p>
+              )}
+              {caps.reference_weights && refIds.length > 0 && (
+                <p className="mt-1 text-[10px] text-faint">
+                  Weights are guidance strength (0–2) — they steer the edit
+                  but do not guarantee identity.
+                </p>
+              )}
+            </div>
+          </div>
+        </fieldset>
+      )}
+
       <div className="mt-3">
-        <label className={labelCls} htmlFor="ci-prompt">Image prompt</label>
+        <label className={labelCls} htmlFor="ci-prompt">
+          {mode === "img2img" ? "Edit prompt" : "Image prompt"}
+        </label>
         <textarea id="ci-prompt" className={`${inputCls} min-h-24`} value={prompt}
           data-testid="ci-prompt"
           onChange={(e) => setPrompt(e.target.value)}
@@ -527,15 +694,16 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
 
       <p className="mt-2 rounded border border-line bg-panel p-2 text-xs text-muted" data-testid="ci-data-out">
         Data leaving this device (if this were a live call):{" "}
-        <b>prompt text (~{prompt.length} chars){detail ? ` → ${detail.label}` : ""}</b>.
-        No project files, bibles, images, or credentials are sent — and nothing
+        <b>prompt text (~{prompt.length} chars){detail ? ` → ${detail.label}` : ""}</b>
+        {mode === "img2img" ? " plus the selected image bytes" : ""}.
+        No project files, bibles, or credentials are sent{mode === "img2img" ? " beyond the images you picked" : ""} — and nothing
         is sent at all on the simulated transport.
       </p>
 
       <div className="mt-3">
         <button className={btnCls} disabled={!genReady || busy}
           data-testid="ci-preview-btn" onClick={doPreview}>
-          Preview image request
+          {mode === "img2img" ? "Preview edit request" : "Preview image request"}
         </button>
       </div>
 

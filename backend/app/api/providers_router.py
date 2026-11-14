@@ -75,8 +75,17 @@ def image_contracts():
     image provider is shown disabled — commit refuses them identically.
     Contracts are exercised on simulated transports only; there is no
     live path in this build."""
-    from app.domain.workers.rest_image_providers import IMAGE_REST_KEYS
+    from app.domain.workers.rest_image_providers import (
+        IMAGE_REST_KEYS, IMAGE_SPECS)
+    img2img = [k for k in IMAGE_REST_KEYS
+               if IMAGE_SPECS[k].edit_path is not None]
     return {"implemented": list(IMAGE_REST_KEYS),
+            # C3-D2 — implemented img2img contracts (a strict subset of
+            # `implemented`). The UI must use this list, not the catalog
+            # editing flags: a catalog declaration never conjures a
+            # provider operation the contract does not implement.
+            "img2img_implemented": img2img,
+            "img2img_adapter_id": "cloud.image.img2img.sim",
             "adapter_id": "cloud.image.sim",
             "simulated": True,
             "note": "Implemented image REST contracts — simulated "

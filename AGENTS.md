@@ -16,6 +16,7 @@
 - Mock adapters are labeled `adapter_kind="mock"` — never present them as inference.
 - Backend session token: `X-Atomic-Token` header only — `?token=` was removed in A3; the WS authenticates via a first-frame `{"type":"auth","token":...}` message.
 - No model downloads, cloud calls, or paid work without explicit owner approval.
+- C3-D2 img2img: `generate.image.img2img` → `cloud.image.img2img.sim`; the provider's `EndpointSpec.edit_path` is the implemented-contract gate — catalog `editing.img2img` alone never enables the mode.
 
 ## Milestone state
 - M0 + M0.1 approved and merged in PR #2; **M1 implemented** on `feat/m1-projects` (project mgmt, bibles, CAS storage, backups, workspace UI).

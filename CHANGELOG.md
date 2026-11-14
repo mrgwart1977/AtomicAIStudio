@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **C3-D2 — simulated image-to-image (`generate.image.img2img`)**:
+  edit an existing project image through a documented provider edits
+  contract on the simulated transport. Capability negotiation fails
+  closed at two layers — the catalog model must declare
+  `editing.img2img` AND the provider must implement an edits endpoint
+  (`EndpointSpec.edit_path`; today `openai-images` → `/v1/images/edits`
+  and `bfl-flux` → `/v1/{model}` for Kontext models). A catalog
+  declaration alone never enables the mode. Source and reference bytes
+  are re-decoded through the C3-A image-safety gate at commit and again
+  at run; source ownership, project scoping, reference-count limits,
+  and optional weights (only where `reference_weights` is implemented)
+  are all validated. Every output is a NEW CAS asset recording
+  `derived_from_asset_id`/`reference_asset_ids` lineage — the source is
+  never modified. Durable job, backend-authoritative synthetic cost,
+  reservations/holds, and reconcile posture are unchanged. Cloud Studio
+  gains an "Edit an existing image" mode with source picker, reference
+  selection, cost preview, and job history.
 - **C3-D1 — image reference foundation**: the provider catalog now
   carries an explicit per-model `editing` declaration
   (`img2img`, `max_reference_images`, `mask_inpaint`, `outpaint`,

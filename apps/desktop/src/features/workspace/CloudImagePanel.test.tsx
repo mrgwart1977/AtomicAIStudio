@@ -40,9 +40,12 @@ const store: Record<string, unknown> = {
   ],
   assetsPage: {
     items: [{
-      id: "asset-1", media_json: { scene_id: "sc1", shot_id: "sh1", character_id: "ch1" },
+      id: "asset-1", name: "keyframe.png", kind: "image",
+      media_json: { scene_id: "sc1", shot_id: "sh1", character_id: "ch1" },
+    }, {
+      id: "asset-ref", name: "style-ref.png", kind: "image", media_json: {},
     }],
-    total: 1, offset: 0, limit: 100,
+    total: 2, offset: 0, limit: 100,
   },
   setWorkspaceTab, setAssetKindFilter, refreshAssets,
 };
@@ -64,6 +67,9 @@ const DETAILS: Record<string, unknown> = {
       id: "gpt-image-1", capability: "image",
       sizes: ["auto", "1024x1024", "1536x1024", "1024x1536"],
       qualities: ["auto", "low", "medium", "high"],
+      editing: { img2img: true, max_reference_images: 16,
+        mask_inpaint: true, outpaint: false, reference_weights: false,
+        identity_reference: false },
       cost_table: { unit: "per_image", rates: { low: 0.02, medium: 0.07, high: 0.19 }, checked: "2026-11-13" },
     }],
   },
@@ -81,6 +87,8 @@ const DETAILS: Record<string, unknown> = {
 
 const CONTRACTS = {
   implemented: ["openai-images"], adapter_id: "cloud.image.sim",
+  img2img_implemented: ["openai-images"],
+  img2img_adapter_id: "cloud.image.img2img.sim",
   simulated: true, note: "simulated transports only",
 };
 
@@ -585,5 +593,67 @@ describe("CloudImagePanel — job lifecycle & asset navigation", () => {
     const grid = document.querySelector(".grid.sm\\:grid-cols-2");
     expect(grid).toBeTruthy();
     expect(document.querySelector(".grid.sm\\:grid-cols-3")).toBeTruthy();
+  });
+});
+
+describe("CloudImagePanel — C3-D2 image-to-image mode", () => {
+  it("shows img2img inputs only in edit mode and requires a source", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    expect(screen.queryByTestId("ci-source")).toBeNull();
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    await waitFor(() => screen.getByTestId("ci-img2img-inputs"));
+    expect(screen.getByTestId("ci-source")).toBeTruthy();
+    expect(screen.getByText(/never changed|never modified/i)).toBeTruthy();
+    // Preview stays disabled until a source image is picked.
+    fireEvent.change(screen.getByTestId("ci-provider"), { target: { value: "openai-images" } });
+    await waitFor(() => screen.getByText("gpt-image-1"));
+    fireEvent.change(screen.getByTestId("ci-prompt"), { target: { value: "stormy night" } });
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    expect((screen.getByTestId("ci-preview-btn") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("lists references, excludes the source, and sends them in the payload", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    fireEvent.change(screen.getByTestId("ci-provider"), { target: { value: "openai-images" } });
+    await waitFor(() => screen.getByText("gpt-image-1"));
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    fireEvent.change(screen.getByTestId("ci-prompt"), { target: { value: "restyle" } });
+    // The source asset must not appear as a reference option.
+    expect(screen.queryByTestId("ci-ref-asset-1")).toBeNull();
+    fireEvent.click(screen.getByTestId("ci-ref-asset-ref"));
+    fireEvent.click(screen.getByTestId("ci-preview-btn"));
+    await waitFor(() => screen.getByTestId("ci-approval"));
+    const payload = previewCommand.mock.calls[0][2] as Record<string, unknown>;
+    expect(previewCommand.mock.calls[0][1]).toBe("generate.image.img2img");
+    expect(payload.source_asset_id).toBe("asset-1");
+    expect(payload.reference_asset_ids).toEqual(["asset-ref"]);
+    expect(screen.getByTestId("ci-approval-source").textContent)
+      .toContain("1 reference");
+  });
+
+  it("keeps non-img2img providers disabled in edit mode", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    const sel = screen.getByTestId("ci-provider") as HTMLSelectElement;
+    const opts = Array.from(sel.options);
+    expect(opts.find((o) => o.value === "openai-images")!.disabled).toBe(false);
+    expect(opts.find((o) => o.value === "gemini-images")!.disabled).toBe(true);
+  });
+
+  it("resets edit-only fields when switching back to generate mode", async () => {
+    renderPanel();
+    await waitFor(() => screen.getByText("OpenAI Images (simulated API)"));
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    fireEvent.change(screen.getByTestId("ci-source"), { target: { value: "asset-1" } });
+    fireEvent.click(screen.getByTestId("ci-mode-generate"));
+    expect(screen.queryByTestId("ci-img2img-inputs")).toBeNull();
+    fireEvent.click(screen.getByTestId("ci-mode-img2img"));
+    await waitFor(() => screen.getByTestId("ci-img2img-inputs"));
+    expect((screen.getByTestId("ci-source") as HTMLSelectElement).value).toBe("");
   });
 });

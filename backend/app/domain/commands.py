@@ -49,6 +49,7 @@ SUPPORTED_COMMANDS = {
     # generation (mock + real local inference since M3)
     "generate.image.mock", "generate.image", "generate.image.persistent",
     "generate.video", "generate.text.cloud", "generate.image.cloud",
+    "generate.image.img2img",
     # bibles
     "character.create", "character.update", "character.archive", "character.unarchive", "character.revert",
     "world.create", "world.update", "world.archive", "world.unarchive", "world.revert",
@@ -83,7 +84,8 @@ SUPPORTED_COMMANDS = {
 # Command types that enqueue paid/GPU-visible work; preview must stay free.
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
-                       "generate.text.cloud", "generate.image.cloud"}
+                       "generate.text.cloud", "generate.image.cloud",
+                       "generate.image.img2img"}
 
 # Commands whose commit transaction must begin BEGIN IMMEDIATE — they
 # check-then-act on financial state, so the budget-check SELECT must
@@ -91,6 +93,7 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
 # _spend_isolation). Everything else stays deferred.
 SPEND_GUARDED_COMMANDS = {
     "generate.text.cloud", "generate.image.cloud",
+    "generate.image.img2img",
     "spend.budget_set", "spend.budget_remove", "spend.reconcile",
     # live-gate mutations check-then-act on budgets + gate state
     "cloud.live.enable", "cloud.live.disable",
@@ -116,6 +119,10 @@ JOB_COMMANDS = {
     # C3-A — cloud image contract adapter; per-provider contract
     # coverage is checked at commit (only implemented contracts run).
     "generate.image.cloud": "cloud.image.sim",
+    # C3-D2 — simulated image-to-image on documented edits contracts;
+    # routed through its own adapter id so contract coverage and mode
+    # are negotiated per provider/model, never from catalog flags alone.
+    "generate.image.img2img": "cloud.image.img2img.sim",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -190,6 +197,9 @@ def _summary(command_type: str, payload: dict) -> str:
                 f"— '{(payload.get('prompt') or '')[:60]}'")
     if command_type == "generate.image.cloud":
         return (f"Simulate cloud image job for {payload.get('provider_key', '?')} "
+                f"— '{(payload.get('prompt') or '')[:60]}'")
+    if command_type == "generate.image.img2img":
+        return (f"Simulate image-to-image edit via {payload.get('provider_key', '?')} "
                 f"— '{(payload.get('prompt') or '')[:60]}'")
     if command_type == "asset.import":
         return f"Import file '{payload.get('source_path', '')}'"
@@ -426,6 +436,106 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             "Runs on a SIMULATED transport — documented request/response "
             "shapes with no network egress; output is a deterministic "
             "test PNG and can never be verified_remote")
+    if command_type == "generate.image.img2img":
+        # C3-D2 — simulated image-to-image. Capability negotiation is
+        # fail-closed at two layers: the catalog model must declare
+        # editing.img2img AND the provider must have an implemented
+        # edits contract (spec.edit_path). Catalog metadata alone can
+        # never enable the mode.
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        from app.domain.providers import catalog as _pc
+        from app.domain.workers.rest_image_providers import IMAGE_SPECS
+        provider = _bridge.get_provider(payload.get("provider_key"))
+        if provider is None:
+            raise CommandError(404, "provider not found in catalog")
+        if payload.get("execution_target") != "cloud":
+            raise CommandError(422, "cloud generation requires explicit "
+                                    "execution_target 'cloud' — local is "
+                                    "the default and must be opted out of")
+        prompt = (payload.get("prompt") or "").strip()
+        if not prompt:
+            raise CommandError(422, "prompt is required")
+        if len(prompt) > 8000:
+            raise CommandError(422, "prompt exceeds 8000 characters")
+        strat = _cc.t1_image_strategy(provider)
+        if strat is None:
+            raise CommandError(422, "no documented T1 image API path — "
+                                    "provider not eligible for cloud image")
+        if _bridge.record_stale(strat):
+            warnings.append("Documented strategy evidence needs re-check — "
+                            "this simulation proceeds on stale evidence only")
+        model = _cc.pick_image_model(provider, payload.get("model_id"))
+        if payload.get("model_id") and model is None:
+            raise CommandError(
+                422, f"unknown image model '{payload['model_id']}'")
+        if model is None:
+            raise CommandError(422, "no image-capable model for this provider")
+        caps = _pc.model_editing_caps(provider["key"], model["id"])
+        if not caps.get("img2img"):
+            raise CommandError(
+                422, f"model '{model['id']}' does not declare img2img "
+                     "editing support — unsupported modes fail closed")
+        spec = IMAGE_SPECS.get(provider["key"])
+        if spec is None or spec.edit_path is None:
+            raise CommandError(
+                422, f"no img2img edits contract implemented for provider "
+                     f"'{provider['key']}' — a catalog declaration alone "
+                     "does not enable an unimplemented provider operation")
+        if int(payload.get("count") or 1) != 1:
+            raise CommandError(422, "C3-D2 supports exactly one image per job")
+        src = session.get(Asset, payload.get("source_asset_id") or "")
+        if src is None or src.project_id != project.id:
+            raise CommandError(404, "source image asset not found in project")
+        if src.kind != "image":
+            raise CommandError(422, "source asset must be an image")
+        refs = list(payload.get("reference_asset_ids") or [])
+        if len(refs) > int(caps.get("max_reference_images") or 0):
+            raise CommandError(
+                422, f"model accepts at most "
+                     f"{caps.get('max_reference_images') or 0} "
+                     "reference image(s)")
+        seen = {src.id}
+        for rid in refs:
+            if rid in seen:
+                raise CommandError(422, "duplicate asset in source/references")
+            seen.add(rid)
+            r = session.get(Asset, rid)
+            if r is None or r.project_id != project.id:
+                raise CommandError(404, "reference image asset not found "
+                                        "in project")
+            if r.kind != "image":
+                raise CommandError(422, "reference asset must be an image")
+        weights = payload.get("reference_weights")
+        if weights:
+            if not caps.get("reference_weights"):
+                raise CommandError(
+                    422, "this model does not implement reference weights")
+            if len(weights) != len(refs):
+                raise CommandError(
+                    422, "reference_weights must match reference_asset_ids")
+            for w in weights:
+                _validate_reference_weight(w)
+        est = _cc.estimate_image_cost(
+            model, count=1, size=payload.get("size"),
+            quality=payload.get("quality"), prompt=prompt)
+        if est["est_cost_usd"] is None:
+            raise CommandError(
+                422, {"error": "pricing_unavailable",
+                      "detail": "catalog pricing for this model is missing, "
+                                "stale, or not estimable — refusing rather "
+                                "than guessing a billable amount"})
+        warnings.append(
+            f"Cloud execution sends: {_cc.data_out_summary(provider, prompt)} "
+            "+ source image bytes"
+            + (" + reference image bytes" if refs else ""))
+        warnings.append(
+            f"Cost is an ESTIMATE only (~${est['est_cost_usd']:.4f}, "
+            f"{est['unit']}) — simulated accounting on this run; "
+            "no billable execution happens in C3-D2")
+        warnings.append(
+            "Runs on a SIMULATED edits transport — output is a new asset; "
+            "the source image is never modified")
     if command_type in ("spend.budget_set", "spend.budget_remove"):
         if payload.get("target", "project") not in ("project", "global"):
             raise CommandError(422, "target must be 'project' or 'global'")
@@ -892,7 +1002,8 @@ def _preview_cost_estimate(command_type: str, payload: dict) -> dict | None:
     commit path validates against — the UI must render this value, and
     any client-side hint is preliminary only. None for commands without
     a catalog estimate or when the estimate is not computable."""
-    if command_type not in ("generate.text.cloud", "generate.image.cloud"):
+    if command_type not in ("generate.text.cloud", "generate.image.cloud",
+                            "generate.image.img2img"):
         return None
     from app.domain import bridge as _bridge
     from app.domain import cloud_cost as _cc
@@ -1760,7 +1871,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
     elif command_type in JOB_COMMANDS:
         if job_engine is None:
             raise CommandError(500, "job engine unavailable")
-        request = _job_request(session, project, command_type, payload)
+        request = _job_request(session, project, command_type, payload,
+                               storage=storage)
         # C2.0c — provider-key routing for cloud text; all other
         # command types keep their JOB_COMMANDS mapping.
         _adapter_id = (_cloud_adapter_id(job_engine._registry,
@@ -1784,7 +1896,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     "generate.video",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
-                    "generate.text.cloud", "generate.image.cloud"),
+                    "generate.text.cloud", "generate.image.cloud",
+                    "generate.image.img2img"),
             )
         except Exception as exc:
             from app.domain.jobs import OpBusyError
@@ -1799,7 +1912,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 raise CommandError(409, str(exc)) from exc
             raise
         audit["after"]["job_id"] = job.id
-        if command_type in ("generate.text.cloud", "generate.image.cloud"):
+        if command_type in ("generate.text.cloud", "generate.image.cloud",
+                            "generate.image.img2img"):
             # Minimized durable record — the prompt body lives in the job
             # request (like local generation), never re-echoed to audit.
             audit["after"]["cloud"] = {
@@ -2059,6 +2173,7 @@ def _job_kind(command_type: str) -> str:
         "generate.video": "video",
         "generate.text.cloud": "text",
         "generate.image.cloud": "image",
+        "generate.image.img2img": "image",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -2080,7 +2195,8 @@ def _cloud_adapter_id(registry, provider_key: str) -> str:
     return JOB_COMMANDS["generate.text.cloud"]
 
 
-def _job_request(session: Session, project: Project, command_type: str, payload: dict) -> dict:
+def _job_request(session: Session, project: Project, command_type: str,
+                 payload: dict, storage=None) -> dict:
     req: dict[str, Any] = {"command_type": command_type, **payload}
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
@@ -2189,6 +2305,123 @@ def _job_request(session: Session, project: Project, command_type: str, payload:
             "world_id": payload.get("world_id"),
             "location_id": payload.get("location_id"),
             "reference_asset_id": payload.get("reference_asset_id"),
+        }
+    elif command_type == "generate.image.img2img":
+        # C3-D2 — resolve source/reference CAS payloads at commit time:
+        # existence + project ownership + kind were checked at preview,
+        # and every byte payload passes the image-safety decode gate
+        # here again before the job row is written. The job stores CAS
+        # paths + content hashes (never raw bytes); the adapter reads,
+        # re-inspects, and base64s them into the provider-shaped submit
+        # body at run time. Source-to-output lineage is recorded in the
+        # output asset's provenance media (see _media_extra).
+        from app.db.models import Asset
+        from app.domain import bridge as _bridge
+        from app.domain import cloud_cost as _cc
+        from app.domain import image_safety
+        provider = _bridge.get_provider(payload.get("provider_key"))
+        if provider is None:
+            raise CommandError(404, "provider not found in catalog")
+        model = _cc.pick_image_model(provider, payload.get("model_id"))
+        strat = _cc.t1_image_strategy(provider)
+        if model is None or strat is None:
+            raise CommandError(
+                422, "provider has no documented image strategy/model")
+        # Commit-time capability gate — a direct commit must not bypass
+        # the declared/implemented contract checks preview performed.
+        from app.domain.providers import catalog as _pc
+        from app.domain.workers.rest_image_providers import IMAGE_SPECS
+        caps = _pc.model_editing_caps(provider["key"], model["id"])
+        if not caps.get("img2img"):
+            raise CommandError(
+                422, f"model '{model['id']}' does not declare img2img "
+                     "editing support")
+        _spec = IMAGE_SPECS.get(provider["key"])
+        if _spec is None or _spec.edit_path is None:
+            raise CommandError(
+                422, "no img2img edits contract implemented for provider "
+                     f"'{provider['key']}'")
+        est = _cc.estimate_image_cost(
+            model, count=1, size=payload.get("size"),
+            quality=payload.get("quality"),
+            prompt=(payload.get("prompt") or "").strip())
+        if est["est_cost_usd"] is None:
+            raise CommandError(422, "pricing_unavailable")
+
+        def _resolve_image(aid: str, label: str) -> tuple:
+            a = session.get(Asset, aid or "")
+            if a is None or a.project_id != project.id:
+                raise CommandError(404, f"{label} asset not found in project")
+            if a.kind != "image":
+                raise CommandError(422, f"{label} asset must be an image")
+            if storage is None:
+                raise CommandError(500, "storage unavailable")
+            p = storage.asset_path(session, a)
+            if p is None or not p.exists():
+                raise CommandError(422, f"{label} asset bytes missing")
+            try:
+                image_safety.inspect_image(p.read_bytes())
+            except Exception as exc:
+                raise CommandError(
+                    422, f"{label} image failed safety inspection: {exc}")
+            return a, p
+
+        src, src_path = _resolve_image(
+            payload.get("source_asset_id") or "", "source image")
+        # Commit-time re-check of the preview gates — a direct commit
+        # must not carry a combination preview would have refused.
+        ref_ids = list(payload.get("reference_asset_ids") or [])
+        if len(ref_ids) > int(caps.get("max_reference_images") or 0):
+            raise CommandError(
+                422, "reference count exceeds the model's declared limit")
+        if src.id in ref_ids or len(set(ref_ids)) != len(ref_ids):
+            raise CommandError(
+                422, "duplicate asset in source/references")
+        weights = payload.get("reference_weights") or []
+        if weights:
+            if not caps.get("reference_weights"):
+                raise CommandError(
+                    422, "this model does not implement reference weights")
+            if len(weights) != len(ref_ids):
+                raise CommandError(
+                    422, "reference_weights must match reference_asset_ids")
+            for w in weights:
+                _validate_reference_weight(w)
+        refs, ref_paths = [], []
+        for rid in ref_ids:
+            r, rp = _resolve_image(rid, "reference image")
+            refs.append(r.id)
+            ref_paths.append(str(rp))
+        req = {
+            "command_type": command_type,
+            "provider_key": provider["key"],
+            "model_id": model["id"],
+            "strategy_id": strat["strategy_id"],
+            "mode": "img2img",
+            "prompt": (payload.get("prompt") or "").strip(),
+            "negative_prompt": payload.get("negative_prompt") or "",
+            "execution_target": "cloud",
+            "size": payload.get("size"),
+            "quality": payload.get("quality"),
+            "seed": payload.get("seed"),
+            "count": 1,
+            "est_cost_usd": est["est_cost_usd"],
+            "cost_table": model.get("cost_table"),
+            "cost_is_estimate": True,
+            "data_out": _cc.data_out_summary(
+                provider, (payload.get("prompt") or "").strip()),
+            "simulated": True,
+            "source_asset_id": src.id,
+            "source_sha256": src.sha256,
+            "source_path": str(src_path),
+            "reference_asset_ids": refs,
+            "reference_paths": ref_paths,
+            "reference_weights": payload.get("reference_weights") or [],
+            "scene_id": payload.get("scene_id"),
+            "shot_id": payload.get("shot_id"),
+            "character_id": payload.get("character_id"),
+            "world_id": payload.get("world_id"),
+            "location_id": payload.get("location_id"),
         }
     elif command_type == "generate.video":
         from app.domain import compatibility, model_catalog
