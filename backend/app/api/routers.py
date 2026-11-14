@@ -729,6 +729,34 @@ def asset_file(
     return FileResponse(path)
 
 
+@api_router.post("/api/projects/{project_id}/assets/upload-source")
+async def upload_source_image(
+    request: Request,
+    project: Project = Depends(get_project),
+):
+    """C3-D4 — stage painted/editor-produced image bytes to a server
+    path so the standard `asset.import` command can ingest them through
+    the normal CAS job path. The payload passes the same image-safety
+    gate as every image input; the file lands under data_dir/uploads
+    with a content-derived name — never caller-controlled."""
+    from app.domain import image_safety
+    data = await request.body()
+    try:
+        info = image_safety.inspect_image(data)
+    except Exception as exc:
+        raise HTTPException(422, f"not a valid image payload: {exc}")
+    import hashlib
+    sha = hashlib.sha256(data).hexdigest()
+    up_dir = request.app.state.settings.data_dir / "uploads" / project.id
+    up_dir.mkdir(parents=True, exist_ok=True)
+    path = up_dir / f"{sha}.{info.format}"
+    if not path.exists():
+        path.write_bytes(data)
+    return {"path": str(path), "sha256": sha,
+            "width": info.width, "height": info.height,
+            "format": info.format}
+
+
 @api_router.get("/api/projects/{project_id}/shared-assets", response_model=list[SharedAssetOut])
 def list_shared(project: Project = Depends(get_project), db: Session = Depends(get_db)):
     """Shared-library assets visible to this project: globally shared rows

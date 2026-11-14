@@ -5,7 +5,9 @@
 // entries only, and generated PNGs are deterministic test artifacts —
 // the UI must never present any of it as real provider output.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "../../api/client";
+import { apiFetch, fetchAssetObjectUrl } from "../../api/client";
+import { MaskEditor } from "./MaskEditor";
+import { computePad } from "./editorMath";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
   CommandProposal, ImageContracts, Job,
@@ -136,6 +138,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
   const [outW, setOutW] = useState("");
   const [outH, setOutH] = useState("");
   const [placement, setPlacement] = useState("center");
+  const [srcObjUrl, setSrcObjUrl] = useState<string | null>(null);
   const [refIds, setRefIds] = useState<string[]>([]);
   const [refWeights, setRefWeights] = useState<Record<string, string>>({});
 
@@ -232,11 +235,28 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     }
   }, [mode, selectable, providerKey, modelId, models, maxRefs, refIds.length]);
 
+  // C3-D4 — authenticated object URL for the painted-mask editor.
+  useEffect(() => {
+    let revoke: string | null = null;
+    if (mode === "inpaint" && sourceAssetId) {
+      fetchAssetObjectUrl(pid, sourceAssetId)
+        .then((u) => { revoke = u; setSrcObjUrl(u); })
+        .catch(() => setSrcObjUrl(null));
+    } else setSrcObjUrl(null);
+    return () => { if (revoke) URL.revokeObjectURL(revoke); };
+  }, [mode, pid, sourceAssetId]);
+
   // Project image assets usable as img2img source/references.
   const imageAssets = useMemo(
     () => assetsPage.items.filter((a) => a.kind === "image"),
     [assetsPage],
   );
+  const srcDims = useMemo(() => {
+    const a = imageAssets.find((x) => x.id === sourceAssetId);
+    const m = (a?.media_json ?? {}) as Record<string, unknown>;
+    const w = Number(m.width), h = Number(m.height);
+    return w && h ? { w, h } : null;
+  }, [imageAssets, sourceAssetId]);
 
   const sizes = model?.sizes ?? [];
   const qualities = useMemo(() => {
@@ -666,6 +686,12 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
               </p>
             </div>
           </div>
+          <div className="mt-3">
+            <span className={labelCls}>Paint a mask</span>
+            <MaskEditor pid={pid} revision={revision} imageUrl={srcObjUrl}
+              onMaskImported={(id) => { setMaskAssetId(id); refreshAssets(); }}
+              onNotice={(m) => setNotice(m)} onError={(m) => setError(m)} />
+          </div>
         </fieldset>
       )}
 
@@ -713,6 +739,28 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
                 Where the original sits inside the new canvas — its pixels
                 are preserved; only the expansion is generated.
               </p>
+            </div>
+            <div className="sm:col-span-4" data-testid="ci-outpaint-preview">
+              {(() => {
+                const sw = srcDims?.w ?? 0, sh = srcDims?.h ?? 0;
+                const ow = Number(outW) || 0, oh = Number(outH) || 0;
+                if (!sw || !ow || !oh) return (
+                  <p className="text-[10px] text-faint">
+                    Pick a source and enter target dimensions to preview placement.
+                  </p>);
+                const sc = Math.min(220 / ow, 140 / oh, 1);
+                const pad = computePad(sw, sh, ow, oh, placement as never);
+                return (
+                  <div className="relative mx-auto mt-1 border border-line bg-black/40"
+                    style={{ width: ow * sc, height: oh * sc }}>
+                    <div className="absolute bg-teal/60"
+                      style={{ left: pad.left * sc, top: pad.top * sc,
+                               width: sw * sc, height: sh * sc }} />
+                    <span className="absolute inset-0 flex items-center justify-center text-[9px] text-faint">
+                      {ow}×{oh} — teal = original preserved region
+                    </span>
+                  </div>);
+              })()}
             </div>
           </div>
         </fieldset>
