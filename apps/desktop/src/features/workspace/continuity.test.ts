@@ -83,4 +83,32 @@ describe("compareShots", () => {
     expect(d.prevLocation).toBe("Lab");
     expect(d.nextLocation).toBe("Roof");
   });
+
+  it("flags a cross-scene comparison", () => {
+    const a = shot("a", { scene_id: "s1" });
+    const b = shot("b", { scene_id: "s2" });
+    expect(compareShots(a, b).sceneChanged).toBe(true);
+    expect(compareShots(a, shot("b", { scene_id: "s1" })).sceneChanged).toBe(false);
+  });
+
+  it("diffs style, blocking, action and per-character notes", () => {
+    const a1 = castMember("c1", "Ada", {
+      blocking: "frame left", action_instructions: "waits",
+      continuity_json: { notes: "limps slightly" },
+    });
+    const b1 = castMember("c1", "Ada", {
+      blocking: "frame right", action_instructions: "waits",
+      continuity_json: { notes: "recovered" },
+    });
+    const a = shot("a", { continuity_json: { style: "noir" } }, [a1]);
+    const b = shot("b", { continuity_json: { style: "pastel" } }, [b1]);
+    const d = compareShots(a, b);
+    expect(d.fields).toEqual([
+      { label: "Scene style", prev: "noir", next: "pastel" },
+    ]);
+    expect(d.castChanges).toEqual([
+      { name: "Ada", prev: "blocking: frame left", next: "blocking: frame right" },
+      { name: "Ada", prev: "notes: limps slightly", next: "notes: recovered" },
+    ]);
+  });
 });

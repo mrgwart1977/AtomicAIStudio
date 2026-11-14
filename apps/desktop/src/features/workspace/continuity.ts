@@ -12,6 +12,7 @@ export const CONTINUITY_KEYS = [
   { key: "lighting", label: "Lighting" },
   { key: "camera", label: "Camera framing" },
   { key: "mood", label: "Mood & atmosphere" },
+  { key: "style", label: "Scene style" },
   { key: "notes", label: "Stays consistent" },
   { key: "changes", label: "What changed" },
 ] as const;
@@ -29,6 +30,8 @@ export interface ContinuityDiff {
   locationChanged: boolean;
   prevLocation: string;
   nextLocation: string;
+  /** C5-C — shots from different scenes (scene style/intent differs). */
+  sceneChanged: boolean;
 }
 
 function castIdsOf(e: StoryboardShot): Map<string, CastMember> {
@@ -53,12 +56,20 @@ function castDiffs(prev: StoryboardShot, next: StoryboardShot,
     const p = pm.get(id)!;
     const n = nm.get(id)!;
     const name = n.character?.name ?? p.character?.name ?? "?";
-    for (const k of ["wardrobe_variant", "expression", "emotion"] as const) {
+    for (const k of ["wardrobe_variant", "expression", "emotion",
+                     "blocking", "action_instructions"] as const) {
       const a = String(p[k] ?? ""), b = String(n[k] ?? "");
       if (a !== b && (a || b)) {
         out.push({ name, prev: `${k}: ${a || "—"}`,
                    next: `${k}: ${b || "—"}` });
       }
+    }
+    // C5-C — character-specific continuity notes diff too.
+    const pa = String((p.continuity_json || {}).notes ?? "");
+    const na = String((n.continuity_json || {}).notes ?? "");
+    if (pa !== na && (pa || na)) {
+      out.push({ name, prev: `notes: ${pa || "—"}`,
+                 next: `notes: ${na || "—"}` });
     }
   }
   return out;
@@ -83,5 +94,6 @@ export function compareShots(prev: StoryboardShot, next: StoryboardShot): Contin
     locationChanged: (prev.shot.location_id ?? "") !== (next.shot.location_id ?? ""),
     prevLocation: prev.location_name || "unset",
     nextLocation: next.location_name || "unset",
+    sceneChanged: prev.shot.scene_id !== next.shot.scene_id,
   };
 }

@@ -274,6 +274,22 @@ export interface CommandProposal {
     id: string; revision: number; clip_count: number;
     edl_sha256?: string;   // C5-B - timeline.export pins the EDL bytes
   } | null;
+
+  /** C5-C -- shot.generate/shot.video: the composed prompt record
+   * (sections, omissions, conflicts, budget). The approval pins
+   * prompt_sha256 as expected_prompt; context edits refuse the commit. */
+  resolved_prompt?: {
+    prompt_sha256: string;
+    prompt: string;
+    user_prompt: string | null;
+    context_text: string;
+    sections: Array<Record<string, unknown>>;
+    omitted: string[];
+    conflicts: string[];
+    warnings: string[];
+    budget: { limit: number; used: number; user: number };
+    user_over_budget: boolean;
+  } | null;
 }
 
 export interface CommitResult {
@@ -448,6 +464,7 @@ export interface CastMember {
   character_id: string;
   position: number;
   character: { id: string; name: string; status: string };
+
   role?: string | null;
   notes_json?: Record<string, unknown> | null;
   wardrobe_variant?: string | null;

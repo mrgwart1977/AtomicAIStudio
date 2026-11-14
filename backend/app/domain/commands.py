@@ -470,12 +470,40 @@ def _compose_shot_generate(session: Session, project: Project,
     if not prompt:
         raise CommandError(
             422, "shot has no prompt — write one or pass prompt")
+    # C5-C — deterministic prompt composition. The user text stays
+    # verbatim; scene/location/camera/cast/continuity context appends
+    # under the model's prompt budget. compose_prompt=False opts out —
+    # the provider then receives exactly the user-authored text.
+    comp = None
+    if payload.get("compose_prompt", True):
+        from app.domain import prompt_compose
+        comp = prompt_compose.compose_shot_prompt(
+            session, project, shot, user_prompt=prompt,
+            refset=rs if rs_id else None,
+            model_max_chars=_model_prompt_budget(payload))
+        expected_prompt = payload.get("expected_prompt")
+        if expected_prompt is not None and \
+                expected_prompt != comp["prompt_sha256"]:
+            raise CommandError(
+                422, "prompt context changed since preview — "
+                     "re-preview shot.generate")
+        # The local img2img path's text encoder truncates user text
+        # beyond its context window with no declared hard cap — refuse
+        # oversized user text rather than silently losing it. Cloud
+        # image keeps its own real 8000-char cap in _validate, so its
+        # budget stays advisory (warning only).
+        if comp["user_over_budget"] and src:
+            raise CommandError(
+                422, f"prompt is {comp['budget']['user']} characters — "
+                     f"over this model's {comp['budget']['limit']}-char "
+                     "budget. Shorten the prompt or disable context "
+                     "composition (compose_prompt=false).")
     inner = ("generate.image.img2img" if src
              else "generate.image.cloud")
     composed = {
         "provider_key": payload.get("provider_key"),
         "model_id": payload.get("model_id"),
-        "prompt": prompt,
+        "prompt": comp["prompt"] if comp else prompt,
         "negative_prompt": payload.get("negative_prompt"),
         "execution_target": "cloud",
         "size": payload.get("size"),
@@ -489,6 +517,20 @@ def _compose_shot_generate(session: Session, project: Project,
     }
     if src:
         composed["source_asset_id"] = src
+    if comp is not None:
+        # Composed-prompt provenance: what context was added, what was
+        # omitted by the budget, and the fingerprint the approval pins.
+        composed["user_prompt"] = comp["user_prompt"]
+        composed["prompt_context"] = {
+            "prompt_sha256": comp["prompt_sha256"],
+            "context_text": comp["context_text"],
+            "sections": comp["sections"],
+            "omitted": comp["omitted"],
+            "conflicts": comp["conflicts"],
+            "warnings": comp["warnings"],
+            "budget": comp["budget"],
+            "user_over_budget": comp["user_over_budget"],
+        }
     if rs_id:
         composed["reference_set_id"] = rs_id
         # Forward the caller's stale-approval pins untouched — the
@@ -588,6 +630,30 @@ def _video_default_size(session: Session, spec, image_asset_id,
     return 832, 480
 
 
+def _model_prompt_budget(payload: dict) -> int | None:
+    """C5-C — model-specific prompt budget. Cloud image models may
+    declare ``prompt_max_chars`` on their catalog entry; local video
+    models declare it on the spec's capabilities. Unresolvable → None
+    (composer default). Never raises — the inner pipeline remains the
+    authority on model eligibility."""
+    try:
+        if payload.get("model_key"):
+            from app.domain import model_catalog
+            spec = model_catalog.get(payload.get("model_key") or "")
+            v = (spec.capabilities.get("prompt_max_chars")
+                 if spec else None)
+        else:
+            from app.domain import bridge as _bridge
+            from app.domain import cloud_cost as _cc
+            provider = _bridge.get_provider(payload.get("provider_key"))
+            model = (_cc.pick_image_model(provider, payload.get("model_id"))
+                     if provider else None)
+            v = model.get("prompt_max_chars") if model else None
+        return v if isinstance(v, int) and v > 0 else None
+    except Exception:
+        return None
+
+
 def _compose_shot_video(session: Session, project: Project,
                         payload: dict) -> tuple:
     """C4-D — resolve a shot.video call into the equivalent
@@ -611,12 +677,40 @@ def _compose_shot_video(session: Session, project: Project,
     parts = [str(p).strip() for p in
              (shot.prompt, payload.get("motion_prompt"),
               payload.get("prompt")) if p and str(p).strip()]
-    cont = shot.continuity_json or {}
-    cont_txt = ", ".join(f"{k}: {v}" for k, v in cont.items()
-                         if str(v or "").strip())
-    if cont_txt:
-        parts.append(f"continuity guidance: {cont_txt}"[:300])
-    prompt = " — ".join(parts)
+    user_prompt = " — ".join(parts)
+    if not user_prompt and not src:
+        raise CommandError(
+            422, "shot has no prompt and no source image — "
+                 "write a prompt or bind a source first")
+    # C5-C — same deterministic composer as shot.generate: user text
+    # verbatim first, then structured context under the model budget.
+    # The old ad-hoc 'continuity guidance:' append is superseded by the
+    # composer's typed continuity section.
+    comp = None
+    if payload.get("compose_prompt", True) and user_prompt:
+        from app.domain import prompt_compose
+        comp = prompt_compose.compose_shot_prompt(
+            session, project, shot, user_prompt=user_prompt,
+            model_max_chars=_model_prompt_budget(payload))
+        expected_prompt = payload.get("expected_prompt")
+        if expected_prompt is not None and \
+                expected_prompt != comp["prompt_sha256"]:
+            raise CommandError(
+                422, "prompt context changed since preview — "
+                     "re-preview shot.video")
+        # No declared hard cap exists for video prompts, but the local
+        # text encoder truncates beyond its context window — silently
+        # losing user-authored text is not allowed, so oversized user
+        # text refuses here rather than degrading at the model. The
+        # documented escape hatch is compose_prompt=false + a shorter
+        # prompt. (Image models keep their own real 8000-char cap.)
+        if comp["user_over_budget"]:
+            raise CommandError(
+                422, f"prompt is {comp['budget']['user']} characters — "
+                     f"over this model's {comp['budget']['limit']}-char "
+                     "budget. Shorten the prompt or disable context "
+                     "composition (compose_prompt=false).")
+    prompt = comp["prompt"] if comp else user_prompt
     if not prompt and not src:
         raise CommandError(
             422, "shot has no prompt and no source image — "
@@ -645,6 +739,18 @@ def _compose_shot_video(session: Session, project: Project,
     # to ABSENT keys — a present-but-None value would crash them, so
     # unset fields are simply omitted.
     composed = {k: v for k, v in composed.items() if v is not None}
+    if comp is not None:
+        composed["user_prompt"] = comp["user_prompt"]
+        composed["prompt_context"] = {
+            "prompt_sha256": comp["prompt_sha256"],
+            "context_text": comp["context_text"],
+            "sections": comp["sections"],
+            "omitted": comp["omitted"],
+            "conflicts": comp["conflicts"],
+            "warnings": comp["warnings"],
+            "budget": comp["budget"],
+            "user_over_budget": comp["user_over_budget"],
+        }
     # Same approval-pin contract as shot.generate — a shot edit between
     # preview and commit refuses rather than silently regenerating.
     expected_shot = payload.get("expected_shot")
@@ -1238,8 +1344,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _vshot, _vinner, _vcomposed = _compose_shot_video(
             session, project, payload)
         warnings += _validate(session, project, _vinner, _vcomposed)
-        if command_type == "shot.move" and payload.get("to_scene_id"):
-            _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
+    if command_type == "shot.move" and payload.get("to_scene_id"):
+        _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
         _get_shot(session, project, payload)
         _get_character(session, project, payload)
@@ -1860,6 +1966,24 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         # state (prompt, source, cast, continuity); set fingerprints
         # alone can't see those edits.
         out["resolved_shot"] = _shot_gen_fingerprint(session, _sh, eff)
+    if eff.get("prompt_context"):
+        # C5-C — the approval sees the COMPOSED prompt (user text +
+        # context sections + omissions/conflicts) and pins its hash via
+        # expected_prompt at commit.
+        pc = eff["prompt_context"]
+        out["resolved_prompt"] = {
+            "prompt_sha256": pc["prompt_sha256"],
+            "prompt": eff["prompt"],
+            "user_prompt": eff.get("user_prompt"),
+            "context_text": pc["context_text"],
+            "sections": pc["sections"],
+            "omitted": pc["omitted"],
+            "conflicts": pc["conflicts"],
+            "warnings": pc["warnings"],
+            "budget": pc["budget"],
+            "user_over_budget": pc["user_over_budget"],
+        }
+        out["warnings"] = out["warnings"] + pc["warnings"]
     if command_type == "shot.video" and _sh is not None:
         # C4-D — the approval pins the resolved generation parameters
         # (model, dims, duration, sampling) via expected_params at
@@ -3255,6 +3379,9 @@ def _job_request(session: Session, project: Project, command_type: str,
         req["shot_generate"] = {
             "shot_id": _shot.id, "scene_id": _shot.scene_id,
             "reference_set_id": _composed.get("reference_set_id"),
+            # C5-C — composition record travels in provenance.
+            "prompt_context": _composed.get("prompt_context"),
+            "user_prompt": _composed.get("user_prompt"),
         }
         return req
     if command_type == "shot.video":
@@ -3269,6 +3396,9 @@ def _job_request(session: Session, project: Project, command_type: str,
             "shot_id": _shot.id, "scene_id": _shot.scene_id,
             "source_asset_id": _composed.get("image_asset_id"),
             "model_key": _composed.get("model_key"),
+            # C5-C — composition record travels in provenance.
+            "prompt_context": _composed.get("prompt_context"),
+            "user_prompt": _composed.get("user_prompt"),
         }
         return req
     if command_type == "generate.image.mock":

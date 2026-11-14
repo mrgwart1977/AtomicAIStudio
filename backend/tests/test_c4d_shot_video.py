@@ -140,7 +140,10 @@ def test_shot_video_continuity_merges_into_prompt(client, tmp_path, monkeypatch)
     req = _job_req(client, r["job_id"])
     assert "overcast noon" in req["prompt"]
     assert "red coat" in req["prompt"]
-    assert "continuity guidance" in req["prompt"]
+    # C5-C — continuity now rides the composer's typed section
+    # (lighting → camera section, wardrobe → continuity), not the old
+    # ad-hoc 'continuity guidance:' append.
+    assert "lighting" in req["prompt"] or "wardrobe" in req["prompt"]
 
 
 def test_shot_video_stale_approval_rejected(client, tmp_path, monkeypatch):
