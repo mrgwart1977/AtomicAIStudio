@@ -123,6 +123,15 @@ class AssetImportAdapter(_OpsBase):
                 "byte_size": af.byte_size,
                 "origin": "external" if ext else "imported",
             }
+            # S3 — record image dimensions at ingestion so asset-list
+            # media_json carries width/height like generated assets do.
+            if output["kind"] == "image":
+                try:
+                    from app.domain import image_safety
+                    info = image_safety.inspect_image(out_path.read_bytes())
+                    output["media"] = {**info.to_dict(), "source": "import"}
+                except Exception:
+                    pass
             if ext:
                 output["external_source"] = {
                     "provider_key": ext.get("provider_key"),

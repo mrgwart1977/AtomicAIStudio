@@ -662,8 +662,26 @@ def cancel_job(job_id: str, request: Request, db: Session = Depends(get_db)):
 
 # ---------- assets ----------
 
+def _image_dims_backfill(storage, db: Session, asset) -> dict:
+    """S3 — header-only dimension probe for legacy image assets whose
+    AssetVersion.media_json predates dimension capture. Read-only and
+    non-destructive: fills response metadata without touching CAS rows
+    or hashes; any failure yields {} rather than breaking the list."""
+    try:
+        path = storage.asset_path(db, asset)
+        if path is None or not path.exists():
+            return {}
+        from PIL import Image
+        with Image.open(path) as im:
+            return {"width": im.width, "height": im.height,
+                    "format": (im.format or "").upper()}
+    except Exception:
+        return {}
+
+
 @api_router.get("/api/projects/{project_id}/assets", response_model=AssetPageOut)
 def list_assets(
+    request: Request,
     project: Project = Depends(get_project), db: Session = Depends(get_db),
     offset: int = 0, limit: int = Query(default=100, le=500),
     kind: str | None = None, q: str | None = None, status: str | None = None,
@@ -692,7 +710,11 @@ def list_assets(
         ).scalars():
             media_by_ver[v.id] = v.media_json
     out_items = []
+    storage = request.app.state.storage
     for a in items:
+        media = dict(media_by_ver.get(a.current_version_id) or {})
+        if a.kind == "image" and "width" not in media:
+            media = {**_image_dims_backfill(storage, db, a), **media}
         out_items.append({
             "id": a.id, "project_id": a.project_id, "name": a.name,
             "kind": a.kind, "origin": a.origin, "scope": a.scope,
@@ -700,7 +722,7 @@ def list_assets(
             "byte_size": a.byte_size, "current_version_id": a.current_version_id,
             "created_at": a.created_at,
             "provenance_json": a.provenance_json or {},
-            "media_json": media_by_ver.get(a.current_version_id) or {},
+            "media_json": media,
         })
     return {"items": out_items, "total": total, "offset": offset, "limit": limit}
 
