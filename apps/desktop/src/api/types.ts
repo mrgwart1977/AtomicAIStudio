@@ -493,7 +493,11 @@ export interface StoryboardShot {
     latest_asset_at: string | null;
     latest_job_id: string | null;
     latest_job_status: string | null;
+    latest_job_kind: string | null;
     latest_job_at: string | null;
+    video_count: number;
+    latest_video_id: string | null;
+    latest_video_duration_s: number | null;
   } | null;
 }
 

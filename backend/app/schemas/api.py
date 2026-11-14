@@ -103,7 +103,7 @@ CommandType = Literal[
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
-    "shot.generate",
+    "shot.generate", "shot.video",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",

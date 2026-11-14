@@ -83,6 +83,8 @@ SUPPORTED_COMMANDS = {
     "refset.create", "refset.update", "refset.delete",
     # C4-B — shot-scoped image generation (composes existing pipelines)
     "shot.generate",
+    # C4-D — shot-scoped video generation (composes generate.video)
+    "shot.video",
 }
 GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "generate.image.persistent", "generate.video",
@@ -91,7 +93,10 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        # C4-B — shot-scoped composition of the same
                        # simulated image pipelines (img2img when a
                        # source is bound, else cloud text-to-image).
-                       "shot.generate"}
+                       "shot.generate",
+                       # C4-D — shot-scoped composition of generate.video
+                       # (local installed video models, i2v optional).
+                       "shot.video"}
 
 # Commands whose commit transaction must begin BEGIN IMMEDIATE — they
 # check-then-act on financial state, so the budget-check SELECT must
@@ -134,6 +139,9 @@ JOB_COMMANDS = {
     # C4-B — maps to the base sim adapter; the composed request
     # overrides to img2img when a source image is bound.
     "shot.generate": "cloud.image.sim",
+    # C4-D — local installed video models; the composed request is
+    # exactly generate.video's shape plus shot provenance.
+    "shot.video": "gen.video.sdcpp",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -204,6 +212,8 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Generate image via persistent worker ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
     if command_type == "generate.video":
         return f"Generate video ({payload.get('model_key', '?')}) — '{(payload.get('prompt') or '')[:60]}'"
+    if command_type == "shot.video":
+        return f"Generate video for shot — '{(payload.get('motion_prompt') or '')[:60]}'"
     if command_type == "generate.text.cloud":
         return (f"Simulate cloud text job for {payload.get('provider_key', '?')} "
                 f"— '{(payload.get('prompt') or '')[:60]}'")
@@ -476,16 +486,84 @@ def _shot_gen_fingerprint(session: Session, shot, composed: dict) -> dict:
     """C4-B — the generation-relevant shot state an approval pins.
     shot.revision catches prompt/source/continuity edits, but cast
     membership lives in shot_characters and doesn't bump the row —
-    it is fingerprinted explicitly."""
+    it is fingerprinted explicitly. The source key covers both image
+    (source_asset_id) and video (image_asset_id) compositions."""
     return {
         "shot_id": shot.id,
         "revision": shot.revision,
         "prompt": composed.get("prompt"),
-        "source_asset_id": composed.get("source_asset_id"),
+        "source_asset_id": (composed.get("source_asset_id")
+                            or composed.get("image_asset_id")),
         "reference_set_id": composed.get("reference_set_id"),
         "continuity": shot.continuity_json or {},
         "cast": sorted(_shot_cast_ids(session, shot)),
     }
+
+
+def _compose_shot_video(session: Session, project: Project,
+                        payload: dict) -> tuple:
+    """C4-D — resolve a shot.video call into the equivalent
+    generate.video call + effective payload. Returns (shot,
+    "generate.video", composed). Composition is server-side only:
+    bindings come from the shot row, never the client.
+
+    Reference sets/cast/location are NOT video-contract inputs — the
+    contract takes a prompt + an optional source image, so that is all
+    the composed request carries. Descriptive continuity guidance is
+    merged INTO the prompt (the only channel the contract supports) —
+    never claimed as enforced continuity."""
+    try:
+        shot = sb.get_shot(session, payload.get("shot_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "shot not found in this project")
+    if shot.status != "active":
+        raise CommandError(422, "cannot generate video from an archived shot")
+    src = (payload.get("image_asset_id")
+           or payload.get("source_asset_id") or shot.source_asset_id)
+    parts = [str(p).strip() for p in
+             (shot.prompt, payload.get("motion_prompt"),
+              payload.get("prompt")) if p and str(p).strip()]
+    cont = shot.continuity_json or {}
+    cont_txt = ", ".join(f"{k}: {v}" for k, v in cont.items()
+                         if str(v or "").strip())
+    if cont_txt:
+        parts.append(f"continuity guidance: {cont_txt}"[:300])
+    prompt = " — ".join(parts)
+    if not prompt and not src:
+        raise CommandError(
+            422, "shot has no prompt and no source image — "
+                 "write a prompt or bind a source first")
+    composed = {
+        "model_key": payload.get("model_key"),
+        "prompt": prompt,
+        "negative_prompt": payload.get("negative_prompt"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "frames": payload.get("frames"),
+        "fps": payload.get("fps"),
+        "steps": payload.get("steps"),
+        "cfg": payload.get("cfg"),
+        "seed": payload.get("seed"),
+        "device": payload.get("device", "auto"),
+        "image_asset_id": src,
+        "shot_id": shot.id,
+        "scene_id": shot.scene_id,
+        "residency_mode": payload.get("residency_mode"),
+        "max_vram_gib": payload.get("max_vram_gib"),
+        "memory_risk_acknowledged": payload.get("memory_risk_acknowledged"),
+    }
+    # generate.video's request builder applies int()/default fallbacks
+    # to ABSENT keys — a present-but-None value would crash them, so
+    # unset fields are simply omitted.
+    composed = {k: v for k, v in composed.items() if v is not None}
+    # Same approval-pin contract as shot.generate — a shot edit between
+    # preview and commit refuses rather than silently regenerating.
+    expected_shot = payload.get("expected_shot")
+    if expected_shot is not None and \
+            expected_shot != _shot_gen_fingerprint(session, shot, composed):
+        raise CommandError(
+            422, "shot changed since preview — re-preview shot.video")
+    return shot, "generate.video", composed
 
 
 def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
@@ -1056,6 +1134,13 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _shot, _inner, _composed = _compose_shot_generate(
             session, project, payload)
         warnings += _validate(session, project, _inner, _composed)
+    if command_type == "shot.video":
+        # C4-D — same discipline for video: compose → the REAL
+        # generate.video validation (modality, install state, i2v
+        # support, frames/fps/device bounds).
+        _vshot, _vinner, _vcomposed = _compose_shot_video(
+            session, project, payload)
+        warnings += _validate(session, project, _vinner, _vcomposed)
         if command_type == "shot.move" and payload.get("to_scene_id"):
             _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -1459,6 +1544,13 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                 session, project, payload)
         except CommandError:
             est_type, eff = command_type, payload
+    elif command_type == "shot.video":
+        # C4-D — compose for the cost/vram estimate + resolved_shot pin.
+        try:
+            _sh, est_type, eff = _compose_shot_video(
+                session, project, payload)
+        except CommandError:
+            est_type, eff = command_type, payload
     out = {
         "command": {
             "project_id": project.id,
@@ -1493,8 +1585,9 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                                    "revision": _rs.revision}
         except KeyError:
             pass  # _validate already reported the missing set
-    if command_type == "shot.generate" and _sh is not None:
-        # C4-B — the approval also pins the SHOT's generation-relevant
+    if (command_type in ("shot.generate", "shot.video")
+            and _sh is not None):
+        # C4-B/D — the approval also pins the SHOT's generation-relevant
         # state (prompt, source, cast, continuity); set fingerprints
         # alone can't see those edits.
         out["resolved_shot"] = _shot_gen_fingerprint(session, _sh, eff)
@@ -2353,7 +2446,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         asset = session.get(Asset, payload["asset_id"])
         _link_asset(session, project, asset, payload.get("mode", "link"), audit)
 
-    elif (command_type != "shot.generate"
+    elif (command_type not in ("shot.generate", "shot.video")
           and (command_type.startswith(
               ("scene.", "shot.", "entity.assets.", "refset."))
               or command_type == "character.duplicate")):
@@ -2394,7 +2487,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 # gen job restarts from scratch (bounded, user-initiated).
                 resumable=command_type not in (
                     "generate.image", "generate.image.persistent",
-                    "generate.video",
+                    "generate.video", "shot.video",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
@@ -2677,6 +2770,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image.img2img": "image",
         "generate.image.edit": "image",
         "shot.generate": "image",
+        "shot.video": "video",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -2715,6 +2809,20 @@ def _job_request(session: Session, project: Project, command_type: str,
         req["shot_generate"] = {
             "shot_id": _shot.id, "scene_id": _shot.scene_id,
             "reference_set_id": _composed.get("reference_set_id"),
+        }
+        return req
+    if command_type == "shot.video":
+        # C4-D — compose the shot's bindings into a real generate.video
+        # request; same engine, same admission, plus shot provenance.
+        _shot, _inner, _composed = _compose_shot_video(
+            session, project, payload)
+        req = _job_request(session, project, _inner, _composed,
+                           storage=storage)
+        req["origin_command_type"] = "shot.video"
+        req["shot_video"] = {
+            "shot_id": _shot.id, "scene_id": _shot.scene_id,
+            "source_asset_id": _composed.get("image_asset_id"),
+            "model_key": _composed.get("model_key"),
         }
         return req
     if command_type == "generate.image.mock":
