@@ -739,7 +739,7 @@ async def upload_source_image(
     the normal CAS job path. The payload passes the same image-safety
     gate as every image input; the file lands under data_dir/uploads
     with a content-derived name — never caller-controlled."""
-    from app.domain import image_safety
+    from app.domain import image_safety, upload_staging
     data = await request.body()
     try:
         info = image_safety.inspect_image(data)
@@ -747,14 +747,25 @@ async def upload_source_image(
         raise HTTPException(422, f"not a valid image payload: {exc}")
     import hashlib
     sha = hashlib.sha256(data).hexdigest()
-    up_dir = request.app.state.settings.data_dir / "uploads" / project.id
+    up_dir = upload_staging.uploads_dir(
+        request.app.state.settings.data_dir, project.id)
     up_dir.mkdir(parents=True, exist_ok=True)
-    path = up_dir / f"{sha}.{info.format}"
+    path = upload_staging.stage_path(
+        request.app.state.settings.data_dir, project.id, sha, info.format)
     if not path.exists():
         path.write_bytes(data)
-    return {"path": str(path), "sha256": sha,
-            "width": info.width, "height": info.height,
-            "format": info.format}
+    # S2 — bounded lazy sweep of this project's expired staging files.
+    # Recoverable-job references are preserved; counts only, no paths.
+    with request.app.state.session_factory() as db:
+        sweep = upload_staging.cleanup_project_staged(
+            db, request.app.state.settings.data_dir, project.id)
+    out = {"path": str(path), "sha256": sha,
+           "width": info.width, "height": info.height,
+           "format": info.format}
+    if sweep["deleted"]:
+        out["staging_sweep"] = {"deleted": sweep["deleted"],
+                                "reclaimed_bytes": sweep["reclaimed_bytes"]}
+    return out
 
 
 @api_router.get("/api/projects/{project_id}/shared-assets", response_model=list[SharedAssetOut])
