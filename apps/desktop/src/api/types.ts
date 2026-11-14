@@ -261,6 +261,10 @@ export interface CommandProposal {
   /** C4-A — {id, seed, revision} of the previewed set; committed back
    * as expected_set so pinned-seed/metadata edits invalidate too. */
   resolved_set?: { id: string; seed: number | null; revision: number } | null;
+  /** C4-B — shot.generate only: the SHOT's generation-relevant state
+   * (prompt/source/cast/continuity/revision). Commit pins this as
+   * expected_shot — a shot edit after preview refuses the commit. */
+  resolved_shot?: Record<string, unknown> | null;
 }
 
 export interface CommitResult {

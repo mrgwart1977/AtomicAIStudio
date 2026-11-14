@@ -149,6 +149,9 @@ class CommandProposalOut(BaseModel):
     # or metadata edit changes no member fingerprint, so the approval
     # pins set identity separately via expected_set at commit.
     resolved_set: dict[str, Any] | None = None
+    # C4-B — shot.generate only: the shot's generation-relevant state
+    # fingerprint (prompt/source/cast/continuity/revision).
+    resolved_shot: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):

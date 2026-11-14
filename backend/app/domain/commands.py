@@ -418,8 +418,11 @@ def _compose_shot_generate(session: Session, project: Project,
         except KeyError:
             raise CommandError(
                 404, "reference set not found in this project") from None
+        # Generate-time is STRICT, unlike bind-time: a bound set whose
+        # character was removed from the effective cast (own ∪ scene
+        # inherited) must refuse — never fall back to unrelated refs.
         cast = _shot_cast_ids(session, shot)
-        if cast and rs.character_id not in cast:
+        if rs.character_id not in cast:
             raise CommandError(
                 422, "reference set's character is not in this shot's "
                      "cast")
@@ -455,7 +458,34 @@ def _compose_shot_generate(session: Session, project: Project,
         for k in ("expected_references", "expected_set"):
             if k in payload:
                 composed[k] = payload[k]
+    # Shot-state staleness: expected_references fingerprints the SET,
+    # but a prompt/source/cast edit between preview and approve would
+    # otherwise sail through. The approval pins the shot fingerprint
+    # (revision + effective cast + composed bindings); commit recompiles
+    # and refuses a mismatch — composition runs again in _job_request,
+    # so the check also gates job creation.
+    expected_shot = payload.get("expected_shot")
+    if expected_shot is not None and \
+            expected_shot != _shot_gen_fingerprint(session, shot, composed):
+        raise CommandError(
+            422, "shot changed since preview — re-preview shot.generate")
     return shot, inner, composed
+
+
+def _shot_gen_fingerprint(session: Session, shot, composed: dict) -> dict:
+    """C4-B — the generation-relevant shot state an approval pins.
+    shot.revision catches prompt/source/continuity edits, but cast
+    membership lives in shot_characters and doesn't bump the row —
+    it is fingerprinted explicitly."""
+    return {
+        "shot_id": shot.id,
+        "revision": shot.revision,
+        "prompt": composed.get("prompt"),
+        "source_asset_id": composed.get("source_asset_id"),
+        "reference_set_id": composed.get("reference_set_id"),
+        "continuity": shot.continuity_json or {},
+        "cast": sorted(_shot_cast_ids(session, shot)),
+    }
 
 
 def _validate_reference_weight(weight, *, allow_none: bool = False) -> None:
@@ -1422,6 +1452,7 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
     # resolved-reference surfacing run on the COMPOSED payload so the
     # approval reflects exactly what commit will build.
     eff, est_type = payload, command_type
+    _sh = None
     if command_type == "shot.generate":
         try:
             _sh, est_type, eff = _compose_shot_generate(
@@ -1462,6 +1493,11 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                                    "revision": _rs.revision}
         except KeyError:
             pass  # _validate already reported the missing set
+    if command_type == "shot.generate" and _sh is not None:
+        # C4-B — the approval also pins the SHOT's generation-relevant
+        # state (prompt, source, cast, continuity); set fingerprints
+        # alone can't see those edits.
+        out["resolved_shot"] = _shot_gen_fingerprint(session, _sh, eff)
     return out
 
 

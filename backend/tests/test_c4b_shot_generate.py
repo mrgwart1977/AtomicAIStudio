@@ -186,6 +186,8 @@ def test_shot_generate_img2img_composition(client, tmp_path):
     pid, c, sid, src, scene = _setup(client, tmp_path)
     sh = _shot(client, pid, scene["scene"]["id"], prompt="misty dawn",
                source_asset_id=src["id"])
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
     _commit(client, pid, "shot.update",
             {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
     prev = _preview(client, pid, "shot.generate",
@@ -245,6 +247,8 @@ def test_stale_approval_rejected(client, tmp_path):
     pid, c, sid, src, scene = _setup(client, tmp_path)
     sh = _shot(client, pid, scene["scene"]["id"], prompt="x",
                source_asset_id=src["id"])
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
     _commit(client, pid, "shot.update",
             {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
     prev = _preview(client, pid, "shot.generate",
@@ -316,3 +320,123 @@ def test_capability_and_cost_gates_apply(client, tmp_path):
                   "execution_target": "cloud",
                   "shot_id": sh["shot"]["id"]}, expect=422)
     assert r.json()
+
+
+def test_cast_removal_invalidates_generate(client, tmp_path):
+    """Removing the bound character from the effective cast must refuse
+    generation — including the empty-cast edge that binding-time
+    deliberately permits."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    _commit(client, pid, "scene.cast.assign",
+            {"scene_id": scene["scene"]["id"], "character_id": c["id"]})
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="x")
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
+    # Inherited membership satisfies the cast check at generate time.
+    prev = _preview(client, pid, "shot.generate",
+                    {**GEN, "shot_id": sh["shot"]["id"]})
+    assert prev["resolved_shot"]["cast"] == [c["id"]]
+    # Removing the character empties the cast — bound set must refuse,
+    # not fall back to unrelated references.
+    _commit(client, pid, "scene.cast.remove",
+            {"scene_id": scene["scene"]["id"], "character_id": c["id"]})
+    r = _preview(client, pid, "shot.generate",
+                 {**GEN, "shot_id": sh["shot"]["id"]}, expect=422)
+    assert "cast" in str(r.json())
+
+
+def test_shot_state_change_invalidates_preview(client, tmp_path):
+    """Prompt/source edits after preview refuse the pinned commit —
+    the set fingerprints alone cannot see shot-level changes."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="misty dawn",
+               source_asset_id=src["id"])
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
+    prev = _preview(client, pid, "shot.generate",
+                    {**GEN, "shot_id": sh["shot"]["id"]})
+    fp = prev["resolved_shot"]
+    assert fp["shot_id"] == sh["shot"]["id"]
+    assert fp["prompt"] == "misty dawn"
+    assert fp["source_asset_id"] == src["id"]
+    assert fp["reference_set_id"] == sid
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "prompt": "sunny noon"})
+    r = _commit(client, pid, "shot.generate",
+                {**GEN, "shot_id": sh["shot"]["id"],
+                 "expected_shot": fp,
+                 "expected_references": prev["resolved_references"],
+                 "expected_set": prev["resolved_set"]},
+                expect=422)
+    assert "shot changed since preview" in str(r.json())
+
+
+def test_cast_change_invalidates_preview(client, tmp_path):
+    """Adding/removing cast members doesn't bump the shot row — the
+    fingerprint carries membership explicitly."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="x")
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    prev = _preview(client, pid, "shot.generate",
+                    {**GEN, "shot_id": sh["shot"]["id"]})
+    other = _char(client, pid, "Borin")
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": other["id"]})
+    r = _commit(client, pid, "shot.generate",
+                {**GEN, "shot_id": sh["shot"]["id"],
+                 "expected_shot": prev["resolved_shot"]},
+                expect=422)
+    assert "shot changed since preview" in str(r.json())
+
+
+def test_expected_shot_pins_clean_commit(client, tmp_path):
+    """expected_shot is not just a tripwire: an unchanged shot commits
+    fine with the pin attached."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="misty dawn",
+               source_asset_id=src["id"])
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
+    prev = _preview(client, pid, "shot.generate",
+                    {**GEN, "shot_id": sh["shot"]["id"]})
+    r = _commit(client, pid, "shot.generate",
+                {**GEN, "shot_id": sh["shot"]["id"],
+                 "expected_shot": prev["resolved_shot"],
+                 "expected_references": prev["resolved_references"],
+                 "expected_set": prev["resolved_set"]})
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded", job
+
+
+def test_output_queryable_by_shot_provenance(client, tmp_path):
+    """Generated assets carry the originating shot id in durable
+    provenance — discoverable via a fresh query (post-restart shape),
+    and a failed job must not fake an association."""
+    pid, c, sid, src, scene = _setup(client, tmp_path)
+    sh = _shot(client, pid, scene["scene"]["id"], prompt="misty dawn",
+               source_asset_id=src["id"])
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": c["id"]})
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"], "reference_set_id": sid})
+    r = _commit(client, pid, "shot.generate",
+                {**GEN, "shot_id": sh["shot"]["id"]})
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded", job
+    # Fresh list query — provenance_json.request.shot_generate is the
+    # restart-proof association, not transient UI state.
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    mine = [a for a in items
+            if ((a.get("provenance_json") or {}).get("request") or {})
+                .get("shot_generate", {}).get("shot_id") == sh["shot"]["id"]]
+    assert len(mine) >= 1  # sim adapter may emit intermediate + final
+    # And the job row itself retains the originating shot id.
+    req = _job_req(client, job["id"])
+    assert req["shot_generate"]["shot_id"] == sh["shot"]["id"]

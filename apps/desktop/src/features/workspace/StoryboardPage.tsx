@@ -1199,6 +1199,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
         p.expected_references = pending.proposal.resolved_references;
         p.expected_set = pending.proposal.resolved_set;
       }
+      // Pin the shot's generation-relevant state too — prompt, source,
+      // cast, continuity edits since preview refuse the commit.
+      if (pending.proposal.resolved_shot) {
+        p.expected_shot = pending.proposal.resolved_shot;
+      }
       await commitCommand(projectId, rev, "shot.generate", p, "storyboard");
       setPending(null);
       onDone();
