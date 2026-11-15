@@ -138,7 +138,13 @@ def test_installed_weights_without_runtime_are_limited_not_operational(client, t
     hw = client.get("/api/hardware").json()
     if (hw.get("backends") or {}).get("vulkan", {}).get("available"):
         assert m["runtime"]["any_operational"] is True
-        assert m["availability"] == "installed_operational"
+        # Operational runtime lifts the runtime gate, but availability
+        # still honestly reflects this machine's hardware fit: only a
+        # "compatible" classifier verdict earns installed_operational.
+        assert m["availability"] == (
+            "installed_operational"
+            if m["compatibility"]["status"] == "compatible"
+            else "installed_limited")
 
 
 def test_benchmark_adapter_shares_gen_lane_admission(client):
