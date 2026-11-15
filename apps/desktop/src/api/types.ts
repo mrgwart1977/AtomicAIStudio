@@ -959,6 +959,10 @@ export interface TimelineTrack {
   visible: boolean;
   locked: boolean;
   muted: boolean;
+  /** N2-C — lane gain in decibels (0 = unity, −60…+12). */
+  gain_db: number;
+  /** N2-C — when ≥1 lane is soloed, non-soloed lanes are silent. */
+  solo: boolean;
   created_at: string;
 }
 
@@ -980,6 +984,8 @@ export interface TimelineClip {
   src_fps_num: number;
   src_fps_den: number;
   src_duration_s: number;
+  /** N2-C — per-clip gain in decibels (0 = unity). Audio clips only. */
+  gain_db: number;
   shot_id: string | null;
   scene_id: string | null;
   created_at: string;

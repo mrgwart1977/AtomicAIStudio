@@ -26,6 +26,7 @@ edit exactly (new clip ids — clip identity is not stable across
 revert, the edit decision is what persists)."""
 from __future__ import annotations
 
+import math
 from fractions import Fraction
 from typing import Any
 
@@ -237,6 +238,7 @@ def track_snapshot(t: TimelineTrack) -> dict[str, Any]:
         "id": t.id, "kind": t.kind, "position": t.position,
         "name": t.name, "visible": t.visible, "locked": t.locked,
         "muted": t.muted,
+        "gain_db": t.gain_db, "solo": t.solo,
     }
 
 
@@ -253,6 +255,7 @@ def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
         "src_frames": c.src_frames,
         "src_fps_num": c.src_fps_num, "src_fps_den": c.src_fps_den,
         "src_duration_s": c.src_duration_s,
+        "gain_db": c.gain_db,
         "shot_id": c.shot_id, "scene_id": c.scene_id,
     }
 
@@ -333,21 +336,98 @@ def add_track(session: Session, tl: Timeline, *, kind: str = "video",
     return tr
 
 
+# ---------- N2-C gain contract ----------
+
+# Decibels are the single stored representation — linear amplitude is
+# derived (10**(db/20)) only at mix time, so nothing can disagree.
+GAIN_DB_MIN = -60.0   # practical silence floor (~0.1% amplitude)
+GAIN_DB_MAX = 12.0    # headroom cap — beginner-safe
+
+
+def check_gain_db(v: Any, field: str = "gain_db") -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise TimelineError(f"{field} must be a number of decibels")
+    v = float(v)
+    if not math.isfinite(v):
+        raise TimelineError(f"{field} must be finite")
+    if v < GAIN_DB_MIN or v > GAIN_DB_MAX:
+        raise TimelineError(
+            f"{field} must be within "
+            f"[{GAIN_DB_MIN:g}, {GAIN_DB_MAX:g}] dB")
+    return v
+
+
+def db_to_linear(db: float) -> float:
+    """Decibels → amplitude ratio. 0 dB = unity (1.0), negative
+    attenuates, positive amplifies. -inf is never stored — true
+    silence is represented by ``muted``, not a gain value."""
+    return 10.0 ** (db / 20.0)
+
+
+def effective_gain_db(clip_db: float, track_db: float) -> float:
+    """Clip gain combines multiplicatively with track gain — dB adds."""
+    return (clip_db or 0.0) + (track_db or 0.0)
+
+
+def lane_audible(track: TimelineTrack, any_solo: bool) -> bool:
+    """Audibility precedence, applied in order:
+    hidden lanes are render-inert → mute silences → a nonempty solo
+    set silences every non-soloed lane. Multiple solos are all
+    audible; an empty solo set leaves mute as the only silencer."""
+    if not track.visible:
+        return False
+    if track.muted:
+        return False
+    if any_solo and not track.solo:
+        return False
+    return True
+
+
+def any_solo(session: Session, timeline_id: str) -> bool:
+    return any(t.solo for t in list_tracks(session, timeline_id))
+
+
+def set_clip_gain(session: Session, tl: Timeline, clip: TimelineClip, *,
+                  gain_db: float, command_id: str | None) -> None:
+    """Per-clip gain, audio-source clips only — video clips carry
+    embedded audio whose level is a track/mix decision (N2-E)."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    tr = session.get(TimelineTrack, clip.track_id) if clip.track_id else None
+    if tr is None or tr.kind != "audio":
+        raise TimelineError(
+            "clip gain applies to clips on audio lanes")
+    clip.gain_db = check_gain_db(gain_db)
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Set clip gain")
+
+
 def update_track(session: Session, tl: Timeline, track: TimelineTrack, *,
                  fields: dict, command_id: str | None) -> None:
-    """name/visible/locked/muted. Flags are deliberately settable on a
-    locked track — locking is the edit guard, unlock must remain
-    reachable."""
+    """name/visible/locked/muted/solo/gain_db. Flags are deliberately
+    settable on a locked track — locking is the clip-edit guard, not a
+    mix-control lock; unlock must remain reachable."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
     if "name" in fields:
         track.name = (fields["name"] or "").strip()
-    for f in ("visible", "locked", "muted"):
+    for f in ("visible", "locked", "muted", "solo"):
         if f in fields:
             v = fields[f]
             if not isinstance(v, bool):
                 raise TimelineError(f"{f} must be a boolean")
+            if f == "solo" and v and track.kind == "overlay":
+                raise TimelineError(
+                    "solo is meaningless on overlay lanes "
+                    "(no audio output)")
             setattr(track, f, v)
+    if "gain_db" in fields:
+        if track.kind == "overlay":
+            raise TimelineError(
+                "gain_db is meaningless on overlay lanes "
+                "(no audio output)")
+        track.gain_db = check_gain_db(fields["gain_db"])
     session.flush()
     _touch(session, tl, command_id=command_id,
            summary="Updated track")
@@ -479,14 +559,16 @@ def _restore_snapshot(session: Session, tl: Timeline,
                 position=st.get("position", 0), name=st.get("name", ""),
                 visible=st.get("visible", True),
                 locked=st.get("locked", False),
-                muted=st.get("muted", False)))
+                muted=st.get("muted", False),
+                gain_db=st.get("gain_db", 0.0),
+                solo=st.get("solo", False)))
         else:
             # N1-E — restore mutable lane fields too, or undoing a
             # reorder/rename/visibility/lock/mute edit silently keeps
             # the post-edit lane state.
             tr = have[st["id"]]
             for f in ("position", "name", "visible", "locked",
-                      "muted"):
+                      "muted", "gain_db", "solo"):
                 if f in st:
                     setattr(tr, f, st[f])
     session.flush()
@@ -539,6 +621,7 @@ def _restore_snapshot(session: Session, tl: Timeline,
             src_frames=c["src_frames"], src_fps_num=c["src_fps_num"],
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
+            gain_db=c.get("gain_db", 0.0),
             shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
         row = live_clips.get(c.get("id")) if c.get("id") else None
         if row is not None:
@@ -1311,7 +1394,9 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
     tracks_out = [{
         "id": t.id, "kind": t.kind, "position": t.position,
         "name": t.name, "visible": t.visible, "locked": t.locked,
-        "muted": t.muted} for t in tracks]
+        "muted": t.muted,
+        # N2-C — lane mix controls. dB only; the mixer converts.
+        "gain_db": t.gain_db, "solo": t.solo} for t in tracks]
     clips_out, gaps_out = [], []
     tl_fps = Fraction(tl.fps_num, tl.fps_den)
     for t in tracks:
@@ -1347,6 +1432,9 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
                 "sha256": c.source_sha256,
                 "in_frame": c.in_frame, "out_frame": c.out_frame,
                 "duration_s": round(float(clip_duration_frac(c)), 6),
+                # N2-C — per-clip gain in dB (0 = unity). Effective
+                # level = clip + track dB when the lane is audible.
+                "gain_db": c.gain_db,
                 "source": {
                     "fps_num": c.src_fps_num, "fps_den": c.src_fps_den,
                     "frames": c.src_frames,
