@@ -400,20 +400,108 @@ async function scenario_n1c(pid, tid) {
   const s9 = d9.clips.map((c) => c.start_frames).sort((a, b) => a - b);
   ok(`ripple delete: ${JSON.stringify(ord8.map(c => c.start_frames))} → ${JSON.stringify(s9)}`);
   if (d9.clips.length !== ord8.length - 1) throw new Error("ripple delete didn't remove a clip");
-  // Follower shifts left by the deleted clip's integer footprint —
-  // NOT to 0: the 4f gap the trim created is preserved as a leading
-  // gap (honest gap preservation).
+  // The first follower shifts left by the deleted clip's integer
+  // footprint — NOT to 0: the gap the trim created is preserved as a
+  // leading gap (honest gap preservation).
   const delOcc = t1clip.start_frames + ext(t1clip, d8);
-  const expectedFirst = ord8[ord8.length - 1].start_frames - delOcc;
+  const expectedFirst = ord8[1].start_frames - delOcc;
   if (s9[0] !== expectedFirst) {
     throw new Error(`ripple shift wrong: expected ${expectedFirst}, got ${s9[0]}`);
   }
   ok(`follower shifted by the deleted footprint (→ frame ${s9[0]}) — gap preserved`);
 
+  step("Locked-track refusal: lock V1 → handles gone, edits disabled");
+  const dLock = await detail(pid, tid);
+  const insideF = dLock.clips[0].start_frames + 2;
+  await setPlayhead(insideF); // inside the first clip
+  await evalJs(`[...document.querySelectorAll('[aria-label^="Lock "]')]
+    .find(b => b.getAttribute("aria-label") === "Lock V1").click()`);
+  await sleep(1000);
+  const lockedState = await evalJs(`(() => ({
+    handles: document.querySelectorAll('[data-testid="trim-handle"]').length,
+    splitDisabled: document.querySelector('[data-testid="split-at-playhead"]').disabled,
+    insDisabled: document.querySelector('[data-testid="insert-space"]').disabled,
+    gapDisabled: [...document.querySelectorAll('[data-testid="lane-gap"]')]
+      .every(g => g.disabled),
+  }))()`);
+  ok(`locked state: ${JSON.stringify(lockedState)}`);
+  if (lockedState.handles !== 0) throw new Error("locked lane still shows trim handles");
+  if (!lockedState.splitDisabled) throw new Error("split enabled on a fully-locked timeline");
+  if (!lockedState.insDisabled) throw new Error("insert-space enabled with no editable lane");
+  if (!lockedState.gapDisabled) throw new Error("gap buttons enabled on locked lane");
+  ok("locked lane: no handles, split/insert/gap all disabled");
+  await evalJs(`document.querySelector('[aria-label="Unlock V1"]').click()`);
+  await sleep(1000);
+
+  step("Escape cancels a trim drag — no commit");
+  const d10 = await detail(pid, tid);
+  const escClip = d10.clips.slice()
+    .sort((a, b) => a.start_frames - b.start_frames)[0];
+  await evalJs(`(() => {
+    const h = [...document.querySelectorAll('[data-testid="lane-clip"]')][0]
+      .querySelector('[data-testid="trim-handle"]');
+    const r = h.getBoundingClientRect();
+    h.dispatchEvent(new PointerEvent("pointerdown",
+      { bubbles: true, clientX: r.left + 1, clientY: r.top + 5, pointerId: 13 }));
+    window.dispatchEvent(new PointerEvent("pointermove",
+      { bubbles: true, clientX: r.left - 30, clientY: r.top + 5, pointerId: 13 }));
+    window.dispatchEvent(new KeyboardEvent("keydown",
+      { bubbles: true, key: "Escape" }));
+    window.dispatchEvent(new PointerEvent("pointerup",
+      { bubbles: true, clientX: r.left - 30, clientY: r.top + 5, pointerId: 13 }));
+    return true; })()`);
+  await sleep(1200);
+  const d11 = await detail(pid, tid);
+  const escAfter = d11.clips.find((c) => c.id === escClip.id);
+  if (!escAfter || escAfter.out_frame !== escClip.out_frame) {
+    throw new Error(`Escape-cancelled trim committed (${escClip.out_frame} → ${escAfter && escAfter.out_frame})`);
+  }
+  ok(`out_frame unchanged after Escape (${escClip.out_frame})`);
+
+  step("Export eligibility: leading gap → non-v1 badge → close → v1 badge");
+  const badgeGap = await evalJs(
+    `document.querySelector('[data-testid="export-capability"]')?.textContent || ""`);
+  ok(`gapped badge: "${badgeGap}"`);
+  if (badgeGap.includes("Exports as one video")) {
+    throw new Error("leading-gap layout wrongly claims v1 export");
+  }
+  // Close the leading gap via its indicator → lane contiguous from 0.
+  await evalJs(`document.querySelector('[data-testid="lane-gap"]').click()`);
+  await sleep(1500);
+  const d12 = await detail(pid, tid);
+  if (d12.clips[0].start_frames !== 0) {
+    throw new Error("leading-gap close didn't pull the clip to 0");
+  }
+  const badgeOk = await evalJs(
+    `document.querySelector('[data-testid="export-capability"]')?.textContent || ""`);
+  ok(`contiguous badge: "${badgeOk}"`);
+  if (!badgeOk.includes("Exports as one video")) {
+    throw new Error(`expected v1 badge after close, got "${badgeOk}"`);
+  }
+
+  step("Restart persistence: reload WebView → committed state renders");
+  await send("Page.reload");
+  await sleep(4000);
+  await navToTimeline();
+  const d13 = await detail(pid, tid);
+  const domCount = await evalJs(
+    `document.querySelectorAll('[data-testid="lane-clip"]').length`);
+  const domStart = await evalJs(`(() => {
+    const c = document.querySelector('[data-testid="lane-clip"]');
+    return c ? c.getAttribute("aria-label") : null; })()`);
+  ok(`post-reload: ${domCount} clips in DOM vs ${d13.clips.length} via API; first clip "${domStart}"`);
+  if (domCount !== d13.clips.length) {
+    throw new Error("post-reload DOM clip count differs from API");
+  }
+  if (!domStart || !domStart.includes(`frame ${d13.clips[0].start_frames}`)) {
+    throw new Error("post-reload clip position differs from API");
+  }
+
   step("Final state dump + EDL v2 sanity (gaps/tracks honest)");
   const edl = await api("GET", `/api/projects/${pid}/timelines/${tid}/edl?version=2`);
   ok(`edl v2: ${JSON.stringify(edl).slice(0, 240)}`);
-  fs.writeFileSync(`${OUT}/final-timeline.json`, JSON.stringify(d9, null, 2));
+  fs.writeFileSync(`${OUT}/final-timeline.json`,
+    JSON.stringify(await detail(pid, tid), null, 2));
   fs.writeFileSync(`${OUT}/final-edl-v2.json`, JSON.stringify(edl, null, 2));
   await shot("final");
 }

@@ -87,6 +87,63 @@ def test_split_mixed_rate_requires_source_frame(client):
     assert len(_detail(client, pid, t["id"])["clips"]) == 1
 
 
+def test_split_mixed_rate_valid_cuts(client):
+    """Representable mixed-rate cuts DO split — the rule isn't a
+    blanket mixed-rate refusal. 48fps src on a 24fps timeline: every
+    timeline frame maps to exactly 2 source frames."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"],
+            _video(client, pid, "h.mp4", sha="e" * 64,
+                   frames=72, fps=48, duration=1.5))
+    c0 = _clip(_detail(client, pid, t["id"]))
+    _split(client, pid, t["id"], c0["id"], 10)  # tl 10 → src 20
+    d = _detail(client, pid, t["id"])
+    left, right = sorted(d["clips"], key=lambda c: c["start_frames"])
+    assert (left["in_frame"], left["out_frame"]) == (0, 20)
+    assert (right["in_frame"], right["out_frame"]) == (20, 72)
+    assert right["start_frames"] == 10
+
+
+def test_split_24000_1001_source_boundary(client):
+    """24000/1001 src on a 24fps timeline: whole source frames land at
+    tl offsets that are multiples of 1001 (off_src = off_tl·1000/1001)."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid, "NTSC24", fps_num=24, fps_den=1)
+    # 1200f @ 24000/1001 → extent 1201.2 tl frames.
+    _insert(client, pid, t["id"],
+            _video(client, pid, "n24.mp4", sha="f" * 64,
+                   frames=1200, fps=23.976, duration=1200 / 23.976))
+    c0 = _clip(_detail(client, pid, t["id"]))
+    # off=500 → 500·1000/1001 = 499.5 src frames → mid-frame → refuse.
+    r = _split(client, pid, t["id"], c0["id"], 500, expect=422)
+    assert "source frame" in r.text
+    # off=1001 → exactly 1000 source frames → legal cut.
+    _split(client, pid, t["id"], c0["id"], 1001)
+    d = _detail(client, pid, t["id"])
+    left, right = sorted(d["clips"], key=lambda c: c["start_frames"])
+    assert (left["in_frame"], left["out_frame"]) == (0, 1000)
+    assert (right["in_frame"], right["out_frame"]) == (1000, 1200)
+    assert right["start_frames"] == 1001
+    assert sum(c["out_frame"] - c["in_frame"] for c in d["clips"]) == 1200
+
+
+def test_split_preserves_shot_scene(client):
+    """Shot/scene provenance rides along on both fragments."""
+    from tests.test_c4b_shot_generate import _scene, _shot
+    pid = make_project(client)["id"]
+    sc = _scene(client, pid, "S1")["scene"]
+    sh = _shot(client, pid, sc["id"], "wide")["shot"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid),
+            shot_id=sh["id"], scene_id=sc["id"])
+    c0 = _clip(_detail(client, pid, t["id"]))
+    _split(client, pid, t["id"], c0["id"], 30)
+    d = _detail(client, pid, t["id"])
+    for c in d["clips"]:
+        assert c["shot_id"] == sh["id"] and c["scene_id"] == sc["id"]
+
+
 def test_split_locked_track_refuses(client):
     pid = make_project(client)["id"]
     t = _tl(client, pid)
@@ -224,6 +281,30 @@ def test_ripple_delete_all_scope_and_locked_guard(client):
     assert v2_clip["start_frames"] == 128
 
 
+def test_ripple_all_scope_refusal_moves_nothing(client):
+    """A locked in-scope lane refuses the WHOLE op — no partial
+    movement on the unlocked lanes either (fail closed)."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1, clips = _three(client, pid, t["id"])
+    v2 = _track(client, pid, t["id"], name="V2")
+    _commit(client, pid, "timeline.clip.place",
+            {"timeline_id": t["id"], "track_id": v2["id"],
+             "asset_id": _video(client, pid, "x.mp4", sha="e" * 64)["id"],
+             "start_frames": 200})
+    _commit(client, pid, "timeline.track.update",
+            {"timeline_id": t["id"], "track_id": v2["id"],
+             "locked": True})
+    _commit(client, pid, "timeline.clip.remove",
+            {"timeline_id": t["id"], "clip_id": clips[1]["id"],
+             "ripple_scope": "all"}, expect=422)
+    d = _detail(client, pid, t["id"])
+    # Nothing moved — not even the deleted clip was removed.
+    assert sorted(c["start_frames"] for c in d["clips"]
+                  if c["track_id"] == v1) == [0, 72, 144]
+    assert len(d["clips"]) == 4
+
+
 def test_ripple_scope_validation(client):
     pid = make_project(client)["id"]
     t = _tl(client, pid)
@@ -312,6 +393,68 @@ def test_ripple_trim_head_and_non_ripple(client):
              "out_frame": 60})
     d = _detail(client, pid, t["id"])
     assert sorted(c["start_frames"] for c in d["clips"]) == [0, 48, 120]
+
+
+def test_ripple_trim_uses_occupancy_not_source_delta(client):
+    """Displacement is the change in INTEGER TIMELINE-FRAME occupancy,
+    never the source-frame delta. NTSC source on a 24fps timeline:
+    trimming 4 source frames changes occupancy by only 3."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    # A: 120f @ 30000/1001 trimmed to [0,91) → extent 72.8 → occupies 73.
+    _insert(client, pid, t["id"],
+            _video(client, pid, "n.mp4", sha="a" * 64,
+                   frames=120, fps=29.97, duration=120 / 29.97),
+            out_frame=91)
+    d = _detail(client, pid, t["id"])
+    a = _clip(d)
+    assert a["start_frames"] == 0
+    # B: plain 24fps clip packed right after → starts at 73.
+    _commit(client, pid, "timeline.clip.place",
+            {"timeline_id": t["id"],
+             "asset_id": _video(client, pid, "b.mp4",
+                                sha="b" * 64)["id"],
+             "start_frames": 73})
+    d = _detail(client, pid, t["id"])
+    b = next(c for c in d["clips"] if c["start_frames"] == 73)
+    # Shrink A by 4 SRC frames (91→87): extent 72.8→69.77 → ceil 73→70.
+    # Occupancy delta -3 — a source-delta implementation would give -4.
+    _commit(client, pid, "timeline.clip.trim",
+            {"timeline_id": t["id"], "clip_id": a["id"],
+             "out_frame": 87, "ripple_scope": "track"})
+    d = _detail(client, pid, t["id"])
+    b2 = next(c for c in d["clips"] if c["id"] == b["id"])
+    assert b2["start_frames"] == 70  # NOT 69 — occupancy, not source
+    # Grow A by 4 src frames (87→91): occupancy 70→73 → B returns to 73.
+    _commit(client, pid, "timeline.clip.trim",
+            {"timeline_id": t["id"], "clip_id": a["id"],
+             "out_frame": 91, "ripple_scope": "track"})
+    d = _detail(client, pid, t["id"])
+    assert next(c for c in d["clips"] if c["id"] == b["id"])[
+        "start_frames"] == 73
+
+
+def test_ripple_trim_one_frame_and_gap_adjacent(client):
+    """One-frame ripples move followers by one grid frame; a follower
+    across a gap keeps its gap (shift preserves spacing)."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1 = _gapped(client, pid, t["id"])  # clips at 0 and 120 (48f gap)
+    d = _detail(client, pid, t["id"])
+    a, b = sorted(d["clips"], key=lambda c: c["start_frames"])
+    _commit(client, pid, "timeline.clip.trim",
+            {"timeline_id": t["id"], "clip_id": a["id"],
+             "out_frame": 71, "ripple_scope": "track"})
+    d = _detail(client, pid, t["id"])
+    b2 = next(c for c in d["clips"] if c["id"] == b["id"])
+    assert b2["start_frames"] == 119  # moved -1, 48f gap preserved
+    # And back: grow one frame → follower +1.
+    _commit(client, pid, "timeline.clip.trim",
+            {"timeline_id": t["id"], "clip_id": a["id"],
+             "out_frame": 72, "ripple_scope": "track"})
+    d = _detail(client, pid, t["id"])
+    assert next(c for c in d["clips"] if c["id"] == b["id"])[
+        "start_frames"] == 120
 
 
 # ---------- gap management ----------
@@ -446,6 +589,21 @@ def test_split_and_delete_preserve_export_honesty(client):
     e2 = _edl(client, pid, t["id"], version=2)
     assert e2["format"] == "ade-edl/2"
     assert any(g["duration_frames"] == 24 for g in e2["gaps"])
+
+
+def test_gap_close_revert_restores_gapped_layout(client):
+    """Revert restores the exact pre-op arrangement — gaps included."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1 = _gapped(client, pid, t["id"])  # clips at 0 and 120
+    rev = _detail(client, pid, t["id"])["revision"]
+    _gap(client, pid, t["id"], "close", v1, 90)
+    assert sorted(c["start_frames"] for c in
+                  _detail(client, pid, t["id"])["clips"]) == [0, 72]
+    _commit(client, pid, "timeline.revert",
+            {"timeline_id": t["id"], "to_revision": rev})
+    d = _detail(client, pid, t["id"])
+    assert sorted(c["start_frames"] for c in d["clips"]) == [0, 120]
 
 
 def test_gap_close_restores_v1_export(client):

@@ -864,7 +864,10 @@ def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
 
 #: Ripple scope choices — 'track' (the safest default: only the edited
 #: lane's later clips move) or 'all' (every lane's later clips; a
-#: locked lane that would be affected refuses the whole op).
+#: locked lane that would be affected refuses the whole op). 'all'
+#: treats lane kinds uniformly — video, overlay, and audio lanes all
+#: shift by the same integer timeline-frame delta (audio lanes can't
+#: hold clips yet, so today 'all' effectively spans video+overlay).
 RIPPLE_SCOPES = ("track", "all")
 
 
