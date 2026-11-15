@@ -271,24 +271,24 @@ async function main() {
   /* 8 — move the audio clip on the timeline */
   step("8) audio clip move — frame-accurate placement");
   d = await detail(p.id, tl.id);
-  const theClip = d.tracks.flatMap((t) => t.clips)[0];
+  const theClip = d.clips[0];
   if (!theClip) throw new Error("no clip after step 7");
   await commit(p.id, "timeline.clip.move",
-    { clip_id: theClip.clip_id, start_frames: 96 });
+    { timeline_id: tl.id, clip_id: theClip.id, start_frames: 96 });
   d = await detail(p.id, tl.id);
-  let moved = d.tracks.flatMap((t) => t.clips)[0];
-  if (moved.start_frames !== 96 || moved.clip_id !== theClip.clip_id)
+  let moved = d.clips[0];
+  if (moved.start_frames !== 96 || moved.id !== theClip.id)
     throw new Error(`move bad: ${JSON.stringify(moved).slice(0, 160)}`);
-  ok(`clip moved to tl-frame 96, stable id ${moved.clip_id.slice(0, 8)}`);
+  ok(`clip moved to tl-frame 96, stable id ${moved.id.slice(0, 8)}`);
 
   /* 9 — head + tail trim, sample-exact source bounds */
   step("9) head + tail trim — sample-exact in/out");
   await commit(p.id, "timeline.clip.trim",
-    { clip_id: theClip.clip_id, in_frame: 48000 });
+    { timeline_id: tl.id, clip_id: theClip.id, in_frame: 48000 });
   await commit(p.id, "timeline.clip.trim",
-    { clip_id: theClip.clip_id, out_frame: 1380000 });
+    { timeline_id: tl.id, clip_id: theClip.id, out_frame: 1380000 });
   d = await detail(p.id, tl.id);
-  let trimmed = d.tracks.flatMap((t) => t.clips)[0];
+  let trimmed = d.clips[0];
   if (trimmed.in_frame !== 48000 || trimmed.out_frame !== 1380000)
     throw new Error(`trim bad: ${JSON.stringify(trimmed).slice(0, 160)}`);
   // Trimmed samples map to an absolute bucket range — the manifest is
@@ -302,9 +302,9 @@ async function main() {
   step("10) split — both halves keep correct source segments");
   const splitAt = trimmed.start_frames + 300; // 300 tl-f × 2000 smp/f
   await commit(p.id, "timeline.clip.split",
-    { clip_id: theClip.clip_id, at_frame: splitAt });
+    { timeline_id: tl.id, clip_id: theClip.id, at_frame: splitAt });
   d = await detail(p.id, tl.id);
-  const halves = d.tracks.flatMap((t) => t.clips)
+  const halves = d.clips
     .sort((x, y) => x.start_frames - y.start_frames);
   if (halves.length !== 2
       || halves[0].in_frame !== 48000
@@ -321,13 +321,13 @@ async function main() {
   step("11) undo/redo — stable clip identity");
   await commit(p.id, "timeline.undo", { timeline_id: tl.id });
   d = await detail(p.id, tl.id);
-  const restored = d.tracks.flatMap((t) => t.clips);
-  if (restored.length !== 1 || restored[0].clip_id !== theClip.clip_id
+  const restored = d.clips;
+  if (restored.length !== 1 || restored[0].id !== theClip.id
       || restored[0].in_frame !== 48000)
     throw new Error(`undo bad: ${JSON.stringify(restored).slice(0, 200)}`);
   await commit(p.id, "timeline.redo", { timeline_id: tl.id });
   d = await detail(p.id, tl.id);
-  if (d.tracks.flatMap((t) => t.clips).length !== 2)
+  if (d.clips.length !== 2)
     throw new Error("redo did not restore the split");
   ok(`undo → 1 clip (stable id), redo → 2 clips`);
 
@@ -344,10 +344,11 @@ async function main() {
   for (let i = 0; i < 100; i++) {
     await commit(p.id, "timeline.clip.place", {
       timeline_id: tl.id, track_id: lanes[i % 2].id,
-      asset_id: au.id, start_frames: i * 720 });
+      asset_id: au.id, allow_duplicate: true,
+      start_frames: i * 720 });
   }
   d = await detail(p.id, tl.id);
-  const total = d.tracks.flatMap((t) => t.clips).length;
+  const total = d.clips.length;
   if (total < 100) throw new Error(`expected 100+ clips, got ${total}`);
   ok(`${total} clips across ${d.tracks.length} audio lanes`);
 
