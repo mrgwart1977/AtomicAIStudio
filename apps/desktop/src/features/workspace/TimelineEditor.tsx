@@ -12,8 +12,8 @@ import {
 } from "./timelineMath";
 import { apiFetch } from "../../api/client";
 import {
-  getWaveformManifest, getWaveformSlice, invalidateWaveform,
-  pickLevel,
+  clipWaveWindow, getWaveformManifest, getWaveformSlice,
+  invalidateWaveform, pickLevel,
 } from "./waveform";
 import type { ManifestResult } from "./waveform";
 
@@ -998,12 +998,11 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
  * to bucket ranges with plain arithmetic — no drift, no per-clip
  * re-bucketing. Fetches are viewport-bounded via the level API. */
 const WaveformCanvas = memo(function WaveformCanvas({
-  clip, tl, ppf, width, projectId, viewL, viewR,
+  clip, tl, ppf, projectId, viewL, viewR,
 }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   ppf: number;
-  width: number;
   projectId: string;
   viewL: number;
   viewR: number;
@@ -1011,15 +1010,10 @@ const WaveformCanvas = memo(function WaveformCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [state, setState] = useState<"loading" | "missing" | "error" | "ok">("loading");
   const [tries, setTries] = useState(0);
-  const rate = clip.src_fps_num / clip.src_fps_den; // samples per second
   const tlFps = tl.fps_num / tl.fps_den;
-  const samplesPerTlFrame = rate / tlFps;
-  const samplesPerPx = samplesPerTlFrame / ppf;
-  const clipEnd = clip.start_frames + clipTlExtent(clip, tl);
-  const v0 = Math.max(viewL, clip.start_frames);
-  const v1 = Math.min(viewR, clipEnd);
-  const s0 = clip.in_frame + (v0 - clip.start_frames) * samplesPerTlFrame;
-  const s1 = clip.in_frame + (v1 - clip.start_frames) * samplesPerTlFrame;
+  const extent = clipTlExtent(clip, tl);
+  const win = clipWaveWindow(clip, tlFps, viewL, viewR, extent);
+  const samplesPerPx = win ? win.samplesPerTlFrame / ppf : 1;
 
   const [manifest, setManifest] = useState<ManifestResult | null>(null);
   // Poll gently while no waveform exists so a just-finished build
@@ -1051,13 +1045,18 @@ const WaveformCanvas = memo(function WaveformCanvas({
 
   const level = manifest && manifest !== "error" && manifest !== "missing"
     ? pickLevel(manifest, samplesPerPx) : null;
-  const b0 = level ? Math.max(0, Math.floor(s0 / level.spb)) : 0;
-  const b1 = level
-    ? Math.min(level.buckets, Math.ceil(s1 / level.spb)) : 0;
+  const b0 = level && win ? Math.max(0, Math.floor(win.s0 / level.spb)) : 0;
+  const b1 = level && win
+    ? Math.min(level.buckets, Math.ceil(win.s1 / level.spb)) : 0;
+  // Canvas covers ONLY the visible window — bitmap stays bounded even
+  // for multi-hour clips, and scroll/zoom refetches just that range.
+  const dpr = Math.max(1, Math.min(4,
+    typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
+  const canvasW = win ? Math.min(MAX_BMP, Math.round(win.winW * ppf)) : 0;
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !level || b1 <= b0) return;
+    if (!canvas || !level || !win || b1 <= b0) return;
     setState("loading");
     let dead = false;
     void getWaveformSlice(
@@ -1067,18 +1066,20 @@ const WaveformCanvas = memo(function WaveformCanvas({
         if (!sl) { setState("error"); return; }
         const ctx = canvas.getContext("2d");
         if (!ctx) { setState("ok"); return; }
-        const H = canvas.height, W = canvas.width;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const H = 44, W = canvasW;
         ctx.clearRect(0, 0, W, H);
         ctx.fillStyle = "rgba(45, 212, 191, 0.55)";
         const rows = Math.max(1, sl.channels);
         const rowH = H / rows;
-        const pxPerSample = ppf / samplesPerTlFrame;
+        const pxPerSample = ppf / win.samplesPerTlFrame;
         for (let ch = 0; ch < rows; ch++) {
           const mid = rowH * ch + rowH / 2;
           const half = rowH / 2 - 1;
           sl.peaks[ch].forEach(([mn, mx], i) => {
             const b = sl.bucket_start + i;
-            const x = (b * level.spb - clip.in_frame) * pxPerSample;
+            const x = (b * level.spb - clip.in_frame) * pxPerSample
+              - win.winL * ppf;
             const w = Math.max(1, level.spb * pxPerSample);
             const y0 = mid + (mn / 32768) * half;
             const y1 = mid + (mx / 32768) * half;
@@ -1089,13 +1090,18 @@ const WaveformCanvas = memo(function WaveformCanvas({
       });
     return () => { dead = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, clip.source_asset_id, clip.in_frame,
-      level?.spb, b0, b1, ppf, width]);
+  }, [projectId, clip.source_asset_id, clip.in_frame, clip.out_frame,
+      level?.spb, b0, b1, ppf, canvasW, win?.winL]);
 
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
-      <canvas ref={canvasRef} width={Math.max(1, Math.round(width))}
-        height={44} className="h-full w-full opacity-70" />
+      {win && (
+        <canvas ref={canvasRef}
+          width={Math.max(1, Math.round(canvasW * dpr))}
+          height={Math.round(44 * dpr)}
+          className="absolute top-0 h-full opacity-70"
+          style={{ left: win.winL * ppf, width: canvasW }} />
+      )}
       {state !== "ok" && (
         <span className="absolute bottom-0.5 right-1 text-[8px] text-faint">
           {state === "loading" ? "waveform…"
@@ -1112,6 +1118,7 @@ const WaveformCanvas = memo(function WaveformCanvas({
     </div>
   );
 });
+const MAX_BMP = 16384;
 
 const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   draggable, onSelect, onPointerDown, onTrimDown, onKeyDown,
@@ -1154,7 +1161,7 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
     >
       {trackKind === "audio" && (
         <WaveformCanvas
-          clip={clip} tl={tl} ppf={ppf} width={w}
+          clip={clip} tl={tl} ppf={ppf}
           projectId={projectId} viewL={viewL ?? clip.start_frames}
           viewR={viewR ?? clipTlEnd(clip, tl)} />
       )}

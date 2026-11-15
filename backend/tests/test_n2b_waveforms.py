@@ -253,3 +253,81 @@ def test_waveform_rejects_after_version_change(client, tmp_path):
         s.commit()
     r = _manifest(client, pid, a["id"], expect=409)
     assert "predates" in r.json()["detail"]
+
+
+# ---------- job reliability ----------
+
+def test_waveform_missing_source_fails_closed(client):
+    """Probe-OK asset whose CAS bytes were never written → job fails
+    with a clear reason; no manifest appears."""
+    pid = make_project(client)["id"]
+    au = _audio(client, pid)  # synthetic rows only — no real file
+    r = _wave(client, pid, au["id"])
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "failed"
+    assert "missing" in (job["error"] or "").lower()
+    _manifest(client, pid, au["id"], expect=409)
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_waveform_corrupt_bytes_fail_closed(client, tmp_path):
+    """Probe says usable audio but the CAS bytes are garbage → the
+    -xerror decode fails and the job records a failed outcome."""
+    pid = make_project(client)["id"]
+    au = _audio(client, pid)
+    st = client.app.state.storage
+    with client.app.state.session_factory() as s:
+        from app.db.models import AssetFile
+        af = s.get(AssetFile, au["sha256"])
+        p = st.file_path(s, af)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"this is definitely not audio data")
+        s.commit()
+    r = _wave(client, pid, au["id"])
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "failed"
+    assert "decode failed" in (job["error"] or "").lower()
+    _manifest(client, pid, au["id"], expect=409)
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_build_waveform_cancel_event(tmp_path):
+    """A pre-set cancel event stops the build — whichever stage sees it
+    first, the outcome is cancelled, never a partial manifest."""
+    import threading
+    from app.domain.media.waveform import build_waveform
+    p = _wav(tmp_path / "c.wav", rate=48000, channels=2, seconds=0.25)
+    ev = threading.Event()
+    ev.set()
+    out = build_waveform(p, rate=48000, channels=2, samples=12000,
+                        work_dir=tmp_path / "w", source_sha256="x",
+                        cancel=ev)
+    assert out["ok"] is False and out["cancelled"] is True
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_waveform_blob_integrity_refusal(client, tmp_path):
+    """Tamper with a CAS level blob → serve-time sha check refuses."""
+    pid = make_project(client)["id"]
+    p = _tone(tmp_path / "t.wav", rate=48000, channels=2, seconds=0.5)
+    r = _commit(client, pid, "asset.import",
+                {"source_path": str(p), "name": "t.wav",
+                 "kind": "audio"})
+    wait_for_job(client, pid, r["job_id"])
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    a = next(x for x in items if x["name"] == "t.wav")
+    r = _wave(client, pid, a["id"])
+    assert wait_for_job(client, pid, r["job_id"])["status"] == "succeeded"
+    m = _manifest(client, pid, a["id"])
+    sha = m["levels"][0]["sha256"]
+    st = client.app.state.storage
+    with client.app.state.session_factory() as s:
+        from app.db.models import AssetFile
+        af = s.get(AssetFile, sha)
+        st.file_path(s, af).write_bytes(b"corrupted json")
+        s.commit()
+    r = _slice(client, pid, a["id"], m["levels"][0]["spb"], expect=409)
+    assert "integrity" in r.json()["detail"]
+    # Manifest endpoint itself still serves (it's version-pinned, not
+    # blob-derived) — the corruption is reported at slice level.
+    _manifest(client, pid, a["id"])

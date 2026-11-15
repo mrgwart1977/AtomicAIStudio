@@ -1011,8 +1011,25 @@ def waveform_level_slice(
     path = request.app.state.storage.file_path(db, af)
     if not path.exists():
         raise HTTPException(404, "waveform blob missing on disk")
+    # CAS integrity, verified at serve time — a corrupted or swapped
+    # blob never masquerades as this source's waveform.
+    import hashlib as _hashlib
     import json as _json
-    doc = _json.loads(path.read_bytes())
+    raw = path.read_bytes()
+    if _hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+        raise HTTPException(
+            409, "waveform blob failed CAS integrity — "
+                 "rebuild via asset.waveform")
+    try:
+        doc = _json.loads(raw)
+    except _json.JSONDecodeError:
+        raise HTTPException(
+            409, "waveform blob corrupt — rebuild via asset.waveform")
+    ver = db.get(AssetVersion, asset.current_version_id)
+    if doc.get("source_sha256") != (ver.sha256 if ver else None):
+        raise HTTPException(
+            409, "waveform blob names a different source — "
+                 "rebuild via asset.waveform")
     total = doc["buckets"]
     s = max(0, min(start_bucket, total))
     e = total if end_bucket is None else max(s, min(end_bucket, total))

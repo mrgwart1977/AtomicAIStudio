@@ -55,6 +55,11 @@ CAS blobs alongside (not instead of) the original audio.
   — a viewport-bounded slice of one level's peaks. Bounds clamp to the
   level's bucket count; the client requests only what the viewport
   needs.
+- **Serve-time integrity**: before returning a slice the endpoint
+  re-hashes the CAS blob and rejects sha mismatch (409), refuses
+  unparseable documents (409), and refuses a level whose baked
+  `source_sha256` names a different source (409). Corrupt or swapped
+  blobs can never masquerade as this audio's waveform.
 
 ## Frontend
 
@@ -65,6 +70,16 @@ CAS blobs alongside (not instead of) the original audio.
 - `TimelineEditor` renders a `<canvas>` inside audio `LaneClip`s only —
   viewport-culled like the clip itself; slices are fetched for exactly
   the visible bucket range. Multi-channel rows stack vertically.
+- `clipWaveWindow()` (pure, unit-tested) maps the visible timeline
+  range onto source samples and clamps it to `[in_frame, out_frame]`:
+  head trims never display discarded samples, tail trims never display
+  beyond-out samples, and the DOM-extent ceil pad cannot paint audio
+  the trim discarded. Zoom changes which `pickLevel` level is used —
+  never the source range.
+- The canvas bitmap covers **only the visible window** (positioned at
+  `winL·ppf`), is `devicePixelRatio`-scaled (dpr ∈ [1,4]) for crisp
+  high-DPI lines, and is hard-capped at 16 384 px — multi-hour clips
+  cannot allocate giant bitmaps.
 - States: `waveform…` (fetching/polling for a build), `no waveform`
   (poll exhausted), `waveform unavailable` + retry (fetch failure).
   The canvas is `pointer-events-none` — drag/trim/keyboard behavior is

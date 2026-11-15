@@ -8,6 +8,7 @@
  */
 
 import { apiFetch } from "../../api/client";
+import type { TimelineClip } from "../../api/types";
 
 export interface WaveLevel {
   spb: number;
@@ -93,6 +94,45 @@ export function getWaveformSlice(
     boundedSet(sliceCache, key, p);
   }
   return p;
+}
+
+export interface WaveWindow {
+  /** Source-sample range actually visible — clamped to
+   * [clip.in_frame, clip.out_frame] so head/tail trims never display
+   * discarded or beyond-out samples. */
+  s0: number;
+  s1: number;
+  /** Visible window inside the clip, in timeline frames. */
+  winL: number;
+  winW: number;
+  samplesPerTlFrame: number;
+}
+
+/** Map the visible timeline range of an audio clip onto source samples.
+ * Pure — unit-tested. `viewL`/`viewR` are timeline-frame viewport
+ * bounds; `tlFps` is the timeline rate (fps_num/fps_den — fractional
+ * rates work unchanged since nothing accumulates). */
+export function clipWaveWindow(
+  clip: TimelineClip, tlFps: number,
+  viewL: number, viewR: number, tlExtent: number,
+): WaveWindow | null {
+  const rate = clip.src_fps_num / clip.src_fps_den;
+  const samplesPerTlFrame = rate / tlFps;
+  const clipEnd = clip.start_frames + tlExtent;
+  const v0 = Math.max(viewL, clip.start_frames);
+  const v1 = Math.min(viewR, clipEnd);
+  if (v1 <= v0) return null;
+  const s0 = Math.max(clip.in_frame,
+    clip.in_frame + (v0 - clip.start_frames) * samplesPerTlFrame);
+  const s1 = Math.min(clip.out_frame,
+    clip.in_frame + (v1 - clip.start_frames) * samplesPerTlFrame);
+  if (s1 <= s0) return null;
+  return {
+    s0, s1,
+    winL: v0 - clip.start_frames,
+    winW: v1 - v0,
+    samplesPerTlFrame,
+  };
 }
 
 /** Choose the level whose samples-per-bucket best matches the pixels

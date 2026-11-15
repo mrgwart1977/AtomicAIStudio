@@ -8,10 +8,11 @@ vi.mock("../../api/client", () => ({
 }));
 
 import {
-  getWaveformManifest, getWaveformSlice, invalidateWaveform,
-  pickLevel,
+  clipWaveWindow, getWaveformManifest, getWaveformSlice,
+  invalidateWaveform, pickLevel,
 } from "./waveform";
 import type { WaveManifest } from "./waveform";
+import type { TimelineClip } from "../../api/types";
 
 const MANIFEST: WaveManifest = {
   format: "ade-wave/1", built_sha256: "ab".repeat(32),
@@ -100,5 +101,111 @@ describe("getWaveformSlice", () => {
     // Recent keys still cached — no new fetch.
     await getWaveformSlice("p", "cap", 256, 299, 300);
     expect(apiFetch.mock.calls.length).toBe(calls + 1);
+  });
+});
+
+// ---------- clipWaveWindow — timing/alignment ----------
+
+const CLIP = {
+  clip_id: "c1", source_asset_id: "a1", source_version_id: "v1",
+  start_frames: 0, in_frame: 0, out_frame: 48000,
+  src_fps_num: 48000, src_fps_den: 1, src_frames: 48000,
+} as TimelineClip;
+
+describe("clipWaveWindow", () => {
+  const TL = 24; // timeline fps — 1 s of 48 kHz audio = 24 tl-frames
+  const EXT = 24; // ceil(48000 × 24 / 48000)
+
+  it("maps full-clip view to the full source range", () => {
+    const w = clipWaveWindow(CLIP, TL, 0, EXT, EXT)!;
+    expect(w.s0).toBe(0);
+    expect(w.s1).toBe(48000); // 24 tl-f × 2000 samples/f
+    expect(w.samplesPerTlFrame).toBe(2000);
+  });
+
+  it("head trim: discarded samples below in_frame are not shown", () => {
+    const clipped = { ...CLIP, in_frame: 12000 };
+    const extent = Math.ceil(36000 * TL / 48000); // 18 tl-f
+    const w = clipWaveWindow(clipped, TL, 0, extent, extent)!;
+    expect(w.s0).toBe(12000); // starts AT the trim, never before
+    expect(w.s1).toBe(48000);
+  });
+
+  it("tail trim: samples beyond out_frame are not shown", () => {
+    const clipped = { ...CLIP, out_frame: 30000 };
+    const extent = Math.ceil(30000 * TL / 48000); // 15 tl-f
+    // DOM extent pads to ceil — view covering it still clamps at out.
+    const w = clipWaveWindow(clipped, TL, 0, extent, extent)!;
+    expect(w.s0).toBe(0);
+    expect(w.s1).toBe(30000); // clamped AT the out point
+  });
+
+  it("nonzero in AND out: window is exactly [in, out]", () => {
+    const clipped = { ...CLIP, in_frame: 5000, out_frame: 43000 };
+    const extent = Math.ceil(38000 * TL / 48000); // 19 tl-f
+    const w = clipWaveWindow(clipped, TL, 0, extent, extent)!;
+    expect(w.s0).toBe(5000);
+    expect(w.s1).toBe(43000);
+  });
+
+  it("split halves: each keeps its own source interval", () => {
+    // split at source sample 24000 → A [0,24000) B [24000,48000)
+    const extA = 12; // 24000 × 24 / 48000
+    const a = { ...CLIP, out_frame: 24000 };
+    const b = { ...CLIP, in_frame: 24000, start_frames: extA };
+    const wa = clipWaveWindow(a, TL, 0, extA, extA)!;
+    const wb = clipWaveWindow(b, TL, extA, EXT, extA)!;
+    expect(wa.s0).toBe(0); expect(wa.s1).toBe(24000);
+    expect(wb.s0).toBe(24000); expect(wb.s1).toBe(48000);
+  });
+
+  it("timeline placement shifts the window, not the samples", () => {
+    const moved = { ...CLIP, start_frames: 100 };
+    const w = clipWaveWindow(moved, TL, 100, 100 + EXT, EXT)!;
+    expect(w.s0).toBe(0);
+    expect(w.s1).toBe(48000);
+    expect(w.winL).toBe(0);
+  });
+
+  it("44.1 kHz source maps proportionally (per-clip rate)", () => {
+    const c44 = {
+      ...CLIP, out_frame: 44100, src_frames: 44100,
+      src_fps_num: 44100,
+    };
+    const extent = Math.ceil(44100 * TL / 44100); // 24 tl-f
+    const w = clipWaveWindow(c44, TL, 0, extent, extent)!;
+    expect(w.s0).toBe(0);
+    expect(w.s1).toBe(44100);
+    expect(w.samplesPerTlFrame).toBeCloseTo(44100 / 24, 5);
+  });
+
+  it("fractional timeline rate (24000/1001) does not drift", () => {
+    const tlFps = 24000 / 1001; // ≈23.976
+    const samplesPerTlFrame = 48000 / tlFps; // 2002
+    const extent = Math.ceil(48000 / samplesPerTlFrame); // 24
+    const w = clipWaveWindow(CLIP, tlFps, 0, extent, extent)!;
+    // Direct multiply — no accumulation, so full range maps exactly.
+    expect(w.s1 - w.s0).toBeCloseTo(48000, 6);
+    expect(w.samplesPerTlFrame).toBeCloseTo(2002, 6);
+  });
+
+  it("zoom changes LOD, not timing — window is ppf-independent", () => {
+    // clipWaveWindow takes no pixel scale: the same call at any zoom
+    // yields the same source range. What changes is which level
+    // pickLevel selects from the manifest.
+    const w = clipWaveWindow(CLIP, TL, 0, EXT, EXT)!;
+    expect(w.s0).toBe(0); expect(w.s1).toBe(48000);
+    // zoomed out (2000 samples/px) → coarse level; zoomed in → fine.
+    expect(pickLevel(MANIFEST, 2000)?.spb).toBe(1024);
+    expect(pickLevel(MANIFEST, 20)?.spb).toBe(256);
+  });
+
+  it("viewport culling: offscreen → null; partial → windowed", () => {
+    expect(clipWaveWindow(CLIP, TL, 500, 900, EXT)).toBeNull();
+    const w = clipWaveWindow(CLIP, TL, 10, 14, EXT)!;
+    expect(w.s0).toBe(20_000); // tl-f 10 × 2000 samples/f
+    expect(w.s1).toBe(28_000);
+    expect(w.winL).toBe(10);
+    expect(w.winW).toBe(4);
   });
 });

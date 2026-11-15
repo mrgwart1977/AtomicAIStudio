@@ -97,7 +97,7 @@ async function navToTimeline(pname) {
   await sleep(600);
 }
 
-async function main() {
+async function attachWs() {
   const targets = await fetch(`http://127.0.0.1:${PORT}/json`).then((r) => r.json());
   const page = targets.find((t) => t.type === "page");
   ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -111,6 +111,10 @@ async function main() {
       _events.get(m.method).forEach((fn) => fn(m.params));
     }
   };
+}
+
+async function main() {
+  await attachWs();
   await send("Network.enable");
   onEvent("Network.requestWillBeSent", (e) => {
     const m = e.request.url.match(/http:\/\/(127\.0\.0\.1|localhost):(\d+)\/api/);
@@ -264,35 +268,208 @@ async function main() {
     throw new Error(`export did not fail closed: ${JSON.stringify(xjob).slice(0, 240)}`);
   ok(`refused: "${xjob.error.slice(0, 90)}"`);
 
-  /* 8 — scroll + canvas paint timing sample */
-  step("8) scroll/zoom responsiveness sample (rAF + heap)");
+  /* 8 — move the audio clip on the timeline */
+  step("8) audio clip move — frame-accurate placement");
+  d = await detail(p.id, tl.id);
+  const theClip = d.tracks.flatMap((t) => t.clips)[0];
+  if (!theClip) throw new Error("no clip after step 7");
+  await commit(p.id, "timeline.clip.move",
+    { clip_id: theClip.clip_id, start_frames: 96 });
+  d = await detail(p.id, tl.id);
+  let moved = d.tracks.flatMap((t) => t.clips)[0];
+  if (moved.start_frames !== 96 || moved.clip_id !== theClip.clip_id)
+    throw new Error(`move bad: ${JSON.stringify(moved).slice(0, 160)}`);
+  ok(`clip moved to tl-frame 96, stable id ${moved.clip_id.slice(0, 8)}`);
+
+  /* 9 — head + tail trim, sample-exact source bounds */
+  step("9) head + tail trim — sample-exact in/out");
+  await commit(p.id, "timeline.clip.trim",
+    { clip_id: theClip.clip_id, in_frame: 48000 });
+  await commit(p.id, "timeline.clip.trim",
+    { clip_id: theClip.clip_id, out_frame: 1380000 });
+  d = await detail(p.id, tl.id);
+  let trimmed = d.tracks.flatMap((t) => t.clips)[0];
+  if (trimmed.in_frame !== 48000 || trimmed.out_frame !== 1380000)
+    throw new Error(`trim bad: ${JSON.stringify(trimmed).slice(0, 160)}`);
+  // Trimmed samples map to an absolute bucket range — the manifest is
+  // source-global and unchanged by edits.
+  const man2 = await api("GET", `/api/projects/${p.id}/assets/${au.id}/waveform`);
+  if (man2.built_sha256 !== man.built_sha256)
+    throw new Error("trim changed waveform provenance — must not happen");
+  ok(`in=48000 out=1380000 (samples), provenance unchanged`);
+
+  /* 10 — split preserves source intervals across both halves */
+  step("10) split — both halves keep correct source segments");
+  const splitAt = trimmed.start_frames + 300; // 300 tl-f × 2000 smp/f
+  await commit(p.id, "timeline.clip.split",
+    { clip_id: theClip.clip_id, at_frame: splitAt });
+  d = await detail(p.id, tl.id);
+  const halves = d.tracks.flatMap((t) => t.clips)
+    .sort((x, y) => x.start_frames - y.start_frames);
+  if (halves.length !== 2
+      || halves[0].in_frame !== 48000
+      || halves[0].out_frame !== 48000 + 300 * 2000
+      || halves[1].in_frame !== 48000 + 300 * 2000
+      || halves[1].out_frame !== 1380000
+      || halves[0].source_asset_id !== au.id
+      || halves[1].source_asset_id !== au.id)
+    throw new Error(`split bad: ${JSON.stringify(halves).slice(0, 300)}`);
+  ok(`A:[48000,648000) B:[648000,1380000) — contiguous, same source`);
+
+  /* 11 — undo restores pre-split single clip with a stable id; redo
+     re-splits. N1-E identity semantics must hold for audio clips. */
+  step("11) undo/redo — stable clip identity");
+  await commit(p.id, "timeline.undo", { timeline_id: tl.id });
+  d = await detail(p.id, tl.id);
+  const restored = d.tracks.flatMap((t) => t.clips);
+  if (restored.length !== 1 || restored[0].clip_id !== theClip.clip_id
+      || restored[0].in_frame !== 48000)
+    throw new Error(`undo bad: ${JSON.stringify(restored).slice(0, 200)}`);
+  await commit(p.id, "timeline.redo", { timeline_id: tl.id });
+  d = await detail(p.id, tl.id);
+  if (d.tracks.flatMap((t) => t.clips).length !== 2)
+    throw new Error("redo did not restore the split");
+  ok(`undo → 1 clip (stable id), redo → 2 clips`);
+
+  /* 12 — multi-track load: ~100 audio clips across two more lanes;
+     rapid scroll must stay responsive, heap bounded, and revisiting a
+     region must hit the slice cache (zero new fetches). */
+  step("12) 100+ audio clips — rapid scroll, bounded heap, cache reuse");
+  await commit(p.id, "timeline.track.add",
+    { timeline_id: tl.id, kind: "audio", name: "A2" });
+  await commit(p.id, "timeline.track.add",
+    { timeline_id: tl.id, kind: "audio", name: "A3" });
+  d = await detail(p.id, tl.id);
+  const lanes = d.tracks.filter((t) => t.kind === "audio" && t.name !== "A1");
+  for (let i = 0; i < 100; i++) {
+    await commit(p.id, "timeline.clip.place", {
+      timeline_id: tl.id, track_id: lanes[i % 2].id,
+      asset_id: au.id, start_frames: i * 720 });
+  }
+  d = await detail(p.id, tl.id);
+  const total = d.tracks.flatMap((t) => t.clips).length;
+  if (total < 100) throw new Error(`expected 100+ clips, got ${total}`);
+  ok(`${total} clips across ${d.tracks.length} audio lanes`);
+
+  await navToTimeline(p.name);
+  await evalJs(`(() => {
+    const b = [...document.querySelectorAll("button")]
+      .find(e => e.textContent.includes("WF"));
+    if (b) b.click(); return !!b; })()`);
+  await sleep(3000);
+  await evalJs(`(() => {
+    window.__fetches = [];
+    const of = window.fetch;
+    if (!window.__wrapped) {
+      window.__wrapped = true;
+      window.fetch = (...a) => {
+        window.__fetches.push(String(a[0])); return of(...a); };
+    } else { window.__fetches = []; }
+    return true; })()`);
   const perf = await evalJs(`(async () => {
     const scroller = document.querySelector('[data-testid="timeline-scroll"]');
     if (!scroller) return { skipped: "no scroller" };
-    const t0 = performance.now();
-    let frames = 0;
-    const raf = () => { frames++; if (performance.now() - t0 < 800) requestAnimationFrame(raf); };
-    requestAnimationFrame(raf);
-    scroller.scrollLeft = 400; scroller.dispatchEvent(new Event("scroll"));
-    await new Promise((r) => setTimeout(r, 1000));
-    return { fps: frames, heapMB: performance.memory
-      ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const measure = async (ms) => {
+      const t0 = performance.now(); let n = 0;
+      const raf = () => { n++; if (performance.now() - t0 < ms)
+        requestAnimationFrame(raf); };
+      requestAnimationFrame(raf);
+      await sleep(ms);
+      return Math.round(n / (ms / 1000)); };
+    const fps1 = await measure(800);
+    // Rapid scroll across the 43k-frame span, then back.
+    for (const x of [4000, 12000, 30000, 4000]) {
+      scroller.scrollLeft = x;
+      scroller.dispatchEvent(new Event("scroll"));
+      await sleep(300); }
+    await sleep(800);
+    const fetchesAfterScroll =
+      window.__fetches.filter(u => u.includes("/waveform/level")).length;
+    // Revisit the same spot — must hit the promise cache.
+    scroller.scrollLeft = 4000;
+    scroller.dispatchEvent(new Event("scroll"));
+    await sleep(900);
+    const fetchesAfterRevisit =
+      window.__fetches.filter(u => u.includes("/waveform/level")).length;
+    const canvases = document.querySelectorAll(
+      '[data-testid="lane-clip"] canvas').length;
+    return { fps: fps1,
+      sliceFetches: fetchesAfterScroll,
+      revisitNewFetches: fetchesAfterRevisit - fetchesAfterScroll,
+      mountedCanvases: canvases,
+      heapMB: performance.memory
+        ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null };
   })()`);
-  ok(`scroll: ${JSON.stringify(perf)}`);
+  if (perf.fps && perf.fps < 20)
+    throw new Error(`janky under load: ${JSON.stringify(perf)}`);
+  if (perf.revisitNewFetches > 2)
+    throw new Error(`cache not reusing: ${JSON.stringify(perf)}`);
+  if (perf.heapMB && perf.heapMB > 700)
+    throw new Error(`heap blowout: ${JSON.stringify(perf)}`);
+  ok(`100+ clips: ${JSON.stringify(perf)}`);
   fs.writeFileSync(`${OUT}\\n2b-ui-perf.json`, JSON.stringify(perf, null, 2));
 
-  /* clean shutdown check — real process names, killed then verified */
-  step("9) shutdown — no orphan processes");
+  /* 13 — restart persistence: kill the app, relaunch, reconnect —
+     manifest must still serve and the canvas mount WITHOUT a rebuild. */
+  step("13) restart persistence — waveform survives relaunch");
+  const EXE = process.argv[4];
+  try { execFileSync("taskkill", ["/F", "/IM", "atomic-dream-engine.exe"]); } catch {}
+  try { execFileSync("taskkill", ["/F", "/IM", "atomic-backend.exe"]); } catch {}
+  await sleep(3000);
+  if (!EXE) throw new Error("restart needs the exe path as argv[4]");
+  const { spawn } = require("child_process");
+  spawn(EXE, [], {
+    detached: true, stdio: "ignore",
+    env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
+        `--remote-debugging-port=${PORT}` } }).unref();
+  await sleep(9000);
+  // Reconnect CDP on the fresh instance.
+  await attachWs();
+  API = null; TOKEN = null;
+  await send("Network.enable");
+  await sleep(4000);
+  if (!API || !TOKEN) {
+    await evalJs(`(() => {
+      const b = [...document.querySelectorAll("button,a")]
+        .find(e => e.textContent.trim() === "Projects");
+      if (b) b.click(); return !!b; })()`);
+    await sleep(3000);
+  }
+  if (!API || !TOKEN) { await send("Page.reload", {}); await sleep(6000); }
+  if (!API || !TOKEN) throw new Error("relaunch: no backend creds");
+  const man3 = await api("GET", `/api/projects/${p.id}/assets/${au.id}/waveform`);
+  if (man3.built_sha256 !== man.built_sha256)
+    throw new Error("manifest changed across restart");
+  await navToTimeline(p.name);
+  await evalJs(`(() => {
+    const b = [...document.querySelectorAll("button")]
+      .find(e => e.textContent.includes("WF"));
+    if (b) b.click(); return !!b; })()`);
+  await sleep(3000);
+  const domAfter = await evalJs(`(() => {
+    const clip = document.querySelector('[data-testid="lane-clip"]');
+    return { canvas: clip ? clip.querySelectorAll("canvas").length : 0,
+      jobs: document.body.innerText.includes("waveform…") }; })()`);
+  if (domAfter.canvas < 1)
+    throw new Error(`no canvas after restart: ${JSON.stringify(domAfter)}`);
+  ok(`manifest identical post-restart; canvas remounts (no rebuild)`);
+
+  /* 14 — clean shutdown: no orphan app OR ffmpeg processes */
+  step("14) shutdown — no orphan processes");
   try { execFileSync("taskkill", ["/F", "/IM", "atomic-dream-engine.exe"]); } catch {}
   try { execFileSync("taskkill", ["/F", "/IM", "atomic-backend.exe"]); } catch {}
   await sleep(3000);
   const procs = execFileSync("tasklist").toString();
   const orphans = (procs.match(/atomic-(dream-engine|backend)\.exe/gi) || []).length;
+  const ffmpegOrphans = (procs.match(/ffmpeg\.exe/gi) || []).length;
   if (orphans > 0) throw new Error(`${orphans} orphan app processes`);
-  ok("clean shutdown — zero orphan app processes");
+  if (ffmpegOrphans > 0) throw new Error(`${ffmpegOrphans} orphan ffmpeg processes`);
+  ok("clean shutdown — zero orphan app/ffmpeg processes");
 
   fs.writeFileSync(`${OUT}\\n2b-acceptance.log`, LOG.join("\n") + "\n");
-  console.log(`\nPASS ${STEP}/9 — evidence in ${OUT}`);
+  console.log(`\nPASS ${STEP}/14 — evidence in ${OUT}`);
 }
 
 main().catch((e) => {
