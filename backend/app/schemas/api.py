@@ -507,7 +507,7 @@ class AdapterProfileOut(BaseModel):
     display_name: str
     adapter_kind: str
     tasks: list[str]
-    supports: dict[str, bool]
+    supports: dict[str, Any]
     limits: dict[str, Any]
     requires_cloud: bool
     cost_model: str

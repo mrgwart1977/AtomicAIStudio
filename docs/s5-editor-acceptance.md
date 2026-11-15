@@ -175,3 +175,18 @@ deferred to a later stabilization PR; do not add a vector editor here.
 | 87 | Delete a shot outside the wizard, then return to it | A notice says the shot was removed; the wizard continues cleanly |
 | 88 | Trigger an error (e.g. import a missing file path) | Plain-language message with an expandable technical-details section |
 | 89 | Keyboard-only: Tab through the wizard | Every control is reachable; focus order follows the steps |
+
+## C5-E — model & runtime compatibility
+
+| # | Step | Expected |
+|---|------|----------|
+| 90 | Model Manager → model cards | Each model shows one availability badge: "Installed & ready", "Installed — limited", "Can be installed", "Coming in a future update", or "Not available" — never a misleading mix |
+| 91 | Planned video model card | Badge reads "Coming in a future update"; no Install or Benchmark button; runtime says "(planned)" |
+| 92 | Any model → "Compatibility checks" | Read-only check list renders: catalog metadata, runtime/binary, model files, hash verification (opt-in), capability contract, parameter combos, driver/runtime — each ✓/✗/· with a plain detail line; page makes no downloads or inference |
+| 93 | Installable model → Install… | Preflight dialog shows download size, disk free, est. VRAM + RAM ("estimates, not guarantees"), runtime install state, license, limitations, and "Nothing downloads until you approve" — install still requires the explicit confirm |
+| 94 | Installed sd.cpp image model → Run benchmark… → confirm | Ops job runs 3 minimal generations; progress visible; result shows median time + peak worker RAM + GPU/runtime, labelled as this-hardware measurement with the estimate-vs-measured warning |
+| 95 | Benchmark a model → cancel mid-run | Job cancels cleanly; no benchmark result is stamped on the model card |
+| 96 | Benchmark result persists | Reopen Model Manager after app restart — the measured result still shows on the model card |
+| 97 | Uninstalled / planned model → /api/models/{key}/benchmark | Refused (422) — benchmarks never trigger downloads |
+| 98 | Machine with no compatible GPU | Hardware profile block explains CPU-only/limited state; affected models show "Not available" or "Installed — limited" with reasons — never "Compatible" |
+| 99 | Multi-GPU machine | GPU slots listed per-device; runtimes report per-flavor state; no unvalidated multi-GPU execution claim appears anywhere |

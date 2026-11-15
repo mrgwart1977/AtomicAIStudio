@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 
 /**
@@ -18,7 +18,7 @@ export function ConfirmDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
   title: string;
-  body: string;
+  body: ReactNode;
   confirmLabel?: string;
   requireText?: string;
   onConfirm: () => void;
@@ -32,7 +32,7 @@ export function ConfirmDialog({
         <Dialog.Overlay className="fixed inset-0 bg-black/60" />
         <Dialog.Content className="fixed left-1/2 top-1/2 w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-line bg-panel p-5 shadow-xl">
           <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
-          <p className="mt-2 text-sm text-muted">{body}</p>
+          <div className="mt-2 text-sm text-muted">{body}</div>
           {requireText && (
             <label className="mt-4 block text-sm text-muted">
               Type <span className="font-semibold text-fg">{requireText}</span> to confirm

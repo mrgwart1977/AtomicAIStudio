@@ -334,6 +334,94 @@ def record_benchmark(runtime_key: str, body: RuntimeBenchmarkRequest,
     return {"runtime_key": row_key, "benchmark": meta["benchmark"]}
 
 
+# ---------- C5-E: consolidated compatibility ----------
+
+@api_router.get("/api/compatibility")
+def get_compatibility(request: Request, db: Session = Depends(get_db)):
+    """Consolidated model/runtime/hardware compatibility matrix — one
+    availability class per model (installed_operational |
+    installed_limited | installable | planned | blocked), runtime flavor
+    state, estimates, limitations. Read-only."""
+    from app.domain import compat_report
+    return compat_report.build_report(db, request.app.state.settings,
+                                      hardware.probe())
+
+
+@api_router.get("/api/models/{model_key}/preflight")
+def get_model_preflight(model_key: str, request: Request,
+                        db: Session = Depends(get_db)):
+    """Beginner install preflight: download size, disk space, VRAM/RAM
+    estimates, runtime state, license, limitations. Approval is still
+    required — this only informs it."""
+    from app.domain import compat_report
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    return compat_report.preflight(db, request.app.state.settings, spec,
+                                   hardware.probe())
+
+
+@api_router.get("/api/models/{model_key}/validation")
+def get_model_validation(model_key: str, request: Request,
+                         verify_hashes: bool = False,
+                         db: Session = Depends(get_db)):
+    """Read-only validation report: catalog completeness, runtime/binary
+    availability, model files, optional sha256 verification, capability
+    contract consistency, parameter sanity, driver/runtime match.
+    Never runs inference."""
+    from app.domain import compat_report
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    return compat_report.validate_model(
+        db, request.app.state.settings, spec,
+        request.app.state.adapter_registry, hardware.probe(),
+        verify_hashes=verify_hashes)
+
+
+class ModelBenchmarkRequest(BaseModel):
+    runs: int = 3
+    runtime_flavor: str | None = None
+
+
+@api_router.post("/api/models/{model_key}/benchmark")
+def start_model_benchmark(model_key: str, request: Request,
+                          body: ModelBenchmarkRequest | None = None,
+                          db: Session = Depends(get_db)):
+    """Explicit, user-initiated benchmark of an INSTALLED local model —
+    durable ops-lane job, cancellable via /api/jobs/{id}/cancel.
+    No downloads, no cloud calls; uninstalled/planned/non-local models
+    are refused."""
+    spec = model_catalog.get(model_key)
+    if spec is None:
+        raise HTTPException(404, "unknown model")
+    if spec.support == "planned":
+        raise HTTPException(422, "planned models cannot be benchmarked")
+    if spec.adapter_id != "gen.image.sdcpp":
+        raise HTTPException(
+            422, f"benchmark harness not available for '{spec.adapter_id}' "
+                 "models yet — only local sd.cpp image models are supported")
+    installs = model_files.installs_by_key(db)
+    if (installs.get(model_key) or {}).get("status") != "installed":
+        raise HTTPException(
+            422, f"model '{model_key}' is not installed — benchmarks never "
+                 "download; install it first")
+    body = body or ModelBenchmarkRequest()
+    if not 1 <= body.runs <= 5:
+        raise HTTPException(422, "runs must be between 1 and 5")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.benchmark",
+        kind="model_benchmark",
+        request={"model_key": model_key, "runs": body.runs,
+                 "runtime_flavor": body.runtime_flavor},
+        idempotency_key=f"bench:{model_key}:{new_id()[:8]}",
+        model_key=model_key,
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
+
+
 @api_router.get("/api/gpu/scheduler")
 def gpu_scheduler_state(request: Request):
     sched = getattr(request.app.state, "gpu_scheduler", None)
