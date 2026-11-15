@@ -661,13 +661,53 @@ def _fps_to_rational(fps: float) -> tuple[int, int]:
     return (max(1, f.numerator), max(1, f.denominator))
 
 
+def source_geometry_audio(version: AssetVersion) -> dict[str, Any]:
+    """N2-A — audio geometry in SAMPLES: the clip's src_fps_* pins the
+    source sample rate (rate/1), src_frames pins total samples, and
+    in/out trims are sample indices — sample-exact with no new units.
+    Requires a measured rate+duration+sample count, same fail-closed
+    stance as video."""
+    probe = (version.media_json or {}).get("probe") or {}
+    rate = probe.get("sample_rate")
+    dur = probe.get("duration_s")
+    samples = probe.get("samples")
+    if not probe.get("ok") or not isinstance(rate, int) or rate <= 0 \
+            or not isinstance(dur, (int, float)) or dur <= 0 \
+            or not isinstance(samples, int) or samples <= 0:
+        raise TimelineError(
+            "source audio has no measured rate/duration/samples — "
+            "it cannot be trimmed safely")
+    return {"frames": samples, "fps_num": rate, "fps_den": 1,
+            "duration_s": float(dur), "width": None, "height": None,
+            "codec": probe.get("codec"),
+            "sample_rate": rate, "channels": probe.get("channels"),
+            "channel_layout": probe.get("channel_layout")}
+
+
+# Lane ↔ asset kind rule (N2-A): audio lanes accept only audio-kind
+# assets; video and overlay lanes accept video-kind assets. A video
+# file's embedded audio is edited as a video asset — detaching it
+# onto an audio lane is out of scope.
+def check_track_asset_kind(track: TimelineTrack, asset: Asset) -> None:
+    if track.kind == "audio":
+        if asset.kind != "audio":
+            raise TimelineError(
+                f"audio lanes accept audio assets only — "
+                f"'{asset.name}' is kind '{asset.kind}'")
+    elif asset.kind != "video":
+        raise TimelineError(
+            f"{track.kind} lanes accept video assets only — "
+            f"'{asset.name}' is kind '{asset.kind}'")
+
+
 def resolve_clip_source(session: Session, project_id: str, asset_id: str,
                         version_id: str | None) -> tuple[Asset, AssetVersion, dict]:
     asset = session.get(Asset, asset_id)
     if asset is None or asset.project_id != project_id:
         raise KeyError("source asset not found in this project")
-    if asset.kind != "video":
-        raise TimelineError("timeline clips require a video asset")
+    if asset.kind not in ("video", "audio"):
+        raise TimelineError(
+            "timeline clips require a video or audio asset")
     # Asset vocabulary is ready|missing|deleted — 'ready' is the only
     # usable state; archived/missing/deleted sources refuse.
     if asset.status != "ready":
@@ -677,7 +717,9 @@ def resolve_clip_source(session: Session, project_id: str, asset_id: str,
            else session.get(AssetVersion, asset.current_version_id))
     if ver is None or ver.asset_id != asset.id:
         raise TimelineError("source version not found on this asset")
-    return asset, ver, source_geometry(ver)
+    geo = (source_geometry_audio(ver) if asset.kind == "audio"
+           else source_geometry(ver))
+    return asset, ver, geo
 
 
 def _check_trims(in_frame: int, out_frame: int, src_frames: int) -> tuple[int, int]:
@@ -718,6 +760,7 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
                 "timeline has no video track — add one before "
                 "inserting clips")
     _check_track_unlocked(track)
+    check_track_asset_kind(track, asset)
     clips = list_clips(session, tl.id)
     if not allow_duplicate and any(
             c.source_asset_id == asset.id
@@ -897,6 +940,10 @@ def move_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
             dst_track = src_track
         if dst_track is None:
             raise TimelineError("clip has no track")
+        if dst_track.id != clip.track_id:
+            asset = session.get(Asset, clip.source_asset_id)
+            if asset is not None:
+                check_track_asset_kind(dst_track, asset)
         clip.start_frames = _check_int(
             start_frames if start_frames is not None
             else clip.start_frames, "start_frames", 0, 1 << 30)
@@ -1308,6 +1355,12 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
                     "width": probe.get("width"),
                     "height": probe.get("height"),
                     "codec": probe.get("codec"),
+                    # N2-A — audio sources carry stream identity so the
+                    # document alone reveals rate/layout; null on video.
+                    "sample_rate": probe.get("sample_rate"),
+                    "channels": probe.get("channels"),
+                    "channel_layout": probe.get("channel_layout"),
+                    "samples": probe.get("samples"),
                 },
                 "shot_id": c.shot_id, "scene_id": c.scene_id,
             })

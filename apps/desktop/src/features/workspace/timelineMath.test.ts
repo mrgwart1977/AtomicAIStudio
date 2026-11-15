@@ -99,10 +99,16 @@ describe("dropError", () => {
     expect(dropError(TRACK("v", { locked: true }), 0, moving, [], TL))
       .toMatch(/locked/);
   });
-  it("refuses audio lanes (no audio sources yet)", () => {
-    expect(dropError(TRACK("a", { kind: "audio" }), 0, moving, [], TL))
-      .toMatch(/audio/);
-    expect(compatibleTrack(TRACK("a", { kind: "audio" }))).toBe(false);
+  it("refuses video clips on audio lanes (N2-A kind rule)", () => {
+    expect(dropError(TRACK("a", { kind: "audio" }), 0, moving, [], TL,
+                     "video")).toMatch(/audio clips only/);
+    // an audio clip is accepted on an audio lane
+    expect(dropError(TRACK("a", { kind: "audio" }), 0, moving, [], TL,
+                     "audio")).toBeNull();
+    // an audio clip is refused on a video lane
+    expect(dropError(TRACK("v"), 0, moving, [], TL, "audio"))
+      .toMatch(/audio lanes only/);
+    expect(compatibleTrack(TRACK("a", { kind: "audio" }))).toBe(true);
     expect(compatibleTrack(TRACK("o", { kind: "overlay" }))).toBe(true);
   });
   it("refuses negative starts", () => {

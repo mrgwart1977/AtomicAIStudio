@@ -86,6 +86,78 @@ def probe(path: Path, *, timeout_s: float = 30.0,
     }
 
 
+def probe_audio(path: Path, *, timeout_s: float = 30.0,
+                cancel: threading.Event | None = None) -> dict[str, Any]:
+    """N2-A — ffprobe metadata for audio-kind sources.
+
+    Requires at least one decodable audio stream; the first audio
+    stream is authoritative for rate/channels/layout. ``samples`` is
+    the stream's ``duration_ts`` when its time_base is 1/rate (exact),
+    else ``round(duration_s * sample_rate)`` — a container-derived
+    estimate documented in docs/n2a-audio.md."""
+    tool = binaries.ffprobe()
+    if tool is None:
+        return {"ok": False, "reason": "ffprobe unavailable",
+                "probe_unavailable": True}
+    r = supervise.run(
+        [tool["path"], "-v", "error", "-print_format", "json",
+         "-show_format", "-show_streams", str(path)],
+        timeout_s=timeout_s, cancel=cancel, capture_bytes=1 << 20)
+    if r["timed_out"]:
+        return {"ok": False, "reason": "ffprobe timed out"}
+    if r["cancelled"]:
+        return {"ok": False, "reason": "ffprobe cancelled", "cancelled": True}
+    if r["exit"] != 0:
+        return {"ok": False,
+                "reason": (r["output_tail"] or "ffprobe error").strip()[:300]
+                or "ffprobe error"}
+    try:
+        data = json.loads(_stdout_json(r["output_tail"]))
+    except json.JSONDecodeError:
+        return {"ok": False, "reason": "ffprobe returned unparseable output"}
+    astreams = [s for s in data.get("streams", [])
+                if s.get("codec_type") == "audio"]
+    if not astreams:
+        return {"ok": False, "reason": "no audio stream in container"}
+    a = astreams[0]
+    rate = int(a.get("sample_rate") or 0)
+    dur_s = round(float(data.get("format", {}).get("duration")
+                        or a.get("duration") or 0), 6)
+    if rate <= 0 or dur_s <= 0:
+        return {"ok": False,
+                "reason": "audio stream has no measured rate/duration"}
+    # Sample count: exact when the stream exposes duration_ts in
+    # 1/rate timebase (WAV/AIFF do), else container-derived estimate.
+    samples = 0
+    samples_exact = False
+    tb = (a.get("time_base") or "")
+    dts = a.get("duration_ts")
+    try:
+        tb_num, tb_den = (int(x) for x in tb.split("/"))
+        if dts is not None and tb_num == 1 and tb_den == rate:
+            samples = int(dts)
+            samples_exact = True
+    except (ValueError, TypeError):
+        pass
+    if samples <= 0:
+        samples = max(1, round(dur_s * rate))
+    return {
+        "ok": True,
+        "kind": "audio",
+        "duration_s": dur_s,
+        "codec": a.get("codec_name") or "",
+        "container": (data.get("format", {}).get("format_name") or "")
+        .split(",")[0],
+        "sample_rate": rate,
+        "channels": int(a.get("channels") or 0),
+        "channel_layout": a.get("channel_layout") or "",
+        "samples": samples,
+        "samples_exact": samples_exact,
+        "audio_streams": len(astreams),
+        "probe_backend": "ffprobe",
+    }
+
+
 def _stdout_json(text: str) -> str:
     """ffprobe JSON lands on stdout; supervise merges stderr — take the
     largest JSON-looking slice."""

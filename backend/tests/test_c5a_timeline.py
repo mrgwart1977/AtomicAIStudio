@@ -95,7 +95,7 @@ def test_clip_insert_requires_video_active_project_owned(client, tmp_path):
     from tests.test_c4b_shot_generate import _import
     img = _import(client, pid, "i.png", tmp_path, (1, 2, 3))
     r = _insert(client, pid, t["id"], {"id": img["id"]}, expect=422)
-    assert "video asset" in r.text
+    assert "video or audio asset" in r.text
     # archived source → 422
     va = _video(client, pid, "old.mp4", sha="d" * 64, status="archived")
     r = _insert(client, pid, t["id"], va, expect=422)

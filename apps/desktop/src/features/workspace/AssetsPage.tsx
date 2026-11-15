@@ -38,9 +38,26 @@ function isAssisted(a: Asset): boolean {
  * legitimately registered in CAS but can never be trimmed/inserted —
  * flag it so it doesn't look like ordinary footage. */
 export function isUnusableMedia(a: Asset): boolean {
-  if (a.kind !== "video" && a.kind !== "image") return false;
+  if (a.kind !== "video" && a.kind !== "image" && a.kind !== "audio") {
+    return false;
+  }
   const probe = a.media_json?.probe as { ok?: boolean } | undefined;
   return probe?.ok === false;
+}
+
+/** N2-A — extension → import kind (docs/n2a-audio.md matrix). Returns
+ * undefined when unknown so the backend's default kind applies; the
+ * probe — never the extension — decides whether the file is usable. */
+export function inferKind(path: string): string | undefined {
+  const ext = (path.split(".").pop() ?? "").toLowerCase();
+  if (["wav", "aiff", "aif", "flac", "mp3", "m4a", "aac", "ogg",
+       "opus"].includes(ext)) return "audio";
+  if (["mp4", "mov", "webm", "mkv", "avi", "m4v"].includes(ext)) {
+    return "video";
+  }
+  if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"]
+        .includes(ext)) return "image";
+  return undefined;
 }
 
 export function AssetsPage() {
@@ -55,6 +72,7 @@ export function AssetsPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importPath, setImportPath] = useState("");
+  const [importKind, setImportKind] = useState("auto");
   const [shared, setShared] = useState<SharedAsset[] | null>(null);
   const [missingOnly, setMissingOnly] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -87,7 +105,13 @@ export function AssetsPage() {
       p = picked ?? p;
       if (!p) return;
     }
-    if (await run("asset.import", { source_path: p })) setImportPath("");
+    // N2-A — kind is explicit when chosen; "auto" infers by extension
+    // (see docs/n2a-audio.md matrix). The backend probe still decides
+    // whether the file is actually usable.
+    const kind = importKind === "auto" ? inferKind(p) : importKind;
+    const payload: Record<string, unknown> = { source_path: p };
+    if (kind) payload.kind = kind;
+    if (await run("asset.import", payload)) setImportPath("");
   }
 
   async function share(a: Asset) {
@@ -142,6 +166,18 @@ export function AssetsPage() {
           placeholder="Path to a file to import (or use Browse)…"
           className="flex-1 rounded-md border border-line bg-card px-3 py-2 text-sm"
         />
+        <select
+          value={importKind}
+          onChange={(e) => setImportKind(e.target.value)}
+          aria-label="Import kind"
+          title="auto infers the kind from the file extension; the backend probe validates it either way"
+          className="rounded-md border border-line bg-card px-2 py-2 text-sm"
+        >
+          <option value="auto">auto</option>
+          <option value="video">video</option>
+          <option value="audio">audio</option>
+          <option value="image">image</option>
+        </select>
         <button
           onClick={() => void pickFile("Import media file").then((p) => p && setImportPath(p))}
           className="rounded-md border border-line px-3 py-2 text-sm text-muted hover:text-fg"

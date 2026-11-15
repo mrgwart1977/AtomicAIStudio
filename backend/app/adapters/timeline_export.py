@@ -64,12 +64,17 @@ class TimelineExportAdapter:
         elif not edl.get("clips"):
             errs.append("timeline has no clips to export")
         elif fmt == "ade-edl/2":
-            plan = tx.composite_plan(edl, {})
-            if not plan["clips"]:
-                errs.append("no visible lane holds clips — nothing "
-                            "to composite")
-            elif plan["program_frames"] <= 0:
-                errs.append("composite program has zero duration")
+            try:
+                plan = tx.composite_plan(edl, {})
+            except ValueError as exc:
+                # e.g. N2-A — a populated visible audio lane refuses.
+                errs.append(str(exc))
+            else:
+                if not plan["clips"]:
+                    errs.append("no visible lane holds clips — nothing "
+                                "to composite")
+                elif plan["program_frames"] <= 0:
+                    errs.append("composite program has zero duration")
         return errs
 
     def _source_path(self, session, sha: str, clip_id: str) -> Path:
