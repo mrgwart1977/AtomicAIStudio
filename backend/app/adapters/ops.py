@@ -364,6 +364,10 @@ class AssetWaveformAdapter(_OpsBase):
             stem=f"{handle.job_id}-wave",
             cancel=handle.cancel_event)
         if not built.get("ok"):
+            if built.get("cancelled"):
+                # Re-check so the job is recorded as cancelled, not
+                # failed — same outcome as a mid-adapter check_cancel.
+                handle.check_cancel()
             raise ValueError(
                 built.get("reason") or "waveform build failed")
 
