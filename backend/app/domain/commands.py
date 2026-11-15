@@ -100,6 +100,8 @@ SUPPORTED_COMMANDS = {
     "timeline.clip.place",
     # N1-C — frame-accurate split, ripple edits, gap management
     "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
+    # N2-C — audio gain + track controls
+    "timeline.clip.gain",
     # C5-B — durable FFmpeg render of a pinned EDL
     "timeline.export",
 }
@@ -1625,9 +1627,17 @@ def _validate_timeline(session: Session, project: Project,
         except KeyError as exc:
             raise CommandError(404, str(exc).strip("'")) from None
     elif command_type in ("timeline.clip.remove", "timeline.clip.move",
-                          "timeline.clip.trim", "timeline.clip.split"):
+                          "timeline.clip.trim", "timeline.clip.split",
+                          "timeline.clip.gain"):
         if not payload.get("clip_id"):
             raise CommandError(422, "clip_id is required")
+        if command_type == "timeline.clip.gain":
+            if "gain_db" not in payload:
+                raise CommandError(422, "gain_db is required")
+            try:
+                tld.check_gain_db(payload["gain_db"])
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
         if command_type == "timeline.clip.split":
             if payload.get("at_frame") is None:
                 raise CommandError(422, "at_frame is required")
@@ -2826,7 +2836,8 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
             tld.update_track(
                 session, t, tr,
                 fields={f: payload[f] for f in
-                        ("name", "visible", "locked", "muted")
+                        ("name", "visible", "locked", "muted",
+                         "solo", "gain_db")
                         if f in payload},
                 command_id=command.id)
         elif command_type == "timeline.track.reorder":
@@ -2855,6 +2866,17 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                           out_frame=payload.get("out_frame"),
                           ripple_scope=payload.get("ripple_scope"),
                           command_id=command.id)
+        elif command_type == "timeline.clip.gain":
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            try:
+                tld.set_clip_gain(session, t, clip,
+                                  gain_db=payload.get("gain_db"),
+                                  command_id=command.id)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
         elif command_type == "timeline.clip.split":
             try:
                 clip = tld.get_clip(session, t, payload["clip_id"])

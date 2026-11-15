@@ -18,6 +18,7 @@ const TRACK = (id: string, over: Partial<TimelineTrack> = {}): TimelineTrack => 
   id, project_id: "p", timeline_id: "t", kind: "video",
   name: id.toUpperCase(), position: 0,
   visible: true, locked: false, muted: false,
+  gain_db: 0, solo: false,
   created_at: "2026-01-01", ...over,
 });
 
@@ -28,7 +29,7 @@ const CLIP = (id: string, over: Partial<TimelineClip> = {}): TimelineClip => ({
   source_sha256: "ab".repeat(32),
   in_frame: 0, out_frame: 72,
   src_frames: 72, src_fps_num: 24, src_fps_den: 1,
-  src_duration_s: 3, shot_id: null, scene_id: null,
+  src_duration_s: 3, gain_db: 0, shot_id: null, scene_id: null,
   created_at: "2026-01-01", ...over,
 });
 
@@ -125,6 +126,72 @@ describe("TimelineEditor", () => {
     await waitFor(() => expect(onRun).toHaveBeenCalledWith(
       "timeline.track.remove",
       expect.objectContaining({ track_id: "o1" })));
+  });
+
+  it("N2-C: solo toggle + track gain slider commit one update each", async () => {
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Solo Music" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.update",
+      expect.objectContaining({ track_id: "a1", solo: true })));
+    // Drag the lane gain slider — commits once on release.
+    const slider = screen.getByRole("slider", { name: "Music volume" });
+    fireEvent.change(slider, { target: { value: "-6" } });
+    expect(onRun).not.toHaveBeenCalledWith(
+      "timeline.track.update",
+      expect.objectContaining({ gain_db: expect.anything() }));
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.update",
+      expect.objectContaining({ track_id: "a1", gain_db: -6 })));
+  });
+
+  it("N2-C: gain readout resets to unity on click", async () => {
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music",
+        gain_db: -8 })],
+      clips: [],
+    }));
+    // The reset control is the dB readout button beside the slider.
+    fireEvent.click(screen.getByRole("button", { name: "-8.0dB" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.update",
+      expect.objectContaining({ track_id: "a1", gain_db: 0 })));
+  });
+
+  it("N2-C: audio clip inspector exposes clip gain", async () => {
+    // WaveformCanvas polls the manifest — answer "not built".
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [CLIP("c0", { track_id: "a1",
+        src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+        in_frame: 0, out_frame: 96000, gain_db: -3 })],
+    }));
+    fireEvent.click(screen.getByTestId("lane-clip"));
+    const slider = await screen.findByRole("slider",
+      { name: "Clip volume" });
+    fireEvent.change(slider, { target: { value: "-10" } });
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.gain",
+      expect.objectContaining({ clip_id: "c0", gain_db: -10 })));
+    // Effective readout = committed clip + track dB (−3 + 0).
+    expect(screen.getByText(/eff .*dB/).textContent)
+      .toContain("-3.0");
+  });
+
+  it("N2-C: no mix row on overlay lanes", () => {
+    setup(DETAIL({
+      tracks: [TRACK("o1", { kind: "overlay", name: "Top" })],
+      clips: [],
+    }));
+    expect(screen.queryByTestId("mix-o1")).toBeNull();
+    expect(screen.getByRole("button", { name: "Solo Top" }))
+      .toBeTruthy(); // toggle exists; backend refuses solo on overlay
   });
 
   it("non-empty lane removal is disabled", () => {

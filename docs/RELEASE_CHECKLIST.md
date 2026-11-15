@@ -408,7 +408,7 @@ Classification legend: **[auto]** verified automated test ·
 - All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
 - **N1 is development-complete; this is not production release readiness.**
 
-### N2 milestone note (audio editing — N2-A merged, N2-B in review, N2-C..F not started)
+### N2 milestone note (audio editing — N2-A + N2-B merged, N2-C in review, N2-D..F not started)
 
 - N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
 - Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
@@ -420,7 +420,11 @@ Classification legend: **[auto]** verified automated test ·
 - Audio-lane rendering/mixing in export — **[blocked]** by design until N2-E; currently refuses visibly populated audio lanes (never silently drops)
 - **N2-B waveform envelopes:** `asset.waveform` durable job → streaming decode → deterministic min/max LOD levels in CAS pinned to source sha — **[auto]** + **[installed]** (9/9, `docs/n2b-evidence/`; rerun skips; stale-version manifest → honest 409)
 - Waveform canvas inside audio `LaneClip`s — viewport-culled, zoom-aware LOD switching, loading/missing/error+retry states, pointer-transparent — **[auto]** + **[installed]**
-- Waveform perf — `[auto]` bench (`backend/bench_waveform.py`): 5 min build 1.5 s; 1 h 12.9 s / 5.7 MB blob / 57 MB peak; 3 h 36.3 s / 4.3 MB blob / 43 MB peak (bucket-capped); UI scroll ~49 fps / 4 MB heap on a 30 s clip
-- Gain/automation, fades, crossfades, mute/solo mixing, audio preview — **[notrun]** N2-C..N2-F scope, not implemented
+- Waveform perf — `[auto]` bench (`backend/bench_waveform.py`): 5 min build 1.5 s; 1 h 12.9 s / 5.7 MB blob / 57 MB peak; 3 h 36.3 s / 4.3 MB blob / 43 MB peak (bucket-capped); 102-clip multi-lane scroll 60 fps / 7 MB heap / 0 revisit fetches **[installed]**
+- Waveform timing integrity — absolute source-sample buckets; `clipWaveWindow` clamps to `[in,out]` so trims never display discarded/beyond-out audio; zoom changes LOD never timing — **[auto]** (unit tests incl. nonzero in/out, split halves, 44.1 kHz, 24000/1001)
+- Waveform serve-time integrity — CAS blob sha re-verified per slice; corrupt/unparseable/mismatched-source blobs → 409 — **[auto]** + **[installed]**
+- Waveform editing installed coverage — move, head+tail trim, split (contiguous source halves), undo/redo stable id, restart persistence, export refusal — **[installed]** (14/14, `docs/n2b-evidence/`)
+- **N2-C gain + track controls:** per-clip + per-lane `gain_db` (dB only, −60…+12; linear = 10^(db/20) at mix), lane `solo`; `timeline.clip.gain` + extended `timeline.track.update`; EDL v2 metadata; precedence visible→mute→solo — **[auto]** (22 backend + 4 UI tests; `docs/n2c-gain-controls.md`); UI/installed pending
+- Gain automation, fades, crossfades, audio mixing in export, audio preview — **[notrun]** N2-D..N2-F scope, not implemented
 - Human audio-edit UX feel, drag on audio lanes — **[human]**; waveform accuracy vs a known-good editor — **[human]**
 - All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.

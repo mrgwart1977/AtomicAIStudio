@@ -121,6 +121,7 @@ CommandType = Literal[
     "timeline.track.reorder", "timeline.track.remove",
     "timeline.clip.place",
     "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
+    "timeline.clip.gain",
     "timeline.export",
 ]
 
@@ -650,6 +651,7 @@ class TimelineClipOut(BaseModel):
     src_fps_num: int
     src_fps_den: int
     src_duration_s: float
+    gain_db: float = 0.0
     shot_id: str | None
     scene_id: str | None
     created_at: datetime
@@ -665,6 +667,8 @@ class TimelineTrackOut(BaseModel):
     visible: bool
     locked: bool
     muted: bool
+    gain_db: float = 0.0
+    solo: bool = False
     created_at: datetime
 
 

@@ -771,6 +771,12 @@ class TimelineTrack(Base):
     visible: Mapped[bool] = mapped_column(Boolean, default=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # N2-C — lane-level mix controls. ``gain_db`` is decibels
+    # (0 = unity; linear = 10**(gain_db/20) at mix time, N2-E).
+    # ``solo`` participates in the solo set: when ≥1 lane is soloed,
+    # non-soloed lanes are silent regardless of their own mute/gain.
+    gain_db: Mapped[float] = mapped_column(Float, default=0.0)
+    solo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -813,6 +819,10 @@ class TimelineClip(Base):
     src_fps_num: Mapped[int] = mapped_column(Integer, default=24)
     src_fps_den: Mapped[int] = mapped_column(Integer, default=1)
     src_duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    # N2-C — per-clip gain in decibels (0 = unity). Effective gain =
+    # clip × track in linear amplitude, i.e. the dB values sum.
+    # Meaningful on audio-source clips; video clips keep 0.0.
+    gain_db: Mapped[float] = mapped_column(Float, default=0.0)
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True)
     scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

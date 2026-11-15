@@ -33,6 +33,54 @@ import type { ManifestResult } from "./waveform";
 const HEADER_W = 176;   // px — track header column
 const RULER_H = 28;     // px — ruler row
 const LANE_H = 56;      // px — one lane
+const MIX_ROW_H = 22;   // px — extra mix-controls row on audio/video lanes
+
+const GAIN_DB_MIN = -60, GAIN_DB_MAX = 12; // mirrors backend contract
+
+/** Compact dB slider — drafts locally while dragging and commits ONE
+ * command on release/Enter, so an adjustment is a single undo step.
+ * Keyboard: arrows adjust ±0.5 (Shift ±5), Home/End to bounds —
+ * native range behavior. Double-click the value to reset to unity. */
+const GainSlider = ({ value, onCommit, label, disabled }: {
+  value: number;
+  onCommit: (db: number) => void;
+  label: string;
+  disabled?: boolean;
+}) => {
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? value;
+  const commit = () => {
+    if (draft !== null && draft !== value) onCommit(draft);
+    setDraft(null);
+  };
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-1"
+      title={`${label} — drag to set gain; click the value to reset to 0 dB`}>
+      <input
+        type="range" min={GAIN_DB_MIN} max={GAIN_DB_MAX} step={0.5}
+        value={shown} disabled={disabled}
+        aria-label={label}
+        onChange={(e) => setDraft(Number(e.target.value))}
+        onPointerUp={commit}
+        onKeyUp={(e) => {
+          if (e.key === "Enter" || e.key.startsWith("Arrow")
+              || e.key === "Home" || e.key === "End") commit();
+        }}
+        onBlur={commit}
+        className="min-w-0 flex-1 accent-teal disabled:opacity-40"
+        style={{ height: 10 }}
+      />
+      <button
+        disabled={disabled || shown === 0}
+        onClick={() => onCommit(0)}
+        title={shown === 0
+          ? `${label}: unity (0 dB)`
+          : `Reset ${label} to unity (0 dB)`}
+        className="w-11 shrink-0 text-right text-[9px] text-muted hover:text-fg disabled:opacity-40"
+      >{`${shown > 0 ? "+" : ""}${shown.toFixed(1)}dB`}</button>
+    </span>
+  );
+};
 const TAIL_F = 48;      // blank frames of scroll room past program end
 
 export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
@@ -717,8 +765,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
           {tracks.map((t, ti) => {
             const lane = clipsByTrack.get(t.id) ?? [];
             const dimmed = !t.visible;
+            const mixable = t.kind === "audio" || t.kind === "video";
             return (
-              <div key={t.id} className="flex" style={{ height: LANE_H }}
+              <div key={t.id} className="flex"
+                style={{ height: mixable ? LANE_H + MIX_ROW_H : LANE_H }}
                 data-testid={`lane-${t.id}`}>
                 {/* track header — sticky left */}
                 <div
@@ -788,6 +838,16 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                         ? "border-teal/50 text-teal"
                         : "border-line text-muted hover:text-fg"}`}
                     >{t.muted ? "Unmute" : "Mute"}</button>
+                    <button
+                      onClick={() => patchTrack(t, { solo: !t.solo })}
+                      aria-label={`${t.solo ? "Unsolo" : "Solo"} ${t.name}`}
+                      title={t.solo
+                        ? "Unsolo — let other lanes be heard again"
+                        : "Solo — hear only soloed lanes"}
+                      className={`rounded border px-1 ${t.solo
+                        ? "border-action/60 text-action"
+                        : "border-line text-muted hover:text-fg"}`}
+                    >Solo</button>
                     <span className="mx-0.5 text-faint">·</span>
                     <button disabled={busy || ti === 0} onClick={() => moveTrack(t, -1)}
                       aria-label={`Move ${t.name} up`}
@@ -828,6 +888,22 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                       </select>
                     )}
                   </div>
+                  {/* N2-C — lane mix row: gain slider on audio (clip
+                      audio) and video (embedded audio) lanes. */}
+                  {mixable && (
+                    <div className="flex items-center gap-1"
+                      data-testid={`mix-${t.id}`}>
+                      <GainSlider
+                        value={t.gain_db ?? 0}
+                        label={`${t.name} volume`}
+                        disabled={busy || !active}
+                        onCommit={(db) => patchTrack(t, { gain_db: db })}
+                      />
+                      {t.solo && (
+                        <span className="text-[9px] text-action">soloed</span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {/* lane body */}
                 <div
@@ -836,7 +912,8 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                     else lanesRef.current.delete(t.id);
                   }}
                   className={`relative border-b border-line ${dimmed ? "opacity-50" : ""}`}
-                  style={{ width: contentW, height: LANE_H }}
+                  style={{ width: contentW,
+                    height: mixable ? LANE_H + MIX_ROW_H : LANE_H }}
                   data-testid={`lane-body-${t.id}`}
                 >
                   {lane.length === 0 && (
@@ -1292,6 +1369,27 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
               className="rounded border border-line px-2 py-0.5 text-muted hover:text-teal disabled:opacity-40"
             >Build waveform</button>
           )}
+        </div>
+      )}
+      {/* N2-C — per-clip gain for audio clips. Effective level =
+          clip + track dB; mute/solo are lane-level (header). */}
+      {isAudio && !locked && (
+        <div className="mt-2 flex items-center gap-2"
+          data-testid="clip-gain">
+          <span className="text-[10px] text-muted">Clip volume</span>
+          <GainSlider
+            value={clip.gain_db ?? 0}
+            label="Clip volume"
+            disabled={busy}
+            onCommit={(db) => void onRun("timeline.clip.gain", {
+              timeline_id: tl.id, clip_id: clip.id, gain_db: db })}
+          />
+          <span className="shrink-0 text-[9px] text-faint"
+            title="Effective level = clip gain + track gain (dB add)">
+            eff {(((clip.gain_db ?? 0) + (track?.gain_db ?? 0)) > 0 ? "+" : "")
+              + ((clip.gain_db ?? 0) + (track?.gain_db ?? 0)).toFixed(1)}
+            dB
+          </span>
         </div>
       )}
       {locked && (
