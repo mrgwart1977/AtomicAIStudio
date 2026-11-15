@@ -146,7 +146,8 @@ describe("TimelinePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply trim" }));
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "timeline.clip.trim",
-      { timeline_id: "t1", clip_id: "c0", in_frame: 5, out_frame: 50 },
+      expect.objectContaining(
+        { timeline_id: "t1", clip_id: "c0", in_frame: 5, out_frame: 50 }),
       "timeline"));
   });
 

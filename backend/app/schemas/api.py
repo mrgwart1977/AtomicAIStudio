@@ -118,6 +118,7 @@ CommandType = Literal[
     "timeline.track.add", "timeline.track.update",
     "timeline.track.reorder", "timeline.track.remove",
     "timeline.clip.place",
+    "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
     "timeline.export",
 ]
 

@@ -166,7 +166,7 @@ describe("TimelineEditor", () => {
       expect.objectContaining({ clip_id: "c0", start_frames: 1 }));
     fireEvent.keyDown(clips[0], { key: "Delete" });
     expect(onRemoveClip).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "c0" }));
+      expect.objectContaining({ id: "c0" }), false);
   });
 
   it("drag commits clip.move with snapped integer frames on pointerup", async () => {
@@ -295,6 +295,176 @@ describe("TimelineEditor", () => {
       active: true, busy: false, onRun, onRemoveClip,
     }));
     expect(screen.queryByTestId("clip-inspector")).toBeNull();
+  });
+
+  /* ---------------- N1-C: split / ripple / trim / gaps ---------------- */
+
+  it("Split at playhead commits clip.split with the revision pin", async () => {
+    setup();
+    const btn = screen.getByTestId("split-at-playhead");
+    expect(btn).toHaveProperty("disabled", true);   // playhead at 0 = edge
+    fireEvent.pointerDown(screen.getByTestId("timeline-ruler"),
+      { clientX: 216 });                            // 216px / 6ppf = frame 36
+    await waitFor(() =>
+      expect(btn).toHaveProperty("disabled", false));
+    fireEvent.click(btn);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.split",
+      expect.objectContaining({
+        timeline_id: "t", clip_id: "c0", at_frame: 36,
+        expected_timeline: { id: "t", revision: 3 } })));
+  });
+
+  it("S key on a clip splits it at the playhead; outside does nothing", async () => {
+    setup();
+    const clip = screen.getAllByTestId("lane-clip")[0];
+    fireEvent.keyDown(clip, { key: "s" });          // playhead 0 — boundary
+    expect(onRun).not.toHaveBeenCalled();
+    fireEvent.pointerDown(screen.getByTestId("timeline-ruler"),
+      { clientX: 216 });
+    fireEvent.keyDown(clip, { key: "S" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.split",
+      expect.objectContaining({ clip_id: "c0", at_frame: 36 })));
+  });
+
+  it("locked lanes refuse keyboard splits and hide the button", async () => {
+    setup(DETAIL({ tracks: [TRACK("v1", { locked: true })] }));
+    fireEvent.pointerDown(screen.getByTestId("timeline-ruler"),
+      { clientX: 216 });
+    expect(screen.getByTestId("split-at-playhead"))
+      .toHaveProperty("disabled", true);
+    fireEvent.keyDown(screen.getAllByTestId("lane-clip")[0], { key: "s" });
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("ripple toggle flows to remove and inspector trim payloads", async () => {
+    setup();
+    fireEvent.click(screen.getByTestId("ripple-toggle"));
+    // Delete now carries the ripple flag to the confirm dialog.
+    fireEvent.keyDown(screen.getAllByTestId("lane-clip")[0],
+      { key: "Delete" });
+    expect(onRemoveClip).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "c0" }), true);
+    // Inspector trim gets ripple_scope + the revision pin.
+    fireEvent.click(screen.getAllByTestId("lane-clip")[0]);
+    fireEvent.change(await screen.findByRole("textbox",
+      { name: "Trim out frame" }), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply trim" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.trim",
+      expect.objectContaining({
+        clip_id: "c0", out_frame: 60, ripple_scope: "track",
+        expected_timeline: { id: "t", revision: 3 } })));
+  });
+
+  it("trim-handle drag commits a source-frame out_frame on pointerup", async () => {
+    setup();
+    stubLaneRects();
+    const handle = screen.getAllByTestId("trim-handle")[0];
+    fireEvent.pointerDown(handle, { clientX: 432, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 300 }); // 300px = frame 50
+    const status = await screen.findByTestId("trim-status");
+    expect(status.textContent).toMatch(/source frame 50/);
+    fireEvent.pointerUp(window, { clientX: 300 });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.trim",
+      expect.objectContaining({
+        timeline_id: "t", clip_id: "c0", out_frame: 50,
+        expected_timeline: { id: "t", revision: 3 } })));
+  });
+
+  it("trim drag past the neighbor shows the overlap reason and doesn't commit", async () => {
+    // Longer source (200f) leaves head-room to grow into c1@72.
+    setup(DETAIL({ clips: [
+      CLIP("c0", { src_frames: 200 }), CLIP("c1", { start_frames: 72 }),
+    ] }));
+    stubLaneRects();
+    const handle = screen.getAllByTestId("trim-handle")[0];
+    fireEvent.pointerDown(handle, { clientX: 432, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 480 }); // frame 80 → overlaps c1
+    const err = await screen.findByTestId("drop-error");
+    expect(err.textContent).toMatch(/overlap|Ripple/i);
+    fireEvent.pointerUp(window, { clientX: 480 });
+    expect(onRun).not.toHaveBeenCalledWith(
+      "timeline.clip.trim", expect.anything());
+  });
+
+  it("with ripple on, the same growth commits with ripple_scope", async () => {
+    setup(DETAIL({ clips: [
+      CLIP("c0", { src_frames: 200 }), CLIP("c1", { start_frames: 72 }),
+    ] }));
+    stubLaneRects();
+    fireEvent.click(screen.getByTestId("ripple-toggle"));
+    const handle = screen.getAllByTestId("trim-handle")[0];
+    fireEvent.pointerDown(handle, { clientX: 432, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 480 });
+    fireEvent.pointerUp(window, { clientX: 480 });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.trim",
+      expect.objectContaining({
+        clip_id: "c0", out_frame: 80, ripple_scope: "track" })));
+  });
+
+  it("Escape cancels a trim drag — no commit", async () => {
+    setup();
+    stubLaneRects();
+    const handle = screen.getAllByTestId("trim-handle")[0];
+    fireEvent.pointerDown(handle, { clientX: 432, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.pointerUp(window, { clientX: 300 });
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("gap indicators render explicit gaps and click-to-close", async () => {
+    setup(DETAIL({ clips: [
+      CLIP("c0"), CLIP("c1", { start_frames: 96 }),
+    ] }));
+    const gap = await screen.findByTestId("lane-gap");
+    expect(gap.getAttribute("title")).toMatch(/24 frames/);
+    fireEvent.click(gap);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.gap.close",
+      expect.objectContaining({
+        timeline_id: "t", track_id: "v1", at_frame: 84,
+        expected_timeline: { id: "t", revision: 3 } })));
+  });
+
+  it("Insert space commits gap.insert on the first editable lane", async () => {
+    setup();
+    fireEvent.pointerDown(screen.getByTestId("timeline-ruler"),
+      { clientX: 60 });                             // playhead → frame 10
+    fireEvent.change(screen.getByRole("textbox",
+      { name: "Insert space frames" }), { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("insert-space"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.gap.insert",
+      expect.objectContaining({
+        track_id: "v1", at_frame: 10, frames: 10 })));
+  });
+
+  it("Close gap commits gap.close at the playhead", async () => {
+    setup(DETAIL({ clips: [
+      CLIP("c0"), CLIP("c1", { start_frames: 96 }),
+    ] }));
+    fireEvent.pointerDown(screen.getByTestId("timeline-ruler"),
+      { clientX: 480 });                            // playhead → frame 80
+    fireEvent.click(screen.getByTestId("close-gap"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.gap.close",
+      expect.objectContaining({ track_id: "v1", at_frame: 80 })));
+  });
+
+  it("locked lane disables gap buttons and space ops", () => {
+    setup(DETAIL({
+      tracks: [TRACK("v1", { locked: true })],
+      clips: [CLIP("c0"), CLIP("c1", { start_frames: 96 })],
+    }));
+    expect(screen.getByTestId("lane-gap")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("insert-space"))
+      .toHaveProperty("disabled", true);
+    expect(screen.getByTestId("close-gap")).toHaveProperty("disabled", true);
   });
 
   it("empty timeline shows the beginner empty-state", () => {

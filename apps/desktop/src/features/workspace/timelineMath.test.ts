@@ -4,8 +4,8 @@
 import { describe, expect, it } from "vitest";
 import {
   clipTlEnd, clipTlExtent, compatibleTrack, dropError,
-  exportEligibility, fmtTc, laneClips, programEndFrames, snapStart,
-  tickInterval,
+  exportEligibility, extentOverlap, fmtTc, laneClips, laneGaps,
+  programEndFrames, snapStart, splitSrcOffset, tickInterval,
 } from "./timelineMath";
 import type { TimelineClip, TimelineDetail, TimelineTrack } from "../../api/types";
 
@@ -165,6 +165,68 @@ describe("exportEligibility (mirrors v1_layout_reason)", () => {
       CLIP("c", { start_frames: 97, out_frame: 48 }),
     ]);
     expect(exportEligibility(d).ok).toBe(true);
+  });
+});
+
+describe("N1-C — laneGaps (mirrors the backend's ceil packing)", () => {
+  it("finds mid-lane gaps on the integer grid", () => {
+    const lane = [CLIP("a"), CLIP("b", { start_frames: 96 })];
+    // a: 0–72, b: 96–168 → gap [72, 96) = 24 frames
+    expect(laneGaps(lane, TL)).toEqual([{ start: 72, frames: 24 }]);
+  });
+  it("reports a leading gap when the lane doesn't start at 0", () => {
+    expect(laneGaps([CLIP("a", { start_frames: 48 })], TL))
+      .toEqual([{ start: 0, frames: 48 }]);
+  });
+  it("contiguous and empty lanes have no gaps", () => {
+    expect(laneGaps([CLIP("a"), CLIP("b", { start_frames: 72 })], TL))
+      .toEqual([]);
+    expect(laneGaps([], TL)).toEqual([]);
+  });
+  it("gaps under fractional extents use ceil boundaries", () => {
+    // a occupies [0, 48.048) → next free integer slot is 49
+    const a = CLIP("a", { out_frame: 60,
+      src_fps_num: 30000, src_fps_den: 1001 });
+    const b = CLIP("b", { start_frames: 60 });
+    expect(laneGaps([a, b], TL)).toEqual([{ start: 49, frames: 11 }]);
+  });
+});
+
+describe("N1-C — splitSrcOffset (mirrors backend source-boundary rule)", () => {
+  it("same-rate: interior whole frames split, boundaries don't", () => {
+    const c = CLIP("c"); // [0,72) on a 24fps timeline
+    expect(splitSrcOffset(c, TL, 36)).toBe(36);
+    expect(splitSrcOffset(c, TL, 0)).toBeNull();
+    expect(splitSrcOffset(c, TL, 72)).toBeNull();
+    expect(splitSrcOffset(c, TL, 100)).toBeNull();
+    expect(splitSrcOffset(c, TL, 36.6)).toBeNull();
+  });
+  it("respects in_frame offsets", () => {
+    const c = CLIP("c", { in_frame: 10, out_frame: 82 });
+    expect(splitSrcOffset(c, TL, 30)).toBe(30); // src offset 30 → out=40
+  });
+  it("mixed rates only split on whole source frames", () => {
+    const c = CLIP("c", { out_frame: 60, src_fps_num: 30000,
+      src_fps_den: 1001 }); // extent 48.048 on a 24fps grid
+    // tl frame 8 → src 8×30000/24024 ≈ 9.99 → not whole
+    expect(splitSrcOffset(c, TL, 8)).toBeNull();
+    // tl frame 1001 → would be whole but outside the clip anyway
+    // a 48fps source on a 24fps grid: every tl frame = 2 src frames
+    const d = CLIP("d", { out_frame: 96, src_fps_num: 48 });
+    expect(splitSrcOffset(d, TL, 20)).toBe(40);
+  });
+});
+
+describe("N1-C — extentOverlap (trim preview rule)", () => {
+  it("growing into the next clip overlaps, shrinking never does", () => {
+    const lane = [CLIP("me"), CLIP("next", { start_frames: 72 })];
+    expect(extentOverlap(0, 50, lane, "me", TL)).toBe(false);
+    expect(extentOverlap(0, 80, lane, "me", TL)).toBe(true);  // end 80 > 72
+    expect(extentOverlap(0, 72, lane, "me", TL)).toBe(false); // touching ok
+  });
+  it("skips the trimmed clip itself", () => {
+    const lane = [CLIP("me")];
+    expect(extentOverlap(0, 200, lane, "me", TL)).toBe(false);
   });
 });
 

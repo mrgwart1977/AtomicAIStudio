@@ -1,0 +1,53 @@
+{
+  "format": "ade-edl/2",
+  "timeline_id": "38745f47-bf4a-40ef-9a34-abeb9e58c765",
+  "revision": 28,
+  "name": "N1-C Cut",
+  "timebase": {
+    "num": 24,
+    "den": 1
+  },
+  "tracks": [
+    {
+      "id": "1f095209-f9f4-4f24-a54a-1cc166b43e71",
+      "kind": "video",
+      "position": 0,
+      "name": "V1",
+      "visible": true,
+      "locked": false,
+      "muted": false
+    }
+  ],
+  "clips": [
+    {
+      "clip_id": "c3bed84a-28d0-4a86-84e2-73f14342efde",
+      "track_id": "1f095209-f9f4-4f24-a54a-1cc166b43e71",
+      "order": 0,
+      "start_frames": 0,
+      "start_s": 0,
+      "timeline_frames": {
+        "num": 48,
+        "den": 1
+      },
+      "asset_id": "91099d2b-2d8d-4b0f-968e-da2015be8867",
+      "version_id": "b0f8cc11-b838-4a75-b943-4e0504fc3590",
+      "sha256": "3985b8b675606c07e245a0d5b588ff3c90e63c64e8122ce50507bc8996a236cb",
+      "in_frame": 0,
+      "out_frame": 48,
+      "duration_s": 2,
+      "source": {
+        "fps_num": 24,
+        "fps_den": 1,
+        "frames": 48,
+        "duration_s": 2,
+        "width": 640,
+        "height": 360,
+        "codec": "h264"
+      },
+      "shot_id": null,
+      "scene_id": null
+    }
+  ],
+  "gaps": [],
+  "total_duration_s": 2
+}
