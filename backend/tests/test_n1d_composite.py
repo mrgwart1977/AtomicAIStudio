@@ -113,11 +113,12 @@ def test_composite_argv_deterministic_and_shaped():
     assert fc.index("[c0]") < fc.index("[c1]")
     assert fc.index("overlay") < fc.rindex("overlay")
     assert "[base][c0]overlay" in fc and "[o0][c1]overlay" in fc
-    # enable windows in timeline seconds.
-    assert "between(t,1,2)" in fc          # top clip @24..48f @24fps
-    assert "between(t,0,2)" in fc          # base clip @0..48f
-    # audio: only the unmuted audio-bearing clip mixes; silence base.
-    assert "adelay=0:all=1" in fc
+    # enable windows in exact timeline frames: [S, E), no float leak.
+    assert "gte(n,24)*lt(n,48)" in fc      # top clip @24..48f
+    assert "gte(n,0)*lt(n,48)" in fc       # base clip @0..48f
+    # audio: only the unmuted audio-bearing clip mixes; silence base;
+    # start=0 needs no leading-silence concat.
+    assert "[0:a]atrim" in fc and "asetpts=PTS-STARTPTS[am0]" in fc
     assert "amix=inputs=2:duration=first:normalize=0" in fc
     assert "alimiter" in fc and "anullsrc" in fc
     # argv never goes through a shell — list of discrete args.
@@ -144,7 +145,10 @@ def test_composite_argv_audio_delay_ms_and_silence_gaps():
     argv = tx.build_composite_argv("ff", plan, {"a": "/cas/a"},
                                    canvas, 23, "/o.mp4")
     fc = argv[argv.index("-filter_complex") + 1]
-    assert f"adelay={int(Fraction(100, 24) * 1000)}:all=1" in fc
+    # 100f @24fps = 200,000 leading-silence samples exactly — sample-
+    # accurate placement, no millisecond quantization.
+    assert f"atrim=end_sample={round(Fraction(100, 24) * 48000)}" in fc
+    assert "concat=n=2:v=0:a=1" in fc
 
 
 def test_composite_argv_mixed_source_rates_normalize_fps():
@@ -169,6 +173,30 @@ def test_validate_rejects_bad_layouts():
         "edl": _v2([_v2clip("g", "hid")],
                    [_trk("hid", pos=0, visible=False)])}))
     assert any("visible" in e for e in errs)
+
+
+@pytest.mark.parametrize("fps", [(24, 1), (25, 1), (30, 1),
+                                 (24000, 1001), (30000, 1001)])
+def test_plan_program_end_and_windows_all_rates(fps):
+    """Leading + interior + trailing gap coverage across every
+    shipping rate: occupancy windows are integer-frame exact, and the
+    enable window is [S, E) in timeline frames — never float seconds."""
+    clips = [_v2clip("lead", start=10, extent=(20, 1)),      # lead gap
+             _v2clip("mid", start=50, extent=(10, 1)),       # interior
+             _v2clip("tail", start=60, extent=(1001, 100))]  # 10.01f
+    plan = tx.composite_plan(_v2(clips, fps=fps), {})
+    lead = next(c for c in plan["clips"] if c["clip_id"] == "lead")
+    tail = next(c for c in plan["clips"] if c["clip_id"] == "tail")
+    assert lead["start_frame"] == 10 and lead["occ_end_frame"] == 30
+    assert tail["occ_end_frame"] == 71   # 60 + ceil(10.01)
+    assert plan["program_frames"] == Fraction(60) + Fraction(1001, 100)
+    canvas = tx.composite_canvas(plan, "720p", {})
+    argv = tx.build_composite_argv("ff", plan,
+                                   {c["clip_id"]: "/x" for c
+                                    in plan["clips"]},
+                                   canvas, 23, "/o.mp4")
+    fc = argv[argv.index("-filter_complex") + 1]
+    assert "gte(n,10)*lt(n,30)" in fc and "gte(n,60)*lt(n,71)" in fc
 
 
 # ---------------- Layer 2 — command wiring ----------------
@@ -241,6 +269,229 @@ def test_stale_pins_still_rejected_on_v2_layout(client):
             {"timeline_id": t["id"],
              "expected_edl_sha":
                  p["resolved_timeline"]["edl_sha256"]}, expect=422)
+
+
+# ---------------- Layer 2b — composite failure/cancel paths --------
+
+def _cas_blob(client, data: bytes) -> str:
+    """Put raw bytes into CAS layout + register the AssetFile row."""
+    from app.db.models import AssetFile, StorageLocation
+    sha = hashlib.sha256(data).hexdigest()
+    data_dir = Path(client.app.state.settings.data_dir)
+    rel = Path("blobs") / sha[:2] / sha
+    dest = data_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    with client.app.state.session_factory() as s:
+        loc = s.query(StorageLocation).first()
+        if s.get(AssetFile, sha) is None:
+            s.add(AssetFile(sha256=sha,
+                            storage_location_id=loc.id if loc else None,
+                            rel_path=str(rel).replace("\\", "/"),
+                            byte_size=len(data), status="ready"))
+            s.commit()
+    return sha
+
+
+def _adapter(client):
+    from app.adapters.timeline_export import TimelineExportAdapter
+    st = client.app.state
+    return TimelineExportAdapter(st.session_factory, st.storage,
+                                 st.settings)
+
+
+def _handle(client, edl, tmp_path, cancel=None, **req):
+    from app.adapters.base import JobHandle
+    return JobHandle(job_id="j1", project_id="p",
+                     request={"profile": "720p", "crf": 23,
+                              "edl": edl, **req},
+                     work_dir=str(tmp_path), cancel_event=cancel)
+
+
+async def _drain(agen):
+    updates = []
+    async for u in agen:
+        updates.append(u)
+    return updates
+
+
+def _v2_edl_for(client, pid, tmp_path):
+    """Real two-lane layout via commands → pinned v2 doc whose sha-
+    pinned blobs physically exist in CAS (fake bytes — probe is
+    monkeypatched by callers)."""
+    t = _tl(client, pid)
+    o1 = _track(client, pid, t["id"], kind="overlay", name="O1")
+    data_dir = Path(client.app.state.settings.data_dir)
+    for i, trk in enumerate((None, o1["id"])):
+        content = f"clip-{i}-bytes".encode()
+        sha = hashlib.sha256(content).hexdigest()
+        blob = data_dir / "blobs" / sha[:2] / "v"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(content)
+        a = _video(client, pid, f"v{i}.mp4", sha=sha)
+        payload = {"timeline_id": t["id"], "asset_id": a["id"]}
+        if trk:
+            payload["track_id"] = trk
+            payload["start_frames"] = 0
+            _commit(client, pid, "timeline.clip.place", payload)
+        else:
+            _commit(client, pid, "timeline.clip.insert", payload)
+    with client.app.state.session_factory() as s:
+        from app.domain import timeline as tld
+        from app.db.models import Timeline
+        tl = s.get(Timeline, t["id"])
+        return tld.edl_json_v2(s, tl)
+
+
+def test_composite_missing_source_file_fails_closed(client, tmp_path):
+    """EDL references a sha with no AssetFile row → explicit refusal,
+    no output, no partial render."""
+    import asyncio
+    edl = _v2([_v2clip("c1", sha="0" * 64)])
+    h = _handle(client, edl, tmp_path)
+    with pytest.raises(ValueError, match="missing"):
+        asyncio.run(_drain(_adapter(client).run(h)))
+    assert not list(tmp_path.glob("*export*.mp4"))
+
+
+def test_composite_hash_mismatch_refuses(client, tmp_path):
+    """Bytes on disk that don't match the pinned sha → fail closed."""
+    import asyncio
+    good = b"declared bytes"
+    sha = _cas_blob(client, good)
+    # Corrupt the CAS blob AFTER registration.
+    data_dir = Path(client.app.state.settings.data_dir)
+    blob = data_dir / "blobs" / sha[:2] / sha
+    blob.write_bytes(b"tampered")
+    edl = _v2([_v2clip("c1", sha=sha)])
+    h = _handle(client, edl, tmp_path)
+    with pytest.raises(ValueError, match="sha256"):
+        asyncio.run(_drain(_adapter(client).run(h)))
+    assert not list(tmp_path.glob("*export*.mp4"))
+
+
+def test_composite_probe_failure_is_clear(client, tmp_path):
+    """A hash-verified blob that isn't media → clear probe error."""
+    import asyncio
+    sha = _cas_blob(client, b"definitely not a video file")
+    edl = _v2([_v2clip("c1", sha=sha)])
+    h = _handle(client, edl, tmp_path)
+    with pytest.raises(ValueError, match="probe|video stream|codec"):
+        asyncio.run(_drain(_adapter(client).run(h)))
+
+
+def test_composite_cancel_during_render_cleans_output(client,
+                                                    tmp_path,
+                                                    monkeypatch):
+    """Cancelled ffmpeg → JobCancelled, output unlinked, no asset."""
+    import asyncio, threading
+    pid = make_project(client)["id"]
+    edl = _v2_edl_for(client, pid, tmp_path)
+    cancel = threading.Event()
+    ad = _adapter(client)
+    from app.domain.media import supervise
+    real_run = supervise.run
+
+    def fake_run(argv, timeout_s=0, cancel=None):
+        out = Path(argv[-1])
+        out.write_bytes(b"partial render")
+        return {"cancelled": True, "timed_out": False, "exit": None,
+                "output_tail": ""}
+
+    monkeypatch.setattr(supervise, "run", fake_run)
+    # Pre-seed the encoder cache — h264_encoder() would otherwise call
+    # the fake runner and cache a bogus pick for later real renders.
+    from app.domain.media import binaries
+    ff = binaries.ffmpeg()
+    if ff:
+        monkeypatch.setitem(tx._ENCODER_CACHE, ff["path"],
+                            "libopenh264")
+    # Probes: real ffprobe on garbage bytes fails — fake probe instead.
+    monkeypatch.setattr(
+        "app.adapters.timeline_export.engine.probe",
+        lambda p, cancel=None: {"ok": True, "codec": "h264",
+                                "width": 320, "height": 240, "fps": 24,
+                                "audio": []})
+    from app.adapters.base import JobCancelled
+    h = _handle(client, edl, tmp_path, cancel=cancel)
+    with pytest.raises(JobCancelled):
+        asyncio.run(_drain(ad.run(h)))
+    out = tmp_path / "j1-export.mp4"
+    assert not out.exists()  # partial output removed — no phantom
+    monkeypatch.setattr(supervise, "run", real_run)
+
+
+def test_composite_ffmpeg_exit_failure_cleans_output(client, tmp_path,
+                                                     monkeypatch):
+    """ffmpeg exit!=0 → job error, output removed, tail surfaces."""
+    import asyncio
+    pid = make_project(client)["id"]
+    edl = _v2_edl_for(client, pid, tmp_path)
+    ad = _adapter(client)
+    from app.domain.media import supervise
+    monkeypatch.setattr(supervise, "run",
+                        lambda argv, timeout_s=0, cancel=None:
+                        {"cancelled": False, "timed_out": False,
+                         "exit": 1, "output_tail": "codec blew up"})
+    from app.domain.media import binaries
+    ff = binaries.ffmpeg()
+    if ff:
+        monkeypatch.setitem(tx._ENCODER_CACHE, ff["path"],
+                            "libopenh264")
+    monkeypatch.setattr(
+        "app.adapters.timeline_export.engine.probe",
+        lambda p, cancel=None: {"ok": True, "codec": "h264",
+                                "width": 320, "height": 240, "fps": 24,
+                                "audio": []})
+    Path(tmp_path / "j1-export.mp4").write_bytes(b"junk")
+    h = _handle(client, edl, tmp_path)
+    with pytest.raises(ValueError, match="codec blew up"):
+        asyncio.run(_drain(ad.run(h)))
+
+
+def test_composite_insufficient_disk_preflight(client, tmp_path,
+                                               monkeypatch):
+    import asyncio, shutil
+    sha = _cas_blob(client, b"x" * 64)
+    edl = _v2([_v2clip("c1", sha=sha)])
+    monkeypatch.setattr(
+        "app.adapters.timeline_export.engine.probe",
+        lambda p, cancel=None: {"ok": True, "codec": "h264",
+                                "width": 320, "height": 240, "fps": 24,
+                                "audio": []})
+    from collections import namedtuple
+    monkeypatch.setattr(
+        "app.adapters.timeline_export.shutil.disk_usage",
+        lambda p: namedtuple("U", ("total", "used", "free"))(0, 0, 1))
+    h = _handle(client, edl, tmp_path)
+    with pytest.raises(ValueError, match="insufficient disk"):
+        asyncio.run(_drain(_adapter(client).run(h)))
+
+
+def test_interrupted_export_reconciles_not_succeeded(client):
+    """A 'running' non-resumable export after restart → failed with an
+    interrupted note — never reported as a phantom success."""
+    from app.db.models import GenerationJob, new_id
+    pid = make_project(client)["id"]
+    with client.app.state.session_factory() as s:
+        j = GenerationJob(
+            id=new_id(), project_id=pid, adapter_id="ops.timeline.export",
+            kind="export", status="running",
+            progress=0.4, resumable=False, attempt_no=1,
+            idempotency_key="k1", request_json={})
+        s.add(j)
+        s.commit()
+        jid = j.id
+    engine_inst = client.app.state.job_engine
+    with client.app.state.session_factory() as s:
+        # returns the REQUEUED count — failed jobs aren't counted.
+        engine_inst.reconcile_interrupted(s)
+        s.commit()
+    with client.app.state.session_factory() as s:
+        j = s.get(GenerationJob, jid)
+        assert j.status == "failed"
+        assert "interrupted" in (j.error or "")
+        assert j.output_asset_id is None
 
 
 # ---------------- Layer 3 — real ffmpeg render ----------------

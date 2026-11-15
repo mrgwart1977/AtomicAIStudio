@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from math import ceil as _ceil
 from typing import Any
 
 #: Validated initial profile set.
@@ -183,10 +184,12 @@ def h264_encoder(ffmpeg: str, runner) -> str:
 #   invents geometry.
 # - Timeline gaps and uncovered canvas render black (color= base).
 # - Audio: each audio-bearing clip's source audio is trimmed to its
-#   source range, delayed to its timeline start, and summed with a
-#   full-length silent base via amix normalize=0 + limiter, so gaps
-#   are silent, overlaps are mixed (never duplicated), and loud
-#   overlaps limit rather than clip.
+#   source range and positioned at its timeline start by prepending
+#   integer-sample silence (atrim=end_sample + concat — sample-exact,
+#   no millisecond quantization), then summed with a full-length
+#   silent base via amix normalize=0 + limiter, so gaps are silent,
+#   overlaps are mixed once (never duplicated), and loud overlaps
+#   limit rather than clip.
 # - Output duration is exact: program_end_frames / timeline_fps as a
 #   rational second count; the fps filter quantizes every input.
 
@@ -216,10 +219,13 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
                           c["timeline_frames"]["den"])
         start = Fraction(int(c["start_frames"]))
         end_frames = max(end_frames, start + extent)
+        occ_end = _ceil(start + extent)  # lane occupancy rule (ceil)
         out_clips.append({
             "clip_id": c["clip_id"], "sha256": c["sha256"],
             "track_position": int(t["position"]),
             "muted": bool(t.get("muted")),
+            "start_frame": int(start),
+            "occ_end_frame": occ_end,
             "tl_start_s": start / tl_fps,
             "tl_end_s": (start + extent) / tl_fps,
             "in_s": in_s, "dur_s": dur_s,
@@ -292,11 +298,13 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease"
             f"[c{i}]")
         nxt = "v" if i == len(clips) - 1 else f"o{i}"
+        # Frame-index window [S, E): n is the output frame number at the
+        # timeline rate — exact, no float-second boundary leak.
         parts.append(
             f"[{cur}][c{i}]overlay=x=(main_w-overlay_w)/2:"
             f"y=(main_h-overlay_h)/2:eof_action=pass:"
-            f"enable='between(t,{_flt(float(c['tl_start_s']))},"
-            f"{_flt(float(c['tl_end_s']))})'[{nxt}]")
+            f"enable='gte(n,{c['start_frame']})"
+            f"*lt(n,{c['occ_end_frame']})'[{nxt}]")
         cur = nxt
     audio_inputs = [i for i, c in enumerate(clips)
                     if c["has_audio"] and not c["muted"]]
@@ -307,12 +315,30 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             c = clips[i]
             in_s = float(c["in_s"])
             end_s = float(c["in_s"] + c["dur_s"])
-            delay_ms = int(c["tl_start_s"] * 1000)
-            a_parts.append(
-                f"[{i}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
-                f"asetpts=PTS-STARTPTS,aresample=48000,"
-                f"aformat=channel_layouts=stereo,"
-                f"adelay={delay_ms}:all=1[am{j}]")
+            # Sample-exact timeline placement: prepend integer-sample
+            # silence via atrim=end_sample + concat — amix consumes
+            # inputs positionally from 0, so leading-silent concat is
+            # the only alignment that is both exact and reliable (no
+            # millisecond quantization, no PTS-alignment ambiguity).
+            # Remaining error is <1 sample for rates like 30000/1001
+            # (48000×1001/30000 = 1601.6 samples/frame) — ±0.4 sample,
+            # ~8µs, documented and unavoidable at the sample grid.
+            start_samples = round(c["tl_start_s"] * 48000)
+            if start_samples:
+                a_parts.append(
+                    f"anullsrc=r=48000:cl=stereo,"
+                    f"atrim=end_sample={start_samples}[sil{j}]")
+                a_parts.append(
+                    f"[{i}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
+                    f"aresample=48000,aformat=channel_layouts=stereo,"
+                    f"asetpts=PTS-STARTPTS[as{j}]")
+                a_parts.append(
+                    f"[sil{j}][as{j}]concat=n=2:v=0:a=1[am{j}]")
+            else:
+                a_parts.append(
+                    f"[{i}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
+                    f"aresample=48000,aformat=channel_layouts=stereo,"
+                    f"asetpts=PTS-STARTPTS[am{j}]")
             mix_in += f"[am{j}]"
         a_parts.append(
             f"{mix_in}amix=inputs={len(audio_inputs) + 1}:"
