@@ -44,7 +44,8 @@ export default function App() {
                 id: e.resource_id,
                 project_id: e.project_id ?? null,
                 adapter_id: adapterId,
-                kind: adapterId === "ops.model.download" ? "model_download" : "image",
+                kind: adapterId === "ops.model.download" ? "model_download"
+                  : adapterId === "ops.model.benchmark" ? "model_benchmark" : "image",
                 resumable: true,
                 output_asset_id: null,
                 command_id: null,

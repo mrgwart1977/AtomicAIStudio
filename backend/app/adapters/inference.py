@@ -33,7 +33,7 @@ from typing import Any, AsyncIterator
 from sqlalchemy import select
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
-from app.db.models import RuntimeInstall, utcnow
+from app.db.models import ModelInstall, RuntimeInstall, utcnow
 from app.domain import compatibility, hardware, model_catalog, model_files, proc_guard
 from app.domain.media import engine as media_engine
 from app.domain.media import policy as media_policy
@@ -799,6 +799,207 @@ class SdCppVideoAdapter(SdCppAdapter):
                 "extra_assets": assets[1:],
             },
         }
+
+
+class ModelBenchmarkAdapter:
+    """C5-E — explicit, user-initiated local benchmark for an INSTALLED
+    model. Runs N minimal generations through the same supervised sd.cpp
+    spawn path as real inference and measures wall time + worker RSS.
+
+    Hard guarantees: no downloads, no cloud, installed models only, and
+    cancellation kills the worker tree via the job cancel_event — the same
+    machinery generation jobs use. Results land durably on the job row
+    (result_json) and on the model's install row (meta_json.benchmark).
+    Peak RSS is the host working-set of the worker process — VRAM peaks
+    are not portably measurable, so results always carry the
+    estimated-vs-measured warning."""
+
+    profile = CapabilityProfile(
+        adapter_id="ops.model.benchmark",
+        display_name="Model benchmark",
+        adapter_kind="local",
+        tasks=("model_benchmark",),
+        supports={"cancel": True},
+        limits={"max_runs": 5},
+        requires_cloud=False,
+        cost_model="free",
+        lane="ops",
+        needs_gpu=False,
+        notes="Explicit opt-in benchmark of an installed model — never runs "
+              "at startup, never downloads, never calls a cloud provider.",
+    )
+
+    def __init__(self, session_factory, settings) -> None:
+        self._sf = session_factory
+        self._settings = settings
+        self._gen = SdCppAdapter(session_factory, settings)
+
+    async def validate(self, request: dict[str, Any]) -> list[str]:
+        errors = []
+        spec = model_catalog.get(request.get("model_key") or "")
+        if spec is None:
+            return ["model_key is required"]
+        if spec.adapter_id != "gen.image.sdcpp":
+            errors.append(
+                f"benchmark harness not available for '{spec.adapter_id}' models yet")
+        if spec.support == "planned":
+            errors.append("planned models cannot be benchmarked")
+        runs = int(request.get("runs", 3) or 3)
+        if not 1 <= runs <= 5:
+            errors.append("runs must be between 1 and 5")
+        try:
+            self._gen._resolve({"model_key": spec.key,
+                                **{k: v for k, v in request.items()
+                                   if k in ("runtime_key", "runtime_flavor")}})
+        except ValueError as exc:
+            errors.append(str(exc))
+        return errors
+
+    async def _run_once(self, handle: JobHandle, spec: ModelSpec,
+                        weight: Path, argv_prefix: list[str],
+                        req: dict, run_ix: int, work: Path):
+        """One measured spawn — returns (duration_ms, peak_rss_bytes|None)."""
+        caps = spec.capabilities or {}
+        sizes = caps.get("sizes") or {}
+        side = int(sizes.get("min") or 512)
+        steps = int((caps.get("steps") or {}).get("min") or 4)
+        out_png = work / f"bench_{handle.job_id}_{run_ix}.png"
+        argv = argv_prefix + [
+            "-M", "img_gen", "-m", str(weight),
+            "-p", "benchmark calibration frame",
+            "-o", str(out_png),
+            "-W", str(side), "-H", str(side),
+            "--steps", str(steps),
+            "--cfg-scale", "1.0",
+            "--seed", "1",
+            "--batch-count", "1",
+            "-v",
+        ]
+        rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
+        flavor, _reason = self._gen._pick_flavor(req.get("runtime_flavor"), rt_spec)
+        env = dict(os.environ)
+        env.update(_device_env(flavor, req.get("assigned_gpu")
+                               if isinstance(req.get("assigned_gpu"), int) else None))
+        proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
+        peak_rss: int | None = None
+        cancelled = False
+        started = time.time()
+        last_mem_check = 0.0
+        try:
+            while True:
+                if handle.cancel_event is not None and handle.cancel_event.is_set():
+                    cancelled = True
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    break
+                rss = proc_guard.process_rss_bytes(proc.pid)
+                if rss is not None:
+                    peak_rss = max(peak_rss or 0, rss)
+                now = time.time()
+                if now - last_mem_check >= 5.0:
+                    last_mem_check = now
+                    if _check_worker_pressure(proc, started):
+                        proc_guard.terminate_tree(proc.pid)
+                        raise ValueError("benchmark aborted for system safety")
+                try:
+                    line = await asyncio.wait_for(lines.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                if line is None:
+                    break
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait, 5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait)
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await _verify_worker_dead(proc)
+            proc_guard.unsupervise(proc.pid)
+            out_png.unlink(missing_ok=True)
+        if cancelled:
+            raise JobCancelled()
+        duration_ms = int((time.time() - started) * 1000)
+        if proc.returncode != 0:
+            raise ValueError(f"benchmark run {run_ix + 1} failed "
+                             f"(worker exit {proc.returncode})")
+        return duration_ms, peak_rss
+
+    async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
+        req = handle.request
+        spec, weight, _exe = self._gen._resolve(req)
+        argv_prefix = self._gen._argv_prefix(req)
+        runs = max(1, min(5, int(req.get("runs", 3) or 3)))
+        work = Path(handle.work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+
+        rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
+        flavor, flavor_reason = self._gen._pick_flavor(
+            req.get("runtime_flavor"), rt_spec)
+        gpu_ix = req.get("assigned_gpu") if isinstance(req.get("assigned_gpu"), int) else None
+        gpus = hardware.probe().get("gpus") or []
+        gpu_name = next((g.get("name") for g in gpus
+                         if isinstance(g.get("index"), int) and g["index"] == (gpu_ix or 0)),
+                        None) if gpus else None
+
+        results: list[dict[str, Any]] = []
+        for i in range(runs):
+            yield {"progress": 0.05 + 0.9 * (i / runs),
+                   "message": f"benchmark run {i + 1}/{runs}"}
+            dur, rss = await self._run_once(
+                handle, spec, weight, argv_prefix, req, i, work)
+            results.append({"run": i + 1, "duration_ms": dur,
+                            "peak_worker_rss_bytes": rss})
+
+        durations = sorted(r["duration_ms"] for r in results)
+        median = durations[len(durations) // 2]
+        peaks = [r["peak_worker_rss_bytes"] for r in results
+                 if r["peak_worker_rss_bytes"] is not None]
+        est = compatibility.estimate_vram(spec)
+        result = {
+            "model_key": spec.key,
+            "model_version": spec.version,
+            "adapter_id": self.profile.adapter_id,
+            "runtime": {"key": "sdcpp", "flavor": flavor,
+                        "selection_reason": flavor_reason},
+            "gpu": gpu_name, "gpu_index": gpu_ix,
+            "runs": results,
+            "median_duration_ms": median,
+            "peak_worker_rss_bytes": max(peaks) if peaks else None,
+            "peak_memory_note": "worker-process host RAM peak (Windows "
+                "working set); VRAM peaks are not portably measurable — "
+                "use the VRAM estimate as guidance, not a measurement",
+            "params": {"size": "model minimum", "steps": "model minimum",
+                       "batch": 1},
+            "estimate_vs_measured": {
+                "estimated_vram_bytes": est,
+                "warning": "Catalog figures are ESTIMATES from model "
+                           "anchors; measured numbers here reflect this "
+                           "hardware only and will vary run to run.",
+            },
+            "measured_at": utcnow().isoformat(),
+        }
+        # durable stamp on the install row — survives restarts, visible in
+        # /api/compatibility without re-running anything
+        with self._sf() as s:
+            row = s.execute(
+                select(ModelInstall).where(
+                    ModelInstall.model_key == spec.key,
+                    ModelInstall.status == "installed")
+            ).scalars().first()
+            if row is not None:
+                meta = dict(row.meta_json or {})
+                meta["benchmark"] = result
+                row.meta_json = meta
+                s.commit()
+        yield {"done": True, "progress": 1.0,
+               "output": {"no_asset": True, "result": result}}
 
 
 class ModelDownloadAdapter:

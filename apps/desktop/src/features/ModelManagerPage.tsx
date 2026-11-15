@@ -2,7 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../api/client";
 import { useApp } from "../stores/appStore";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import type { CompatStatus, ModelCatalogEntry, ModelsDir } from "../api/types";
+import type {
+  AvailabilityClass,
+  CompatModelEntry,
+  CompatibilityReport,
+  CompatStatus,
+  ModelCatalogEntry,
+  ModelPreflight,
+  ModelValidation,
+  ModelsDir,
+} from "../api/types";
 
 function gb(bytes: number | null | undefined): string {
   if (bytes == null) return "unknown";
@@ -17,6 +26,16 @@ const COMPAT: Record<CompatStatus, { label: string; cls: string }> = {
   restricted: { label: "Restricted license", cls: "bg-rose/15 text-rose" },
   unavailable: { label: "Unavailable", cls: "bg-line/40 text-muted" },
   planned: { label: "Planned", cls: "bg-line/40 text-muted" },
+};
+
+/** C5-E — the five beginner-facing availability classes folded from
+ *  classification + install state. */
+const AVAIL: Record<AvailabilityClass, { label: string; cls: string }> = {
+  installed_operational: { label: "Installed & ready", cls: "bg-teal/15 text-teal" },
+  installed_limited: { label: "Installed — limited", cls: "bg-amber/15 text-amber" },
+  installable: { label: "Can be installed", cls: "bg-sky/15 text-sky" },
+  planned: { label: "Coming in a future update", cls: "bg-line/40 text-muted" },
+  blocked: { label: "Not available", cls: "bg-rose/15 text-rose" },
 };
 
 const SUPPORT: Record<string, { label: string; cls: string } | null> = {
@@ -36,16 +55,29 @@ export function ModelManagerPage() {
   const refreshModels = useApp((s) => s.refreshModels);
 
   const [modelsDir, setModelsDir] = useState<ModelsDir | null>(null);
+  const [compat, setCompat] = useState<CompatibilityReport | null>(null);
   const [installTarget, setInstallTarget] = useState<ModelCatalogEntry | null>(null);
   const [removeTarget, setRemoveTarget] = useState<ModelCatalogEntry | null>(null);
+  const [preflight, setPreflight] = useState<ModelPreflight | null>(null);
+  const [checks, setChecks] = useState<Record<string, ModelValidation | "loading" | null>>({});
+  const [benchTarget, setBenchTarget] = useState<CompatModelEntry | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const refreshCompat = () =>
+    apiFetch<CompatibilityReport>("/api/compatibility").then(setCompat).catch(() => {});
 
   useEffect(() => {
     void refreshHw();
     void refreshModels();
+    void refreshCompat();
     void apiFetch<ModelsDir>("/api/models/dir").then(setModelsDir).catch(() => {});
   }, [refreshHw, refreshModels]);
+
+  const compatByKey = useMemo(
+    () => new Map((compat?.models ?? []).map((m) => [m.key, m])),
+    [compat],
+  );
 
   // Model-download jobs are app-level (no project) — find any in-flight ones.
   const downloadJobs = useMemo(
@@ -55,8 +87,49 @@ export function ModelManagerPage() {
   // Refresh catalog whenever a download job lands/updates.
   const dlDone = downloadJobs.filter((j) => j.status !== "queued" && j.status !== "running").length;
   useEffect(() => {
-    if (dlDone > 0) void refreshModels();
+    if (dlDone > 0) { void refreshModels(); void refreshCompat(); }
   }, [dlDone, refreshModels]);
+
+  const benchJobs = useMemo(
+    () => Object.values(jobs).filter((j) => j.kind === "model_benchmark"),
+    [jobs],
+  );
+  const benchDone = benchJobs.filter((j) => j.status !== "queued" && j.status !== "running").length;
+  useEffect(() => {
+    if (benchDone > 0) void refreshCompat();
+  }, [benchDone]);
+
+  async function openPreflight(model: ModelCatalogEntry) {
+    setInstallTarget(model);
+    setPreflight(null);
+    try {
+      setPreflight(await apiFetch<ModelPreflight>(`/api/models/${model.key}/preflight`));
+    } catch { /* dialog falls back to catalog data */ }
+  }
+
+  async function toggleChecks(model: ModelCatalogEntry) {
+    const cur = checks[model.key];
+    if (cur) { setChecks((c) => ({ ...c, [model.key]: null })); return; }
+    setChecks((c) => ({ ...c, [model.key]: "loading" }));
+    try {
+      const v = await apiFetch<ModelValidation>(`/api/models/${model.key}/validation`);
+      setChecks((c) => ({ ...c, [model.key]: v }));
+    } catch { setChecks((c) => ({ ...c, [model.key]: null })); }
+  }
+
+  async function runBenchmark(model: CompatModelEntry) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiFetch(`/api/models/${model.key}/benchmark`,
+        { method: "POST", body: JSON.stringify({ runs: 3 }) });
+      setBenchTarget(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function install(model: ModelCatalogEntry) {
     setBusy(true);
@@ -65,6 +138,7 @@ export function ModelManagerPage() {
       await apiFetch(`/api/models/${model.key}/install`, { method: "POST", body: "{}" });
       setInstallTarget(null);
       void refreshModels();
+      void refreshCompat();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -117,11 +191,16 @@ export function ModelManagerPage() {
       <section className="mt-6 space-y-3">
         {models.map((m) => {
           const c = COMPAT[m.compatibility.status];
+          const ce = compatByKey.get(m.key);
           const inst = m.install;
           const job = modelJob(m.key);
+          const benchJob = benchJobs.find((j) => j.model_key === m.key
+            && (j.status === "queued" || j.status === "running"));
           const downloading = job && (job.status === "queued" || job.status === "running");
           const installed = inst?.status === "installed";
           const s = SUPPORT[m.support];
+          const avail = ce ? AVAIL[ce.availability] : null;
+          const check = checks[m.key];
           return (
             <div key={m.key} className="rounded-lg border border-line bg-card p-4">
               <div className="flex flex-wrap items-center gap-2">
@@ -130,13 +209,9 @@ export function ModelManagerPage() {
                 {m.modality !== "image" && (
                   <span className="rounded bg-sky/15 px-2 py-0.5 text-xs capitalize text-sky">{m.modality}</span>
                 )}
-                <span className={`rounded px-2 py-0.5 text-xs ${c.cls}`}>{c.label}</span>
+                {avail && <span className={`rounded px-2 py-0.5 text-xs ${avail.cls}`}>{avail.label}</span>}
+                {!avail && <span className={`rounded px-2 py-0.5 text-xs ${c.cls}`}>{c.label}</span>}
                 {s && <span className={`rounded px-2 py-0.5 text-xs ${s.cls}`}>{s.label}</span>}
-                {installed && (
-                  <span className="rounded bg-teal/15 px-2 py-0.5 text-xs text-teal">
-                    Installed{inst?.verified ? " · verified" : ""}
-                  </span>
-                )}
                 {inst?.status === "failed" && (
                   <span className="rounded bg-rose/15 px-2 py-0.5 text-xs text-rose">install failed</span>
                 )}
@@ -146,9 +221,11 @@ export function ModelManagerPage() {
               <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted md:grid-cols-4">
                 <div><dt className="inline text-faint">License: </dt><dd className="inline">{m.license.name}</dd></div>
                 <div><dt className="inline text-faint">Download: </dt><dd className="inline">{gb(m.download_bytes)}</dd></div>
-                <div><dt className="inline text-faint">Min VRAM: </dt><dd className="inline">{gb(m.requirements.min_vram_bytes)}</dd></div>
+                <div><dt className="inline text-faint">Est. VRAM: </dt><dd className="inline">{gb(ce?.estimates.vram_bytes ?? m.requirements.min_vram_bytes)} <span className="text-faint">(estimate)</span></dd></div>
+                <div><dt className="inline text-faint">Est. RAM: </dt><dd className="inline">{ce ? gb(ce.estimates.ram_bytes) : "unknown"} <span className="text-faint">(estimate)</span></dd></div>
+                <div><dt className="inline text-faint">Runtime: </dt><dd className="inline">{ce?.runtime.key ?? m.runtime_key}{ce && !ce.runtime.known && " (unknown)"}{ce?.runtime.planned && " (planned)"}</dd></div>
                 <div><dt className="inline text-faint">Source: </dt><dd className="inline">{String(m.source.provider ?? "local")}</dd></div>
-                <div className="col-span-2"><dt className="inline text-faint">Modes: </dt><dd className="inline">{m.modes.join(", ")}</dd></div>
+                <div className="col-span-2"><dt className="inline text-faint">Can generate: </dt><dd className="inline">{m.modes.join(", ")}</dd></div>
                 {m.capabilities.audio && (
                   <div className="col-span-2"><dt className="inline text-faint">Audio: </dt><dd className="inline">synchronized audio+video</dd></div>
                 )}
@@ -181,15 +258,50 @@ export function ModelManagerPage() {
                   </p>
                 </div>
               )}
+              {benchJob && (
+                <p className="mt-2 text-xs text-muted">
+                  Benchmark running — {benchJob.message || "measuring"} ({Math.round(benchJob.progress * 100)}%)
+                </p>
+              )}
+              {ce?.benchmark && !benchJob && (
+                <div className="mt-2 rounded border border-line p-2 text-xs text-muted">
+                  <span className="text-fg">Measured:</span> median {(ce.benchmark.median_duration_ms / 1000).toFixed(1)}s
+                  over {ce.benchmark.runs.length} run(s)
+                  {ce.benchmark.peak_worker_rss_bytes != null && <> · peak worker RAM {gb(ce.benchmark.peak_worker_rss_bytes)}</>}
+                  {ce.benchmark.gpu && <> · {ce.benchmark.gpu}</>}
+                  <p className="mt-1 text-faint">{ce.benchmark.estimate_vs_measured.warning}</p>
+                </div>
+              )}
+              {check === "loading" && <p className="mt-2 text-xs text-muted">Running read-only checks…</p>}
+              {check && check !== "loading" && (
+                <ul className="mt-2 space-y-0.5 rounded border border-line p-2 text-xs">
+                  {check.checks.map((ch) => (
+                    <li key={ch.name} className={
+                      ch.ok === false ? (ch.severity === "warning" ? "text-amber" : "text-rose")
+                        : ch.ok === null ? "text-faint" : "text-teal"}>
+                      {ch.ok === false ? "✗" : ch.ok === null ? "·" : "✓"} {ch.name.replaceAll("_", " ")} — {ch.detail}
+                    </li>
+                  ))}
+                </ul>
+              )}
 
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex flex-wrap gap-2">
                 {!installed && !downloading && m.license.commercial_ok && m.files.length > 0 && m.support !== "planned" && (
                   <button
-                    onClick={() => setInstallTarget(m)}
+                    onClick={() => void openPreflight(m)}
                     disabled={busy}
                     className="rounded-md bg-action px-3 py-1.5 text-xs text-white disabled:opacity-50"
                   >
                     Install…
+                  </button>
+                )}
+                {ce?.benchmarkable && !benchJob && (
+                  <button
+                    onClick={() => setBenchTarget(ce)}
+                    disabled={busy}
+                    className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+                  >
+                    Run benchmark…
                   </button>
                 )}
                 {installed && (
@@ -201,6 +313,12 @@ export function ModelManagerPage() {
                     Remove
                   </button>
                 )}
+                <button
+                  onClick={() => void toggleChecks(m)}
+                  className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg"
+                >
+                  {check ? "Hide checks" : "Compatibility checks"}
+                </button>
               </div>
             </div>
           );
@@ -324,21 +442,55 @@ export function ModelManagerPage() {
         </ul>
       </section>
 
-      {/* install confirmation — the approval gate */}
+      {/* install confirmation — the approval gate, preflight-informed */}
       <ConfirmDialog
         open={installTarget !== null}
-        onOpenChange={(o) => { if (!o) setInstallTarget(null); }}
+        onOpenChange={(o) => { if (!o) { setInstallTarget(null); setPreflight(null); } }}
         title={`Install ${installTarget?.display_name ?? ""}?`}
-        confirmLabel="Install model"
+        confirmLabel="Approve download & install"
         body={
-          installTarget
-            ? `Downloads ${gb(installTarget.download_bytes)} to ${modelsDir?.dir ?? "the models folder"} — ` +
-              `verified against published checksums. License: ${installTarget.license.name} ` +
-              `(${installTarget.license.notes}). Requires ≥ ${gb(installTarget.requirements.min_vram_bytes)} ` +
-              `VRAM. ${installTarget.compatibility.warnings.join(" ")}`
-            : ""
+          installTarget ? (
+            preflight ? (
+              <div className="space-y-1.5 text-left text-sm">
+                <p>Downloads <b>{gb(preflight.download_bytes)}</b> to {preflight.models_root}
+                  {preflight.disk_free_bytes != null && <> — {gb(preflight.disk_free_bytes)} free
+                    {!preflight.disk_sufficient && <span className="text-rose"> (not enough space)</span>}</>}.</p>
+                <p>Needs ≈ {gb(preflight.est_vram_bytes)} VRAM + {gb(preflight.est_ram_bytes)} RAM
+                  <span className="text-faint"> (estimates, not guarantees)</span>.</p>
+                <p>Runtime: {preflight.runtime.display_name}
+                  {preflight.runtime.planned
+                    ? " — planned, no installable build yet"
+                    : preflight.runtime.flavors.some((f) => f.operational)
+                      ? " — installed & operational"
+                      : " — will be installed with the model"}</p>
+                <p>License: {preflight.license.name}{preflight.license.notes ? ` — ${preflight.license.notes}` : ""}
+                  {!preflight.license.commercial_ok && <span className="text-rose"> (no commercial use)</span>}</p>
+                {preflight.limitations.length > 0 && (
+                  <ul className="text-amber">
+                    {preflight.limitations.map((l, i) => <li key={i}>· {l}</li>)}
+                  </ul>
+                )}
+                <p className="text-faint">Nothing downloads until you approve. Verified against published checksums.</p>
+              </div>
+            ) : "Checking disk space, memory, runtime, and license…"
+          ) : ""
         }
         onConfirm={() => { if (installTarget) void install(installTarget); }}
+      />
+      {/* benchmark confirmation — explicit opt-in, never automatic */}
+      <ConfirmDialog
+        open={benchTarget !== null}
+        onOpenChange={(o) => { if (!o) setBenchTarget(null); }}
+        title={`Benchmark ${benchTarget?.display_name ?? ""}?`}
+        confirmLabel="Run benchmark"
+        body={
+          benchTarget
+            ? `Runs 3 minimal generations on this machine to measure real speed and memory — ` +
+              `takes a few minutes and keeps the GPU/CPU busy. No downloads, no cloud calls. ` +
+              `Results are estimates for THIS hardware, stored locally.`
+            : ""
+        }
+        onConfirm={() => { if (benchTarget) void runBenchmark(benchTarget); }}
       />
       <ConfirmDialog
         open={removeTarget !== null}

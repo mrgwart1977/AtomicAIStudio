@@ -268,7 +268,7 @@ export interface CommandProposal {
   /** C4-D — shot.video only: resolved generation parameters
    * (model/dims/duration/sampling/source) pinned via expected_params. */
   resolved_params?: Record<string, unknown> | null;
-  /** C5-A � timeline ops only: {id, revision, clip_count} pinned via
+  /** C5-A — timeline ops only: {id, revision, clip_count} pinned via
    * expected_timeline at commit. */
   resolved_timeline?: {
     id: string; revision: number; clip_count: number;
@@ -746,6 +746,106 @@ export interface ModelCatalogEntry {
   notes: string;
   install: ModelInstall | null;
   compatibility: Compatibility;
+}
+
+
+// ---------- C5-E: consolidated compatibility ----------
+
+export type AvailabilityClass =
+  | "installed_operational" | "installed_limited"
+  | "installable" | "planned" | "blocked";
+
+export interface RuntimeFlavorState {
+  flavor: string;
+  backend_available: boolean;
+  installed: boolean;
+  operational: boolean;
+  error: string | null;
+  benchmark: Record<string, unknown> | null;
+}
+
+export interface CompatRuntime {
+  key: string;
+  display_name: string;
+  version: string;
+  license: { name?: string };
+  backends: string[];
+  est_bytes: number;
+  notes: string;
+  flavors: RuntimeFlavorState[];
+  any_operational: boolean;
+  planned: boolean;
+}
+
+export interface BenchmarkResult {
+  model_key: string;
+  model_version: string;
+  runtime: { key: string; flavor: string; selection_reason?: string };
+  gpu: string | null;
+  gpu_index: number | null;
+  runs: { run: number; duration_ms: number; peak_worker_rss_bytes: number | null }[];
+  median_duration_ms: number;
+  peak_worker_rss_bytes: number | null;
+  peak_memory_note: string;
+  params: Record<string, unknown>;
+  estimate_vs_measured: { estimated_vram_bytes: number | null; warning: string };
+  measured_at: string;
+}
+
+export interface CompatModelEntry extends ModelCatalogEntry {
+  availability: AvailabilityClass;
+  runtime: { key: string; known: boolean; installed_flavors: string[]; planned: boolean };
+  estimates: { vram_bytes: number | null; ram_bytes: number | null; basis: string };
+  resolutions: unknown;
+  fps: unknown;
+  durations_s: unknown;
+  benchmark: BenchmarkResult | null;
+  benchmarkable: boolean;
+  limitations: string[];
+}
+
+export interface CompatibilityReport {
+  hardware_profile: { key: string; label: string; detail: string; gpu_count: number; max_vram_bytes: number | null };
+  runtimes: CompatRuntime[];
+  models: CompatModelEntry[];
+}
+
+export interface ModelPreflight {
+  model_key: string;
+  display_name: string;
+  version: string;
+  support: string;
+  download_bytes: number;
+  models_root: string;
+  disk_free_bytes: number | null;
+  disk_sufficient: boolean;
+  est_vram_bytes: number | null;
+  est_ram_bytes: number | null;
+  estimate_basis: string;
+  runtime: { key: string; display_name: string; known: boolean; planned: boolean;
+             flavors: { flavor: string; installed: boolean; operational: boolean }[] };
+  license: { name?: string; url?: string; commercial_ok: boolean; notes?: string };
+  compatibility: { status: string; reasons: string[]; warnings: string[]; suggested: Record<string, unknown> };
+  limitations: string[];
+  requires_explicit_approval: boolean;
+  auto_download: boolean;
+  installable: boolean;
+}
+
+export interface ValidationCheck {
+  name: string;
+  ok: boolean | null;
+  detail: string;
+  severity?: string;
+}
+
+export interface ModelValidation {
+  model_key: string;
+  read_only: boolean;
+  ran_inference: boolean;
+  verify_hashes: boolean;
+  checks: ValidationCheck[];
+  ok: boolean;
 }
 
 export interface ModelsDir {
