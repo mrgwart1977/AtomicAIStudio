@@ -20,9 +20,11 @@ backfill to unity (`0.0` / `false`).
 
 **Decibels are the only stored representation.** Linear amplitude is
 derived (`10 ** (db / 20)`) at mix time — there is no parallel linear
-column that could disagree. Bounds: `[-60, +12] dB` — −60 is the
-practical silence floor (~0.1 % amplitude); true silence is `muted`,
-never −∞. +12 is a beginner-safe headroom cap.
+column that could disagree. Bounds: `[-60, +12] dB` — +12 is a
+beginner-safe headroom cap. **−60 dB is attenuation, not
+silence** (~0.1 % amplitude remains audible in a mix context); the
+actual silence control is `muted`. NaN/±inf are refused by
+`check_gain_db` regardless of the entry point.
 
 ## Semantics
 
@@ -44,6 +46,29 @@ never −∞. +12 is a beginner-safe headroom cap.
   no audio output, so mix controls there would be ambiguous.
 - Mix controls are **settable on locked tracks** — lock guards clip
   edits, not mix state (unlock must remain reachable anyway).
+
+### Audio/video separation policy (review-pinned)
+
+Audibility controls never touch compositing:
+
+- **`muted` on a video lane suppresses its embedded audio only.** The
+  picture still composites — `composite_plan` gates the overlay chain
+  on `visible`, while `muted` only filters the clip out of
+  `audio_inputs`. (`test_plan_muted_lane_keeps_video_drops_audio`)
+- **`solo` is an audio-set membership flag, never a visibility flag.**
+  The composite plan never consults `solo`, so soloing an audio lane
+  cannot hide any picture. (`test_solo_never_removes_video_from_composite`)
+- **Video lanes ARE included in the audio solo set** — a soloed video
+  lane isolates its embedded audio exactly like a soloed audio lane.
+  This keeps one unambiguous rule: the solo set decides which
+  audio-producing lanes are heard, whatever their kind.
+- **Hidden video lanes produce no embedded audio** — `visible=false`
+  removes the lane from the composite plan entirely, so its audio
+  can't reach the mix. Same rule for hidden audio lanes
+  (`lane_audible` returns false first).
+- **One slider adjustment = one command = one undo step.** The
+  `GainSlider` drafts locally and commits once on release (or click
+  readout to reset), so dragging can't flood the history.
 
 ## Commands
 

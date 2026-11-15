@@ -321,3 +321,106 @@ def test_migration_backfills_unity():
     cc = {c["name"] for c in insp.get_columns("timeline_clips")}
     assert {"gain_db", "solo"} <= tc
     assert "gain_db" in cc
+
+
+# ---------- N2-C review additions ----------
+
+def test_gain_db_refuses_nan_and_inf():
+    """check_gain_db is the fail-closed gate — NaN and ±inf must never
+    reach storage even if a non-JSON caller bypasses the API schema."""
+    from app.domain.timeline import check_gain_db
+    for bad in (math.nan, math.inf, -math.inf):
+        with pytest.raises(ValueError):
+            check_gain_db(bad)
+    # Unity and both bounds are the accepted envelope.
+    assert check_gain_db(-60.0) == -60.0
+    assert check_gain_db(12.0) == 12.0
+
+
+def test_solo_never_removes_video_from_composite():
+    """Solo is an audibility flag only — a soloed audio lane must not
+    hide any video lane's picture. composite_plan consults `visible`
+    alone, so the video clip stays in the plan."""
+    from app.domain import timeline_export as tx
+    from tests.test_n1d_composite import _v2, _v2clip, _trk
+    tracks = [_trk("v1", "video", 0),
+              {**_trk("a1", "audio", 1), "solo": True}]
+    clips = [_v2clip("pic", "v1")]
+    plan = tx.composite_plan(_v2(clips, tracks), {"pic": {}})
+    assert [c["clip_id"] for c in plan["clips"]] == ["pic"]
+    # And the hidden-video-lane audio policy: invisible ⇒ absent from
+    # the plan entirely — its embedded audio cannot reach the mix.
+    tracks[0]["visible"] = False
+    plan = tx.composite_plan(_v2(clips, tracks), {"pic": {}})
+    assert plan["clips"] == []
+
+
+def test_migration_0014_upgrade_preserves_flags(tmp_path):
+    """Real pre-0015 upgrade: muted/hidden track flags and clip rows
+    keep their values while gaining unity defaults (0 dB, solo=false).
+    Old snapshots restore via .get defaults — verified implicitly by
+    the backfill never touching non-column state."""
+    import sqlite3
+    import uuid
+    from alembic.config import Config as AlembicConfig
+    from alembic import command as alembic_command
+    from app.main import _alembic_script_location, run_migrations
+
+    url = f"sqlite:///{tmp_path}/pre.db"
+    run_migrations(url)
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location",
+                        str(_alembic_script_location()))
+    cfg.set_main_option("sqlalchemy.url", url)
+    # Back down to the pre-N2-C shape (0015 has a real downgrade).
+    alembic_command.downgrade(cfg, "0014_n1e")
+
+    con = sqlite3.connect(str(tmp_path / "pre.db"))
+    pid, tl, tr, cl = (str(uuid.uuid4()) for _ in range(4))
+    now = "2024-01-01 00:00:00"
+    con.execute(
+        "INSERT INTO projects (id, name, template, kind, status,"
+        " aspect_ratio, width, height, fps_num, fps_den, style,"
+        " settings_json, revision, created_at, updated_at) VALUES "
+        f"('{pid}', 'Legacy', 'blank', 'film', 'active', '16:9',"
+        f" 1920, 1080, 24, 1, '{{}}', '{{}}', 0, '{now}', '{now}')")
+    con.execute(
+        "INSERT INTO timelines (id, project_id, name, description,"
+        " fps_num, fps_den, status, revision, undo_stack_json,"
+        " redo_stack_json, created_at, updated_at) VALUES "
+        f"('{tl}', '{pid}', 'Old Cut', '', 24, 1, 'active',"
+        f" 2, '[]', '[]', '{now}', '{now}')")
+    # Muted + hidden audio lane at the 0014 shape (no gain_db/solo).
+    tr_cols = [r[1] for r in con.execute(
+        "PRAGMA table_info(timeline_tracks)")]
+    assert "gain_db" not in tr_cols and "solo" not in tr_cols
+    con.execute(
+        "INSERT INTO timeline_tracks (id, project_id, timeline_id,"
+        " kind, position, name, visible, locked, muted, created_at)"
+        f" VALUES ('{tr}', '{pid}', '{tl}', 'audio', 0, 'A1',"
+        f" 0, 0, 1, '{now}')")   # hidden + muted legacy lane
+    cl_cols = [r[1] for r in con.execute(
+        "PRAGMA table_info(timeline_clips)")]
+    assert "gain_db" not in cl_cols
+    con.execute(
+        "INSERT INTO timeline_clips (id, project_id, timeline_id,"
+        " track_id, position, start_frames, source_asset_id,"
+        " source_version_id, source_sha256, in_frame, out_frame,"
+        " src_frames, src_fps_num, src_fps_den, src_duration_s,"
+        f" created_at) VALUES ('{cl}', '{pid}', '{tl}', '{tr}',"
+        f" 0, 0, 'a1', 'v1', '{'ab'*32}', 0, 48000, 48000, 48000,"
+        f" 1, 1.0, '{now}')")
+    con.commit()
+    con.close()
+
+    alembic_command.upgrade(cfg, "head")
+    con = sqlite3.connect(str(tmp_path / "pre.db"))
+    row = con.execute(
+        "SELECT visible, locked, muted, gain_db, solo FROM"
+        f" timeline_tracks WHERE id='{tr}'").fetchone()
+    # Flags preserved; new columns backfilled to documented defaults.
+    assert row == (0, 0, 1, 0.0, 0)
+    row = con.execute(
+        f"SELECT gain_db FROM timeline_clips WHERE id='{cl}'").fetchone()
+    assert row == (0.0,)
+    con.close()
