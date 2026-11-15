@@ -29,7 +29,11 @@ const CLIP = (id: string, over: Partial<TimelineClip> = {}): TimelineClip => ({
   source_sha256: "ab".repeat(32),
   in_frame: 0, out_frame: 72,
   src_frames: 72, src_fps_num: 24, src_fps_den: 1,
-  src_duration_s: 3, gain_db: 0, shot_id: null, scene_id: null,
+  src_duration_s: 3, gain_db: 0,
+  fade_in_units: 0, fade_in_curve: "linear",
+  fade_out_units: 0, fade_out_curve: "linear",
+  automation_json: "[]",
+  shot_id: null, scene_id: null,
   created_at: "2026-01-01", ...over,
 });
 
@@ -39,6 +43,7 @@ const DETAIL = (over: Partial<TimelineDetail> = {}): TimelineDetail => ({
   created_at: "2026-01-01", updated_at: "2026-01-01",
   tracks: [TRACK("v1")],
   clips: [CLIP("c0"), CLIP("c1", { start_frames: 72 })],
+  crossfades: [],
   total_duration_s: 6,
   undo_label: null, redo_label: null,
   ...over,
@@ -182,6 +187,84 @@ describe("TimelineEditor", () => {
     // Effective readout = committed clip + track dB (−3 + 0).
     expect(screen.getByText(/eff .*dB/).textContent)
       .toContain("-3.0");
+  });
+
+  it("N2-D: audio clip shows fade wedge + draggable apex", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [CLIP("c0", { track_id: "a1",
+        src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+        in_frame: 0, out_frame: 96000,
+        fade_in_units: 4800, fade_in_curve: "equal_power" })],
+    }));
+    expect(screen.getByTestId("fade-in-wedge")).toBeTruthy();
+    // Apex handle exists and exposes the resize affordance.
+    const h = screen.getByTestId("fade-in-handle");
+    expect(h.getAttribute("aria-label")).toContain("4800");
+    // Video clips never get fade furniture.
+    expect(screen.queryByTestId("fade-out-wedge")).toBeNull();
+  });
+
+  it("N2-D: inspector fade + automation sections commit", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [CLIP("c0", { track_id: "a1",
+        src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+        in_frame: 0, out_frame: 96000,
+        automation_json: '[{"id":"p0","at_frames":12,"gain_db":-6}]' })],
+    }));
+    fireEvent.click(screen.getByTestId("lane-clip"));
+    // Fade-in seconds field → units commit (0.5s @48k = 24000).
+    const fin = await screen.findByLabelText("Fade-in seconds");
+    fireEvent.change(fin, { target: { value: "0.5" } });
+    fireEvent.blur(fin);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.fade",
+      expect.objectContaining({ clip_id: "c0", fade_in_units: 24000 })));
+    // Curve select commits independently.
+    fireEvent.change(screen.getByLabelText("Fade out curve"),
+      { target: { value: "equal_power" } });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.fade",
+      expect.objectContaining({ fade_out_curve: "equal_power" })));
+    // Existing automation point renders; delete commits the list.
+    expect(screen.getByTestId("automation-section").textContent)
+      .toContain("+12f");
+    fireEvent.click(screen.getByLabelText("Delete point 1"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.automation",
+      expect.objectContaining({ clip_id: "c0", points: [] })));
+  });
+
+  it("N2-D: crossfade badge + offer to create on next clip", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [
+        CLIP("c0", { track_id: "a1", src_fps_num: 48000,
+          src_fps_den: 1, src_frames: 96000, out_frame: 48000 }),
+        CLIP("c1", { track_id: "a1", start_frames: 24,
+          src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+          in_frame: 4800, out_frame: 96000 }),
+      ],
+      crossfades: [{
+        id: "x1", project_id: "p", timeline_id: "t",
+        out_clip_id: "c0", in_clip_id: "c1",
+        tl_start: 22, tl_frames: 4, curve: "equal_power",
+        satisfied: true, created_at: "2026-01-01",
+      }],
+    }));
+    expect(screen.getAllByTestId("xf-badge")).toHaveLength(2);
+    // Selecting the OUT clip shows the record + clear affordance.
+    fireEvent.click(screen.getAllByTestId("lane-clip")[0]);
+    const sect = await screen.findByTestId("xf-section");
+    expect(sect.textContent).toContain("4f window");
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.crossfade.clear",
+      expect.objectContaining({ crossfade_id: "x1" })));
   });
 
   it("N2-C: no mix row on overlay lanes", () => {

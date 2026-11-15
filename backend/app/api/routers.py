@@ -1372,6 +1372,12 @@ def get_timeline(timeline_id: str,
     d["clips"] = clips
     # N1-A — tracks describe the lanes clips are placed on
     d["tracks"] = tld.list_tracks(db, tl.id)
+    # N2-D — crossfade records with read-time feasibility
+    d["crossfades"] = [
+        {**{c.name: getattr(x, c.name)
+            for c in x.__table__.columns},
+         "satisfied": tld.crossfade_satisfied(db, tl, x)}
+        for x in tld.list_crossfades(db, tl.id)]
     # program end = max(clip end) across tracks, in timeline frames —
     # exact rational; seconds fall out at the boundary
     prog = tld.program_end_frac(db, tl)

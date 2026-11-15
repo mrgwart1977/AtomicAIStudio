@@ -823,8 +823,40 @@ class TimelineClip(Base):
     # clip × track in linear amplitude, i.e. the dB values sum.
     # Meaningful on audio-source clips; video clips keep 0.0.
     gain_db: Mapped[float] = mapped_column(Float, default=0.0)
+    # N2-D — fades in SOURCE units (samples for audio clips, per the
+    # N2-A unit contract); 0 = no fade. Curves: 'linear' |
+    # 'equal_power'. ``automation_json`` is a bounded keyframe list
+    # [{id, tl_frame, gain_db}] sorted by tl_frame (linear-in-dB
+    # interpolation at N2-E render time).
+    fade_in_units: Mapped[int] = mapped_column(Integer, default=0)
+    fade_in_curve: Mapped[str] = mapped_column(String(20), default="linear")
+    fade_out_units: Mapped[int] = mapped_column(Integer, default=0)
+    fade_out_curve: Mapped[str] = mapped_column(String(20), default="linear")
+    automation_json: Mapped[str] = mapped_column(Text, default="[]")
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True)
     scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TimelineCrossfade(Base):
+    """N2-D — explicit overlap record between two clips on the same
+    audio lane. Lanes still refuse grid overlap; the window
+    [tl_start, tl_start+tl_frames) borrows source HANDLES at render
+    time (out-clip tail extension + in-clip head reach), so lane
+    occupancy, ripple, and packing are unchanged. ``satisfied`` is a
+    read-time flag — a record whose window no longer fits both clips
+    is reported inert, never silently dropped."""
+
+    __tablename__ = "timeline_crossfades"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id", ondelete="CASCADE"), index=True)
+    out_clip_id: Mapped[str] = mapped_column(ForeignKey("timeline_clips.id", ondelete="CASCADE"), index=True)
+    in_clip_id: Mapped[str] = mapped_column(ForeignKey("timeline_clips.id", ondelete="CASCADE"), index=True)
+    tl_start: Mapped[int] = mapped_column(Integer)
+    tl_frames: Mapped[int] = mapped_column(Integer)
+    curve: Mapped[str] = mapped_column(String(20), default="equal_power")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -26,6 +26,7 @@ edit exactly (new clip ids — clip identity is not stable across
 revert, the edit decision is what persists)."""
 from __future__ import annotations
 
+import json
 import math
 from fractions import Fraction
 from typing import Any
@@ -34,8 +35,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (Asset, AssetVersion, EntityRevision, Scene, Shot,
-                           Timeline, TimelineClip, TimelineTrack,
-                           new_id, utcnow)
+                           Timeline, TimelineClip, TimelineCrossfade,
+                           TimelineTrack, new_id, utcnow)
 
 #: Bounded rational timebases — keeps UI inputs honest without
 #: pretending to support arbitrary rates.
@@ -256,6 +257,11 @@ def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
         "src_fps_num": c.src_fps_num, "src_fps_den": c.src_fps_den,
         "src_duration_s": c.src_duration_s,
         "gain_db": c.gain_db,
+        "fade_in_units": c.fade_in_units,
+        "fade_in_curve": c.fade_in_curve,
+        "fade_out_units": c.fade_out_units,
+        "fade_out_curve": c.fade_out_curve,
+        "automation_json": c.automation_json,
         "shot_id": c.shot_id, "scene_id": c.scene_id,
     }
 
@@ -267,6 +273,11 @@ def timeline_snapshot(session: Session, tl: Timeline) -> dict[str, Any]:
         "status": tl.status,
         "tracks": [track_snapshot(t) for t in list_tracks(session, tl.id)],
         "clips": [clip_snapshot(c) for c in list_clips(session, tl.id)],
+        "crossfades": [{"id": x.id, "out_clip_id": x.out_clip_id,
+                        "in_clip_id": x.in_clip_id,
+                        "tl_start": x.tl_start, "tl_frames": x.tl_frames,
+                        "curve": x.curve}
+                       for x in list_crossfades(session, tl.id)],
     }
 
 
@@ -403,6 +414,296 @@ def set_clip_gain(session: Session, tl: Timeline, clip: TimelineClip, *,
            summary="Set clip gain")
 
 
+# ---------- N2-D: fades / automation / crossfades ----------
+
+#: Fade curve vocabulary. 'linear' ramps amplitude 0→1 linearly over
+#: the fade (g(t)=t/N). 'equal_power' uses the constant-power pair —
+#: in: g(t)=sin(πt/2N), out: g(t)=cos(πt/2N) — so a paired crossfade
+#: sums to unity power (sin²+cos²=1) instead of dipping in the middle.
+FADE_CURVES = ("linear", "equal_power")
+
+#: Automation bounds — bounded initial model: at most this many
+#: gain keyframes per clip.
+AUTOMATION_MAX_POINTS = 64
+
+
+def check_fade_curve(v: Any, field: str = "curve") -> str:
+    if not isinstance(v, str) or v not in FADE_CURVES:
+        raise TimelineError(
+            f"{field} must be one of {', '.join(FADE_CURVES)}")
+    return v
+
+
+def _check_fade_units(v: Any, field: str) -> int:
+    n = _check_int(v, field, 0, 1 << 40)
+    return n
+
+
+def _require_audio_lane_clip(session: Session, clip: TimelineClip,
+                             what: str) -> TimelineTrack:
+    tr = session.get(TimelineTrack, clip.track_id) if clip.track_id else None
+    if tr is None or tr.kind != "audio":
+        raise TimelineError(f"{what} applies to clips on audio lanes")
+    return tr
+
+
+def set_clip_fades(session: Session, tl: Timeline, clip: TimelineClip, *,
+                   fields: dict, command_id: str | None) -> None:
+    """Per-clip fades in SOURCE units (samples for audio — the N2-A
+    unit contract), anchored to the trim edges: fade_in covers
+    [in_frame, in_frame+units) and fade_out the last `units` before
+    out_frame. Both must fit the clip's extent — a fade can never
+    reference source material outside the trim."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    _require_audio_lane_clip(session, clip, "fades")
+    fin = (clip.fade_in_units if "fade_in_units" not in fields
+           else _check_fade_units(fields["fade_in_units"],
+                                  "fade_in_units"))
+    fout = (clip.fade_out_units if "fade_out_units" not in fields
+            else _check_fade_units(fields["fade_out_units"],
+                                   "fade_out_units"))
+    fic = (clip.fade_in_curve if "fade_in_curve" not in fields
+           else check_fade_curve(fields["fade_in_curve"],
+                                 "fade_in_curve"))
+    foc = (clip.fade_out_curve if "fade_out_curve" not in fields
+           else check_fade_curve(fields["fade_out_curve"],
+                                 "fade_out_curve"))
+    extent = clip.out_frame - clip.in_frame
+    if fin + fout > extent:
+        raise TimelineError(
+            f"fade_in+fade_out ({fin + fout}) exceed the clip extent "
+            f"({extent} source units) — fades cannot reach past the "
+            f"trim")
+    clip.fade_in_units, clip.fade_in_curve = fin, fic
+    clip.fade_out_units, clip.fade_out_curve = fout, foc
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Set clip fades")
+
+
+def fade_gain(curve: str, pos: int, n: int, *, out: bool = False
+              ) -> float:
+    """Envelope value at source offset `pos` within an `n`-unit fade.
+    Deterministic float math — 'linear': in t/n, out 1−t/n;
+    'equal_power': in sin(πt/2n), out cos(πt/2n)."""
+    check_fade_curve(curve)
+    if n <= 0:
+        return 1.0
+    t = min(max(pos / n, 0.0), 1.0)
+    if curve == "linear":
+        g = 1.0 - t if out else t
+    else:  # equal_power
+        g = math.cos(t * math.pi / 2) if out else math.sin(
+            t * math.pi / 2)
+    return g
+
+
+def automation_points(clip: TimelineClip) -> list[dict[str, Any]]:
+    """Stored keyframes [{id, at_frames, gain_db}] — `at_frames` is a
+    TIMELINE-frame offset from clip start (clip-local time position,
+    so moves never drift it)."""
+    try:
+        pts = json.loads(clip.automation_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    return pts if isinstance(pts, list) else []
+
+
+def set_clip_automation(session: Session, tl: Timeline,
+                        clip: TimelineClip, *, points: list,
+                        command_id: str | None) -> None:
+    """Replace the clip's gain keyframes. Bounded model: ≤64 points,
+    integer `at_frames` within the clip's integer occupancy [0,
+    ceil(extent)), unique positions, gain bounds as clip gain. Points
+    are stored sorted by position — deterministic serialization.
+    Interpolation is linear in dB between neighbors, flat at the
+    ends (documented; rendered at N2-E)."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    _require_audio_lane_clip(session, clip, "gain automation")
+    if not isinstance(points, list):
+        raise TimelineError("points must be a list")
+    if len(points) > AUTOMATION_MAX_POINTS:
+        raise TimelineError(
+            f"at most {AUTOMATION_MAX_POINTS} automation points")
+    occ = _ceil_frame(clip_tl_extent(clip, tl))
+    cleaned: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for i, p in enumerate(points):
+        if not isinstance(p, dict):
+            raise TimelineError("automation points must be objects")
+        at = _check_int(p.get("at_frames"), "at_frames", 0, occ - 1)
+        if at in seen:
+            raise TimelineError(
+                f"duplicate automation point at frame {at}")
+        seen.add(at)
+        cleaned.append({
+            "id": (p.get("id") if isinstance(p.get("id"), str)
+                   and p["id"] else f"p{i}"),
+            "at_frames": at,
+            "gain_db": check_gain_db(p.get("gain_db"))})
+    cleaned.sort(key=lambda p: p["at_frames"])
+    clip.automation_json = json.dumps(cleaned, separators=(",", ":"))
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Set clip automation")
+
+
+def automation_gain_db(points: list[dict], at_frames: float) -> float:
+    """Interpolated gain in dB at a clip-local position — linear in
+    dB between neighbors, constant before the first/after the last
+    point. Deterministic."""
+    if not points:
+        return 0.0
+    if at_frames <= points[0]["at_frames"]:
+        return float(points[0]["gain_db"])
+    if at_frames >= points[-1]["at_frames"]:
+        return float(points[-1]["gain_db"])
+    for a, b in zip(points, points[1:]):
+        if a["at_frames"] <= at_frames <= b["at_frames"]:
+            span = b["at_frames"] - a["at_frames"]
+            t = 0.0 if span == 0 else (at_frames - a["at_frames"]) / span
+            return float(a["gain_db"]) + t * (float(b["gain_db"])
+                                              - float(a["gain_db"]))
+    return float(points[-1]["gain_db"])
+
+
+def list_crossfades(session: Session, timeline_id: str
+                    ) -> list[TimelineCrossfade]:
+    return session.execute(
+        select(TimelineCrossfade)
+        .where(TimelineCrossfade.timeline_id == timeline_id)
+        .order_by(TimelineCrossfade.tl_start,
+                  TimelineCrossfade.id)).scalars().all()
+
+
+def _xf_handle_needs(session: Session, tl: Timeline,
+                     out_clip: TimelineClip, in_clip: TimelineClip,
+                     win_start: int, win_frames: int
+                     ) -> tuple[int, int] | None:
+    """Source-unit handle requirements for a window, or None if the
+    window can't apply to this pair at all. The window [win_start,
+    win_start+win_frames) must intersect BOTH clips' spans; the
+    out-clip covers its far side via tail handle (out_frame→), the
+    in-clip covers its near side via head handle (←in_frame).
+    Returns (tail_src_needed, head_src_needed)."""
+    win_end = win_start + win_frames
+    out_end = Fraction(out_clip.start_frames) + clip_tl_extent(
+        out_clip, tl)
+    in_end = Fraction(in_clip.start_frames) + clip_tl_extent(
+        in_clip, tl)
+    if Fraction(in_clip.start_frames) <= Fraction(
+            out_clip.start_frames):
+        return None  # pair must be ordered out → in on the lane
+    # Both clips must cover the whole window — anything outside
+    # that coverage is one clip sounding alone, not a crossfade.
+    if Fraction(win_start) < Fraction(out_clip.start_frames) or \
+            Fraction(win_end) > in_end:
+        return None
+    tl_rate = Fraction(tl.fps_num, tl.fps_den)
+
+    def tl_to_src(frames: Fraction, c: TimelineClip) -> int:
+        u = frames * Fraction(c.src_fps_num, c.src_fps_den) / tl_rate
+        return _ceil_frame(u)  # conservative: whole source units
+
+    tail = max(Fraction(0), Fraction(win_end) - out_end)
+    head = max(Fraction(0),
+               Fraction(in_clip.start_frames) - Fraction(win_start))
+    return tl_to_src(tail, out_clip), tl_to_src(head, in_clip)
+
+
+def crossfade_satisfied(session: Session, tl: Timeline,
+                        xf: TimelineCrossfade) -> bool:
+    """Read-time feasibility — a record whose clips moved/trimmed past
+    the window reports False instead of silently rendering wrong."""
+    out_c = session.get(TimelineClip, xf.out_clip_id)
+    in_c = session.get(TimelineClip, xf.in_clip_id)
+    if out_c is None or in_c is None or \
+            out_c.track_id != in_c.track_id:
+        return False
+    tr = session.get(TimelineTrack, out_c.track_id or "")
+    if tr is None or tr.kind != "audio":
+        return False
+    needs = _xf_handle_needs(session, tl, out_c, in_c,
+                             xf.tl_start, xf.tl_frames)
+    if needs is None:
+        return False
+    tail, head = needs
+    return (out_c.out_frame + tail <= out_c.src_frames
+            and in_c.in_frame - head >= 0)
+
+
+def set_crossfade(session: Session, tl: Timeline, *,
+                  out_clip_id: str, in_clip_id: str, tl_start: Any,
+                  tl_frames: Any, curve: Any,
+                  command_id: str | None) -> TimelineCrossfade:
+    """Create/replace the pair's crossfade. Lanes still refuse grid
+    overlap — the window borrows source handles at render time:
+    out-clip extends `win_end − out_end` past its occupancy into its
+    tail handle, in-clip reaches `in_start − win_start` into its head
+    handle. Both must exist or the command refuses (fail closed)."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    out_c = session.get(TimelineClip, out_clip_id)
+    in_c = session.get(TimelineClip, in_clip_id)
+    for c, label in ((out_c, "out_clip"), (in_c, "in_clip")):
+        if c is None or c.timeline_id != tl.id:
+            raise TimelineError(f"{label} not found on this timeline")
+    if out_c.id == in_c.id:
+        raise TimelineError("a clip cannot crossfade with itself")
+    if out_c.track_id is None or out_c.track_id != in_c.track_id:
+        raise TimelineError(
+            "crossfades join two clips on the same audio lane")
+    tr = session.get(TimelineTrack, out_c.track_id)
+    if tr is None or tr.kind != "audio":
+        raise TimelineError(
+            "crossfades join two clips on the same audio lane")
+    _check_track_unlocked(tr)
+    start = _check_int(tl_start, "tl_start", 0, 1 << 30)
+    frames = _check_int(tl_frames, "tl_frames", 1, 1 << 30)
+    curve = check_fade_curve(curve if curve is not None else
+                             "equal_power")
+    needs = _xf_handle_needs(session, tl, out_c, in_c, start, frames)
+    if needs is None:
+        raise TimelineError(
+            "crossfade window must overlap both clips' spans with "
+            "the out-clip placed before the in-clip")
+    tail, head = needs
+    if out_c.out_frame + tail > out_c.src_frames:
+        raise TimelineError(
+            "crossfade needs more tail material than the out-clip "
+            "has — extend its trim first")
+    if in_c.in_frame - head < 0:
+        raise TimelineError(
+            "crossfade needs more head material than the in-clip "
+            "has — extend its trim first")
+    xf = session.execute(select(TimelineCrossfade).where(
+        TimelineCrossfade.out_clip_id == out_c.id,
+        TimelineCrossfade.in_clip_id == in_c.id)).scalar_one_or_none()
+    if xf is None:
+        xf = TimelineCrossfade(
+            id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
+            out_clip_id=out_c.id, in_clip_id=in_c.id)
+        session.add(xf)
+    xf.tl_start, xf.tl_frames, xf.curve = start, frames, curve
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Set crossfade")
+    return xf
+
+
+def clear_crossfade(session: Session, tl: Timeline, *,
+                    crossfade_id: str, command_id: str | None) -> None:
+    xf = session.get(TimelineCrossfade, crossfade_id)
+    if xf is None or xf.timeline_id != tl.id:
+        raise TimelineError("crossfade not found on this timeline")
+    session.delete(xf)
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Cleared crossfade")
+
+
 def update_track(session: Session, tl: Timeline, track: TimelineTrack, *,
                  fields: dict, command_id: str | None) -> None:
     """name/visible/locked/muted/solo/gain_db. Flags are deliberately
@@ -523,9 +824,12 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
         session.add(nt)
         track_map[t.id] = nt.id
     session.flush()
+    clip_map: dict[str, str] = {}
     for c in list_clips(session, tl.id):
+        nid = new_id()
+        clip_map[c.id] = nid
         session.add(TimelineClip(
-            id=new_id(), project_id=tl.project_id, timeline_id=dup.id,
+            id=nid, project_id=tl.project_id, timeline_id=dup.id,
             track_id=track_map.get(c.track_id or ""),
             position=c.position, start_frames=c.start_frames,
             source_asset_id=c.source_asset_id,
@@ -534,7 +838,21 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
             in_frame=c.in_frame, out_frame=c.out_frame,
             src_frames=c.src_frames, src_fps_num=c.src_fps_num,
             src_fps_den=c.src_fps_den, src_duration_s=c.src_duration_s,
+            gain_db=c.gain_db,
+            fade_in_units=c.fade_in_units,
+            fade_in_curve=c.fade_in_curve,
+            fade_out_units=c.fade_out_units,
+            fade_out_curve=c.fade_out_curve,
+            automation_json=c.automation_json,
             shot_id=c.shot_id, scene_id=c.scene_id))
+    session.flush()
+    for x in list_crossfades(session, tl.id):
+        session.add(TimelineCrossfade(
+            id=new_id(), project_id=tl.project_id, timeline_id=dup.id,
+            out_clip_id=clip_map[x.out_clip_id],
+            in_clip_id=clip_map[x.in_clip_id],
+            tl_start=x.tl_start, tl_frames=x.tl_frames,
+            curve=x.curve))
     session.flush()
     write_timeline_revision(session, dup, command_id=command_id,
                             summary="Duplicated timeline")
@@ -622,6 +940,11 @@ def _restore_snapshot(session: Session, tl: Timeline,
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
             gain_db=c.get("gain_db", 0.0),
+            fade_in_units=c.get("fade_in_units", 0),
+            fade_in_curve=c.get("fade_in_curve", "linear"),
+            fade_out_units=c.get("fade_out_units", 0),
+            fade_out_curve=c.get("fade_out_curve", "linear"),
+            automation_json=c.get("automation_json", "[]"),
             shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
         row = live_clips.get(c.get("id")) if c.get("id") else None
         if row is not None:
@@ -637,6 +960,30 @@ def _restore_snapshot(session: Session, tl: Timeline,
             acc = Fraction(start) + clip_tl_extent(clip, tl)
     session.flush()
     _renumber(session, tl.id)
+    # N2-D — restore the crossfade set to the snapshot exactly:
+    # records absent from the snapshot are dropped, missing ones are
+    # recreated with their original ids (pre-N2-D snapshots carry no
+    # "crossfades" key → the set clears, matching "no crossfades
+    # existed" semantics of older revisions).
+    snap_xfs = snap.get("crossfades") or []
+    want_xf = {x["id"]: x for x in snap_xfs}
+    for x in list_crossfades(session, tl.id):
+        if x.id not in want_xf:
+            session.delete(x)
+        else:
+            sx = want_xf[x.id]
+            for f in ("out_clip_id", "in_clip_id", "tl_start",
+                      "tl_frames", "curve"):
+                if f in sx:
+                    setattr(x, f, sx[f])
+    for sx in snap_xfs:
+        if session.get(TimelineCrossfade, sx["id"]) is None:
+            session.add(TimelineCrossfade(
+                id=sx["id"], project_id=tl.project_id,
+                timeline_id=tl.id, out_clip_id=sx["out_clip_id"],
+                in_clip_id=sx["in_clip_id"], tl_start=sx["tl_start"],
+                tl_frames=sx["tl_frames"], curve=sx["curve"]))
+    session.flush()
 
 
 def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
@@ -1062,6 +1409,28 @@ def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
     clip.in_frame, clip.out_frame = i, o
     new_end = _ceil_end(clip, tl)
     delta = new_end - old_end
+    # N2-D — a trim can never make stored fades exceed the new
+    # extent, and can never pull source material a crossfade window
+    # relies on. Both refuse closed — the user clears the fade /
+    # crossfade first.
+    if clip.fade_in_units + clip.fade_out_units > o - i:
+        raise TimelineError(
+            "trim would leave less room than the clip's fades need — "
+            "shorten fade_in/fade_out first")
+    new_occ = _ceil_frame(clip_tl_extent(clip, tl))
+    stray = [p["at_frames"] for p in automation_points(clip)
+             if p["at_frames"] >= new_occ]
+    if stray:
+        raise TimelineError(
+            "trim would orphan automation points — remove points "
+            "beyond the new clip end first")
+    for xf in list_crossfades(session, tl.id):
+        if clip.id not in (xf.out_clip_id, xf.in_clip_id):
+            continue
+        if not crossfade_satisfied(session, tl, xf):
+            raise TimelineError(
+                "trim would break a crossfade's source handles — "
+                "clear the crossfade first")
     if ripple_scope is not None:
         if delta != 0 and track is not None:
             scope = _check_ripple_scope(ripple_scope)
@@ -1177,6 +1546,33 @@ def split_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
     off_i = int(off)
     if not 0 < off_i < clip.out_frame - clip.in_frame:
         raise TimelineError("split would create a zero-length fragment")
+    # N2-D — a split can never land inside a crossfade window (the
+    # record's semantics would be ambiguous) nor inside a fade region
+    # (a fade must stay edge-anchored and whole).
+    for xf in list_crossfades(session, tl.id):
+        if clip.id in (xf.out_clip_id, xf.in_clip_id) and \
+                xf.tl_start <= at < xf.tl_start + xf.tl_frames:
+            raise TimelineError(
+                "split point falls inside a crossfade window — "
+                "clear the crossfade or split outside it")
+    left_extent = off_i
+    right_extent = clip.out_frame - (clip.in_frame + off_i)
+    if clip.fade_in_units > left_extent:
+        raise TimelineError(
+            "split lands inside the fade-in — split outside the fade "
+            "or shorten the fade first")
+    if clip.fade_out_units > right_extent:
+        raise TimelineError(
+            "split lands inside the fade-out — split outside the "
+            "fade or shorten the fade first")
+    # Automation points are clip-local (offset from clip start): the
+    # cut at timeline frame `at` divides them — left keeps the points
+    # before the cut, right gets the rest rebased.
+    cut_off = at - clip.start_frames
+    pts = automation_points(clip)
+    left_pts = [p for p in pts if p["at_frames"] < cut_off]
+    right_pts = [dict(p, at_frames=p["at_frames"] - cut_off)
+                 for p in pts if p["at_frames"] >= cut_off]
     right = TimelineClip(
         id=new_id(), project_id=clip.project_id, timeline_id=tl.id,
         track_id=clip.track_id, position=clip.position,
@@ -1187,9 +1583,19 @@ def split_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
         src_frames=clip.src_frames,
         src_fps_num=clip.src_fps_num, src_fps_den=clip.src_fps_den,
         src_duration_s=clip.src_duration_s,
+        gain_db=clip.gain_db,
+        # N2-D — fades are edge-anchored: the left fragment keeps the
+        # IN fade (its in edge is unchanged; its new out edge is the
+        # cut), the right fragment keeps the OUT fade.
+        fade_in_units=0, fade_in_curve=clip.fade_in_curve,
+        fade_out_units=clip.fade_out_units,
+        fade_out_curve=clip.fade_out_curve,
+        automation_json=json.dumps(right_pts, separators=(",", ":")),
         shot_id=clip.shot_id, scene_id=clip.scene_id,
         start_frames=at)
     clip.out_frame = clip.in_frame + off_i
+    clip.fade_out_units = 0
+    clip.automation_json = json.dumps(left_pts, separators=(",", ":"))
     session.add(right)
     session.flush()
     _renumber(session, tl.id)
@@ -1435,6 +1841,17 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
                 # N2-C — per-clip gain in dB (0 = unity). Effective
                 # level = clip + track dB when the lane is audible.
                 "gain_db": c.gain_db,
+                # N2-D — fades in source units + bounded gain
+                # automation (clip-local tl-frame offsets, linear-in-
+                # dB interpolation). Both are metadata until N2-E
+                # renders them.
+                "fades": {
+                    "in": {"units": c.fade_in_units,
+                           "curve": c.fade_in_curve},
+                    "out": {"units": c.fade_out_units,
+                            "curve": c.fade_out_curve},
+                },
+                "automation": automation_points(c),
                 "source": {
                     "fps_num": c.src_fps_num, "fps_den": c.src_fps_den,
                     "frames": c.src_frames,
@@ -1465,6 +1882,17 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
         "tracks": tracks_out,
         "clips": clips_out,
         "gaps": gaps_out,
+        # N2-D — crossfade records, ordered by window start. Each
+        # reports read-time feasibility via `satisfied` — a record
+        # whose window detached (moves, etc.) stays honest, never
+        # silently dropped.
+        "crossfades": [{
+            "id": x.id, "out_clip_id": x.out_clip_id,
+            "in_clip_id": x.in_clip_id,
+            "tl_start": x.tl_start, "tl_frames": x.tl_frames,
+            "curve": x.curve,
+            "satisfied": crossfade_satisfied(session, tl, x)}
+            for x in list_crossfades(session, tl.id)],
         "total_duration_s": round(
             float(program_end_frac(session, tl) / tl_fps), 6),
     }

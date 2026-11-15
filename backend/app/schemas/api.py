@@ -122,6 +122,8 @@ CommandType = Literal[
     "timeline.clip.place",
     "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
     "timeline.clip.gain",
+    "timeline.clip.fade", "timeline.clip.automation",
+    "timeline.crossfade.set", "timeline.crossfade.clear",
     "timeline.export",
 ]
 
@@ -652,8 +654,26 @@ class TimelineClipOut(BaseModel):
     src_fps_den: int
     src_duration_s: float
     gain_db: float = 0.0
+    fade_in_units: int = 0
+    fade_in_curve: str = "linear"
+    fade_out_units: int = 0
+    fade_out_curve: str = "linear"
+    automation_json: str = "[]"
     shot_id: str | None
     scene_id: str | None
+    created_at: datetime
+
+
+class TimelineCrossfadeOut(BaseModel):
+    id: str
+    project_id: str
+    timeline_id: str
+    out_clip_id: str
+    in_clip_id: str
+    tl_start: int
+    tl_frames: int
+    curve: str
+    satisfied: bool = True
     created_at: datetime
 
 
@@ -688,6 +708,7 @@ class TimelineOut(BaseModel):
 class TimelineDetailOut(TimelineOut):
     clips: list[TimelineClipOut]
     tracks: list[TimelineTrackOut] = []
+    crossfades: list[TimelineCrossfadeOut] = []
     total_duration_s: float
     undo_label: str | None = None
     redo_label: str | None = None

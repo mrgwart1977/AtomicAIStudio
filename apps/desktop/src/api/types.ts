@@ -986,8 +986,30 @@ export interface TimelineClip {
   src_duration_s: number;
   /** N2-C — per-clip gain in decibels (0 = unity). Audio clips only. */
   gain_db: number;
+  /** N2-D — fade length in SOURCE units (samples for audio). */
+  fade_in_units: number;
+  fade_in_curve: string;   // "linear" | "equal_power"
+  fade_out_units: number;
+  fade_out_curve: string;
+  /** N2-D — JSON keyframe list [{id, at_frames, gain_db}]. */
+  automation_json: string;
   shot_id: string | null;
   scene_id: string | null;
+  created_at: string;
+}
+
+export interface TimelineCrossfade {
+  id: string;
+  project_id: string;
+  timeline_id: string;
+  /** N2-D — outgoing (earlier) and incoming (later) clip pair. */
+  out_clip_id: string;
+  in_clip_id: string;
+  tl_start: number;
+  tl_frames: number;
+  curve: string;
+  /** Read-time feasibility — false when the window detached. */
+  satisfied: boolean;
   created_at: string;
 }
 
@@ -1007,6 +1029,7 @@ export interface Timeline {
 export interface TimelineDetail extends Timeline {
   clips: TimelineClip[];
   tracks: TimelineTrack[];
+  crossfades: TimelineCrossfade[];
   total_duration_s: number;
   undo_label: string | null;
   redo_label: string | null;
