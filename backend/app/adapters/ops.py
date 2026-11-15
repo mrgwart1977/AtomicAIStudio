@@ -287,6 +287,122 @@ class AssetsVerifyAdapter(_OpsBase):
         yield {"done": True, "output": {"no_asset": True, "result": counts}}
 
 
+class AssetWaveformAdapter(_OpsBase):
+    profile = CapabilityProfile(
+        adapter_id="ops.asset.waveform",
+        display_name="Build waveform",
+        adapter_kind="local",
+        tasks=("waveform",),
+        supports={},
+        limits={},
+        requires_cloud=False,
+        cost_model="free",
+        notes="N2-B — derived min/max envelope levels stored in CAS, "
+              "pinned to the source version's sha. Not an AI adapter.",
+    )
+
+    async def validate(self, request):
+        if not request.get("asset_id"):
+            return ["asset_id is required"]
+        return []
+
+    async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
+        from app.domain.media import waveform
+        asset_id = handle.request["asset_id"]
+        yield {"progress": 0.05, "message": "Resolving source"}
+        await asyncio.sleep(0)
+
+        with self._sf() as session:
+            asset = session.get(Asset, asset_id)
+            if asset is None or asset.project_id != handle.project_id:
+                raise ValueError("asset not found in this project")
+            if asset.kind != "audio":
+                raise ValueError(
+                    f"waveform needs an audio asset — '{asset.name}' "
+                    f"is kind '{asset.kind}'")
+            ver = session.get(AssetVersion, asset.current_version_id)
+            if ver is None:
+                raise ValueError("asset has no current version")
+            media = ver.media_json or {}
+            probe = media.get("probe") or {}
+            existing = media.get("waveform") or {}
+            if (existing.get("built_sha256") == ver.sha256
+                    and existing.get("levels")):
+                # Source bytes unchanged → the CAS blobs are already
+                # the deterministic product. Never regenerate.
+                yield {"done": True, "output": {
+                    "no_asset": True,
+                    "result": {"skipped": "waveform up to date",
+                               "asset_id": asset.id}}}
+                return
+            rate = probe.get("sample_rate")
+            channels = probe.get("channels") or 0
+            samples = probe.get("samples")
+            if not probe.get("ok") or not isinstance(rate, int) \
+                    or rate <= 0 or not isinstance(samples, int) \
+                    or samples <= 0 or channels <= 0:
+                raise ValueError(
+                    "audio asset has no usable probe — cannot build "
+                    "a waveform for unmeasured or undecodable audio")
+            path = self._storage.asset_path(session, asset)
+            if path is None or not path.exists():
+                raise ValueError("source bytes missing on disk")
+            project = session.get(Project, handle.project_id)
+            loc = self._storage.get_location(
+                session,
+                project.storage_location_id if project else None)
+            if loc is None:
+                raise ValueError("no storage location configured")
+
+        yield {"progress": 0.2, "message": "Decoding audio"}
+        await asyncio.sleep(0)
+        built = await asyncio.to_thread(
+            waveform.build_waveform, path,
+            rate=rate, channels=channels, samples=samples,
+            work_dir=Path(handle.work_dir),
+            source_sha256=ver.sha256,
+            stem=f"{handle.job_id}-wave",
+            cancel=handle.cancel_event)
+        if not built.get("ok"):
+            if built.get("cancelled"):
+                # Re-check so the job is recorded as cancelled, not
+                # failed — same outcome as a mid-adapter check_cancel.
+                handle.check_cancel()
+            raise ValueError(
+                built.get("reason") or "waveform build failed")
+
+        yield {"progress": 0.8, "message": "Storing envelope levels"}
+        await asyncio.sleep(0)
+        levels_manifest = []
+        with self._sf() as session:
+            for lvl in built["levels"]:
+                tmp = Path(handle.work_dir) / \
+                    f"{handle.job_id}-lvl-{lvl['spb']}.json"
+                tmp.write_bytes(lvl["data"])
+                af = self._storage.ingest(session, tmp, location=loc)
+                levels_manifest.append({
+                    "spb": lvl["spb"], "buckets": lvl["buckets"],
+                    "sha256": af.sha256})
+            manifest = {
+                "format": "ade-wave/1",
+                "built_sha256": ver.sha256,
+                "sample_rate": rate,
+                "channels": channels,
+                "samples": samples,
+                "levels": levels_manifest,
+            }
+            ver = session.get(AssetVersion, ver.id)
+            ver.media_json = {**(ver.media_json or {}),
+                              "waveform": manifest}
+            session.commit()
+        yield {"done": True, "output": {
+            "no_asset": True,
+            "result": {"asset_id": asset_id,
+                       "levels": len(levels_manifest),
+                       "finest_spb": levels_manifest[0]["spb"]
+                       if levels_manifest else None}}}
+
+
 class BackupExportAdapter(_OpsBase):
     profile = CapabilityProfile(
         adapter_id="ops.backup.export",

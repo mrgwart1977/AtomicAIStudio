@@ -58,6 +58,7 @@ SUPPORTED_COMMANDS = {
     "location.create", "location.update", "location.archive", "location.unarchive", "location.revert",
     # assets / jobs
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
+    "asset.waveform",
     # C1.5 access bridge — user-driven external dispatch only
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
@@ -164,6 +165,7 @@ JOB_COMMANDS = {
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
     "assets.verify": "ops.assets.verify",
+    "asset.waveform": "ops.asset.waveform",
     "backup.export": "ops.backup.export",
     "backup.import": "ops.backup.import",
     "backup.restore": "ops.backup.restore",
@@ -263,6 +265,8 @@ def _summary(command_type: str, payload: dict) -> str:
         return "Relink asset to a file on disk"
     if command_type == "assets.verify":
         return "Verify asset files on disk"
+    if command_type == "asset.waveform":
+        return "Build waveform envelope for an audio asset"
     if command_type == "backup.export":
         return f"{payload.get('kind', 'backup').capitalize()} project to .atomicpkg"
     if command_type == "backup.import":
@@ -1315,6 +1319,23 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             raise CommandError(404, "asset not found in this project")
         if not (payload.get("source_path") or "").strip():
             raise CommandError(422, "source_path is required")
+    if command_type == "asset.waveform":
+        wave_asset = session.get(Asset, payload.get("asset_id") or "")
+        if wave_asset is None or wave_asset.project_id != project.id:
+            raise CommandError(404, "asset not found in this project")
+        if wave_asset.kind != "audio":
+            raise CommandError(
+                422, f"waveform needs an audio asset — "
+                     f"'{wave_asset.name}' is kind '{wave_asset.kind}'")
+        wave_ver = session.get(
+            AssetVersion, wave_asset.current_version_id)
+        wave_probe = ((wave_ver.media_json or {}).get("probe") or {}) \
+            if wave_ver is not None else {}
+        if not wave_probe.get("ok"):
+            raise CommandError(
+                422, "audio asset has no usable probe — a waveform "
+                     "cannot be built for unmeasured or undecodable "
+                     "audio")
     # ---- M2: scenes / shots / cast / entity assets ----
     if command_type == "scene.create":
         if not (payload.get("title") or "").strip():
@@ -3514,6 +3535,7 @@ def _job_kind(command_type: str) -> str:
         "bridge.import": "import",
         "asset.relink": "relink",
         "assets.verify": "verify",
+        "asset.waveform": "waveform",
         "backup.export": "backup",
         "backup.import": "import",
         "backup.restore": "restore",

@@ -9,6 +9,11 @@ import { createElement } from "react";
 import { TimelineEditor } from "./TimelineEditor";
 import type { TimelineClip, TimelineDetail, TimelineTrack } from "../../api/types";
 
+const apiFetch = vi.fn();
+vi.mock("../../api/client", () => ({
+  apiFetch: (...a: unknown[]) => apiFetch(...a),
+}));
+
 const TRACK = (id: string, over: Partial<TimelineTrack> = {}): TimelineTrack => ({
   id, project_id: "p", timeline_id: "t", kind: "video",
   name: id.toUpperCase(), position: 0,
@@ -545,5 +550,58 @@ describe("TimelineEditor", () => {
       "[data-testid='lane-clip']").length;
     expect(mounted).toBeLessThan(300);
     expect(mounted).toBeGreaterThan(0);
+  });
+
+  it("audio clips fetch waveform manifest+slice; video clips do not", async () => {
+    const manifest = {
+      format: "ade-wave/1", built_sha256: "ab".repeat(32),
+      sample_rate: 48000, channels: 2, samples: 48000,
+      levels: [{ spb: 256, buckets: 188, sha256: "c".repeat(64) }],
+    };
+    const slice = {
+      spb: 256, buckets: 188, bucket_start: 0, bucket_end: 20,
+      channels: 2, sample_rate: 48000, peaks: [[[0, 1]], [[0, -1]]],
+    };
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(url.includes("/level") ? slice : manifest));
+    setup(DETAIL({
+      tracks: [
+        TRACK("v1"),
+        TRACK("a1", { kind: "audio", name: "Snd", position: 1 }),
+      ],
+      clips: [
+        CLIP("v0"),
+        // 2 s @ 48 kHz source → 48 tl-frames at 24 fps.
+        CLIP("au0", { track_id: "a1", out_frame: 96000,
+                      src_frames: 96000,
+                      src_fps_num: 48000, src_fps_den: 1,
+                      src_duration_s: 2 }),
+      ],
+    }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/waveform")));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/waveform/level")));
+    // The audio clip mounted a canvas; the video clip's fetches are
+    // zero waveform calls of its own.
+    const calls = apiFetch.mock.calls.map((c) => String(c[0]));
+    expect(calls.filter((u) => u.includes("/waveform")))
+      .toHaveLength(2); // manifest + level, one asset
+  });
+
+  it("audio clip keeps polling on 409 — no error label", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform built"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", position: 0 })],
+      clips: [CLIP("au0", { track_id: "a1", out_frame: 96000,
+                            src_frames: 96000,
+                            src_fps_num: 48000, src_fps_den: 1,
+                            src_duration_s: 2 })],
+    }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/waveform")));
+    // Still polling for a build — label shows the hint, not an error.
+    expect(screen.queryByText("waveform unavailable")).toBeNull();
+    expect(screen.getByText("waveform…")).toBeTruthy();
   });
 });
