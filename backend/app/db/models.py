@@ -781,6 +781,15 @@ class TimelineClip(Base):
     never move a clip's pins, and trims keep validating against the
     pinned geometry.
 
+    UNIT CONTRACT (N2-A): the "frame" columns are SOURCE-UNIT indices
+    whose meaning depends on the source kind — VIDEO source: video
+    frames at src_fps_num/src_fps_den; AUDIO source: SAMPLES at
+    src_fps_num=sample_rate/src_fps_den=1 (src_frames=total samples,
+    in/out_frame=sample indices). ``start_frames`` is always integer
+    TIMELINE frames at the timeline's rate — the only unit that is
+    media-independent. All source→timeline conversion goes through
+    clip_tl_extent/clip_duration_frac (exact Fraction math).
+
     N1-A — ``track_id`` places the clip on a lane and ``start_frames``
     is its integer timeline-time position (frames at the timeline's
     fps_num/fps_den). ``position`` remains as the dense within-track

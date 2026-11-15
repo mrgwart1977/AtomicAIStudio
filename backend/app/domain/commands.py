@@ -1557,10 +1557,17 @@ def _validate_timeline(session: Session, project: Project,
             raise CommandError(404, str(exc).strip("'")) from None
         if payload.get("track_id") is not None:
             try:
-                tld.get_track(session, tl, payload["track_id"])
+                trk = tld.get_track(session, tl, payload["track_id"])
             except KeyError:
                 raise CommandError(
                     404, "track not found on this timeline") from None
+        else:
+            trk = tld.first_video_track(session, tl.id)
+        try:
+            if trk is not None:
+                tld.check_track_asset_kind(trk, asset)
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
         if payload.get("start_frames") is not None:
             try:
                 tld._check_int(payload["start_frames"], "start_frames",
@@ -1580,13 +1587,16 @@ def _validate_timeline(session: Session, project: Project,
         if payload.get("start_frames") is None:
             raise CommandError(422, "start_frames is required")
         try:
-            tld.resolve_clip_source(
+            asset, _ver, _geo = tld.resolve_clip_source(
                 session, project.id, payload["asset_id"],
                 payload.get("version_id"))
             tld._check_int(payload["start_frames"], "start_frames",
                            0, 1 << 30)
-            if payload.get("track_id") is not None:
-                tld.get_track(session, tl, payload["track_id"])
+            trk = (tld.get_track(session, tl, payload["track_id"])
+                   if payload.get("track_id") is not None
+                   else tld.first_video_track(session, tl.id))
+            if trk is not None:
+                tld.check_track_asset_kind(trk, asset)
             if payload.get("ripple_scope") is not None:
                 tld._check_ripple_scope(payload["ripple_scope"])
         except tld.TimelineError as exc:

@@ -5,10 +5,12 @@ import type {
   TimelineClip, TimelineDetail, TimelineTrack,
 } from "../../api/types";
 import {
-  clipTlEnd, clipTlExtent, compatibleTrack, dropError, extentOverlap,
-  fmtTc, frameToPx, laneClips, laneGaps, programEndFrames, snapStart,
-  splitSrcOffset, tickInterval, TRACK_KINDS, KIND_LABEL,
+  acceptsClipKind, clipTlEnd, clipTlExtent, compatibleTrack,
+  dropError, extentOverlap, fmtTc, frameToPx, laneClips, laneGaps,
+  programEndFrames, snapStart, splitSrcOffset, tickInterval,
+  TRACK_KINDS, KIND_LABEL,
 } from "./timelineMath";
+import { apiFetch } from "../../api/client";
 
 /** N1-B — multitrack timeline editor: lanes with track controls,
  * ruler + playhead, zoom/scroll, and pixel-exact drag placement.
@@ -41,6 +43,8 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const [renamingTrack, setRenamingTrack] = useState<string | null>(null);
   const [ripple, setRipple] = useState(false);
   const [gapFrames, setGapFrames] = useState("24");
+  const [audioAssets, setAudioAssets] = useState<
+    { id: string; name: string }[] | null>(null);
   const [dragView, setDragView] = useState<{
     clipId: string; trackId: string; startF: number;
     error: string | null; snapped: boolean;
@@ -155,7 +159,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     const rawF = (e.clientX - rect.left) / ppf - d.grabF;
     const laneClipList = clipsByTrack.get(track.id) ?? [];
     const snap = snapStart(rawF, laneClipList, d.clip.id, detail, ppf);
-    const error = dropError(track, snap.start, d.clip, laneClipList, detail);
+    const clipLaneKind = tracks.find(
+      (t) => t.id === d.orig.trackId)?.kind;
+    const error = dropError(track, snap.start, d.clip, laneClipList,
+                            detail, clipLaneKind);
     const view = {
       clipId: d.clip.id, trackId: track.id, startF: snap.start,
       error, snapped: snap.snappedTo === "edge",
@@ -259,9 +266,13 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
       e.preventDefault();
       const idx = tracks.findIndex((t) => t.id === track.id);
       const next = tracks[idx + (e.key === "ArrowDown" ? 1 : -1)];
-      if (!next || next.locked || !compatibleTrack(next)) return;
+      const clipLaneKind = tracks.find(
+        (x) => x.id === clip.track_id)?.kind ?? "video";
+      if (!next || next.locked || !compatibleTrack(next)
+          || !acceptsClipKind(next, clipLaneKind)) return;
       const lane = clipsByTrack.get(next.id) ?? [];
-      if (dropError(next, clip.start_frames, clip, lane, detail)) return;
+      if (dropError(next, clip.start_frames, clip, lane, detail,
+                    clipLaneKind)) return;
       void onRun("timeline.clip.move", {
         timeline_id: detail.id, clip_id: clip.id,
         to_track_id: next.id, start_frames: clip.start_frames, ...pin(),
@@ -511,6 +522,25 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     void onRun("timeline.gap.insert", {
       timeline_id: detail.id, track_id: t.id,
       at_frame: playheadF, frames: n, ...pin(),
+    });
+  };
+
+  // N2-A — audio lanes: "+ audio" places a ready audio asset at the
+  // playhead. Assets are fetched lazily the first time the picker
+  // opens; the backend revalidates kind/probe anyway.
+  const ensureAudioAssets = async () => {
+    if (audioAssets !== null) return;
+    try {
+      const r = await apiFetch<{ items:
+        { id: string; name: string; status: string }[] }>(
+        `/api/projects/${detail.project_id}/assets?kind=audio&limit=100`);
+      setAudioAssets(r.items.filter((a) => a.status === "ready"));
+    } catch { setAudioAssets([]); }
+  };
+  const placeAudio = (t: TimelineTrack, assetId: string) => {
+    void onRun("timeline.clip.place", {
+      timeline_id: detail.id, track_id: t.id, asset_id: assetId,
+      start_frames: playheadF, allow_duplicate: true, ...pin(),
     });
   };
 
@@ -774,6 +804,24 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                     )}
                     {dimmed && <span className="text-[9px] text-faint">hidden</span>}
                     {t.muted && <span className="text-[9px] text-faint">muted</span>}
+                    {t.kind === "audio" && (
+                      <select
+                        aria-label={`Add audio clip to ${t.name}`}
+                        data-testid={`audio-pick-${t.id}`}
+                        disabled={busy || t.locked || !active}
+                        value=""
+                        onFocus={() => void ensureAudioAssets()}
+                        onChange={(e) => {
+                          if (e.target.value) placeAudio(t, e.target.value);
+                        }}
+                        title="Place an audio clip at the playhead"
+                        className="rounded border border-line bg-panel px-1 text-muted disabled:opacity-30"
+                      >
+                        <option value="">+ audio…</option>
+                        {(audioAssets ?? []).map((a) => (
+                          <option key={a.id} value={a.id}>{a.name}</option>))}
+                      </select>
+                    )}
                   </div>
                 </div>
                 {/* lane body */}
@@ -788,9 +836,9 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                 >
                   {lane.length === 0 && (
                     <p className="absolute inset-0 flex items-center pl-3 text-[10px] text-faint">
-                      {compatibleTrack(t)
-                        ? "Empty — drag a clip here"
-                        : "Audio lane — audio clips aren't supported yet"}
+                      {t.kind === "audio"
+                        ? "Empty — pick an audio clip with “+ audio” above"
+                        : "Empty — drag a clip here"}
                     </p>
                   )}
                   {lane.filter((c) => inView(

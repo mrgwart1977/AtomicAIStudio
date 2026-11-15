@@ -62,11 +62,20 @@ export function pxToFrame(x: number, ppf: number): number {
   return x / ppf;
 }
 
-/** A clip source may sit on visual lanes only — video and overlay.
- * Audio lanes wait for real audio sources (N1-D territory); refusing
- * here keeps the honest "no silent semantic change" rule. */
+/** All three lane kinds can hold clips — the kind of clip each lane
+ * accepts is checked separately by acceptsClipKind (N2-A). */
 export function compatibleTrack(track: TimelineTrack): boolean {
-  return track.kind === "video" || track.kind === "overlay";
+  return track.kind === "video" || track.kind === "overlay"
+    || track.kind === "audio";
+}
+
+/** N2-A — lane-kind rule mirrors the backend: audio clips only on
+ * audio lanes; video clips on video/overlay lanes. `clipKind` is the
+ * kind of the clip's current lane (backend guarantees they match). */
+export function acceptsClipKind(track: TimelineTrack, clipLaneKind: string): boolean {
+  return clipLaneKind === "audio"
+    ? track.kind === "audio"
+    : track.kind !== "audio";
 }
 
 export interface SnapResult { start: number; snappedTo: "edge" | "frame" | null }
@@ -102,10 +111,17 @@ export function dropError(
   moving: TimelineClip,
   lane: TimelineClip[],
   tl: Pick<TimelineDetail, "fps_num" | "fps_den">,
+  clipLaneKind?: string,
 ): string | null {
   if (track.locked) return `${track.name} is locked — unlock it to drop here`;
   if (!compatibleTrack(track)) {
-    return `${track.name} is an audio lane — audio sources aren't supported yet`;
+    return `${track.name} cannot hold clips`;
+  }
+  if (clipLaneKind !== undefined
+      && !acceptsClipKind(track, clipLaneKind)) {
+    return clipLaneKind === "audio"
+      ? `${track.name} — audio clips live on audio lanes only`
+      : `${track.name} is an audio lane — it accepts audio clips only`;
   }
   if (startF < 0) return "clip can't start before frame 0";
   const ext = clipTlExtent(moving, tl);
@@ -179,6 +195,11 @@ export function exportMode(detail: TimelineDetail): {
   if (visible.length === 0) {
     return { mode: "blocked", lanes: 0,
              reason: "no visible lane holds clips — nothing to export" };
+  }
+  if (visible.some((t) => t.kind === "audio")) {
+    return { mode: "blocked", lanes: 0,
+             reason: "visible audio lanes can't be rendered yet (N2-E) "
+               + "— hide the audio lane or remove its clips" };
   }
   return { mode: "composite", lanes: visible.length, reason: null };
 }

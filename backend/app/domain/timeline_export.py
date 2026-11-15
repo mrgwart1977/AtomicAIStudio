@@ -211,6 +211,13 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
         t = tracks.get(c.get("track_id"))
         if t is None or not t.get("visible", True):
             continue  # hidden lanes contribute nothing
+        if t.get("kind") == "audio":
+            # N2-A boundary — never silently discard a populated audio
+            # lane: refuse until N2-E renders audio lanes.
+            raise ValueError(
+                "visible audio lanes cannot be rendered yet — "
+                "hide the audio lane or remove its clips (audio-lane "
+                "mixing is scheduled for N2-E)")
         src = c.get("source") or {}
         src_fps = Fraction(int(src.get("fps_num") or tb["num"]),
                            int(src.get("fps_den") or tb["den"]))

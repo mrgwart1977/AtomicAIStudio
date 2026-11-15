@@ -384,3 +384,40 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
   bypasses the destination check. Cannot be bypassed by provider
   catalog configuration or owner approval. Does not affect the
   current simulated provider boundary (MockTransport — no DNS).
+
+### N1 milestone note (multitrack timeline — N1-A through N1-E merged)
+
+Classification legend: **[auto]** verified automated test ·
+**[installed]** verified on installed WebView2 build ·
+**[human]** requires human visual judgment ·
+**[hw]** hardware/model gated · **[blocked]** blocked ·
+**[notrun]** not executed.
+
+- N1-A data foundation (migrations, track model, EDL v2 schema) — **[auto]**
+- N1-B multitrack editor + NTSC rates + lane ops — **[auto]** + **[installed]** (12/12)
+- N1-C split/ripple/trim/gap ops + revision safety — **[auto]** + **[installed]** (14/14)
+- N1-D composite export (`ade-edl/2`, ffmpeg, cancel/recovery) — **[auto]** + **[installed]** (ffprobe-verified composite)
+- N1-E undo/redo + stable clip identity + viewport culling — **[auto]** + **[installed]** (8/8 + perf matrix)
+- N1 end-to-end audit (18-step workflow in installed app) — **[installed]** `docs/n1-audit-evidence/`
+- Installed UI perf 10/100/500/1000 clips — **[installed]** `docs/n1e-evidence/n1e-perf.json`
+- Export correctness matrix (fps 24/25/30/24000-1001/30000-1001, gaps, hidden/muted, stacking) — **[auto]** parametrized plan tests + e2e renders
+- Reliability (cancel, missing source, hash mismatch, ffmpeg fail, disk guard, reservation release, temp cleanup, phantom-output prevention, orphan-proc) — **[auto]** adapter tests; backend-kill + low-disk on real hardware **[notrun]** (covered by guards/tests, not destructive live runs)
+- Frame-accurate compositing beyond automated checks (pixel-level layer order on the N1-D artifact predates the `aa7034e` stacking fix; corrected order is deterministic-test-covered) — **[human]** optional re-render for pixel confirmation
+- Human-drag latency, real hands-on UX feel — **[human]** (instrumented CDP timings only)
+- Large-project scalability (#10) — partially advanced by the 1000-clip perf evidence; TB-scale validation stays open
+- All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
+- **N1 is development-complete; this is not production release readiness.**
+
+### N2 milestone note (audio editing — N2-A in review, N2-B..F not started)
+
+- N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
+- Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
+- Lane↔asset kind rule (video→audio lane refused, audio→video lane refused, both directions verified) — **[auto]** + **[installed]**
+- Honest audio-lane export refusal (backend fail-closed; UI badge discloses reason via title) — **[auto]** + **[installed]**
+- EDL v2 carries audio stream identity (rate, channels, layout, samples, exact) without losing source pins — **[auto]** + **[installed]**
+- Undo/redo across audio clips with stable clip identity — **[auto]** + **[installed]**
+- Mixed 44.1 kHz / 48 kHz sources, sample↔timeline rational conversion — **[auto]**
+- Audio-lane rendering/mixing in export — **[blocked]** by design until N2-E; currently refuses visibly populated audio lanes (never silently drops)
+- Waveform display, gain/automation, fades, crossfades, mute/solo mixing, audio preview — **[notrun]** N2-B..N2-F scope, not implemented
+- Human audio-edit UX feel, drag on audio lanes — **[human]**
+- All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.
