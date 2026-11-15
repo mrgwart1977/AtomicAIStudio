@@ -1735,9 +1735,18 @@ function AutomationSection({ clip, tl, busy, onRun }: {
         </div>
       ))}
       <button disabled={busy || pts.length >= 64}
-        title="Add a keyframe at the clip's midpoint (edit its value with the slider)"
-        onClick={() => commit([...pts, {
-          id: "", at_frames: Math.floor(occ / 2), gain_db: 0 }])}
+        title="Add a keyframe near the clip's midpoint (edit its value with the slider)"
+        onClick={() => {
+          const used = new Set(pts.map((p) => p.at_frames));
+          const mid = Math.floor(occ / 2);
+          let at = used.has(mid) ? -1 : mid;
+          for (let d = 1; at < 0 && d < occ; d++) {
+            if (mid - d >= 0 && !used.has(mid - d)) at = mid - d;
+            else if (mid + d < occ && !used.has(mid + d)) at = mid + d;
+          }
+          if (at < 0) return;
+          void commit([...pts, { id: "", at_frames: at, gain_db: 0 }]);
+        }}
         className="mt-1 rounded border border-line px-1.5 py-0.5 text-muted hover:text-teal disabled:opacity-40">
         + keyframe
       </button>

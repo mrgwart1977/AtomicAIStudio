@@ -584,9 +584,13 @@ def _xf_handle_needs(session: Session, tl: Timeline,
                      ) -> tuple[int, int] | None:
     """Source-unit handle requirements for a window, or None if the
     window can't apply to this pair at all. The window [win_start,
-    win_start+win_frames) must intersect BOTH clips' spans; the
-    out-clip covers its far side via tail handle (out_frame→), the
-    in-clip covers its near side via head handle (←in_frame).
+    win_start+win_frames) must contain the lane's seam region
+    [out_end, in_start]: win_start ≤ in_clip's start (so the in-clip
+    always enters from silence at the window start — never dips out
+    of native playback) and win_end ≥ out_clip's end (so the
+    out-clip's fade completes before its occupancy would continue).
+    The out-clip covers its far side via tail handle (out_frame→),
+    the in-clip covers its near side via head handle (←in_frame).
     Returns (tail_src_needed, head_src_needed)."""
     win_end = win_start + win_frames
     out_end = Fraction(out_clip.start_frames) + clip_tl_extent(
@@ -596,9 +600,12 @@ def _xf_handle_needs(session: Session, tl: Timeline,
     if Fraction(in_clip.start_frames) <= Fraction(
             out_clip.start_frames):
         return None  # pair must be ordered out → in on the lane
-    # Both clips must cover the whole window — anything outside
-    # that coverage is one clip sounding alone, not a crossfade.
+    # The window must contain the seam and stay within the pair's
+    # combined reach — an interval where only one clip could sound
+    # is not a crossfade.
     if Fraction(win_start) < Fraction(out_clip.start_frames) or \
+            Fraction(win_start) > Fraction(in_clip.start_frames) or \
+            Fraction(win_end) < out_end or \
             Fraction(win_end) > in_end:
         return None
     tl_rate = Fraction(tl.fps_num, tl.fps_den)

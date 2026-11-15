@@ -40,10 +40,13 @@ handles** at render time:
   into its **tail handle** (requires `out_frame + tail_src ≤ src_frames`)
 - in-clip reaches `in_start − win_start` into its **head handle**
   (requires `in_frame − head_src ≥ 0`)
-- the pair must be ordered out→in, and the window must lie entirely
-  within both clips' coverage (`win_start ≥ out.start_frames`,
-  `win_end ≤ in_clip's span end`) — an interval where only one clip
-  could sound is not a crossfade and refuses.
+- the pair must be ordered out→in, and the window must **contain
+  the seam** `[out_occupancy_end, in_occupancy_start]` while staying
+  inside the pair's combined reach: `out.start ≤ win_start ≤
+  in.start` and `out.end ≤ win_end ≤ in.end`. A window buried in
+  one clip's body is refused — the in-clip would already be playing
+  natively when its fade-in asks for zero (a dip), or the out-clip's
+  occupancy would keep sounding after its fade "completed".
 
 **`satisfied` is computed at read time** (detail API + EDL), not
 stored — a move that detaches the window reports `satisfied: false`
@@ -105,6 +108,59 @@ exact. Migration `0016_n2d` is additive and idempotent.
   "Crossfade with next clip" creating a 12f equal-power window —
   the backend reports handle shortages plainly), and the gain
   automation point list (edit/delete/add, whole-list commits).
+
+## N2-E effective-gain contract (pinned by the N2-D review)
+
+The mixer applies these multipliers **in the linear domain, in this
+order**, for every audio-lane clip and for embedded audio from
+video-lane clips:
+
+```
+g_clip(t) = clip_gain_lin                          (10^(gain_db/20))
+          × automation_lin(t)                      (10^(interp_db/20))
+          × fade_env(t)                            (edge-anchored)
+          × xf_env(t)                              (see below)
+sample_out(t) = g_clip(t) × src_sample(t)
+```
+
+Per lane: `lane_out = track_gain_lin × Σ g_clip(t)·src(t)`;
+per mix: `mix = Σ lane_out` over audible lanes only.
+
+- **Processing order is fixed** — clip gain, then automation, then
+  clip fades, then the crossfade envelope. Each is a multiplier, so
+  none is applied twice; the envelope product is computed once per
+  output sample.
+- **Audibility precedence** (unchanged from N2-C):
+  `visible=false` → lane contributes nothing; `muted=true` → lane
+  silent; non-empty solo set → non-solo lanes silent; multiple solos
+  all audible; empty solo set → mute is the only silencer. Video
+  lanes are members of the audio solo set (embedded audio is a
+  lane-level decision) — solo never affects picture.
+- **Fade envelope** (`fade_env`): outside a clip's fade regions = 1;
+  in fade-in region `g_in(t)`; in fade-out region `g_out(t)`;
+  `n=0` ⇒ 1 (zero-duration fades are unity, not silence).
+- **Crossfade envelope** (`xf_env`): for the pair's window [S,E)
+  that *contains the seam* — out-clip: unity before S, `1−c(t)` on
+  [S,E), 0 after E (its stream extends into the tail handle only as
+  far as E); in-clip: absent before S (its extended stream starts
+  at S), `c(t)` on [S,E), unity on [E, span_end). `c` is the
+  record's curve evaluated over the window; for `equal_power`,
+  `1−c = cos(πt/2)`, `c = sin(πt/2)` — constant-power transition.
+- **Clip gain vs. fades vs. automation never double-apply**: clip
+  gain is the clip's static level, automation rides it in dB, fades
+  and crossfades shape the edges/junctions — all multiplicative in
+  linear domain.
+- **`satisfied=false` records never render.** Export refuses
+  closed with a clear error when a populated audio lane carries a
+  detached window — there is no "safe alternative" interpretation:
+  the record says the two clips must overlap over [S,E), and if
+  they no longer can, rendering anything would be wrong.
+- **Quantization**: timeline-frame positions convert to 48 kHz
+  samples as `samples = round(frames × 48000 × fps_den / fps_num)`
+  (round-half-up on exact rationals) — the only quantization point;
+  everything upstream stays in `Fraction` arithmetic.
+- **Output contract**: stereo, 48 kHz, bounded duration
+  (timeline extent), hard-limited at −1 dBFS.
 
 ## Boundaries
 

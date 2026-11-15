@@ -326,6 +326,72 @@ async function main() {
     throw new Error(`inspector: ${JSON.stringify(insp)}`);
   ok("wedges + apex handles + badge live; inspector sections present");
 
+  /* 10b — real UI edits: curve select + automation keyframe list.
+     Committed refreshes can drop the inspector selection — re-click
+     clip A before each interaction. React selects commit through
+     their onChange prop (call it directly; the value tracker can
+     swallow a bare dispatched 'change'). */
+  step("10b) UI curve select + automation editing commit to backend");
+  const clickClipA = `(() => {
+    const c = [...document.querySelectorAll('[data-testid="lane-clip"]')][0];
+    if (!c) throw new Error("clip A gone");
+    c.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    return true; })()`;
+  const setCurve = (v) => `(() => {
+    const sel = [...document.querySelectorAll("select")]
+      .find(e => e.getAttribute("aria-label") === "Fade in curve");
+    if (!sel) throw new Error("no fade-in curve select");
+    const d = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(sel), "value");
+    if (d && d.set) d.set.call(sel, ${JSON.stringify(v)});
+    else sel.value = ${JSON.stringify(v)};
+    const k = Object.keys(sel).find((x) => x.startsWith("__reactProps"));
+    if (k && sel[k].onChange)
+      sel[k].onChange({ target: sel, currentTarget: sel });
+    else sel.dispatchEvent(new Event("change", { bubbles: true }));
+    return true; })()`;
+  await evalJs(clickClipA);
+  await sleep(1500);
+  await evalJs(setCurve("linear"));
+  await sleep(2000);
+  d = await detail(p.id, tl.id);
+  let caNow = d.clips.find((c) => c.id === clipA.id);
+  if (caNow.fade_in_curve !== "linear")
+    throw new Error("curve select did not commit: " + caNow.fade_in_curve);
+  await evalJs(clickClipA);
+  await sleep(1200);
+  await evalJs(setCurve("equal_power"));
+  await sleep(2000);
+  // automation: "+ keyframe" adds a midpoint point; "✕" deletes it.
+  await evalJs(clickClipA);
+  await sleep(1200);
+  await evalJs(`(() => {
+    const sec = document.querySelector('[data-testid="automation-section"]');
+    const b = sec && [...sec.querySelectorAll("button")]
+      .find((e) => e.textContent.includes("keyframe"));
+    if (!b) throw new Error("no +keyframe button");
+    b.click(); return true; })()`);
+  await sleep(2000);
+  d = await detail(p.id, tl.id);
+  caNow = d.clips.find((c) => c.id === clipA.id);
+  let ptsNow = JSON.parse(caNow.automation_json);
+  if (ptsNow.length !== 3 || caNow.fade_in_curve !== "equal_power")
+    throw new Error(`UI commits wrong: pts=${ptsNow.length} curve=${caNow.fade_in_curve}`);
+  await evalJs(clickClipA);
+  await sleep(1200);
+  await evalJs(`(() => {
+    const sec = document.querySelector('[data-testid="automation-section"]');
+    const b = sec && [...sec.querySelectorAll("button")]
+      .find((e) => e.getAttribute("aria-label") === "Delete point 3");
+    if (!b) throw new Error("no delete-point button");
+    b.click(); return true; })()`);
+  await sleep(2000);
+  d = await detail(p.id, tl.id);
+  caNow = d.clips.find((c) => c.id === clipA.id);
+  if (JSON.parse(caNow.automation_json).length !== 2)
+    throw new Error("delete point did not commit");
+  ok("curve select + keyframe add/delete commit via the real UI");
+
   /* 11 - export still fails closed on the populated audio lane */
   step("11) export still fails closed (N2-E)");
   const jr = await commit(p.id, "timeline.export",
@@ -384,7 +450,7 @@ async function main() {
   ok("clean shutdown - zero orphan app processes");
 
   fs.writeFileSync(`${OUT}\\n2d-acceptance.log`, LOG.join("\n") + "\n");
-  console.log(`\nPASS ${STEP}/13 - evidence in ${OUT}`);
+  console.log(`\nPASS ${STEP}/14 - evidence in ${OUT}`);
 }
 
 main().catch((e) => {

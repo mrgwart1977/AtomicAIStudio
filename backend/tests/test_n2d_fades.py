@@ -228,13 +228,17 @@ def _xf_setup(client):
     return pid, t["id"], a1
 
 
-def _two_clips(client, pid, tid, a1):
+def _two_clips(client, pid, tid, a1, tag=""):
     """A[0..24f) with 24f of tail handle, then B[24..69.6f) with
     4800 samples of head handle — adjacent on one audio lane.
     Both clips are 2s@48k (96000 samples); A trims its tail to
     48000, B trims its head to 4800."""
-    a = _audio(client, pid, name="a.wav", sha="aa" * 32, duration=2.0)
-    b = _audio(client, pid, name="b.wav", sha="bb" * 32, duration=2.0)
+    a = _audio(client, pid, name=f"a{tag}.wav",
+               sha="aa" * (31 if tag else 32) + ("fa" if tag else ""),
+               duration=2.0)
+    b = _audio(client, pid, name=f"b{tag}.wav",
+               sha="bb" * (31 if tag else 32) + ("fb" if tag else ""),
+               duration=2.0)
     _place(client, pid, tid, a, a1["id"], at=0)
     d = _detail(client, pid, tid)
     ca = d["clips"][0]
@@ -268,14 +272,14 @@ def test_crossfade_create_persist_edl(client):
 
 def test_crossfade_requires_handles(client):
     pid, tid, a1 = _xf_setup(client)
-    ca, cb = _two_clips(client, pid, tid, a1)
-    # Window [46,50) needs 26f of A tail (52000 > 48000 spare) —
-    # refused closed.
+    ca, cb = _two_clips(client, pid, tid, a1)  # A[0,24) B[24,69.6)
+    # Window [22,50) straddles the seam but needs 26f of A tail
+    # (52000 > 48000 spare samples) — refused closed.
     _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
-        tl_start=46, tl_frames=4, expect=422)
-    # A window inside B's span needing only 6000 of A tail — works.
+        tl_start=22, tl_frames=28, expect=422)
+    # A smaller window still straddling the seam — works.
     _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
-        tl_start=25, tl_frames=2)
+        tl_start=23, tl_frames=2)
 
 
 def test_crossfade_window_must_stay_within_both_spans(client):
@@ -292,6 +296,41 @@ def test_crossfade_window_must_stay_within_both_spans(client):
         tl_start=40, tl_frames=8, expect=422)      # starts before A
     _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
         tl_start=140, tl_frames=8, expect=422)     # ends past B
+
+
+def test_crossfade_window_must_contain_the_seam(client):
+    """The window must contain [out_end, in_start] — otherwise one
+    side of the transition is missing and the envelope would dip or
+    leave a zombie tail. Refuse."""
+    pid, tid, a1 = _xf_setup(client)
+    ca, cb = _two_clips(client, pid, tid, a1)  # A[0,24) B[24,69.6)
+    # Ends before the seam (E < A.e=24): A's fade would stop inside
+    # its own body, leaving its occupancy sounding again after E.
+    _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
+        tl_start=18, tl_frames=4, expect=422)
+    # Starts after the seam (S > B.s=24): B is natively present
+    # before the window — a fade-in from zero would dip it.
+    _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
+        tl_start=26, tl_frames=4, expect=422)
+    # Minimal valid window starting exactly at the seam: S=B.s=24
+    # needs no head; E=25 borrows 1f (2000 ≤ 48000) of A tail.
+    _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
+        tl_start=24, tl_frames=1)
+    # Straddling the seam — succeeds.
+    _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=cb["id"],
+        tl_start=23, tl_frames=2)
+
+
+def test_crossfade_cross_project_refused(client):
+    """A clip from another project's timeline can never join a
+    crossfade — the pair check is timeline-scoped, and project
+    isolation is enforced below the API."""
+    pid, tid, a1 = _xf_setup(client)
+    ca, _cb = _two_clips(client, pid, tid, a1)
+    pid2, tid2, a1b = _xf_setup(client)
+    ca2, _cb2 = _two_clips(client, pid2, tid2, a1b, tag="2")
+    _xf(client, pid, tid, out_clip_id=ca["id"], in_clip_id=ca2["id"],
+        tl_start=22, tl_frames=4, expect=422)
 
 
 def test_crossfade_same_lane_and_order(client):
