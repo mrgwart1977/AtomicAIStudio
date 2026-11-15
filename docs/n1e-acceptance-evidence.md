@@ -57,11 +57,36 @@ rows dominate; no measurement is claimed.
 Frontend: `LaneClip` was already `memo`'d. Added horizontal viewport
 culling — only clips/gaps intersecting the scrolled pixel window
 (± one screen) mount; the scroll handler updates a `{l,r}` window.
-jsdom evidence: 300 clips → 300 nodes before scroll, windowed subset
-after. Frame-accurate edits are unaffected — culling only decides what
-mounts, never edit math. Drag/zoom/selection responsiveness on real
-hardware is recorded as *not directly measured* (needs human-hands
-session); server-side latency above bounds the command path.
+Culling decides what mounts, never edit math or clip data.
+
+## Installed-Windows UI performance — MEASURED (real WebView2)
+
+Method: `scripts/cdp-n1e-perf.cjs` on the installed NSIS build
+(`Atomic Dream Engine_0.1.0_x64-setup.exe`, stable-identity head
+`7a84105`), timing `performance.now()` around REAL interactions —
+scroll events, zoom clicks, clip pointer events, Undo/Redo button
+clicks — plus `performance.memory` heap and a 50-cycle undo/redo
+long-session. Machine: Windows 11 10.0.26300, WebView2 Chromium,
+localhost sidecar backend. Data: `docs/n1e-evidence/n1e-perf.json`.
+
+| clips | DOM mounts | scroll→end | zoom | select | undo (UI) | redo (UI) | heap |
+|------:|-----------:|-----------:|-----:|-------:|----------:|----------:|-----:|
+|    10 |          5 |    27.0ms | 27.1ms | 30.9ms |    83.7ms |    75.6ms | 5.7MB |
+|   100 |          5 |    29.6ms | 29.4ms | 31.3ms |    88.6ms |    87.8ms | 4.5MB |
+|   500 |          5 |    30.2ms | 30.6ms | 31.0ms |    79.2ms |    81.4ms | 8.8MB |
+|  1000 |          5 |    30.3ms | 30.5ms | 31.1ms |    96.8ms |    81.3ms | 8.7MB |
+
+DOM mounts stay ~5 regardless of timeline size — viewport culling is
+doing its job (3 mounts at the far-end scroll position). Interaction
+latency is ~30 ms for paint-level actions and ~85 ms for undo/redo
+command round-trips at every size — no growth with clip count.
+Long-session: 50 undo/redo cycles on the 100-clip timeline moved the
+heap +0.33 MB — no runaway retention observed.
+
+Honest limits: numbers are this machine only; "initial render" is a
+post-navigation rAF settle (the timeline was already open), not a
+cold first paint; drag *gesture* smoothness is approximated by the
+select+scroll timings, not a continuous pointer-move benchmark.
 
 ## Installed Windows acceptance — PASS (8/8 steps)
 
@@ -86,6 +111,26 @@ claim. Evidence: `docs/n1e-evidence/` (screenshots + log).
 
 Screenshots: `02-undo-enabled.png` … `07-post-reload-undo.png`;
 log: `docs/n1e-evidence/n1e-acceptance.log`.
+
+## Viewport culling verification (§5)
+
+- Offscreen clips mount and select after scrolling — measured:
+  `dom_clips_scrolled` non-zero, select path exercised on mounted
+  clips (DOM mounts stay ~5 at every size).
+- Snapping and overlap checks use `clipsByTrack` (the full lane data),
+  NOT the culled view — offscreen clip edges still snap and reject
+  invalid drops (`TimelineEditor.tsx` drag handler).
+- Zoom re-derives the cull window — `contentW` change re-measures the
+  visible range; nothing visible is lost.
+- Selection is id-keyed (`selClipId`), unaffected by mounts/unmounts.
+- Drag listeners live on `window` — a clip scrolling out of view
+  mid-drag cannot break the gesture.
+- Keyboard handlers live on clip elements; a culled clip can't be
+  keyed until scrolled into view (inherent to DOM culling; the clip
+  remains selectable, undo/redo still operate on it).
+- Culling is a render-time filter — it never writes timeline data;
+  frame/px math (`frameToPx`, `ppf`) is unchanged — no coordinate
+  drift possible.
 
 Not executed: drag/zoom/selection frame-latency measurement on real
 hardware (needs a human-hands session; jsdom culling evidence +
