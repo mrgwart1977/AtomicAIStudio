@@ -38,8 +38,14 @@ from app.db.models import (Asset, AssetVersion, EntityRevision, Scene, Shot,
 
 #: Bounded rational timebases — keeps UI inputs honest without
 #: pretending to support arbitrary rates.
-MAX_FPS_NUM = 240
+# Timeline frame-rate bounds. The numerator is intentionally large
+# (480000) so exact broadcast rates like 24000/1001 and 30000/1001 are
+# representable — matching the ProjectCreate schema's bound — while the
+# *rate* itself is capped at 480 fps, strictly extending the earlier
+# numerator-only rule (num ≤ 240 → rate ≤ 240).
+MAX_FPS_NUM = 480000
 MAX_FPS_DEN = 1001
+MAX_FPS_RATE = 480
 
 EDL_FORMAT = "ade-edl/1"
 EDL_FORMAT_V2 = "ade-edl/2"
@@ -57,6 +63,9 @@ def _check_fps(num: int, den: int) -> None:
     if (isinstance(den, bool) or not isinstance(den, int)
             or not 1 <= den <= MAX_FPS_DEN):
         raise TimelineError(f"fps denominator must be an integer 1..{MAX_FPS_DEN}")
+    if Fraction(num, den) > MAX_FPS_RATE:
+        raise TimelineError(
+            f"frame rate must be at most {MAX_FPS_RATE} fps")
 
 
 def _check_int(value: Any, name: str, lo: int, hi: int) -> int:

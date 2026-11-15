@@ -672,9 +672,7 @@ def test_five_rate_conversion_matrix(client, src_fps):
 
 def test_program_end_on_noninteger_timeline_grid(client):
     """Non-integer TIMELINE rate: a 240/11 grid with a 24/1 clip —
-    extent is rational in tl frames, program end honest. (True NTSC
-    tl rates like 24000/1001 exceed the pre-existing fps_num≤240 cap
-    — a documented C5-A limitation, unchanged by N1-A.)"""
+    extent is rational in tl frames, program end honest."""
     from fractions import Fraction as F
     pid = make_project(client)["id"]
     t = _tl(client, pid, fps_num=240, fps_den=11)
@@ -684,11 +682,44 @@ def test_program_end_on_noninteger_timeline_grid(client):
     prog = F(72) * F(1, 24) * F(240, 11)
     assert d["total_duration_s"] == pytest.approx(
         float(prog * F(11, 240)), abs=1e-6)
-    # And the NTSC-rate cap is what it is — recorded, not worked
-    # around:
-    _commit(client, pid, "timeline.create",
-            {"name": "ntsc", "fps_num": 24000, "fps_den": 1001},
-            expect=422)
+
+
+def test_ntsc_timeline_rates_supported(client):
+    """Exact broadcast rates — 24000/1001 and 30000/1001 — are legal
+    timeline timebases (the project schema always allowed them; the
+    timeline numerator cap was a defect)."""
+    from fractions import Fraction as F
+    pid = make_project(client)["id"]
+    asset = _video(client, pid)
+    for num, den in ((24000, 1001), (30000, 1001)):
+        t = _tl(client, pid, name=f"ntsc-{num}", fps_num=num, fps_den=den)
+        _insert(client, pid, t["id"], asset)
+        d = _detail(client, pid, t["id"])
+        # 72f @24fps source: extent = 72 × (1/24) × rate tl frames
+        prog = F(72) * F(1, 24) * F(num, den)
+        assert d["total_duration_s"] == pytest.approx(
+            float(prog * F(den, num)), abs=1e-6)
+
+
+def test_fps_validation_rate_bounds(client):
+    """The bound is on the RATE (≤480 fps), not the numerator — and
+    malformed values still fail closed."""
+    pid = make_project(client)["id"]
+    # Legal: integer and rational rates within bounds.
+    for num, den in ((24, 1), (25, 1), (30, 1), (60, 1), (120, 1),
+                     (240, 1), (480, 1), (24000, 1001), (30000, 1001),
+                     (60000, 1001), (120000, 1001), (1, 1001)):
+        _commit(client, pid, "timeline.create",
+                {"name": f"r{num}/{den}", "fps_num": num,
+                 "fps_den": den}, expect=200)
+    # Refused: rate over 480 fps, malformed, out of range.
+    for num, den in ((481, 1), (480001, 1), (600000, 1001),  # rate > 480
+                     (0, 1), (-24, 1), (24, 0), (24, -1),     # non-positive
+                     (480001, 1001), (24, 1002),              # out of range
+                     ):
+        _commit(client, pid, "timeline.create",
+                {"name": "bad", "fps_num": num, "fps_den": den},
+                expect=422)
 
 
 def test_duplicate_remaps_track_refs(client):
