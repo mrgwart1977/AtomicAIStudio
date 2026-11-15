@@ -1,5 +1,6 @@
-// C5-A — timeline assembly UI: clip ordering, trim controls, removal,
-// and the send-to-timeline provenance path all go through commands.
+// C5-A + N1-B — timeline assembly UI: lane editor, clip ordering,
+// trim/remove via the inspector, export-capability messaging, and
+// stale-revision recovery all go through commands.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
@@ -38,8 +39,14 @@ const TL = {
   fps_num: 24, fps_den: 1, status: "active", revision: 2,
   created_at: "2026-01-01", updated_at: "2026-01-01",
 };
+const V1 = {
+  id: "v1", project_id: "p1", timeline_id: "t1", kind: "video",
+  name: "V1", position: 0, visible: true, locked: false, muted: false,
+  created_at: "2026-01-01",
+};
 const CLIP = (i: number) => ({
-  id: `c${i}`, project_id: "p1", timeline_id: "t1", position: i,
+  id: `c${i}`, project_id: "p1", timeline_id: "t1", track_id: "v1",
+  start_frames: i * 72, position: i,
   source_asset_id: `a${i}`, source_version_id: `v${i}`,
   source_sha256: "ab".repeat(32), in_frame: 0, out_frame: 72,
   src_frames: 72, src_fps_num: 24, src_fps_den: 1,
@@ -51,7 +58,9 @@ function route(url: string) {
   if (url.endsWith("/timelines")) return Promise.resolve([TL]);
   if (url.endsWith("/revisions")) return Promise.resolve([]);
   if (url.includes("/timelines/t1")) {
-    return Promise.resolve({ ...TL, clips: [CLIP(0), CLIP(1)], total_duration_s: 6.0 });
+    return Promise.resolve({
+      ...TL, tracks: [V1], clips: [CLIP(0), CLIP(1)],
+      total_duration_s: 6.0 });
   }
   return Promise.resolve(null);
 }
@@ -63,47 +72,96 @@ describe("TimelinePage", () => {
     commitCommand.mockResolvedValue({});
   });
 
-  it("lists timelines and renders ordered clips with total duration", async () => {
+  it("lists timelines and renders lane clips with total duration", async () => {
     render(createElement(TimelinePage));
     fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
-    const clips = await screen.findAllByTestId("timeline-clip");
+    const clips = await screen.findAllByTestId("lane-clip");
     expect(clips).toHaveLength(2);
     expect(screen.getByText(/6s total/)).toBeTruthy();
   });
 
-  it("move/remove go through timeline.clip commands", async () => {
+  it("shows the export-capability badge for sequential layouts", async () => {
     render(createElement(TimelinePage));
     fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
-    await screen.findAllByTestId("timeline-clip");
-    fireEvent.click(screen.getAllByRole("button", { name: "Move clip earlier" })[1]);
+    const badge = await screen.findByTestId("export-capability");
+    expect(badge.textContent).toMatch(/Exports as one video/);
+  });
+
+  it("multitrack layout is flagged as needing N1-D — not silently flattened", async () => {
+    apiFetch.mockImplementation((url: string) => {
+      if (url.endsWith("/timelines")) return Promise.resolve([TL]);
+      if (url.endsWith("/revisions")) return Promise.resolve([]);
+      if (url.includes("/timelines/t1")) {
+        return Promise.resolve({
+          ...TL,
+          tracks: [V1, { ...V1, id: "o1", kind: "overlay",
+                        name: "O1", position: 1 }],
+          clips: [CLIP(0), { ...CLIP(1), track_id: "o1" }],
+          total_duration_s: 6.0 });
+      }
+      return Promise.resolve(null);
+    });
+    render(createElement(TimelinePage));
+    fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
+    const badge = await screen.findByTestId("export-capability");
+    expect(badge.textContent).toMatch(/needs N1-D/);
+    // The reason is visible in the export panel, not hidden.
+    fireEvent.click(screen.getByRole("button", { name: "Export…" }));
+    const blocked = await screen.findByTestId("export-blocked");
+    expect(blocked.textContent).toMatch(/multiple tracks/);
+  });
+
+  it("keyboard move + inspector remove go through commands", async () => {
+    render(createElement(TimelinePage));
+    fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
+    const clips = await screen.findAllByTestId("lane-clip");
+    // c1@72 → ArrowRight nudges to 73 (into the gap — legal).
+    clips[1].focus();
+    fireEvent.keyDown(clips[1], { key: "ArrowRight" });
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "timeline.clip.move",
-      expect.objectContaining({ clip_id: "c1", to_index: 0 }), "timeline"));
-    fireEvent.click(screen.getAllByRole("button", { name: "Remove clip" })[0]);
+      expect.objectContaining({
+        clip_id: "c1", to_track_id: "v1", start_frames: 73 }), "timeline"));
+    // Select → Remove in inspector → confirm dialog.
+    fireEvent.click(clips[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
     fireEvent.click(await screen.findByRole("button", { name: "confirm:Remove clip" }));
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "timeline.clip.remove",
       expect.objectContaining({ clip_id: "c0" }), "timeline"));
   });
 
-  it("trim inputs only commit parseable integers", async () => {
+  it("inspector trim only commits parseable integers", async () => {
     render(createElement(TimelinePage));
     fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
-    await screen.findAllByTestId("timeline-clip");
-    fireEvent.click(screen.getAllByRole("button", { name: "Trim" })[0]);
-    const inField = screen.getByRole("textbox", { name: "Trim in frame" });
+    fireEvent.click((await screen.findAllByTestId("lane-clip"))[0]);
+    const inField = await screen.findByRole("textbox", { name: "Trim in frame" });
     fireEvent.change(inField, { target: { value: "abc" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply trim" }));
     expect(commitCommand).not.toHaveBeenCalledWith(
       "p1", 7, "timeline.clip.trim", expect.anything(), "timeline");
     fireEvent.change(inField, { target: { value: "5" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Trim out frame" }),
       { target: { value: "50" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply trim" }));
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "timeline.clip.trim",
       { timeline_id: "t1", clip_id: "c0", in_frame: 5, out_frame: 50 },
       "timeline"));
+  });
+
+  it("stale-revision error shows a refresh affordance", async () => {
+    commitCommand.mockRejectedValue(new Error(
+      "422: project revision is stale — re-preview"));
+    render(createElement(TimelinePage));
+    fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
+    const clips = await screen.findAllByTestId("lane-clip");
+    clips[1].focus();
+    fireEvent.keyDown(clips[1], { key: "ArrowRight" });
+    const btn = await screen.findByRole("button", { name: "Refresh timeline" });
+    fireEvent.click(btn);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/timelines/t1")));
   });
 
   it("create goes through timeline.create", async () => {

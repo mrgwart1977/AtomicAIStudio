@@ -947,10 +947,29 @@ export interface SpendReservation {
 
 // ---------- timelines (C5-A) ----------
 
+/** N1-A — a lane on a timeline. `position` is the stack order
+ * (0 = top). */
+export interface TimelineTrack {
+  id: string;
+  project_id: string;
+  timeline_id: string;
+  kind: string;           // "video" | "audio" | "overlay"
+  name: string;
+  position: number;
+  visible: boolean;
+  locked: boolean;
+  muted: boolean;
+  created_at: string;
+}
+
 export interface TimelineClip {
   id: string;
   project_id: string;
   timeline_id: string;
+  /** N1-A — owning lane (null only for legacy/orphaned rows). */
+  track_id: string | null;
+  /** N1-A — integer timeline-frame start on its lane. */
+  start_frames: number;
   position: number;
   source_asset_id: string;
   source_version_id: string;
@@ -981,6 +1000,7 @@ export interface Timeline {
 
 export interface TimelineDetail extends Timeline {
   clips: TimelineClip[];
+  tracks: TimelineTrack[];
   total_duration_s: number;
 }
 

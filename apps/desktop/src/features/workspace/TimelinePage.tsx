@@ -7,10 +7,13 @@ import type {
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
+import { TimelineEditor } from "./TimelineEditor";
+import { exportEligibility } from "./timelineMath";
 
-/** C5-A — timeline assembly. Ordered clip cards with trims, reorder,
- * removal, provenance, revision history, and a deterministic EDL
- * view. Assembly only — no rendering, transitions, or audio. */
+/** C5-A + N1-B — timeline assembly. Multitrack lane editor (ruler,
+ * playhead, drag placement), trim/remove inspector, provenance,
+ * revision history, deterministic EDL view, single-video export.
+ * Assembly only — no rendering, transitions, or audio mixing. */
 
 function fmtS(s: number): string {
   return `${Math.round(s * 100) / 100}s`;
@@ -33,6 +36,7 @@ export function TimelinePage() {
   const [showHistory, setShowHistory] = useState(false);
   const [showEdl, setShowEdl] = useState(false);
   const [edl, setEdl] = useState<string | null>(null);
+  const [edlVersion, setEdlVersion] = useState<1 | 2>(1);
   const [renaming, setRenaming] = useState(false);
   const [renameTo, setRenameTo] = useState("");
   const [showExport, setShowExport] = useState(false);
@@ -57,6 +61,16 @@ export function TimelinePage() {
       `/api/projects/${project.id}/timelines/${selected}/revisions`);
     setRevisions(revs);
   }, [project, selected]);
+
+  // Project switching must not carry a timeline selection across —
+  // the old id doesn't exist in the new project (and state like open
+  // panels/confirms are stale with it).
+  useEffect(() => {
+    setSelected(null); setDetail(null); setRevisions([]);
+    setShowEdl(false); setEdl(null); setShowHistory(false);
+    setShowExport(false); setExportPending(null); setExportJobId(null);
+    setError(null); setConfirm(null);
+  }, [project?.id]);
 
   useEffect(() => {
     setLoading(true);
@@ -100,9 +114,20 @@ export function TimelinePage() {
       const e = await apiFetch<Record<string, unknown>>(
         `/api/projects/${project.id}/timelines/${selected}/edl`);
       setEdl(JSON.stringify(e, null, 2));
+      setEdlVersion(1);
       setShowEdl(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch {
+      // v1 only represents a single sequential video lane — a multitrack
+      // or gapped layout is honest data, so fall back to ade-edl/2.
+      try {
+        const e2 = await apiFetch<Record<string, unknown>>(
+          `/api/projects/${project.id}/timelines/${selected}/edl?version=2`);
+        setEdl(JSON.stringify(e2, null, 2));
+        setEdlVersion(2);
+        setShowEdl(true);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     }
   }
 
@@ -145,6 +170,11 @@ export function TimelinePage() {
   const archived = useMemo(
     () => timelines.filter((t) => t.status === "archived"), [timelines]);
   const selTl = timelines.find((t) => t.id === selected) ?? null;
+  const exportCap = useMemo(
+    () => (detail ? exportEligibility(detail) : { ok: true, reason: null }),
+    [detail]);
+  // A 422 about revisions/stale approvals deserves a one-click refresh.
+  const staleError = !!error && /stale|revision|expected|re-preview/i.test(error);
 
   if (loading) {
     return <p className="p-6 text-sm text-muted">Loading timelines…</p>;
@@ -230,8 +260,17 @@ export function TimelinePage() {
       {/* selected timeline */}
       <main className="min-w-0 flex-1 overflow-y-auto p-4">
         {error && (
-          <p role="alert" className="mb-3 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-            {error}
+          <p role="alert" className="mb-3 flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            <span className="min-w-0 flex-1">{error}</span>
+            {staleError && (
+              <button
+                onClick={() => {
+                  setError(null);
+                  refreshDetail().catch(() => {});
+                }}
+                className="shrink-0 rounded border border-red-400/50 px-2 py-0.5 text-[10px] text-red-200 hover:text-white"
+              >Refresh timeline</button>
+            )}
           </p>
         )}
         {!selTl && (
@@ -275,6 +314,22 @@ export function TimelinePage() {
                 {" · "}{selTl.fps_num}/{selTl.fps_den} fps
                 {selTl.status === "archived" ? " · archived" : ""}
               </span>
+              {detail.clips.length > 0 && (
+                <span
+                  title={exportCap.ok
+                    ? "This cut is a single sequential video lane — the current exporter can render it."
+                    : exportCap.reason ?? undefined}
+                  className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                    exportCap.ok
+                      ? "border-teal/50 text-teal"
+                      : "border-line text-faint"}`}
+                  data-testid="export-capability"
+                >
+                  {exportCap.ok
+                    ? "Exports as one video"
+                    : "Multitrack — export needs N1-D"}
+                </span>
+              )}
               <div className="ml-auto flex gap-1">
                 <button onClick={() => { setRenaming(true); setRenameTo(selTl.name); }}
                   className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-fg">Rename</button>
@@ -317,10 +372,16 @@ export function TimelinePage() {
               <div className="mt-3 rounded border border-line bg-card p-3"
                 data-testid="export-panel">
                 <p className="text-xs text-muted">
-                  Render this cut to a single MP4 video file. Clips that
-                  match exactly are copied losslessly; anything else is
-                  normalized to the chosen profile.
+                  Render this cut to a single MP4 video file. The current
+                  exporter handles one sequential video lane; multitrack
+                  compositing arrives with N1-D.
                 </p>
+                {!exportCap.ok && (
+                  <p className="mt-1.5 rounded border border-line bg-panel px-2 py-1 text-[11px] text-muted"
+                    data-testid="export-blocked">
+                    This layout can't export yet: {exportCap.reason}
+                  </p>
+                )}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <label className="text-[11px] text-muted">Profile
                     <select value={exportProfile}
@@ -361,40 +422,24 @@ export function TimelinePage() {
                 )}
               </div>
             )}
-            {detail.clips.length === 0 && (
-              <p className="mt-8 text-center text-sm text-muted">
-                This timeline is empty. Generate a video clip on the
-                Storyboard, then use “Send to timeline”.
-              </p>
-            )}
-            <ol className="mt-4 flex flex-wrap gap-2" aria-label="Clips">
-              {detail.clips.map((c, i) => (
-                <ClipCard
-                  key={c.id}
-                  clip={c}
-                  index={i}
-                  count={detail.clips.length}
-                  locked={selTl.status !== "active"}
-                  busy={busy}
-                  onMove={(to) => run("timeline.clip.move", {
-                    timeline_id: selTl.id, clip_id: c.id, to_index: to })}
-                  onRemove={() => setConfirm({
-                    title: "Remove clip",
-                    body: "Remove this clip from the timeline? The source asset is not deleted.",
-                    run: () => { setConfirm(null); run("timeline.clip.remove", {
-                      timeline_id: selTl.id, clip_id: c.id }); },
-                  })}
-                  onTrim={(inF, outF) => run("timeline.clip.trim", {
-                    timeline_id: selTl.id, clip_id: c.id,
-                    in_frame: inF, out_frame: outF })}
-                />
-              ))}
-            </ol>
+            <TimelineEditor
+              detail={detail}
+              active={selTl.status === "active"}
+              busy={busy}
+              onRun={run}
+              onRemoveClip={(c: TimelineClip) => setConfirm({
+                title: "Remove clip",
+                body: "Remove this clip from the timeline? The source asset is not deleted.",
+                run: () => { setConfirm(null); run("timeline.clip.remove", {
+                  timeline_id: selTl.id, clip_id: c.id }); },
+              })}
+            />
 
             {showEdl && edl && (
               <section className="mt-4" aria-label="Edit decision list">
                 <h3 className="text-xs font-semibold uppercase text-faint">
-                  ade-edl/1 — deterministic edit decisions
+                  ade-edl/{edlVersion} — deterministic edit decisions
+                  {edlVersion === 2 ? " (multitrack layout)" : ""}
                 </h3>
                 <pre className="mt-1 max-h-72 overflow-auto rounded border border-line bg-card p-3 text-[11px] text-muted">
                   {edl}
@@ -440,98 +485,5 @@ export function TimelinePage() {
         onOpenChange={() => setConfirm(null)}
       />
     </div>
-  );
-}
-
-function ClipCard({ clip, index, count, locked, busy, onMove, onRemove, onTrim }: {
-  clip: TimelineClip;
-  index: number;
-  count: number;
-  locked: boolean;
-  busy: boolean;
-  onMove: (to: number) => Promise<boolean>;
-  onRemove: () => void;
-  onTrim: (inF: number, outF: number) => Promise<boolean>;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [inF, setInF] = useState(String(clip.in_frame));
-  const [outF, setOutF] = useState(String(clip.out_frame));
-  const dur = (clip.out_frame - clip.in_frame)
-    * clip.src_fps_den / clip.src_fps_num;
-
-  return (
-    <li
-      className="w-52 rounded border border-line bg-card p-2"
-      data-testid="timeline-clip"
-      aria-label={`Clip ${index + 1} of ${count}`}
-    >
-      <div className="flex items-center gap-1">
-        <span className="text-[10px] text-faint">#{index + 1}</span>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted"
-          title={`${clip.source_sha256.slice(0, 12)}… · ${clip.src_duration_s}s source`}>
-          {clip.source_sha256.slice(0, 10)}…
-        </span>
-        {!locked && (
-          <>
-            <button disabled={busy || index === 0} onClick={() => onMove(index - 1)}
-              aria-label="Move clip earlier"
-              className="rounded border border-line px-1 text-[10px] text-muted hover:text-teal disabled:opacity-30">◀</button>
-            <button disabled={busy || index === count - 1} onClick={() => onMove(index + 1)}
-              aria-label="Move clip later"
-              className="rounded border border-line px-1 text-[10px] text-muted hover:text-teal disabled:opacity-30">▶</button>
-            <button disabled={busy} onClick={onRemove}
-              aria-label="Remove clip"
-              className="rounded border border-line px-1 text-[10px] text-muted hover:text-red-300 disabled:opacity-30">✕</button>
-          </>
-        )}
-      </div>
-      <div className="mt-1 text-[11px] text-muted">
-        {fmtS(dur)} · frames {clip.in_frame}–{clip.out_frame}
-        <span className="text-faint"> of {clip.src_frames}</span>
-      </div>
-      <div className="text-[10px] text-faint">
-        {clip.src_fps_num}/{clip.src_fps_den} fps source
-        {clip.shot_id ? " · from shot" : ""}
-      </div>
-      {!locked && !editing && (
-        <button onClick={() => { setEditing(true); setInF(String(clip.in_frame)); setOutF(String(clip.out_frame)); }}
-          className="mt-1.5 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:text-teal">
-          Trim
-        </button>
-      )}
-      {editing && (
-        <div className="mt-1.5 space-y-1">
-          <div className="flex gap-1 text-[10px]">
-            <label className="flex-1 text-muted">In
-              <input value={inF} onChange={(e) => setInF(e.target.value)}
-                inputMode="numeric" aria-label="Trim in frame"
-                className="mt-0.5 w-full rounded border border-line bg-panel px-1 py-0.5" />
-            </label>
-            <label className="flex-1 text-muted">Out
-              <input value={outF} onChange={(e) => setOutF(e.target.value)}
-                inputMode="numeric" aria-label="Trim out frame"
-                className="mt-0.5 w-full rounded border border-line bg-panel px-1 py-0.5" />
-            </label>
-          </div>
-          <div className="flex gap-1">
-            <button
-              disabled={busy}
-              onClick={() => {
-                const i = parseInt(inF, 10), o = parseInt(outF, 10);
-                if (Number.isInteger(i) && Number.isInteger(o)) {
-                  onTrim(i, o).then((ok) => { if (ok !== false) setEditing(false); });
-                }
-              }}
-              className="rounded bg-action px-1.5 py-0.5 text-[10px] text-white disabled:opacity-40">
-              Apply
-            </button>
-            <button onClick={() => setEditing(false)}
-              className="rounded border border-line px-1.5 py-0.5 text-[10px] text-muted">
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </li>
   );
 }
