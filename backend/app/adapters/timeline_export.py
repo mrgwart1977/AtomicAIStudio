@@ -58,8 +58,18 @@ class TimelineExportAdapter:
         crf = request.get("crf", tx.CRF_DEFAULT)
         if not isinstance(crf, int) or not (tx.CRF_MIN <= crf <= tx.CRF_MAX):
             errs.append(f"crf must be an integer {tx.CRF_MIN}..{tx.CRF_MAX}")
-        if not edl.get("clips"):
+        fmt = edl.get("format")
+        if fmt not in ("ade-edl/1", "ade-edl/2"):
+            errs.append("edl must be an ade-edl/1 or ade-edl/2 document")
+        elif not edl.get("clips"):
             errs.append("timeline has no clips to export")
+        elif fmt == "ade-edl/2":
+            plan = tx.composite_plan(edl, {})
+            if not plan["clips"]:
+                errs.append("no visible lane holds clips — nothing "
+                            "to composite")
+            elif plan["program_frames"] <= 0:
+                errs.append("composite program has zero duration")
         return errs
 
     def _source_path(self, session, sha: str, clip_id: str) -> Path:
@@ -102,6 +112,7 @@ class TimelineExportAdapter:
         work = Path(handle.work_dir)
         work.mkdir(parents=True, exist_ok=True)
         out_path = work / f"{handle.job_id}-export.mp4"
+        is_v2 = edl.get("format") == "ade-edl/2"
         yield {"progress": 0.05, "stage": "resolving sources"}
 
         with self._sf() as s:
@@ -110,9 +121,12 @@ class TimelineExportAdapter:
         # Verify pinned bytes + probe off the event loop — hashing and
         # ffprobe are blocking work that would stall the whole backend
         # (and every cancel request) for the duration of a render.
+        seen: set[str] = set()
         for p, c in zip(paths, clips):
-            await asyncio.to_thread(
-                self._verify_bytes, p, c["sha256"], c["clip_id"])
+            if c["sha256"] not in seen:  # one hash per unique blob
+                await asyncio.to_thread(
+                    self._verify_bytes, p, c["sha256"], c["clip_id"])
+                seen.add(c["sha256"])
         handle.check_cancel()
 
         yield {"progress": 0.12, "stage": "probing sources"}
@@ -126,9 +140,21 @@ class TimelineExportAdapter:
             probes.append(meta)
         handle.check_cancel()
 
-        path_kind, reason = tx.choose_path(edl, probes)
-        if path_kind == "copy-not-exact":
-            path_kind = "encode"
+        if is_v2:
+            probe_by_clip = {c["clip_id"]: m
+                             for c, m in zip(clips, probes)}
+            plan = tx.composite_plan(edl, probe_by_clip)
+            for c in plan["clips"]:
+                if not (probe_by_clip.get(c["clip_id"]) or {}) \
+                        .get("codec"):
+                    raise ValueError(
+                        f"clip {c['clip_id']} has no decodable video "
+                        "stream — cannot composite")
+            path_kind, reason = "composite", "ade-edl/2 multitrack"
+        else:
+            path_kind, reason = tx.choose_path(edl, probes)
+            if path_kind == "copy-not-exact":
+                path_kind = "encode"
         yield {"progress": 0.2, "stage": f"{path_kind} path",
                "detail": {"render_path": path_kind,
                           "render_reason": reason}}
@@ -147,7 +173,20 @@ class TimelineExportAdapter:
             raise ValueError("ffmpeg is not resolvable")
 
         yield {"progress": 0.3, "stage": "rendering"}
-        if path_kind == "copy":
+        if is_v2:
+            if not plan["clips"]:
+                raise ValueError(
+                    "no visible lane holds clips — nothing to composite")
+            target = tx.composite_canvas(plan, profile_name,
+                                         probe_by_clip)
+            enc = await asyncio.to_thread(
+                tx.h264_encoder, ffmpeg["path"], supervise.run)
+            clip_paths = {c["clip_id"]: str(p)
+                          for c, p in zip(clips, paths)}
+            argv = tx.build_composite_argv(
+                ffmpeg["path"], plan, clip_paths, target, crf,
+                str(out_path), encoder=enc)
+        elif path_kind == "copy":
             list_path = work / f"{handle.job_id}-concat.txt"
             list_path.write_text(tx.concat_list([str(p) for p in paths]),
                                  encoding="utf-8")

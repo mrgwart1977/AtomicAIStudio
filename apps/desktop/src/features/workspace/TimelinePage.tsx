@@ -8,7 +8,7 @@ import type {
 import { useApp } from "../../stores/appStore";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { TimelineEditor } from "./TimelineEditor";
-import { exportEligibility } from "./timelineMath";
+import { exportMode } from "./timelineMath";
 
 /** C5-A + N1-B — timeline assembly. Multitrack lane editor (ruler,
  * playhead, drag placement), trim/remove inspector, provenance,
@@ -170,8 +170,10 @@ export function TimelinePage() {
   const archived = useMemo(
     () => timelines.filter((t) => t.status === "archived"), [timelines]);
   const selTl = timelines.find((t) => t.id === selected) ?? null;
-  const exportCap = useMemo(
-    () => (detail ? exportEligibility(detail) : { ok: true, reason: null }),
+  const exportModeInfo = useMemo(
+    () => (detail ? exportMode(detail)
+                  : { mode: "blocked" as const, lanes: 0,
+                      reason: "no timeline" }),
     [detail]);
   // A 422 about revisions/stale approvals deserves a one-click refresh.
   const staleError = !!error && /stale|revision|expected|re-preview/i.test(error);
@@ -316,18 +318,22 @@ export function TimelinePage() {
               </span>
               {detail.clips.length > 0 && (
                 <span
-                  title={exportCap.ok
-                    ? "This cut is a single sequential video lane — the current exporter can render it."
-                    : exportCap.reason ?? undefined}
+                  title={exportModeInfo.mode === "blocked"
+                    ? exportModeInfo.reason ?? undefined
+                    : exportModeInfo.mode === "sequential"
+                      ? "This cut is a single sequential video lane — it exports via the fast path."
+                      : `Multitrack composite — ${exportModeInfo.lanes} visible lane(s) render over black; hidden and muted lanes contribute nothing.`}
                   className={`rounded border px-1.5 py-0.5 text-[10px] ${
-                    exportCap.ok
-                      ? "border-teal/50 text-teal"
-                      : "border-line text-faint"}`}
+                    exportModeInfo.mode === "blocked"
+                      ? "border-line text-faint"
+                      : "border-teal/50 text-teal"}`}
                   data-testid="export-capability"
                 >
-                  {exportCap.ok
+                  {exportModeInfo.mode === "sequential"
                     ? "Exports as one video"
-                    : "Multitrack — export needs N1-D"}
+                    : exportModeInfo.mode === "composite"
+                      ? `Exports ${exportModeInfo.lanes} lanes — composite`
+                      : "Nothing visible to export"}
                 </span>
               )}
               <div className="ml-auto flex gap-1">
@@ -372,14 +378,14 @@ export function TimelinePage() {
               <div className="mt-3 rounded border border-line bg-card p-3"
                 data-testid="export-panel">
                 <p className="text-xs text-muted">
-                  Render this cut to a single MP4 video file. The current
-                  exporter handles one sequential video lane; multitrack
-                  compositing arrives with N1-D.
+                  {exportModeInfo.mode === "composite"
+                    ? `Render this cut to a single MP4 — ${exportModeInfo.lanes} visible lane(s) composite over black, timeline gaps render black, muted lanes contribute no audio.`
+                    : "Render this cut to a single MP4 video file."}
                 </p>
-                {!exportCap.ok && (
+                {exportModeInfo.mode === "blocked" && (
                   <p className="mt-1.5 rounded border border-line bg-panel px-2 py-1 text-[11px] text-muted"
                     data-testid="export-blocked">
-                    This layout can't export yet: {exportCap.reason}
+                    This layout can't export: {exportModeInfo.reason}
                   </p>
                 )}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -393,7 +399,8 @@ export function TimelinePage() {
                       <option value="720p">720p H.264 MP4</option>
                     </select>
                   </label>
-                  <button disabled={busy} onClick={() => void previewExport()}
+                  <button disabled={busy || exportModeInfo.mode === "blocked"}
+                    onClick={() => void previewExport()}
                     className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-teal disabled:opacity-40">
                     Preview export
                   </button>

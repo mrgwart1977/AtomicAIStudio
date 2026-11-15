@@ -308,9 +308,10 @@ def test_edl_v2_deterministic_and_complete(client):
         client, pid, t["id"])["revision"]
 
 
-def test_export_refuses_unsupported_layout(client):
-    """timeline.export must fail closed on a gapped timeline — no
-    misleading output, no silent flatten."""
+def test_export_gapped_timeline_pins_edl_v2(client):
+    """N1-D — a gapped timeline isn't v1-representable but IS
+    exportable: commit pins an ade-edl/2 document that honestly
+    carries the gap, never a silent flatten."""
     pid = make_project(client)["id"]
     t = _tl(client, pid)
     _insert(client, pid, t["id"], _video(client, pid))
@@ -318,9 +319,22 @@ def test_export_refuses_unsupported_layout(client):
             {"timeline_id": t["id"], "asset_id":
              _video(client, pid, "b.mp4", sha="b" * 64)["id"],
              "start_frames": 200})
+    p = _preview(client, pid, "timeline.export",
+                 {"timeline_id": t["id"]})
+    sha = p["resolved_timeline"]["edl_sha256"]
     r = _commit(client, pid, "timeline.export",
-                {"timeline_id": t["id"]}, expect=422)
-    assert "ade-edl" in r.text or "contiguous" in r.text
+                {"timeline_id": t["id"],
+                 "expected_timeline": p["resolved_timeline"],
+                 "expected_edl_sha": sha})
+    job = wait_for_job(client, pid, r["job_id"])
+    # synthetic assets have no bytes on disk — the job fails closed,
+    # but the pinned request must carry the honest v2 document.
+    assert job["status"] == "failed"
+    with client.app.state.session_factory() as s:
+        from app.db.models import GenerationJob
+        req = s.get(GenerationJob, r["job_id"]).request_json
+    assert req["edl"]["format"] == "ade-edl/2"
+    assert req["edl"]["gaps"] and req["edl_sha256"] == sha
 
 
 # ---------- concurrency / revision safety ----------

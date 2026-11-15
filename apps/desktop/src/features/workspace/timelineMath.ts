@@ -120,9 +120,9 @@ export function dropError(
   return null;
 }
 
-/** Mirror of the backend's v1_layout_reason — drives the export-
- * capability badge. The backend remains authoritative; this is honest
- * UI messaging, never a promise. */
+/** Mirror of the backend's v1_layout_reason — "sequential" means the
+ * layout is ade-edl/1-representable. The backend remains authoritative;
+ * this is honest UI messaging, never a promise. */
 export function exportEligibility(detail: TimelineDetail): {
   ok: boolean; reason: string | null;
 } {
@@ -130,21 +130,17 @@ export function exportEligibility(detail: TimelineDetail): {
     (t) => laneClips(detail.clips, t.id).length > 0);
   if (populated.length === 0) return { ok: true, reason: null };
   if (populated.length > 1) {
-    return { ok: false, reason: "multiple tracks hold clips — "
-      + "the current exporter renders a single sequential video lane" };
+    return { ok: false, reason: "multiple tracks hold clips" };
   }
   const t = populated[0];
   if (t.kind !== "video") {
-    return { ok: false, reason: `the only populated track is '${t.kind}' — `
-      + "the exporter renders video lanes only" };
+    return { ok: false, reason: `the only populated track is '${t.kind}'` };
   }
   if (!t.visible) {
-    return { ok: false, reason: "the populated track is hidden — "
-      + "unhide it before exporting" };
+    return { ok: false, reason: "the populated track is hidden" };
   }
   if (t.muted) {
-    return { ok: false, reason: "the populated track is muted — "
-      + "unmute it before exporting" };
+    return { ok: false, reason: "the populated track is muted" };
   }
   let runEnd = 0;
   for (const c of laneClips(detail.clips, t.id)) {
@@ -153,12 +149,38 @@ export function exportEligibility(detail: TimelineDetail): {
     }
     const packed = Math.ceil(runEnd - EPS);
     if (c.start_frames !== packed) {
-      return { ok: false, reason: "clips aren't contiguous — the exporter "
-        + "can't render gaps (multitrack export arrives with N1-D)" };
+      return { ok: false, reason: "clips aren't contiguous" };
     }
     runEnd = c.start_frames + clipTlExtent(c, detail);
   }
   return { ok: true, reason: null };
+}
+
+/** N1-D — what the exporter will actually do with this layout.
+ * "sequential" → ade-edl/1 (copy/encode paths).
+ * "composite"  → ade-edl/2 multitrack render: every VISIBLE lane with
+ * clips composites (hidden/muted lanes contribute nothing; muted lanes
+ * still show video but no audio).
+ * "blocked"    → no visible lane holds clips — nothing to render. */
+export function exportMode(detail: TimelineDetail): {
+  mode: "sequential" | "composite" | "blocked";
+  lanes: number;
+  reason: string | null;
+} {
+  if (detail.clips.length === 0) {
+    return { mode: "blocked", lanes: 0,
+             reason: "the timeline holds no clips" };
+  }
+  if (exportEligibility(detail).ok) {
+    return { mode: "sequential", lanes: 1, reason: null };
+  }
+  const visible = detail.tracks.filter(
+    (t) => t.visible && laneClips(detail.clips, t.id).length > 0);
+  if (visible.length === 0) {
+    return { mode: "blocked", lanes: 0,
+             reason: "no visible lane holds clips — nothing to export" };
+  }
+  return { mode: "composite", lanes: visible.length, reason: null };
 }
 
 /** Frame → "SS:FF" label using the timeline rate (seconds:frames). */
