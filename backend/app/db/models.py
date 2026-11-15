@@ -745,19 +745,52 @@ class Timeline(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class TimelineTrack(Base):
+    """N1-A — one lane on a timeline. ``position`` is the stack order
+    (0 = bottom, higher composites on top at export). ``visible`` and
+    ``muted`` are render decisions — never clip mutations — and
+    ``locked`` refuses clip edits on the lane at the command layer.
+
+    ``kind`` is the lane vocabulary: ``video`` (composite lanes),
+    ``audio`` (clip-embedded sound lanes — detached audio is N2), and
+    ``overlay`` (titles/graphics; declared for future milestones, no
+    render support yet)."""
+
+    __tablename__ = "timeline_tracks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="video")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    visible: Mapped[bool] = mapped_column(Boolean, default=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TimelineClip(Base):
     """Ordered, pinned reference to ONE asset version. The clip keeps
     source_version_id + source_sha256 + the source's frame geometry
     (src_frames/src_fps_*) captured at insert — later asset versions
     never move a clip's pins, and trims keep validating against the
-    pinned geometry."""
+    pinned geometry.
+
+    N1-A — ``track_id`` places the clip on a lane and ``start_frames``
+    is its integer timeline-time position (frames at the timeline's
+    fps_num/fps_den). ``position`` remains as the dense within-track
+    sequence index — legacy sequential timelines map exactly: position
+    order ≡ start_frames order with contiguous packing."""
 
     __tablename__ = "timeline_clips"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id", ondelete="CASCADE"), index=True)
+    track_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_tracks.id", ondelete="SET NULL"), nullable=True, index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    start_frames: Mapped[int] = mapped_column(Integer, default=0)
     source_asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="RESTRICT"))
     source_version_id: Mapped[str] = mapped_column(ForeignKey("asset_versions.id", ondelete="RESTRICT"))
     source_sha256: Mapped[str] = mapped_column(String(64))

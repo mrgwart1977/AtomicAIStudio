@@ -1282,25 +1282,35 @@ def get_timeline(timeline_id: str,
     d = {c.name: getattr(tl, c.name) for c in tl.__table__.columns}
     clips = tld.list_clips(db, tl.id)
     d["clips"] = clips
-    # exact rational accumulation — floats only at the boundary
+    # N1-A — tracks describe the lanes clips are placed on
+    d["tracks"] = tld.list_tracks(db, tl.id)
+    # program end = max(clip end) across tracks, in timeline frames —
+    # exact rational; seconds fall out at the boundary
+    prog = tld.program_end_frac(db, tl)
     d["total_duration_s"] = round(
-        float(tld.total_duration_frac(clips)), 6)
+        float(prog * tld.Fraction(tl.fps_den, tl.fps_num)), 6)
     return d
 
 
 @api_router.get("/api/projects/{project_id}/timelines/{timeline_id}/edl")
 def timeline_edl(timeline_id: str,
                  project: Project = Depends(get_project),
-                 db: Session = Depends(get_db)):
-    """Stable `ade-edl/1` edit-decision serialization — deterministic
-    JSON, integer source frames, pinned versions/hashes."""
+                 db: Session = Depends(get_db),
+                 version: int = 1):
+    """Edit-decision serialization — `ade-edl/1` for legacy sequential
+    timelines, `ade-edl/2` (?version=2) for track-aware layouts.
+    Deterministic JSON; v1 refuses non-representable layouts."""
     from app.domain import timeline as tld
     try:
         tl = tld.get_timeline(db, project.id, timeline_id)
     except KeyError:
         raise HTTPException(404, "timeline not found in this project") from None
     try:
-        return tld.edl_json(db, tl)
+        if version == 2:
+            return tld.edl_json_v2(db, tl)
+        if version == 1:
+            return tld.edl_json(db, tl)
+        raise tld.TimelineError("edl version must be 1 or 2")
     except tld.TimelineError as exc:
         raise HTTPException(409, str(exc)) from exc
 

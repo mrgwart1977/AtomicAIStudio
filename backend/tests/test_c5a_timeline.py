@@ -324,8 +324,12 @@ def test_mixed_frame_rates_exact_rational_total(client):
     d = _detail(client, pid, t["id"])
     rates = [(c["src_fps_num"], c["src_fps_den"]) for c in d["clips"]]
     assert rates == [(24, 1), (30000, 1001), (24000, 1001)]
-    # exact: 48/24 + 60*1001/30000 + 48*1001/24000 = 2 + 2.002 + 2.002
-    assert d["total_duration_s"] == pytest.approx(6.004, abs=1e-6)
+    # N1-A — program end on the integer timeline grid, not the
+    # source-duration sum: clip c packs at ceil(96.048)=97, so the
+    # program ends at (97 + 48.048)/24 = 6.0436… s. The sub-frame gap
+    # is honest — it cannot end at 6.004 on this grid. (The v1 EDL
+    # below keeps legacy source-time accounting for the C5-B export.)
+    assert d["total_duration_s"] == pytest.approx(6.043667, abs=1e-6)
     e = client.get(f"/api/projects/{pid}/timelines/{t['id']}/edl").json()
     assert e["total_duration_s"] == pytest.approx(6.004, abs=1e-6)
     # non-integer rates keep rationals (12.5 → 25/2, not 12/1)

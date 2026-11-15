@@ -605,7 +605,7 @@ def test_alembic_0006_tables_exist(settings):
     assert "attempt_no" in cols and "execution_scope" in cols and "recovery_state" in cols
     with eng.connect() as c:
         v = c.execute(sa.text("select version_num from alembic_version")).scalar()
-    assert v == "0012_c5a"
+    assert v == "0013_n1a"
 
 
 # ------------------------------------------------ 9. Phase-2 follow-ups
