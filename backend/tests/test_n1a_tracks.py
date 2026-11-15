@@ -607,13 +607,19 @@ def test_migration_raw_ddl_stamped_db(tmp_path):
     run_migrations(f"sqlite:///{db.as_posix()}")
 
     con = sqlite3.connect(str(db))
-    assert con.execute("SELECT version_num FROM alembic_version"
-                       ).fetchone()[0] == "0013_n1a"
+    # migrations run to the CURRENT head — N1-E's 0014 lands after
+    # the N1-A backfill under test; assert ≥ the N1-A revision.
+    head = con.execute("SELECT version_num FROM alembic_version"
+                       ).fetchone()[0]
+    assert head >= "0013_n1a"
     clip = con.execute(
         "SELECT start_frames, track_id FROM timeline_clips").fetchone()
     trk = con.execute(
         "SELECT id FROM timeline_tracks").fetchone()
     assert clip == (0, trk[0])
+    # N1-E columns landed on the raw schema too
+    cols = {r[1] for r in con.execute("PRAGMA table_info(timelines)")}
+    assert {"undo_stack_json", "redo_stack_json"} <= cols
     con.close()
 
 

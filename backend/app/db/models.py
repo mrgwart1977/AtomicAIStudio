@@ -741,6 +741,10 @@ class Timeline(Base):
     fps_den: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
     revision: Mapped[int] = mapped_column(Integer, default=0)
+    # N1-E — undo/redo stacks: [{rev, label}] pointers into
+    # entity_revisions snapshots, managed transactionally by _touch.
+    undo_stack_json: Mapped[list] = mapped_column(JSON, default=list)
+    redo_stack_json: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

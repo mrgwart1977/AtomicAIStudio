@@ -77,6 +77,19 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     [detail.clips, tracks]);
   const programEnd = useMemo(() => programEndFrames(detail), [detail]);
   const contentW = Math.max(1, (programEnd + TAIL_F) * ppf);
+  // Visible pixel window for clip/gap culling; {l:0,r:Inf} until the
+  // first scroll measurement so tests/SSR render everything.
+  const [viewX, setViewX] = useState<{ l: number; r: number }>(
+    { l: 0, r: Number.POSITIVE_INFINITY });
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && el.clientWidth > 0) {
+      setViewX({ l: Math.max(0, el.scrollLeft - el.clientWidth),
+                 r: el.scrollLeft + el.clientWidth * 2 });
+    }
+  }, [contentW]);
+  const inView = useCallback((startF: number, endF: number) =>
+    endF * ppf >= viewX.l && startF * ppf <= viewX.r, [ppf, viewX]);
   const selClip = detail.clips.find((c) => c.id === selClipId) ?? null;
 
   /* ---------------- N1-C: expected-revision pin ---------------- */
@@ -452,6 +465,33 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     });
   };
 
+  // N1-E — undo/redo ride the same pinned command path; the labels
+  // come from the authoritative per-timeline stacks on the server.
+  const doUndo = useCallback(() => {
+    if (busy || !detail.undo_label) return;
+    void onRun("timeline.undo", { timeline_id: detail.id, ...pin() });
+  }, [busy, detail, onRun, pin]);
+  const doRedo = useCallback(() => {
+    if (busy || !detail.redo_label) return;
+    void onRun("timeline.redo", { timeline_id: detail.id, ...pin() });
+  }, [busy, detail, onRun, pin]);
+
+  // Ctrl+Z / Ctrl+Shift+Z (and Ctrl+Y) — skip when typing in a field.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"
+                 || el.isContentEditable)) return;
+      const k = e.key.toLowerCase();
+      if (k === "z" && e.shiftKey) { e.preventDefault(); doRedo(); }
+      else if (k === "z") { e.preventDefault(); doUndo(); }
+      else if (k === "y") { e.preventDefault(); doRedo(); }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [doUndo, doRedo]);
+
   // Gap ops act on the selected clip's lane when it's editable, else
   // the first editable video/overlay lane — the disclosed scope.
   const gapTrack = useCallback((): TimelineTrack | null => {
@@ -504,6 +544,26 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
         <span className="text-[11px] text-faint" data-testid="playhead-readout">
           Playhead {fmtTc(playheadF, detail)}
         </span>
+        <div className="flex items-center gap-1" role="group" aria-label="History">
+          <button
+            disabled={busy || !detail.undo_label}
+            onClick={() => doUndo()}
+            title={detail.undo_label
+              ? `Undo: ${detail.undo_label} (Ctrl+Z)`
+              : "Nothing to undo"}
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+            data-testid="undo-btn"
+          >Undo</button>
+          <button
+            disabled={busy || !detail.redo_label}
+            onClick={() => doRedo()}
+            title={detail.redo_label
+              ? `Redo: ${detail.redo_label} (Ctrl+Shift+Z)`
+              : "Nothing to redo"}
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+            data-testid="redo-btn"
+          >Redo</button>
+        </div>
         {active && (
           <div className="flex flex-wrap items-center gap-2" role="group"
             aria-label="Editing">
@@ -575,6 +635,16 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
       <div
         ref={scrollRef}
         onWheel={onWheel}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          // N1-E — viewport culling: only clips intersecting the
+          // visible x-range (plus a one-screen draw margin) mount.
+          setViewX((v) => {
+            const l = Math.max(0, el.scrollLeft - el.clientWidth);
+            const r = el.scrollLeft + el.clientWidth * 2;
+            return v.l === l && v.r === r ? v : { l, r };
+          });
+        }}
         className="mt-2 max-h-[480px] overflow-auto rounded border border-line bg-panel"
         data-testid="timeline-scroll"
       >
@@ -723,7 +793,9 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                         : "Audio lane — audio clips aren't supported yet"}
                     </p>
                   )}
-                  {lane.map((c) => (
+                  {lane.filter((c) => inView(
+                    c.start_frames, clipTlEnd(c, detail)))
+                    .map((c) => (
                     <LaneClip
                       key={c.id}
                       clip={c}
@@ -740,7 +812,8 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                     />
                   ))}
                   {/* N1-C — explicit gaps: rendered, labeled, closable. */}
-                  {laneGaps(lane, detail).map((g) => (
+                  {laneGaps(lane, detail).filter((g) => inView(
+                    g.start, g.start + g.frames)).map((g) => (
                     <button
                       key={`gap-${g.start}`}
                       type="button"
