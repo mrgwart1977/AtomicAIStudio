@@ -474,17 +474,28 @@ def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
                 locked=st.get("locked", False),
                 muted=st.get("muted", False)))
     session.flush()
-    default_lane = first_video_track(session, tl.id)
     session.execute(
         delete(TimelineClip).where(TimelineClip.timeline_id == tl.id))
     session.flush()
-    # Tracks absent from the snapshot are now empty by construction
-    # (their clips were just deleted) — drop them so the restored lane
-    # set matches the snapshot exactly.
-    for t in list_tracks(session, tl.id):
-        if t.id not in snap_track_ids:
-            session.delete(t)
-    session.flush()
+    if "tracks" in snap:
+        # N1-A snapshot: restore the lane set exactly. Tracks absent
+        # from the snapshot are empty by construction (their clips
+        # were just deleted) — dropping them can't orphan anything.
+        for t in list_tracks(session, tl.id):
+            if t.id not in snap_track_ids:
+                session.delete(t)
+        session.flush()
+    # Pre-N1 snapshots carry no lane set: keep the existing lanes and
+    # repack clips onto the default video lane (migration's rule).
+    # If the timeline somehow has no video lane at all, clips would
+    # orphan — recreate V1 first.
+    default_lane = first_video_track(session, tl.id)
+    if default_lane is None and snap.get("clips"):
+        default_lane = TimelineTrack(
+            id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
+            kind="video", position=0, name="V1")
+        session.add(default_lane)
+        session.flush()
     acc = Fraction(0)  # legacy-snapshot repack (exact rational)
     for i, c in enumerate(snap.get("clips") or []):
         legacy = "start_frames" not in c

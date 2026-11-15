@@ -474,6 +474,308 @@ def test_migration_backfill_realistic_pre_n1(tmp_path):
     con.close()
 
 
+def test_migration_genuine_pre_n1_release_db(tmp_path):
+    """REVIEW-GRADE: a database produced by the actual pre-N1 release
+    code (commit 149690a, checked out in a worktree — see
+    tests/fixtures/README.md) upgrades with everything preserved."""
+    import shutil
+    import sqlite3
+    from pathlib import Path
+    from app.main import run_migrations
+
+    fixture = (Path(__file__).parent / "fixtures"
+               / "pre_n1_release.db")
+    db = tmp_path / "genuine.db"
+    shutil.copy(fixture, db)
+    url = f"sqlite:///{db.as_posix()}"
+
+    # Baseline: read the pre-N1 rows before migrating.
+    con = sqlite3.connect(str(db))
+    (pid, tid) = con.execute(
+        "SELECT project_id, id FROM timelines").fetchone()
+    before_clips = con.execute(
+        "SELECT id, position, source_asset_id, source_version_id,"
+        " source_sha256, in_frame, out_frame, src_fps_num,"
+        " src_fps_den FROM timeline_clips ORDER BY position"
+    ).fetchall()
+    rev = con.execute("SELECT revision FROM timelines").fetchone()[0]
+    # A legacy revision-history row (pre-N1 snapshot shape: no tracks,
+    # no start_frames) must survive untouched.
+    con.execute(
+        "INSERT INTO entity_revisions (id, project_id, entity_type,"
+        " entity_id, revision, snapshot_json, summary, created_at)"
+        " VALUES ('rev-row-1', ?, 'timeline', ?, 1,"
+        " '{\"name\": \"Launch Cut\"}', 'old snap', '2024-01-01')",
+        (pid, tid))
+    con.commit()
+    con.close()
+
+    run_migrations(url)
+
+    con = sqlite3.connect(str(db))
+    # Ownership, ids, ordering, trims, pins — all preserved.
+    tracks = con.execute(
+        "SELECT id, project_id, kind, name, position FROM"
+        f" timeline_tracks WHERE timeline_id='{tid}'").fetchall()
+    assert len(tracks) == 1
+    tr_id, tr_pid, kind, name, pos = tracks[0]
+    assert (tr_pid, kind, name, pos) == (pid, "video", "V1", 0)
+    after = con.execute(
+        "SELECT id, position, start_frames, track_id,"
+        " source_asset_id, source_version_id, source_sha256,"
+        " in_frame, out_frame FROM timeline_clips ORDER BY position"
+    ).fetchall()
+    assert [c[0] for c in after] == [c[0] for c in before_clips]
+    assert [c[1] for c in after] == [c[1] for c in before_clips]
+    for b, a in zip(before_clips, after):
+        # after[4:] = asset, version, sha, in, out == before[2:7]
+        assert a[4:] == b[2:7]
+    # Packed starts: 48f@24 then 60f@30000/1001 on 24/1 → 0, 48.
+    assert [c[2] for c in after] == [0, 48]
+    assert {c[3] for c in after} == {tr_id}
+    assert con.execute(
+        "SELECT revision FROM timelines").fetchone()[0] == rev
+    # Revision history row survived, unchanged.
+    row = con.execute(
+        "SELECT snapshot_json FROM entity_revisions"
+        " WHERE id='rev-row-1'").fetchone()
+    assert row is not None and "Launch Cut" in row[0]
+    # And the migrated timeline is usable through the real API paths:
+    # legacy snapshot reverts still resolve (exercised elsewhere).
+    con.close()
+
+
+def test_migration_raw_ddl_stamped_db(tmp_path):
+    """THIRD PATH: a hand-written pre-N1 schema stamped 0012_c5a —
+    independent of both the release build and the downgrade path."""
+    import sqlite3
+    import uuid
+    from app.main import run_migrations
+
+    db = tmp_path / "raw.db"
+    con = sqlite3.connect(str(db))
+    con.executescript("""
+    CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
+    INSERT INTO alembic_version VALUES ('0012_c5a');
+    CREATE TABLE projects (id VARCHAR(36) PRIMARY KEY);
+    CREATE TABLE timelines (
+        id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL,
+        name VARCHAR(240) NOT NULL, description TEXT NOT NULL,
+        fps_num INTEGER NOT NULL, fps_den INTEGER NOT NULL,
+        status VARCHAR(20) NOT NULL, revision INTEGER NOT NULL,
+        created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL);
+    CREATE TABLE timeline_clips (
+        id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL,
+        timeline_id VARCHAR(36) NOT NULL, position INTEGER NOT NULL,
+        source_asset_id VARCHAR(36) NOT NULL,
+        source_version_id VARCHAR(36) NOT NULL,
+        source_sha256 VARCHAR(64) NOT NULL,
+        in_frame INTEGER NOT NULL, out_frame INTEGER NOT NULL,
+        src_frames INTEGER NOT NULL, src_fps_num INTEGER NOT NULL,
+        src_fps_den INTEGER NOT NULL, src_duration_s FLOAT NOT NULL,
+        shot_id VARCHAR(36), scene_id VARCHAR(36),
+        created_at DATETIME NOT NULL);
+    """)
+    tid, pid = str(uuid.uuid4()), str(uuid.uuid4())
+    now = "2024-01-01"
+    con.execute("INSERT INTO projects VALUES (?)", (pid,))
+    con.execute(
+        "INSERT INTO timelines VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (tid, pid, "Cut", "", 24, 1, "active", 0, now, now))
+    con.execute(
+        "INSERT INTO timeline_clips VALUES (?,?,?,?,?,?,?,?,?,?,?,?,"
+        "?,?,?,?)",
+        (str(uuid.uuid4()), pid, tid, 0, "a1", "v1", "sha", 0, 72,
+         72, 24, 1, 3.0, None, None, now))
+    con.commit()
+    con.close()
+
+    run_migrations(f"sqlite:///{db.as_posix()}")
+
+    con = sqlite3.connect(str(db))
+    assert con.execute("SELECT version_num FROM alembic_version"
+                       ).fetchone()[0] == "0013_n1a"
+    clip = con.execute(
+        "SELECT start_frames, track_id FROM timeline_clips").fetchone()
+    trk = con.execute(
+        "SELECT id FROM timeline_tracks").fetchone()
+    assert clip == (0, trk[0])
+    con.close()
+
+
+def test_migration_rejects_malformed_track_table(tmp_path):
+    """A present-but-corrupt timeline_tracks must abort loudly, not
+    silently continue past inconsistent data."""
+    import sqlite3
+    import pytest as _pytest
+    from app.main import run_migrations
+
+    db = tmp_path / "corrupt.db"
+    con = sqlite3.connect(str(db))
+    con.executescript("""
+    CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
+    INSERT INTO alembic_version VALUES ('0012_c5a');
+    CREATE TABLE timelines (
+        id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL,
+        name VARCHAR(240) NOT NULL, description TEXT NOT NULL,
+        fps_num INTEGER NOT NULL, fps_den INTEGER NOT NULL,
+        status VARCHAR(20) NOT NULL, revision INTEGER NOT NULL,
+        created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL);
+    CREATE TABLE timeline_clips (
+        id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL,
+        timeline_id VARCHAR(36) NOT NULL, position INTEGER NOT NULL,
+        source_asset_id VARCHAR(36) NOT NULL,
+        source_version_id VARCHAR(36) NOT NULL,
+        source_sha256 VARCHAR(64) NOT NULL,
+        in_frame INTEGER NOT NULL, out_frame INTEGER NOT NULL,
+        src_frames INTEGER NOT NULL, src_fps_num INTEGER NOT NULL,
+        src_fps_den INTEGER NOT NULL, src_duration_s FLOAT NOT NULL,
+        shot_id VARCHAR(36), scene_id VARCHAR(36),
+        created_at DATETIME NOT NULL);
+    CREATE TABLE timeline_tracks (id VARCHAR(36) PRIMARY KEY,
+        bogus VARCHAR(10));
+    """)
+    con.close()
+    with _pytest.raises(RuntimeError, match="missing columns"):
+        run_migrations(f"sqlite:///{db.as_posix()}")
+
+
+@pytest.mark.parametrize("src_fps", [(24, 1), (25, 1), (30, 1),
+                                     (24000, 1001), (30000, 1001)])
+def test_five_rate_conversion_matrix(client, src_fps):
+    """Authoritative rational conversion: each source rate's extent on
+    a 24/1 grid is exact Fraction — packing by ceil never overlaps."""
+    from fractions import Fraction as F
+    fps_float = src_fps[0] / src_fps[1]
+    pid = make_project(client)["id"]
+    t = _tl(client, pid, fps_num=24, fps_den=1)
+    _insert(client, pid, t["id"],
+            _video(client, pid, f"s{src_fps[0]}.mp4",
+                   sha=f"{src_fps[0]:064x}"[:64],
+                   frames=src_fps[0] // src_fps[1] * 2
+                   if src_fps[1] == 1 else 48,
+                   fps=fps_float, duration=2.0))
+    d = _detail(client, pid, t["id"])
+    c = d["clips"][0]
+    assert (c["src_fps_num"], c["src_fps_den"]) == src_fps
+    # Extent = frames/src_fps × 24 — checked against the API's own
+    # accounting by appending a 24fps clip and verifying ceil pack.
+    _insert(client, pid, t["id"], _video(client, pid, "tail.mp4",
+                                        sha="e" * 64, frames=24,
+                                        fps=24.0, duration=1.0))
+    d = _detail(client, pid, t["id"])
+    s0, s1 = sorted(x["start_frames"] for x in d["clips"])
+    extent = F(c["out_frame"] - c["in_frame"]) * F(
+        src_fps[1], src_fps[0]) * F(24, 1)
+    assert s0 == 0 and s1 == -(-extent.numerator // extent.denominator)
+
+
+def test_program_end_on_noninteger_timeline_grid(client):
+    """Non-integer TIMELINE rate: a 240/11 grid with a 24/1 clip —
+    extent is rational in tl frames, program end honest. (True NTSC
+    tl rates like 24000/1001 exceed the pre-existing fps_num≤240 cap
+    — a documented C5-A limitation, unchanged by N1-A.)"""
+    from fractions import Fraction as F
+    pid = make_project(client)["id"]
+    t = _tl(client, pid, fps_num=240, fps_den=11)
+    _insert(client, pid, t["id"], _video(client, pid))
+    d = _detail(client, pid, t["id"])
+    # extent = 72 × (1/24) × (240/11) = 720/11 tl frames
+    prog = F(72) * F(1, 24) * F(240, 11)
+    assert d["total_duration_s"] == pytest.approx(
+        float(prog * F(11, 240)), abs=1e-6)
+    # And the NTSC-rate cap is what it is — recorded, not worked
+    # around:
+    _commit(client, pid, "timeline.create",
+            {"name": "ntsc", "fps_num": 24000, "fps_den": 1001},
+            expect=422)
+
+
+def test_duplicate_remaps_track_refs(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v2 = _track(client, pid, t["id"], name="V2")
+    _commit(client, pid, "timeline.clip.place",
+            {"timeline_id": t["id"], "asset_id":
+             _video(client, pid)["id"],
+             "track_id": v2["id"], "start_frames": 5})
+    _commit(client, pid, "timeline.duplicate",
+            {"timeline_id": t["id"], "name": "Copy"})
+    tls = client.get(f"/api/projects/{pid}/timelines").json()
+    dup = next(x for x in tls if x["name"] == "Copy")
+    dd = _detail(client, pid, dup["id"])
+    assert len(dd["tracks"]) == 2 and len(dd["clips"]) == 1
+    assert dd["clips"][0]["track_id"] in {x["id"] for x in dd["tracks"]}
+    assert dd["clips"][0]["track_id"] != v2["id"]
+
+
+def test_track_update_atomic_on_invalid_fields(client):
+    """A bad field type mid-update refuses and persists nothing —
+    the whole command is one transaction."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1 = _detail(client, pid, t["id"])["tracks"][0]
+    rev0 = _detail(client, pid, t["id"])["revision"]
+    _commit(client, pid, "timeline.track.update",
+            {"timeline_id": t["id"], "track_id": v1["id"],
+             "name": "Renamed", "locked": "yes"}, expect=422)
+    d = _detail(client, pid, t["id"])
+    tr = d["tracks"][0]
+    assert tr["name"] == "V1" and not tr["locked"]
+    assert d["revision"] == rev0
+
+
+def test_revert_recreates_missing_snapshot_track(client):
+    """Revert to a revision whose lane was since deleted restores the
+    track by snapshot id — lane set matches the snapshot exactly."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v2 = _track(client, pid, t["id"], name="V2")
+    r_with = _detail(client, pid, t["id"])["revision"]
+    _commit(client, pid, "timeline.track.remove",
+            {"timeline_id": t["id"], "track_id": v2["id"]})
+    _commit(client, pid, "timeline.revert",
+            {"timeline_id": t["id"], "to_revision": r_with})
+    d = _detail(client, pid, t["id"])
+    assert len(d["tracks"]) == 2
+    assert any(x["id"] == v2["id"] for x in d["tracks"])
+    assert any(x["name"] == "V1" for x in d["tracks"])
+
+
+def test_legacy_snapshot_revert_keeps_lanes_no_orphans(client):
+    """Pre-N1 snapshots have no lane set — revert must keep existing
+    tracks and never orphan clips onto deleted lanes."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid))
+    clip = _detail(client, pid, t["id"])["clips"][0]
+    v1 = _detail(client, pid, t["id"])["tracks"][0]["id"]
+    # Inject a pre-N1-shaped snapshot row (no 'tracks', clip rows
+    # without start/track fields) as the next revision.
+    from app.db.models import EntityRevision, new_id
+    d = _detail(client, pid, t["id"])
+    snap = {"name": d["name"], "description": d["description"],
+            "fps_num": d["fps_num"], "fps_den": d["fps_den"],
+            "status": d["status"],
+            "clips": [{k: clip[k] for k in
+                       ("position", "source_asset_id",
+                        "source_version_id", "source_sha256",
+                        "in_frame", "out_frame", "src_frames",
+                        "src_fps_num", "src_fps_den", "src_duration_s",
+                        "shot_id", "scene_id")}]}
+    with client.app.state.session_factory() as s:
+        s.add(EntityRevision(
+            id=new_id(), project_id=pid, entity_type="timeline",
+            entity_id=t["id"], revision=d["revision"] + 10,
+            snapshot_json=snap, summary="legacy"))
+        s.commit()
+    _commit(client, pid, "timeline.revert",
+            {"timeline_id": t["id"],
+             "to_revision": d["revision"] + 10})
+    d2 = _detail(client, pid, t["id"])
+    assert d2["tracks"] and d2["clips"][0]["track_id"] == v1
+
+
 def test_migration_idempotent_backfill(tmp_path):
     """Re-running the upgrade's backfill must not duplicate tracks or
     disturb converted clips."""
