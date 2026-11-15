@@ -214,7 +214,16 @@ def _packed_start(session: Session, track: TimelineTrack,
 
 
 def _touch(session: Session, tl: Timeline, *, command_id: str | None,
-           summary: str) -> None:
+           summary: str, history: bool = True) -> None:
+    # N1-E — every user-facing mutation pushes the PRE-edit revision
+    # onto the undo stack and clears redo (a divergent edit makes the
+    # abandoned branch unreachable). Undo/redo themselves pass
+    # history=False and manage the stacks explicitly.
+    if history:
+        tl.undo_stack_json = [
+            *(tl.undo_stack_json or []),
+            {"rev": tl.revision, "label": summary}]
+        tl.redo_stack_json = []
     tl.revision += 1
     tl.updated_at = utcnow()
     session.flush()
@@ -233,6 +242,7 @@ def track_snapshot(t: TimelineTrack) -> dict[str, Any]:
 
 def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
     return {
+        "id": c.id,
         "track_id": c.track_id,
         "position": c.position,
         "start_frames": c.start_frames,
@@ -451,28 +461,16 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
     return dup
 
 
-def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
-                    command_id: str | None) -> None:
-    """Restore a snapshot's edit state. N1-A: the snapshot's lane set
-    is restored exactly — tracks listed by id are recreated when
-    missing, and tracks added after the snapshot (empty once their
-    clips are deleted) are removed. Pre-N1 snapshots (no track
-    fields) restore onto the first video lane with ceil-packed starts
-    — matching the migration's conversion rule."""
-    row = session.execute(
-        select(EntityRevision).where(
-            EntityRevision.entity_type == "timeline",
-            EntityRevision.entity_id == tl.id,
-            EntityRevision.revision == to_revision)).scalar_one_or_none()
-    if row is None:
-        raise KeyError(f"revision {to_revision} not found")
-    snap = row.snapshot_json or {}
+def _restore_snapshot(session: Session, tl: Timeline,
+                      snap: dict[str, Any]) -> None:
+    """Apply a snapshot's edit state (tracks + clips + meta). The
+    caller owns revision bookkeeping — this only rewrites rows."""
     for f in ("name", "description", "fps_num", "fps_den", "status"):
         if f in snap:
             setattr(tl, f, snap[f])
     snap_tracks = snap.get("tracks") or []
     snap_track_ids = {st["id"] for st in snap_tracks}
-    have = {t.id for t in list_tracks(session, tl.id)}
+    have = {t.id: t for t in list_tracks(session, tl.id)}
     for st in snap_tracks:
         if st["id"] not in have:
             session.add(TimelineTrack(
@@ -482,9 +480,28 @@ def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
                 visible=st.get("visible", True),
                 locked=st.get("locked", False),
                 muted=st.get("muted", False)))
+        else:
+            # N1-E — restore mutable lane fields too, or undoing a
+            # reorder/rename/visibility/lock/mute edit silently keeps
+            # the post-edit lane state.
+            tr = have[st["id"]]
+            for f in ("position", "name", "visible", "locked",
+                      "muted"):
+                if f in st:
+                    setattr(tr, f, st[f])
     session.flush()
-    session.execute(
-        delete(TimelineClip).where(TimelineClip.timeline_id == tl.id))
+    # N1-E — restore clips by STABLE IDENTITY, not delete-all/recreate:
+    # rows whose id is in the snapshot are updated in place, rows
+    # created after the snapshot are deleted, and deleted clips come
+    # back with their ORIGINAL ids (nothing external references clip
+    # ids, but stable ids keep EDL docs and audit trails continuous).
+    # Pre-N1-E snapshots carry no clip ids — every row is recreated.
+    live_clips = {c.id: c for c in list_clips(session, tl.id)}
+    snap_clips = snap.get("clips") or []
+    want_ids = {c["id"] for c in snap_clips if c.get("id")}
+    for cid, row in live_clips.items():
+        if cid not in want_ids:
+            session.delete(row)
     session.flush()
     if "tracks" in snap:
         # N1-A snapshot: restore the lane set exactly. Tracks absent
@@ -506,16 +523,15 @@ def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
         session.add(default_lane)
         session.flush()
     acc = Fraction(0)  # legacy-snapshot repack (exact rational)
-    for i, c in enumerate(snap.get("clips") or []):
+    for i, c in enumerate(snap_clips):
         legacy = "start_frames" not in c
         start = (c.get("start_frames") if not legacy
                  else _ceil_frame(acc))
-        clip = TimelineClip(
-            id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
-            track_id=(default_lane.id if (legacy or not c.get("track_id"))
-                      and default_lane is not None else c.get("track_id")),
-            position=i,
-            start_frames=start,
+        track_id = (default_lane.id
+                    if (legacy or not c.get("track_id"))
+                    and default_lane is not None else c.get("track_id"))
+        fields = dict(
+            track_id=track_id, position=i, start_frames=start,
             source_asset_id=c["source_asset_id"],
             source_version_id=c["source_version_id"],
             source_sha256=c["source_sha256"],
@@ -524,13 +540,88 @@ def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
             shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
-        session.add(clip)
+        row = live_clips.get(c.get("id")) if c.get("id") else None
+        if row is not None:
+            for k, v in fields.items():
+                setattr(row, k, v)
+            clip = row
+        else:
+            clip = TimelineClip(
+                id=c.get("id") or new_id(), project_id=tl.project_id,
+                timeline_id=tl.id, **fields)
+            session.add(clip)
         if legacy:
             acc = Fraction(start) + clip_tl_extent(clip, tl)
     session.flush()
     _renumber(session, tl.id)
+
+
+def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
+                    command_id: str | None) -> None:
+    """Restore a snapshot's edit state. N1-A: the snapshot's lane set
+    is restored exactly — tracks listed by id are recreated when
+    missing, and tracks added after the snapshot (empty once their
+    clips are deleted) are removed. Pre-N1 snapshots (no track
+    fields) restore onto the first video lane with ceil-packed starts
+    — matching the migration's conversion rule."""
+    row = session.execute(
+        select(EntityRevision).where(
+            EntityRevision.entity_type == "timeline",
+            EntityRevision.entity_id == tl.id,
+            EntityRevision.revision == to_revision)).scalar_one_or_none()
+    if row is None:
+        raise KeyError(f"revision {to_revision} not found")
+    _restore_snapshot(session, tl, row.snapshot_json or {})
     _touch(session, tl, command_id=command_id,
            summary=f"Reverted to revision {to_revision}")
+
+
+# ---------- N1-E — undo / redo ----------
+
+def undo_tip(tl: Timeline) -> dict | None:
+    return (tl.undo_stack_json or [])[-1] if tl.undo_stack_json else None
+
+
+def redo_tip(tl: Timeline) -> dict | None:
+    return (tl.redo_stack_json or [])[-1] if tl.redo_stack_json else None
+
+
+def _step(session: Session, tl: Timeline, src: str, dst: str,
+          verb: str, command_id: str | None) -> dict:
+    stack = list(getattr(tl, src) or [])
+    if not stack:
+        raise TimelineError(f"nothing to {verb}")
+    entry = stack.pop()
+    row = session.execute(
+        select(EntityRevision).where(
+            EntityRevision.entity_type == "timeline",
+            EntityRevision.entity_id == tl.id,
+            EntityRevision.revision == entry["rev"])).scalar_one_or_none()
+    if row is None:
+        raise TimelineError(
+            f"revision {entry['rev']} for {verb} is missing")
+    setattr(tl, src, stack)
+    setattr(tl, dst, [*(getattr(tl, dst) or []),
+                      {"rev": tl.revision, "label": entry["label"]}])
+    _restore_snapshot(session, tl, row.snapshot_json or {})
+    _touch(session, tl, command_id=command_id, history=False,
+           summary=f"{verb.capitalize()} {entry['label']}")
+    return entry
+
+
+def undo_timeline(session: Session, tl: Timeline, *,
+                  command_id: str | None) -> dict:
+    """Restore the previous edit state; the abandoned state moves to
+    the redo stack. Atomic within the caller's transaction."""
+    return _step(session, tl, "undo_stack_json", "redo_stack_json",
+                 "undo", command_id)
+
+
+def redo_timeline(session: Session, tl: Timeline, *,
+                  command_id: str | None) -> dict:
+    """Re-apply the most recently undone edit."""
+    return _step(session, tl, "redo_stack_json", "undo_stack_json",
+                 "redo", command_id)
 
 
 # ---------- clip ops ----------

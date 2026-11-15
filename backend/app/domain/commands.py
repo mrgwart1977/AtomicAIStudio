@@ -90,6 +90,7 @@ SUPPORTED_COMMANDS = {
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
+    "timeline.undo", "timeline.redo",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
     # N1-A — multitrack lanes + explicit placement
@@ -337,6 +338,9 @@ def _summary(command_type: str, payload: dict) -> str:
             return f"Create timeline '{payload.get('name', '')}'"
         if command_type == "timeline.revert":
             return f"Revert timeline to revision {payload.get('to_revision')}"
+        if command_type in ("timeline.undo", "timeline.redo"):
+            return ("Undo last timeline edit" if command_type == "timeline.undo"
+                    else "Redo last undone edit")
         if command_type == "timeline.duplicate":
             return "Duplicate timeline (with its clips)"
         if command_type.startswith("timeline.clip."):
@@ -1659,6 +1663,11 @@ def _validate_timeline(session: Session, project: Project,
     elif command_type == "timeline.revert":
         if payload.get("to_revision") is None:
             raise CommandError(422, "to_revision is required")
+    elif command_type in ("timeline.undo", "timeline.redo"):
+        tip = (tld.undo_tip(tl) if command_type == "timeline.undo"
+               else tld.redo_tip(tl))
+        if not tip:
+            raise CommandError(422, f"nothing to {command_type[9:]}")
     elif command_type == "timeline.update":
         fields = {f: payload[f] for f in ("fps_num", "fps_den")
                   if f in payload}
@@ -2726,6 +2735,14 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
             except KeyError:
                 raise CommandError(404, "revision not found") from None
             audit["after"]["reverted_to"] = int(payload["to_revision"])
+        elif command_type in ("timeline.undo", "timeline.redo"):
+            try:
+                entry = (tld.undo_timeline(session, t, command_id=command.id)
+                         if command_type == "timeline.undo"
+                         else tld.redo_timeline(session, t, command_id=command.id))
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+            audit["after"][f"{command_type[9:]}ed_revision"] = entry["rev"]
         elif command_type in ("timeline.clip.insert",
                               "timeline.clip.place"):
             clip = tld.insert_clip(

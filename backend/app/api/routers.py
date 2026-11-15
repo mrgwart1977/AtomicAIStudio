@@ -1289,6 +1289,9 @@ def get_timeline(timeline_id: str,
     prog = tld.program_end_frac(db, tl)
     d["total_duration_s"] = round(
         float(prog * tld.Fraction(tl.fps_den, tl.fps_num)), 6)
+    # N1-E — undo/redo availability + human-readable tips for the UI
+    d["undo_label"] = (tld.undo_tip(tl) or {}).get("label")
+    d["redo_label"] = (tld.redo_tip(tl) or {}).get("label")
     return d
 
 

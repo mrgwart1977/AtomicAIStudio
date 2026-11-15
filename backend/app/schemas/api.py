@@ -113,6 +113,7 @@ CommandType = Literal[
     "cloud.live.validate_arm", "cloud.live.validate_run",
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
+    "timeline.undo", "timeline.redo",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
     "timeline.track.add", "timeline.track.update",
@@ -683,6 +684,8 @@ class TimelineDetailOut(TimelineOut):
     clips: list[TimelineClipOut]
     tracks: list[TimelineTrackOut] = []
     total_duration_s: float
+    undo_label: str | None = None
+    redo_label: str | None = None
 
 
 class TimelineRevisionOut(BaseModel):

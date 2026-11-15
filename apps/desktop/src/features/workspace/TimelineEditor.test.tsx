@@ -34,6 +34,7 @@ const DETAIL = (over: Partial<TimelineDetail> = {}): TimelineDetail => ({
   tracks: [TRACK("v1")],
   clips: [CLIP("c0"), CLIP("c1", { start_frames: 72 })],
   total_duration_s: 6,
+  undo_label: null, redo_label: null,
   ...over,
 });
 
@@ -481,5 +482,68 @@ describe("TimelineEditor", () => {
     fireEvent.pointerMove(window, { clientX: 200, clientY: 10 });
     fireEvent.pointerUp(window, { clientX: 200, clientY: 10 });
     expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("undo/redo buttons fire the commands with the timeline pin", async () => {
+    setup(DETAIL({
+      undo_label: "Trim clip", redo_label: null, revision: 9 }));
+    const undo = screen.getByTestId("undo-btn");
+    const redo = screen.getByTestId("redo-btn");
+    expect(redo).toHaveProperty("disabled", true);
+    fireEvent.click(undo);
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.undo", expect.objectContaining({
+        timeline_id: "t",
+        expected_timeline: expect.objectContaining({ revision: 9 }),
+      })));
+  });
+
+  it("undo is disabled when the stack is empty", () => {
+    setup(DETAIL({ undo_label: null }));
+    expect(screen.getByTestId("undo-btn")).toHaveProperty("disabled", true);
+  });
+
+  it("Ctrl+Z undoes and Ctrl+Shift+Z / Ctrl+Y redoes", async () => {
+    setup(DETAIL({ undo_label: "x", redo_label: "y" }));
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.undo", expect.anything()));
+    fireEvent.keyDown(window, { key: "Z", ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.redo", expect.anything()));
+    fireEvent.keyDown(window, { key: "y", ctrlKey: true });
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(3));
+  });
+
+  it("Ctrl+Z inside a text field does NOT undo", async () => {
+    setup(DETAIL({ undo_label: "x" }));
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    fireEvent.keyDown(input, { key: "z", ctrlKey: true });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(onRun).not.toHaveBeenCalled();
+    input.remove();
+  });
+
+  it("viewport culling mounts only clips in the scrolled window", () => {
+    // 300 clips × 72f each = 21600f; ppf 6 → 129 600px content — far
+    // wider than any viewport. jsdom reports clientWidth 0, so the
+    // first mount renders everything; after a fake scroll the window
+    // collapses to the visible range.
+    const clips = Array.from({ length: 300 }, (_, i) =>
+      CLIP(`c${i}`, { start_frames: i * 72 }));
+    const { container } = setup(DETAIL({ clips }));
+    expect(container.querySelectorAll("[data-testid='lane-clip']")
+      .length).toBe(300);
+    const scroller = screen.getByTestId("timeline-scroll");
+    Object.defineProperty(scroller, "clientWidth",
+      { value: 1200, configurable: true });
+    Object.defineProperty(scroller, "scrollLeft",
+      { value: 60_000, writable: true, configurable: true });
+    fireEvent.scroll(scroller);
+    const mounted = container.querySelectorAll(
+      "[data-testid='lane-clip']").length;
+    expect(mounted).toBeLessThan(300);
+    expect(mounted).toBeGreaterThan(0);
   });
 });

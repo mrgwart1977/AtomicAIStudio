@@ -1002,6 +1002,8 @@ export interface TimelineDetail extends Timeline {
   clips: TimelineClip[];
   tracks: TimelineTrack[];
   total_duration_s: number;
+  undo_label: string | null;
+  redo_label: string | null;
 }
 
 export interface TimelineRevision {
