@@ -1,4 +1,5 @@
 import { apiFetch } from "./client";
+import { useApp } from "../stores/appStore";
 import type { CommitResult, CommandProposal } from "./types";
 
 /** Single entry point for ALL project mutations — the Unified Creative
@@ -10,17 +11,25 @@ export async function commitCommand(
   payload: Record<string, unknown>,
   origin = "ui",
 ): Promise<CommitResult> {
-  return apiFetch<CommitResult>(`/api/projects/${projectId}/commands/commit`, {
-    method: "POST",
-    body: JSON.stringify({
-      command_type: commandType,
-      payload,
-      scope: "project",
-      origin,
-      expected_revision: revision,
-      idempotency_key: `${commandType}-${crypto.randomUUID()}`,
-    }),
-  });
+  const r = await apiFetch<CommitResult>(
+    `/api/projects/${projectId}/commands/commit`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        command_type: commandType,
+        payload,
+        scope: "project",
+        origin,
+        expected_revision: revision,
+        idempotency_key: `${commandType}-${crypto.randomUUID()}`,
+      }),
+    },
+  );
+  // Feed the post-commit revision into the store — a handler issuing
+  // sequential commits must pin the next one against it (without this,
+  // the second commit deterministically 422s on a stale pin).
+  useApp.getState().applyCommitRevision(projectId, r.revision);
+  return r;
 }
 
 export async function previewCommand(

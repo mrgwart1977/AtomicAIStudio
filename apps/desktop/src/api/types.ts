@@ -755,6 +755,15 @@ export type AvailabilityClass =
   | "installed_operational" | "installed_limited"
   | "installable" | "planned" | "blocked";
 
+/** S-C5 — machine-readable cause behind an availability class; null when
+ * nothing adverse applies. Keeps "blocked" honest instead of lumping
+ * license/download/runtime gaps under a hardware failure. */
+export type AvailabilityReason =
+  | "missing_runtime" | "missing_model_files"
+  | "license_restricted" | "download_unavailable"
+  | "hardware_incompatible" | "hardware_limited"
+  | "compatibility_unknown" | "planned";
+
 export interface RuntimeFlavorState {
   flavor: string;
   backend_available: boolean;
@@ -797,6 +806,7 @@ export interface BenchmarkResult {
 
 export interface CompatModelEntry extends ModelCatalogEntry {
   availability: AvailabilityClass;
+  availability_reason: AvailabilityReason | null;
   runtime: { key: string; known: boolean; installed_flavors: string[];
              flavors: { flavor: string; installed: boolean; operational: boolean; backend_available: boolean }[];
              any_operational: boolean; planned: boolean };
@@ -835,6 +845,7 @@ export interface ModelPreflight {
   requires_explicit_approval: boolean;
   auto_download: boolean;
   installable: boolean;
+  availability_reason: AvailabilityReason | null;
 }
 
 export interface ValidationCheck {
@@ -850,6 +861,7 @@ export interface ModelValidation {
   ran_inference: boolean;
   verify_hashes: boolean;
   checks: ValidationCheck[];
+  summary: { blocking: number; warning: number; info: number };
   ok: boolean;
 }
 

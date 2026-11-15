@@ -226,6 +226,38 @@ jobs:
           if (-not ((Test-Path "$ff/ffmpeg.exe") -and (Test-Path "$ff/ffprobe.exe"))) {
             throw "frozen build missing bundled ffmpeg/ffprobe"
           }
+      - name: Smoke frozen backend (fail closed — catches missing prod deps)
+        shell: pwsh
+        run: |
+          $d = New-Item -ItemType Directory -Force "$env:TEMP\atomic-smoke-$PID"
+          $err = "$d\err.log"
+          $p = Start-Process "backend/dist/atomic-backend/atomic-backend.exe" `
+            -ArgumentList "--port 8899 --token smoketok --data-dir `"$d`"" `
+            -PassThru -RedirectStandardError $err -RedirectStandardOutput "$d\out.log"
+          $ok = $false
+          for ($i = 0; $i -lt 90 -and -not $p.HasExited; $i++) {
+            try {
+              $h = Invoke-RestMethod "http://127.0.0.1:8899/health" -TimeoutSec 3
+              if ($h) { $ok = $true; break }
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          $compat = $false
+          if ($ok) {
+            try {
+              $r = Invoke-RestMethod "http://127.0.0.1:8899/api/compatibility" `
+                -Headers @{ 'X-Atomic-Token' = 'smoketok' } -TimeoutSec 15
+              if ($r.models.Count -gt 0) { $compat = $true }
+            } catch {}
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) {
+            Write-Output "----- frozen backend stderr -----"
+            Get-Content $err -Tail 50 -ErrorAction SilentlyContinue
+            throw "frozen backend failed its /health check — see stderr above"
+          }
+          if (-not $compat) {
+            throw "frozen backend healthy but /api/compatibility empty — adapter registry incomplete"
+          }
       - name: Stage sidecar into Tauri bundle dir
         shell: pwsh
         run: |

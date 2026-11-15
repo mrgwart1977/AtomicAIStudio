@@ -312,8 +312,9 @@ MODELS: dict[str, ModelSpec] = {
         },
         files=(ModelFile(
             name="sd_xl_base_1.0.safetensors",
-            size_bytes=6_940_000_000,
+            size_bytes=6_938_078_334,  # verified via HF tree API (lfs oid)
             url="https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+            sha256="31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b",
         ),),
         requirements={
             "min_vram_bytes": 8 * GIB,
@@ -352,8 +353,9 @@ MODELS: dict[str, ModelSpec] = {
         },
         files=(ModelFile(
             name="sd_xl_turbo_1.0_fp16.safetensors",
-            size_bytes=6_940_000_000,
+            size_bytes=6_938_081_905,  # verified via HF tree API (lfs oid)
             url="https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
+            sha256="e869ac7d6942cb327d68d5ed83a40447aadf20e0c3358d98b2cc9e270db0da26",
         ),),
         requirements={
             "min_vram_bytes": 8 * GIB,
@@ -559,6 +561,9 @@ MODELS: dict[str, ModelSpec] = {
             "frames": {"min": 1, "max": 129, "default": 33,
                        "presets": [17, 33, 49, 81]},  # 4k+1 temporal stride
             "fps": {"options": [16, 24], "default": 24},
+            # Derived from the declared frame range ÷ fps options
+            # (129f @ 16fps ≈ 8.1s ceiling; 33f @ 24fps ≈ 1.4s typical).
+            "durations_s": {"min": 1, "max": 8},
             "steps": {"min": 1, "max": 50, "default": 30},
             "cfg": {"min": 1.0, "max": 15.0, "default": 6.0},
             "samplers": ["euler"],

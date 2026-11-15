@@ -310,8 +310,13 @@ def test_verify_model_file_checks(tmp_path):
     short.write_bytes(b"GGUF" + b"\x00" * 64)
     ok, why = model_files.verify_model_file(short, spec)
     assert not ok and "sha256" in why
-    # no-hash spec: falls back to size + magic
-    spec2 = model_catalog.get("sdxl.base")  # safetensors, no published sha256
+    # no-hash spec: falls back to size + magic. Every catalog file now
+    # carries a verified sha256, so build a synthetic hash-less variant
+    # of sdxl.base rather than depending on a catalog entry staying
+    # unpinned.
+    from dataclasses import replace
+    spec2 = model_catalog.get("sdxl.base")
+    spec2 = replace(spec2, files=(replace(spec2.files[0], sha256=None),))
     assert not spec2.files[0].sha256
     short2 = tmp_path / spec2.files[0].name
     short2.write_bytes(b"\x10\x00\x00\x00\x00\x00\x00\x00{}" + b"\x00" * 64)

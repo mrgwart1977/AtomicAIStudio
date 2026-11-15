@@ -38,6 +38,49 @@ AVAILABILITY_CLASSES = (
     "blocked",
 )
 
+# Machine-readable cause behind an availability class — the UI must be
+# able to say WHY a model is blocked or limited instead of lumping every
+# gap under a hardware failure. None = nothing to explain (operational,
+# or a clean compatible install candidate).
+AVAILABILITY_REASONS = (
+    "missing_runtime",        # installed, but no operational runtime binary
+    "missing_model_files",    # install row claims installed but weights absent
+    "license_restricted",     # non-commercial / restricted license
+    "download_unavailable",   # no verified downloadable artifact declared
+    "hardware_incompatible",  # requirements exceed this machine
+    "hardware_limited",       # fits with limitations (slow / tight / reduced)
+    "compatibility_unknown",  # hardware present but unmeasurable
+    "planned",                # future milestone — never installable
+)
+
+_STATUS_REASON = {
+    "restricted": "license_restricted",
+    "unavailable": "download_unavailable",
+    "unsupported": "hardware_incompatible",
+    "limited": "hardware_limited",
+    "unknown": "compatibility_unknown",
+    "planned": "planned",
+}
+
+
+def availability_reason(spec: ModelSpec, compat: dict, install: dict,
+                        runtime_ok: bool | None = None) -> str | None:
+    """The machine-readable cause behind availability_class(). Returns
+    None when there is nothing adverse to explain."""
+    status = compat.get("status") or "unknown"
+    installed = install.get("status") == "installed"
+    if status == "planned":
+        return "planned"
+    if installed:
+        if status == "compatible":
+            return "missing_runtime" if runtime_ok is False else None
+        # A missing runtime is the more actionable explanation than the
+        # hardware verdict when both apply.
+        if runtime_ok is False:
+            return "missing_runtime"
+        return _STATUS_REASON.get(status, "compatibility_unknown")
+    return _STATUS_REASON.get(status)
+
 
 def _runtime_state(session: Session, settings) -> dict[str, dict]:
     """All runtime flavors keyed by '<runtime_key>-<flavor>' with install
@@ -142,6 +185,8 @@ def _model_entry(session: Session, settings, spec: ModelSpec, hw: dict,
         "compatibility": compat,
         "availability": availability_class(spec, compat, install,
                                            runtime_ok=runtime_ok),
+        "availability_reason": availability_reason(spec, compat, install,
+                                                   runtime_ok=runtime_ok),
         "install": install,
         "runtime": {
             "key": spec.runtime_key,
@@ -272,6 +317,9 @@ def preflight(session: Session, settings, spec: ModelSpec, hw: dict) -> dict:
         "installable": availability_class(spec, compat,
                                           installs.get(spec.key)
                                           or {"status": "not_installed"}) == "installable",
+        "availability_reason": availability_reason(
+            spec, compat,
+            installs.get(spec.key) or {"status": "not_installed"}),
     }
 
 
@@ -279,10 +327,15 @@ def preflight(session: Session, settings, spec: ModelSpec, hw: dict) -> dict:
 
 def _check(name: str, ok: bool | None, detail: str,
            severity: str | None = None) -> dict:
-    """ok True/False/None(=skipped); severity only when ok is False."""
+    """ok True/False/None(=skipped); severity only when ok is False.
+
+    Severity bands: "blocking" fails the report rollup (security,
+    integrity, and missing required components); "warning" and "info"
+    surface findings without failing the rollup (advisory concerns,
+    honest unavailability, optional gaps)."""
     out = {"name": name, "ok": ok, "detail": detail}
     if ok is False:
-        out["severity"] = severity or "error"
+        out["severity"] = severity or "blocking"
     return out
 
 
@@ -296,6 +349,10 @@ def validate_model(session: Session, settings, spec: ModelSpec,
     checks: list[dict] = []
 
     # --- catalog metadata completeness --------------------------------
+    # Identity fields are integrity-relevant — a model that cannot name
+    # itself, its version, or its license must not be presented as
+    # trustworthy. Missing artifact pins are a different question (that
+    # is honest "download unavailable", checked separately below).
     missing = []
     if not spec.display_name:
         missing.append("display_name")
@@ -303,14 +360,33 @@ def validate_model(session: Session, settings, spec: ModelSpec,
         missing.append("version")
     if not (spec.license or {}).get("name"):
         missing.append("license.name")
-    if spec.support != "planned" and not spec.files:
-        missing.append("files")
     if spec.support != "planned" and not spec.requirements:
         missing.append("requirements")
     checks.append(_check(
         "catalog_metadata", not missing,
         "catalog entry complete" if not missing
         else f"catalog entry missing: {', '.join(missing)}"))
+
+    # --- artifact pin ---------------------------------------------------
+    # No pinned files = no verifiable download exists in this build. That
+    # is honest unavailability, not a catalog defect — warning, surfaced
+    # to the UI as "download_unavailable" via availability_reason.
+    if spec.support == "planned":
+        checks.append(_check("artifact_pin", None,
+                             "planned model — no artifact expected"))
+    elif not spec.files:
+        checks.append(_check(
+            "artifact_pin", False,
+            "no downloadable artifact pinned — install unavailable "
+            "until a verified artifact is cataloged",
+            severity="warning"))
+    else:
+        pinned = [f.name for f in spec.files if f.sha256]
+        checks.append(_check(
+            "artifact_pin", True,
+            f"{len(spec.files)} artifact(s) pinned"
+            + (f" ({len(pinned)} with checksums)" if pinned else
+               " (no published checksums — size+magic verification only)")))
 
     # --- runtime availability -----------------------------------------
     rt_spec = model_catalog.get_runtime(spec.runtime_key)
@@ -473,12 +549,20 @@ def validate_model(session: Session, settings, spec: ModelSpec,
         checks.append(_check("driver_runtime", None,
                              "no runtime flavor installed to check"))
 
+    failed = [c for c in checks if c["ok"] is False]
     return {
         "model_key": spec.key,
         "read_only": True,
         "ran_inference": False,
         "verify_hashes": verify_hashes,
         "checks": checks,
-        "ok": all(c["ok"] is not False or c.get("severity") == "warning"
-                  for c in checks),
+        "summary": {
+            "blocking": sum(1 for c in failed
+                            if c.get("severity") == "blocking"),
+            "warning": sum(1 for c in failed
+                           if c.get("severity") == "warning"),
+            "info": sum(1 for c in failed
+                        if c.get("severity") == "info"),
+        },
+        "ok": all(c.get("severity") != "blocking" for c in failed),
     }
