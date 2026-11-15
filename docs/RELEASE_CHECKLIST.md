@@ -408,7 +408,7 @@ Classification legend: **[auto]** verified automated test ·
 - All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
 - **N1 is development-complete; this is not production release readiness.**
 
-### N2 milestone note (audio editing — N2-A in review, N2-B..F not started)
+### N2 milestone note (audio editing — N2-A merged, N2-B in review, N2-C..F not started)
 
 - N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
 - Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
@@ -418,6 +418,9 @@ Classification legend: **[auto]** verified automated test ·
 - Undo/redo across audio clips with stable clip identity — **[auto]** + **[installed]**
 - Mixed 44.1 kHz / 48 kHz sources, sample↔timeline rational conversion — **[auto]**
 - Audio-lane rendering/mixing in export — **[blocked]** by design until N2-E; currently refuses visibly populated audio lanes (never silently drops)
-- Waveform display, gain/automation, fades, crossfades, mute/solo mixing, audio preview — **[notrun]** N2-B..N2-F scope, not implemented
-- Human audio-edit UX feel, drag on audio lanes — **[human]**
+- **N2-B waveform envelopes:** `asset.waveform` durable job → streaming decode → deterministic min/max LOD levels in CAS pinned to source sha — **[auto]** + **[installed]** (9/9, `docs/n2b-evidence/`; rerun skips; stale-version manifest → honest 409)
+- Waveform canvas inside audio `LaneClip`s — viewport-culled, zoom-aware LOD switching, loading/missing/error+retry states, pointer-transparent — **[auto]** + **[installed]**
+- Waveform perf — `[auto]` bench (`backend/bench_waveform.py`): 5 min build 1.5 s; 1 h 12.9 s / 5.7 MB blob / 57 MB peak; 3 h 36.3 s / 4.3 MB blob / 43 MB peak (bucket-capped); UI scroll ~49 fps / 4 MB heap on a 30 s clip
+- Gain/automation, fades, crossfades, mute/solo mixing, audio preview — **[notrun]** N2-C..N2-F scope, not implemented
+- Human audio-edit UX feel, drag on audio lanes — **[human]**; waveform accuracy vs a known-good editor — **[human]**
 - All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.

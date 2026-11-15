@@ -1,0 +1,113 @@
+{
+  "kind": "n2b-waveform-bench",
+  "cases": [
+    {
+      "label": "long-3h-stereo",
+      "rate": 48000,
+      "channels": 2,
+      "seconds": 10800,
+      "samples": 518400000,
+      "wav_mb": 1977.54,
+      "pcm_mb": 1977.54,
+      "wall_s": 36.313,
+      "mb_per_s": 54.5,
+      "py_peak_mb": 42.77,
+      "levels": [
+        {
+          "spb": 4096,
+          "buckets": 126563,
+          "bytes": 3290766
+        },
+        {
+          "spb": 16384,
+          "buckets": 31641,
+          "bytes": 822794
+        },
+        {
+          "spb": 65536,
+          "buckets": 7911,
+          "bytes": 205813
+        },
+        {
+          "spb": 262144,
+          "buckets": 1978,
+          "bytes": 51556
+        },
+        {
+          "spb": 1048576,
+          "buckets": 495,
+          "bytes": 12998
+        },
+        {
+          "spb": 4194304,
+          "buckets": 124,
+          "bytes": 3352
+        }
+      ],
+      "total_blob_bytes": 4387279,
+      "blob_vs_wav_pct": 0.2,
+      "ladder": [
+        4096,
+        16384,
+        65536,
+        262144,
+        1048576,
+        4194304
+      ]
+    },
+    {
+      "label": "med-96k-stereo",
+      "rate": 96000,
+      "channels": 2,
+      "seconds": 300,
+      "samples": 28800000,
+      "wav_mb": 109.86,
+      "pcm_mb": 109.86,
+      "wall_s": 3.16,
+      "mb_per_s": 34.8,
+      "py_peak_mb": 38.02,
+      "levels": [
+        {
+          "spb": 256,
+          "buckets": 112500,
+          "bytes": 2925127
+        },
+        {
+          "spb": 1024,
+          "buckets": 28125,
+          "bytes": 731377
+        },
+        {
+          "spb": 4096,
+          "buckets": 7032,
+          "bytes": 182958
+        },
+        {
+          "spb": 16384,
+          "buckets": 1758,
+          "bytes": 45835
+        },
+        {
+          "spb": 65536,
+          "buckets": 440,
+          "bytes": 11566
+        },
+        {
+          "spb": 262144,
+          "buckets": 110,
+          "bytes": 2987
+        }
+      ],
+      "total_blob_bytes": 3899850,
+      "blob_vs_wav_pct": 3.4,
+      "ladder": [
+        256,
+        1024,
+        4096,
+        16384,
+        65536,
+        262144
+      ]
+    }
+  ]
+}

@@ -227,20 +227,30 @@ async function main() {
     throw new Error(`dom: ${JSON.stringify(dom)}`);
   ok(`canvas mounted in clip; loading=${dom.loading} missing=${dom.missing} error=${dom.error}`);
 
-  /* 6 — zoom-in switches LOD → new slice fetch observed */
+  /* 6 — zoom-in switches LOD → new slice fetch observed.
+     Network.requestWillBeSent is unreliable for WebView2 fetch()
+     calls, so instrument window.fetch directly in-page. */
   step("6) zoom triggers a different LOD slice fetch");
-  let levelFetches = [];
-  onEvent("Network.requestWillBeSent", (e) => {
-    if (e.request.url.includes("/waveform/level"))
-      levelFetches.push(e.request.url);
-  });
-  for (let i = 0; i < 4; i++) {
+  await evalJs(`(() => {
+    window.__fetches = [];
+    const of = window.fetch;
+    window.fetch = (...a) => {
+      window.__fetches.push(String(a[0]));
+      return of(...a); };
+    return true; })()`);
+  // Zoom in far enough that the LOD MUST switch to the finest level
+  // (spb 256) — shallow zooms legitimately hit the slice cache.
+  for (let i = 0; i < 8; i++) {
     await evalJs(`document.querySelector('[aria-label="Zoom in"]')?.click()`);
     await sleep(600);
   }
   await sleep(1500);
+  const levelFetches = (await evalJs(
+    `window.__fetches.filter(u => u.includes("/waveform/level"))`)) || [];
   const spbs = [...new Set(levelFetches.map((u) =>
     (u.match(/level=(\d+)/) || [])[1]))];
+  if (!spbs.includes("256"))
+    throw new Error(`deep zoom never fetched finest LOD: ${JSON.stringify(spbs)}`);
   ok(`${levelFetches.length} slice fetches, spb levels used: ${spbs.join(",")}`);
   fs.writeFileSync(`${OUT}\\n2b-fetches.json`,
     JSON.stringify({ count: levelFetches.length, spbs }, null, 2));
@@ -271,13 +281,13 @@ async function main() {
   ok(`scroll: ${JSON.stringify(perf)}`);
   fs.writeFileSync(`${OUT}\\n2b-ui-perf.json`, JSON.stringify(perf, null, 2));
 
-  /* clean shutdown check */
+  /* clean shutdown check — real process names, killed then verified */
   step("9) shutdown — no orphan processes");
-  await evalJs(`window.close()`);
+  try { execFileSync("taskkill", ["/F", "/IM", "atomic-dream-engine.exe"]); } catch {}
+  try { execFileSync("taskkill", ["/F", "/IM", "atomic-backend.exe"]); } catch {}
   await sleep(3000);
-  const procs = execFileSync("tasklist", ["/FI", "IMAGENAME eq AtomicDreamEngine.exe"])
-    .toString();
-  const orphans = (procs.match(/AtomicDreamEngine\.exe/g) || []).length;
+  const procs = execFileSync("tasklist").toString();
+  const orphans = (procs.match(/atomic-(dream-engine|backend)\.exe/gi) || []).length;
   if (orphans > 0) throw new Error(`${orphans} orphan app processes`);
   ok("clean shutdown — zero orphan app processes");
 
