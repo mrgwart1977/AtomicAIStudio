@@ -66,6 +66,8 @@ def test_undo_redo_clip_remove_roundtrip(client):
     _undo(client, pid, t["id"])
     d = _detail(client, pid, t["id"])
     assert len(d["clips"]) == 2
+    # stable identity: the removed clip returns with its ORIGINAL id
+    assert clip["id"] in {c["id"] for c in d["clips"]}
     assert d["redo_label"]  # the removed state is redoable
     _redo(client, pid, t["id"])
     assert len(_detail(client, pid, t["id"])["clips"]) == 1
@@ -230,11 +232,10 @@ def test_undo_preserves_edl_determinism(client):
             {"timeline_id": t["id"], "clip_id": clip["id"]})
     _undo(client, pid, t["id"])
     after = _detail(client, pid, t["id"])
-    # same edit state — restored clip rows carry fresh ids (snapshots
-    # recreate rows), so compare the layout-relevant fields that an
-    # EDL v2 actually keys on
+    # stable identity: restored rows keep their ORIGINAL clip ids, so
+    # the full layout — ids, timing, source pins, provenance — is equal
     shape = lambda d: sorted(
-        (c["track_id"], c["start_frames"], c["in_frame"],
+        (c["id"], c["track_id"], c["start_frames"], c["in_frame"],
          c["out_frame"], c["source_sha256"], c.get("shot_id"),
          c.get("scene_id")) for c in d["clips"])
     assert shape(after) == shape(before)
@@ -264,3 +265,161 @@ def test_undo_cross_project_isolation(client):
     r = _undo(client, p2["id"], t1["id"], expect=404)
     d = _detail(client, p1["id"], t1["id"])
     assert d["undo_label"] is not None  # still undoable from p1
+
+
+# ---------- §2 — remaining edit surfaces ----------
+
+def test_undo_after_gap_insert_and_close(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1 = _detail(client, pid, t["id"])["tracks"][0]["id"]
+    _insert(client, pid, t["id"], _video(client, pid, "g1.mp4"))
+    _insert(client, pid, t["id"], _video(client, pid, "g2.mp4"))
+    before = _detail(client, pid, t["id"])
+    _commit(client, pid, "timeline.gap.insert",
+            {"timeline_id": t["id"], "track_id": v1,
+             "at_frame": 72, "frames": 24})
+    d = _detail(client, pid, t["id"])
+    assert any(g["start"] == 72 and g["frames"] == 24
+               for g in d.get("gaps", []) if isinstance(g, dict)) or \
+        [c["start_frames"] for c in sorted(
+            d["clips"], key=lambda c: c["start_frames"])] == [0, 96]
+    _undo(client, pid, t["id"])
+    assert [c["start_frames"] for c in _detail(
+        client, pid, t["id"])["clips"]] == \
+        [c["start_frames"] for c in before["clips"]]
+
+
+def test_undo_after_gap_close(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    v1 = _detail(client, pid, t["id"])["tracks"][0]["id"]
+    _insert(client, pid, t["id"], _video(client, pid, "g3.mp4"))
+    _insert(client, pid, t["id"], _video(client, pid, "g4.mp4"))
+    _commit(client, pid, "timeline.gap.insert",
+            {"timeline_id": t["id"], "track_id": v1,
+             "at_frame": 72, "frames": 24})
+    starts_gapped = sorted(c["start_frames"] for c in
+                           _detail(client, pid, t["id"])["clips"])
+    _commit(client, pid, "timeline.gap.close",
+            {"timeline_id": t["id"], "track_id": v1, "at_frame": 80})
+    _undo(client, pid, t["id"])
+    assert sorted(c["start_frames"] for c in
+                  _detail(client, pid, t["id"])["clips"]) == starts_gapped
+
+
+def test_undo_after_track_update_visibility_lock_mute(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    tr = _track(client, pid, t["id"], "overlay")
+    orig = next(x for x in _detail(client, pid, t["id"])["tracks"]
+                if x["id"] == tr["id"])
+    for field, val in (("visible", False), ("locked", True),
+                       ("muted", True)):
+        _commit(client, pid, "timeline.track.update",
+                {"timeline_id": t["id"], "track_id": tr["id"],
+                 field: val})
+        _undo(client, pid, t["id"])
+        got = next(x for x in _detail(client, pid, t["id"])["tracks"]
+                   if x["id"] == tr["id"])
+        assert got[field] == orig[field]
+
+
+def test_undo_after_clip_move_across_lanes(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    tr = _track(client, pid, t["id"], "overlay")
+    _insert(client, pid, t["id"], _video(client, pid, "mv.mp4"))
+    c0 = _detail(client, pid, t["id"])["clips"][0]
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": t["id"], "clip_id": c0["id"],
+             "to_track_id": tr["id"], "start_frames": 24})
+    _undo(client, pid, t["id"])
+    c = _detail(client, pid, t["id"])["clips"][0]
+    assert c["id"] == c0["id"] and c["track_id"] == c0["track_id"]
+    assert c["start_frames"] == c0["start_frames"]
+
+
+# ---------- §6 — export correctness after undo/redo ----------
+
+def _edl(client, pid, tid, version=2):
+    from tests.test_n1a_tracks import _edl as _e
+    return _e(client, pid, tid, version)
+
+
+def _strip_rev(edl):
+    return {k: v for k, v in edl.items() if k != "revision"}
+
+
+def test_undo_split_restores_edl_document(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid, "s.mp4"))
+    edl_before = _edl(client, pid, t["id"], version=1)
+    c0 = _detail(client, pid, t["id"])["clips"][0]
+    _split(client, pid, t["id"], c0["id"], 30)
+    _undo(client, pid, t["id"])
+    edl_after = _edl(client, pid, t["id"], version=1)
+    # the undoable document is identical modulo the revision counter —
+    # INCLUDING clip ids (stable-identity restore)
+    assert _strip_rev(edl_after) == _strip_rev(edl_before)
+
+
+def test_undo_ripple_delete_restores_composite_pin(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    o1 = _track(client, pid, t["id"], kind="overlay", name="O1")
+    _insert(client, pid, t["id"], _video(client, pid, "r1.mp4"))
+    _insert(client, pid, t["id"], _video(client, pid, "r2.mp4"))
+    _commit(client, pid, "timeline.clip.place",
+            {"timeline_id": t["id"], "track_id": o1["id"],
+             "asset_id": _video(client, pid, "r3.mp4")["id"],
+             "start_frames": 12})
+    edl_before = _edl(client, pid, t["id"])
+    clip0 = sorted(_detail(client, pid, t["id"])["clips"],
+                   key=lambda c: c["start_frames"])[0]
+    _ripple_rm(client, pid, t["id"], clip0["id"])
+    _undo(client, pid, t["id"])
+    edl_after = _edl(client, pid, t["id"])
+    assert _strip_rev(edl_after) == _strip_rev(edl_before)
+
+
+def test_redo_trim_then_export_document_matches(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    _insert(client, pid, t["id"], _video(client, pid, "tr.mp4"))
+    c0 = _detail(client, pid, t["id"])["clips"][0]
+    _trim(client, pid, t["id"], c0["id"], "out_frame", 40)
+    edl_trimmed = _edl(client, pid, t["id"], version=1)
+    _undo(client, pid, t["id"])
+    _redo(client, pid, t["id"])
+    edl_redone = _edl(client, pid, t["id"], version=1)
+    assert _strip_rev(edl_redone) == _strip_rev(edl_trimmed)
+
+
+def test_undo_reorder_restores_composite_stack(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    o1 = _track(client, pid, t["id"], kind="overlay", name="O1")
+    _insert(client, pid, t["id"], _video(client, pid, "st.mp4"))
+    edl_before = _edl(client, pid, t["id"])
+    _commit(client, pid, "timeline.track.reorder",
+            {"timeline_id": t["id"], "track_id": o1["id"],
+             "to_position": 0})
+    _undo(client, pid, t["id"])
+    assert _strip_rev(_edl(client, pid, t["id"])) == \
+        _strip_rev(edl_before)
+
+
+def test_undo_hidden_restore_composite_document(client):
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    o1 = _track(client, pid, t["id"], kind="overlay", name="O1")
+    _insert(client, pid, t["id"], _video(client, pid, "h.mp4"))
+    edl_before = _edl(client, pid, t["id"])
+    _commit(client, pid, "timeline.track.update",
+            {"timeline_id": t["id"], "track_id": o1["id"],
+             "visible": False})
+    _undo(client, pid, t["id"])
+    assert _strip_rev(_edl(client, pid, t["id"])) == \
+        _strip_rev(edl_before)

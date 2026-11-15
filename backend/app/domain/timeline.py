@@ -242,6 +242,7 @@ def track_snapshot(t: TimelineTrack) -> dict[str, Any]:
 
 def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
     return {
+        "id": c.id,
         "track_id": c.track_id,
         "position": c.position,
         "start_frames": c.start_frames,
@@ -489,8 +490,18 @@ def _restore_snapshot(session: Session, tl: Timeline,
                 if f in st:
                     setattr(tr, f, st[f])
     session.flush()
-    session.execute(
-        delete(TimelineClip).where(TimelineClip.timeline_id == tl.id))
+    # N1-E — restore clips by STABLE IDENTITY, not delete-all/recreate:
+    # rows whose id is in the snapshot are updated in place, rows
+    # created after the snapshot are deleted, and deleted clips come
+    # back with their ORIGINAL ids (nothing external references clip
+    # ids, but stable ids keep EDL docs and audit trails continuous).
+    # Pre-N1-E snapshots carry no clip ids — every row is recreated.
+    live_clips = {c.id: c for c in list_clips(session, tl.id)}
+    snap_clips = snap.get("clips") or []
+    want_ids = {c["id"] for c in snap_clips if c.get("id")}
+    for cid, row in live_clips.items():
+        if cid not in want_ids:
+            session.delete(row)
     session.flush()
     if "tracks" in snap:
         # N1-A snapshot: restore the lane set exactly. Tracks absent
@@ -512,16 +523,15 @@ def _restore_snapshot(session: Session, tl: Timeline,
         session.add(default_lane)
         session.flush()
     acc = Fraction(0)  # legacy-snapshot repack (exact rational)
-    for i, c in enumerate(snap.get("clips") or []):
+    for i, c in enumerate(snap_clips):
         legacy = "start_frames" not in c
         start = (c.get("start_frames") if not legacy
                  else _ceil_frame(acc))
-        clip = TimelineClip(
-            id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
-            track_id=(default_lane.id if (legacy or not c.get("track_id"))
-                      and default_lane is not None else c.get("track_id")),
-            position=i,
-            start_frames=start,
+        track_id = (default_lane.id
+                    if (legacy or not c.get("track_id"))
+                    and default_lane is not None else c.get("track_id"))
+        fields = dict(
+            track_id=track_id, position=i, start_frames=start,
             source_asset_id=c["source_asset_id"],
             source_version_id=c["source_version_id"],
             source_sha256=c["source_sha256"],
@@ -530,7 +540,16 @@ def _restore_snapshot(session: Session, tl: Timeline,
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
             shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
-        session.add(clip)
+        row = live_clips.get(c.get("id")) if c.get("id") else None
+        if row is not None:
+            for k, v in fields.items():
+                setattr(row, k, v)
+            clip = row
+        else:
+            clip = TimelineClip(
+                id=c.get("id") or new_id(), project_id=tl.project_id,
+                timeline_id=tl.id, **fields)
+            session.add(clip)
         if legacy:
             acc = Fraction(start) + clip_tl_extent(clip, tl)
     session.flush()
