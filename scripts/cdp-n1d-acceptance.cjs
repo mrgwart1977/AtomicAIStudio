@@ -152,13 +152,13 @@ async function seed() {
   await commit(p.id, "timeline.clip.place",
     { timeline_id: tl.id, track_id: v1.id, asset_id: assets.base.id,
       start_frames: 0 });
-  // O1 overlay at position 0 (topmost lane): over.mp4 at frame 24.
+  // O1 overlay lane: over.mp4 at frame 24. (position model: 0 =
+  // bottom layer, higher composites on top — V1 stays pos 0 by
+  // default and O1 lands above it.)
   const o1r = await commit(p.id, "timeline.track.add",
     { timeline_id: tl.id, kind: "overlay", name: "O1" });
   const dd = await detail(p.id, tl.id);
   const o1 = dd.tracks.find((t) => t.name === "O1");
-  await commit(p.id, "timeline.track.reorder",
-    { timeline_id: tl.id, track_id: o1.id, to_position: 0 });
   await commit(p.id, "timeline.clip.place",
     { timeline_id: tl.id, track_id: o1.id, asset_id: assets.over.id,
       start_frames: 24 });
@@ -184,7 +184,7 @@ async function seed() {
     { timeline_id: tl.id, track_id: mut.id, muted: true });
   const n = (await detail(p.id, tl.id)).clips.length;
   if (n < 4) throw new Error(`timeline only has ${n} clips`);
-  ok(`timeline ${tl.id}: base@0 on V1, over@24 on O1(top), ghost on hidden, muted on muted`);
+  ok(`timeline ${tl.id}: base@0 on V1, over@24 on O1, ghost on hidden, muted on muted`);
   return { pid: p.id, tid: tl.id };
 }
 

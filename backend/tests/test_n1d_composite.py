@@ -53,15 +53,21 @@ def _trk(tid="o1", kind="overlay", pos=1, visible=True, muted=False):
 
 
 def test_plan_orders_bottom_to_top_and_hides_hidden():
-    """Overlay chain stacks position-descending: the lane rendered at
-    the top of the editor stack composites LAST (topmost picture)."""
+    """Stacking follows the documented model: position 0 = bottom
+    layer, higher positions composite on top — chain order is
+    position ASCENDING, hidden lanes excluded."""
     tracks = [_trk("o1", pos=0), _trk("v1", "video", 1),
               _trk("hid", pos=2, visible=False)]
-    clips = [_v2clip("top", "o1"), _v2clip("base", "v1"),
+    clips = [_v2clip("under", "o1"), _v2clip("over", "v1"),
              _v2clip("ghost", "hid")]
     plan = tx.composite_plan(_v2(clips, tracks), {})
-    # bottom (v1 @pos1) first, top (o1 @pos0) last; hidden lane absent.
-    assert [c["clip_id"] for c in plan["clips"]] == ["base", "top"]
+    # bottom (o1 @pos0) first, top (v1 @pos1) last; hidden absent.
+    assert [c["clip_id"] for c in plan["clips"]] == ["under", "over"]
+    # 3-lane stacking: positions 0→1→2 bottom→top.
+    t3 = [_trk("a", pos=0), _trk("b", pos=1), _trk("c", pos=2)]
+    c3 = [_v2clip("cb", "b"), _v2clip("cc", "c"), _v2clip("ca", "a")]
+    p3 = tx.composite_plan(_v2(c3, t3), {})
+    assert [c["clip_id"] for c in p3["clips"]] == ["ca", "cb", "cc"]
 
 
 def test_plan_exact_times_and_program_end():
@@ -117,8 +123,9 @@ def test_composite_argv_deterministic_and_shaped():
     assert "gte(n,24)*lt(n,48)" in fc      # top clip @24..48f
     assert "gte(n,0)*lt(n,48)" in fc       # base clip @0..48f
     # audio: only the unmuted audio-bearing clip mixes; silence base;
-    # start=0 needs no leading-silence concat.
-    assert "[0:a]atrim" in fc and "asetpts=PTS-STARTPTS[am0]" in fc
+    # start=0 needs no leading-silence concat. With position-ascending
+    # stacking the audio clip is input index 1.
+    assert "[1:a]atrim" in fc and "asetpts=PTS-STARTPTS[am0]" in fc
     assert "amix=inputs=2:duration=first:normalize=0" in fc
     assert "alimiter" in fc and "anullsrc" in fc
     # argv never goes through a shell — list of discrete args.

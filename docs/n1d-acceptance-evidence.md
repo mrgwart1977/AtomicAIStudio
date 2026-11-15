@@ -20,7 +20,7 @@ ffprobe. Nothing is reported on faith.
 
 | # | Check | Evidence |
 |---|-------|----------|
-| 1 | Seed: 4 real synthesized videos imported; 4-lane layout — base@0 V1, over@24 O1 (topmost), ghost on hidden lane, audio-bearing clip on muted lane | `media/`, API reads |
+| 1 | Seed: 4 real synthesized videos imported; 4-lane layout — base@0 V1 (pos 0), over@24 O1 (pos 1, composited on top per the documented position model), ghost on hidden lane, audio-bearing clip on muted lane | `media/`, API reads |
 | 2 | Composite badge: "Exports 3 lanes — composite" (hidden lane honestly excluded from the count) | `02-composite-badge.png` |
 | 3 | Export through the installed UI: profile select → preview shows "Export 4 clip(s) as 720p · EDL pinned b055a8bcd5…" → Start export → "Export queued" | `03-export-preview.png`, `03-export-started.png` |
 | 4 | Job `aa1b1cb7` succeeded; output asset probed: **h264, 1280×720, 48 frames exactly, 2.000s, aac audio** — program end = max(48 base, 24+24 over, hidden/muted clipped extents) | `output-probe.json` |

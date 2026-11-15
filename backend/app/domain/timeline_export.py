@@ -175,9 +175,11 @@ def h264_encoder(ffmpeg: str, runner) -> str:
 # - Only `visible` lanes contribute pixels; only lanes that are BOTH
 #   visible and unmuted contribute audio. Lanes holding no clips are
 #   inert (nothing is silently dropped — they simply have no frames).
-# - Lane stacking follows editor order: `position` ascending renders
-#   top-to-bottom in the lane stack, so the LOWEST position composites
-#   LAST (topmost picture). Chain order is position descending.
+# - Lane stacking follows the documented track model: `position` is
+#   the stack order — 0 is the BOTTOM layer, higher positions
+#   composite on top. Chain order is position ascending (bottom
+#   first). The editor draws position 0 highest on screen — it is
+#   the base layer, not the top picture.
 # - Each clip is scaled to FIT inside the canvas (aspect preserved)
 #   and centered; surrounding canvas pixels from lower lanes show
 #   through — there is no per-clip transform model yet, so nothing
@@ -232,8 +234,8 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
             "has_audio": bool((probes.get(c["clip_id"]) or {})
                               .get("audio")),
         })
-    # Bottom lane (highest position) first; same-lane ties by start.
-    out_clips.sort(key=lambda c: (-c["track_position"],
+    # Bottom lane (lowest position) first; same-lane ties by start.
+    out_clips.sort(key=lambda c: (c["track_position"],
                                   c["tl_start_s"], c["clip_id"]))
     return {"clips": out_clips, "program_frames": end_frames,
             "fps_num": tl_fps.numerator, "fps_den": tl_fps.denominator}
