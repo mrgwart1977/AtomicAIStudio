@@ -161,9 +161,11 @@ class AssetImportAdapter(_OpsBase):
                     output.setdefault("warnings", []).append(
                         f"media probe error: {exc}")
             # N2-A — audio imports probe the audio stream(s): sample
-            # rate, channels, layout, duration, sample count. A failed
-            # probe leaves the asset registered but unusable on audio
-            # lanes (same fail-closed stance as video).
+            # rate, channels, layout, duration, sample count — then a
+            # real decode check: a header ffprobe can parse is NOT proof
+            # the payload decodes (corrupt tail, codec without a
+            # decoder). Either failure leaves the asset registered but
+            # unusable on audio lanes (same fail-closed stance as video).
             elif output["kind"] == "audio":
                 try:
                     from app.domain.media import engine
@@ -171,6 +173,16 @@ class AssetImportAdapter(_OpsBase):
                         engine.probe_audio, out_path,
                         cancel=handle.cancel_event)
                     output["media"] = {"probe": info, "source": "import"}
+                    if info.get("ok"):
+                        dec = await asyncio.to_thread(
+                            engine.decode_check_audio, out_path,
+                            cancel=handle.cancel_event)
+                        info["decode"] = dec
+                        if not dec.get("ok"):
+                            info["ok"] = False
+                            info["reason"] = (
+                                dec.get("reason")
+                                or "audio stream does not decode")
                     if not info.get("ok"):
                         warn = ("audio probe failed — file registered "
                                 "but not usable as audio")

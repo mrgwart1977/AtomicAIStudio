@@ -1004,8 +1004,7 @@ def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
 #: lane's later clips move) or 'all' (every lane's later clips; a
 #: locked lane that would be affected refuses the whole op). 'all'
 #: treats lane kinds uniformly — video, overlay, and audio lanes all
-#: shift by the same integer timeline-frame delta (audio lanes can't
-#: hold clips yet, so today 'all' effectively spans video+overlay).
+#: shift by the same integer timeline-frame delta.
 RIPPLE_SCOPES = ("track", "all")
 
 
@@ -1357,10 +1356,15 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
                     "codec": probe.get("codec"),
                     # N2-A — audio sources carry stream identity so the
                     # document alone reveals rate/layout; null on video.
+                    # samples_exact distinguishes an exact container
+                    # count (duration_ts @ 1/rate — WAV/AIFF) from a
+                    # duration×rate estimate (compressed formats) —
+                    # never claim exactness we don't have.
                     "sample_rate": probe.get("sample_rate"),
                     "channels": probe.get("channels"),
                     "channel_layout": probe.get("channel_layout"),
                     "samples": probe.get("samples"),
+                    "samples_exact": probe.get("samples_exact"),
                 },
                 "shot_id": c.shot_id, "scene_id": c.scene_id,
             })

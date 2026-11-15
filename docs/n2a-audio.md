@@ -42,10 +42,34 @@ source-agnostic. An audio clip reuses every column:
 `engine.probe_audio()` (ffprobe on the CAS'd copy): requires ≥1 audio
 stream; stores `media_json.probe = {ok, codec, container,
 sample_rate, channels, channel_layout, duration_s, samples,
-probe_backend}`. `samples` = stream `duration_ts` when the stream
-time_base is 1/rate, else `round(duration_s × rate)` — documented as
-container-derived. Probe failure → asset registers with
+samples_exact, probe_backend}`. `samples` = stream `duration_ts` when
+the stream time_base is 1/rate, else `round(duration_s × rate)` —
+documented as container-derived. Probe failure → asset registers with
 `probe.ok=false` + warning (fail closed: unusable on timelines).
+
+After a passing probe the adapter runs `decode_check_audio`
+(`ffmpeg -xerror -map 0:a:0 -f null -`): a header ffprobe can parse is
+not proof the payload decodes (corrupt tail, codec with no decoder).
+Decode failure flips `probe.ok=false` with the decode reason and
+records `probe.decode` — registered in CAS, unusable on lanes.
+
+Precision contract (`samples_exact`):
+
+- **exact** — stream `duration_ts` in a 1/rate time_base (PCM in
+  WAV/AIFF): the trim bound equals the real sample count.
+- **derived** — `round(duration_s × rate)` (MP3/AAC/Opus/Vorbis):
+  container metadata, NOT a decoded count. Encoder delay and padding
+  (MP3 ≈1105+ samples, AAC/Opus priming), LAME/Xing gapless fields,
+  and rounded container durations can shift the true decodable length
+  by a few hundred samples. The value is deterministic and consistent
+  across sessions (same estimate every time) but it is an estimate —
+  `samples_exact=false` on the probe and in EDL v2 `source`. A trim
+  at the derived bound may land a few samples beyond the real
+  decodable content; occupancy/duration math stays exact against the
+  bound, and N2-E render must clamp to decoded length rather than
+  assume the bound is physically addressable.
+- **unknown** — no duration or rate ⇒ `probe.ok=false`, unusable.
+  Operations that need source bounds always require samples>0.
 
 Format matrix (decoders in the bundled LGPL ffmpeg build — decode
 only; no encoders claimed):

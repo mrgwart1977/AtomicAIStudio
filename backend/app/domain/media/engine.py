@@ -158,6 +158,40 @@ def probe_audio(path: Path, *, timeout_s: float = 30.0,
     }
 
 
+def decode_check_audio(path: Path, *, timeout_s: float = 120.0,
+                       cancel: threading.Event | None = None) -> dict[str, Any]:
+    """Full FIRST-audio-stream decode (``-map 0:a:0`` — the same stream
+    probe_audio reports). ``-xerror`` makes any decode error a nonzero
+    exit; header-parseable files with undecodable payloads fail here —
+    that's the difference between 'looks like audio' and usable audio."""
+    tool = binaries.ffmpeg()
+    if tool is None:
+        return {"ok": False, "ran": False, "reason": "ffmpeg unavailable"}
+    r = supervise.run(
+        [tool["path"], "-nostdin", "-v", "error", "-xerror",
+         "-i", str(path), "-map", "0:a:0", "-f", "null", "-"],
+        timeout_s=timeout_s, cancel=cancel)
+    out: dict[str, Any] = {
+        "ran": True, "exit": r["exit"], "elapsed_ms": r["elapsed_ms"],
+    }
+    if r["timed_out"]:
+        out.update(ok=False, reason="audio decode timed out")
+    elif r["cancelled"]:
+        out.update(ok=False, reason="audio decode cancelled",
+                   cancelled=True)
+    elif r["exit"] != 0:
+        tail = (r["output_tail"] or "").strip()
+        out.update(
+            ok=False,
+            reason=f"audio decode failed (exit {r['exit']}): "
+                   f"{tail[-300:]}" if tail
+            else f"audio decode failed (exit {r['exit']})")
+        out["stderr_tail"] = tail[-1000:]
+    else:
+        out["ok"] = True
+    return out
+
+
 def _stdout_json(text: str) -> str:
     """ffprobe JSON lands on stdout; supervise merges stderr — take the
     largest JSON-looking slice."""

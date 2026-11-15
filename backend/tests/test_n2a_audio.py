@@ -6,7 +6,7 @@ populated audio lanes refuse export until N2-E."""
 import pytest
 
 from tests.conftest import make_project, wait_for_job
-from tests.test_c4b_shot_generate import _commit, _rev
+from tests.test_c4b_shot_generate import _commit, _preview, _rev
 from tests.test_c5a_timeline import _video, _tl, _detail
 from tests.test_n1a_tracks import _track, _edl
 
@@ -443,3 +443,174 @@ def test_import_audio_invalid_file_fails_closed(client, tmp_path):
     r = _place(client, pid, t["id"], {"id": a["id"]}, a1["id"],
                expect=422)
     assert "rate/duration" in r.json()["detail"]
+
+
+# ---------- PR #127 review: unit safety + precision + import hardening
+
+def test_preview_matches_commit_on_kind_rule(client):
+    """Preview must surface the same lane↔asset refusal commit does —
+    no 'preview OK, commit 422' divergence."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    a1 = _atrack(client, pid, t["id"])
+    v1 = next(x for x in _detail(client, pid, t["id"])["tracks"]
+              if x["kind"] == "video")
+    au, vi = _audio(client, pid), _video(client, pid)
+    # place: video→audio and audio→video both refuse AT PREVIEW.
+    r = _preview(client, pid, "timeline.clip.place",
+                 {"timeline_id": t["id"], "asset_id": vi["id"],
+                  "track_id": a1["id"], "start_frames": 0}, expect=422)
+    assert "audio assets only" in r.json()["detail"]
+    r = _preview(client, pid, "timeline.clip.place",
+                 {"timeline_id": t["id"], "asset_id": au["id"],
+                  "track_id": v1["id"], "start_frames": 0}, expect=422)
+    assert "video assets only" in r.json()["detail"]
+    # place WITHOUT track_id defaults to the first video lane — an
+    # audio asset refuses at preview exactly as commit would.
+    r = _preview(client, pid, "timeline.clip.place",
+                 {"timeline_id": t["id"], "asset_id": au["id"],
+                  "start_frames": 0}, expect=422)
+    assert "video assets only" in r.json()["detail"]
+    # insert: same parity on the explicit-track branch.
+    r = _preview(client, pid, "timeline.clip.insert",
+                 {"timeline_id": t["id"], "asset_id": vi["id"],
+                  "track_id": a1["id"]}, expect=422)
+    assert "audio assets only" in r.json()["detail"]
+
+
+def test_audio_split_refuses_noninteger_sample_boundary(client):
+    """44.1 kHz on a 24 fps timeline: odd timeline-frame offsets map to
+    fractional samples (1 tl frame = 1837.5 samples) — the split must
+    refuse rather than cut mid-sample; even offsets are exact."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)  # default 24/1
+    a1 = _atrack(client, pid, t["id"])
+    _place(client, pid, t["id"], _audio(client, pid, rate=44100,
+                                        duration=1.0), a1["id"], at=0)
+    c = _detail(client, pid, t["id"])["clips"][0]
+    r = _commit(client, pid, "timeline.clip.split",
+                {"timeline_id": t["id"], "clip_id": c["id"],
+                 "at_frame": c["start_frames"] + 1}, expect=422)
+    assert "source frame" in r.json()["detail"].lower()
+    _commit(client, pid, "timeline.clip.split",
+            {"timeline_id": t["id"], "clip_id": c["id"],
+             "at_frame": c["start_frames"] + 2})
+    clips = _detail(client, pid, t["id"])["clips"]
+    frags = sorted(clips, key=lambda x: x["start_frames"])
+    assert len(frags) == 2
+    assert frags[0]["out_frame"] == 3675  # 2 tl frames × 1837.5 samples
+    assert frags[1]["in_frame"] == 3675
+
+
+def test_edl_v2_samples_exact_flag(client):
+    """EDL v2 must not overstate precision: exact sample counts flag
+    true, container-derived counts flag false/absent."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    a1 = _atrack(client, pid, t["id"])
+    a2 = _atrack(client, pid, t["id"], "A2")
+    _place(client, pid, t["id"], _audio(client, pid), a1["id"])
+    # A derived-count source (samples_exact absent/False).
+    au2 = _audio(client, pid, name="song.mp3", samples=105840,
+                 duration=2.4, rate=44100)
+    with client.app.state.session_factory() as s:
+        from app.db.models import AssetVersion
+        v = s.get(AssetVersion, au2["version_id"])
+        probe = dict(v.media_json["probe"],
+                     samples_exact=False, codec="mp3")
+        v.media_json = {**v.media_json, "probe": probe}
+        s.commit()
+    _place(client, pid, t["id"], au2, a2["id"], allow_duplicate=True)
+    d = _edl(client, pid, t["id"], version=2)
+    srcs = {c["source"]["codec"]: c["source"] for c in d["clips"]}
+    assert srcs["mp3"]["samples"] == 105840
+    assert srcs["mp3"]["samples_exact"] is False
+    # WAV stub carries no flag → null (unknown), never true.
+    assert srcs["pcm_s16le"]["samples_exact"] in (None, False)
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_import_audio_decode_failure_marks_unusable(client, tmp_path,
+                                                    monkeypatch):
+    """A file that probes clean but can't decode flips probe.ok=false —
+    registered in CAS, unusable on audio lanes."""
+    from app.domain.media import engine
+    pid = make_project(client)["id"]
+    p = _wav(tmp_path / "sneaky.wav", rate=48000, seconds=0.25)
+    monkeypatch.setattr(engine, "decode_check_audio",
+                        lambda *a, **k: {"ok": False, "ran": True,
+                                         "exit": 1,
+                                         "reason": "codec has no decoder"})
+    r = _commit(client, pid, "asset.import",
+                {"source_path": str(p), "name": "sneaky.wav",
+                 "kind": "audio"})
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded", job
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    a = next(x for x in items if x["name"] == "sneaky.wav")
+    probe = a["media_json"]["probe"]
+    assert probe["ok"] is False and "decoder" in probe["reason"]
+    assert probe["decode"]["ok"] is False
+    t = _tl(client, pid)
+    a1 = _atrack(client, pid, t["id"])
+    _place(client, pid, t["id"], {"id": a["id"]}, a1["id"], expect=422)
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_import_audio_real_wav_passes_decode_gate(client, tmp_path):
+    """The real decode check runs on import: valid WAV passes and the
+    decode evidence is stored on the probe."""
+    pid = make_project(client)["id"]
+    p = _wav(tmp_path / "ok.wav", rate=48000, seconds=0.25)
+    r = _commit(client, pid, "asset.import",
+                {"source_path": str(p), "name": "ok.wav",
+                 "kind": "audio"})
+    job = wait_for_job(client, pid, r["job_id"])
+    assert job["status"] == "succeeded", job
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    a = next(x for x in items if x["name"] == "ok.wav")
+    probe = a["media_json"]["probe"]
+    assert probe["ok"] is True
+    assert probe["decode"]["ok"] is True
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_packaged_decoders_cover_compat_matrix():
+    """The documented format matrix must exist in the PACKAGED binary —
+    demuxer (container) + decoder (codec) pairs, never claim support
+    the bundled build lacks."""
+    import subprocess
+    from app.domain.media import binaries
+    ff = binaries.ffmpeg()
+    assert ff is not None
+    def _caps(flag):
+        return subprocess.run(
+            [ff["path"], "-hide_banner", flag],
+            capture_output=True, text=True, timeout=30).stdout
+    demuxers, decoders = _caps("-demuxers"), _caps("-decoders")
+    # demuxer for each documented container
+    for dem in ("wav", "aiff", "flac", "mp3", "ogg", "mov",
+                "aac"):
+        assert f" {dem}" in demuxers or dem in demuxers, \
+            f"packaged ffmpeg lacks demuxer {dem}"
+    # decoder for each documented codec (AIFF rides pcm_*be)
+    for dec in ("pcm_s16le", "pcm_s24le", "pcm_s16be", "pcm_s24be",
+                "flac", "mp3", "aac", "vorbis", "opus"):
+        assert dec in decoders, \
+            f"packaged ffmpeg lacks decoder {dec}"
+
+
+def test_video_only_timeline_untouched_by_audio_columns(client):
+    """Video clips keep frame semantics end-to-end: src fields remain
+    video frames, EDL source has no audio keys populated."""
+    pid = make_project(client)["id"]
+    t = _tl(client, pid)
+    vi = _video(client, pid)
+    v1 = next(x for x in _detail(client, pid, t["id"])["tracks"]
+              if x["kind"] == "video")
+    _place(client, pid, t["id"], vi, v1["id"])
+    c = _detail(client, pid, t["id"])["clips"][0]
+    assert c["src_fps_den"] == 1 and c["src_fps_num"] == 24
+    src = _edl(client, pid, t["id"], version=2)["clips"][0]["source"]
+    assert src["sample_rate"] is None and src["samples"] is None
+    assert src["samples_exact"] is None
