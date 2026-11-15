@@ -337,6 +337,14 @@ export function FirstFilmPage() {
                 const a = ap.items.find((x) => x.id === done.output_asset_id)
                   ?? ap.items.find((x) => x.name === name);
                 if (a) {
+                  // S-C5 — a registered file is not automatically usable
+                  // media: refuse to mark it attached unless the probe
+                  // confirmed real geometry (timeline insert would fail
+                  // on anything less anyway — fail here instead).
+                  const probe = a.media_json?.probe as { ok?: boolean } | undefined;
+                  if (probe?.ok !== true) {
+                    throw new Error("media probe failed — that file couldn't be read as video");
+                  }
                   setState({ ...state, shot_assets: { ...state.shot_assets, [shotId]: a.id } });
                 } else {
                   throw new Error("Import finished but the asset isn't visible — check the assets list.");

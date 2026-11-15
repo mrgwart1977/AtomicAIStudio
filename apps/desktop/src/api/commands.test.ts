@@ -76,4 +76,43 @@ describe("commitCommand revision pin", () => {
     await useApp.getState().refreshProjectData();
     expect(useApp.getState().projects[0].revision).toBe(33);
   });
+
+  it("project switching: a late commit patches only its own project's card", async () => {
+    const other: ProjectCard = { ...PROJECT, id: "p2", revision: 40 };
+    useApp.setState({
+      projects: [{ ...PROJECT, revision: 3 }, other],
+      currentProjectId: "p2",
+    });
+    apiFetch.mockResolvedValue(RESULT(4));
+    await commitCommand("p1", 3, "project.rename", { name: "x" });
+    const st = useApp.getState();
+    expect(st.projects.find((p) => p.id === "p1")?.revision).toBe(4);
+    // The open project's pin is untouched — no cross-project leakage.
+    expect(st.projects.find((p) => p.id === "p2")?.revision).toBe(40);
+  });
+
+  it("out-of-order concurrent commits cannot regress the pin", async () => {
+    // Two commits in flight; the earlier one resolves LAST with a lower
+    // revision — the store must keep the higher pin.
+    let resolveFirst: (v: ReturnType<typeof RESULT>) => void = () => {};
+    apiFetch
+      .mockImplementationOnce(() =>
+        new Promise((res) => { resolveFirst = res; }))
+      .mockResolvedValueOnce(RESULT(5));
+    const slow = commitCommand("p1", 3, "project.rename", { name: "x" });
+    await commitCommand("p1", 4, "project.update_settings", {});
+    expect(useApp.getState().projects[0].revision).toBe(5);
+    resolveFirst(RESULT(4));
+    await slow;
+    expect(useApp.getState().projects[0].revision).toBe(5);
+  });
+
+  it("a genuine 409 conflict surfaces — never silently retried", async () => {
+    const err = Object.assign(new Error("revision conflict"), { status: 409 });
+    apiFetch.mockRejectedValue(err);
+    await expect(commitCommand("p1", 3, "project.rename", { name: "x" }))
+      .rejects.toThrow("revision conflict");
+    expect(apiFetch).toHaveBeenCalledTimes(1); // no silent retry
+    expect(useApp.getState().projects[0].revision).toBe(3); // pin unchanged
+  });
 });
