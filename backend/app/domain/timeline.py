@@ -1,19 +1,29 @@
-"""C5-A — timeline assembly domain.
+"""C5-A/N1-A — timeline assembly domain.
 
-A Timeline is an ordered list of TimelineClips. Every clip pins one
-immutable asset version (id + sha256 + the source's frame geometry at
-insert time). Trims are integer SOURCE frames: ``in_frame`` inclusive,
-``out_frame`` exclusive, validated against the pinned ``src_frames`` —
-never against whatever the asset's current version might become later.
+A Timeline is a set of TimelineTracks holding TimelineClips. Every
+clip pins one immutable asset version (id + sha256 + the source's
+frame geometry at insert time). Trims are integer SOURCE frames:
+``in_frame`` inclusive, ``out_frame`` exclusive, validated against the
+pinned ``src_frames`` — never against whatever the asset's current
+version might become later.
+
+N1-A placement model: each clip sits on a ``timeline_tracks`` lane at
+integer ``start_frames`` in TIMELINE frames (the timeline's
+fps_num/fps_den) — authoritative for time. ``position`` is the dense
+within-track order index, maintained as rank-by-(start_frames, id);
+on a single contiguous track it is exactly the C5-A sequence index.
+
+Timebase conversion is exact-rational: a clip's timeline extent is
+``(out-in) * src_fps_den * tl_fps_num / (src_fps_num * tl_fps_den)``
+as a Fraction — floats never appear in edit data. N1-A refuses
+same-track overlap; gaps are representable (v1 export refuses them
+honestly, v2 emits them explicitly). Ripple/split/overlap resolution
+arrive in N1-C.
 
 Revisions ride entity_revisions (entity_type ``timeline``); each
-snapshot embeds the full ordered clip list so revert restores the edit
-exactly (new clip ids — clip identity is not stable across revert, the
-edit decision is what persists).
-
-Ordering is a dense integer ``position`` per timeline, renormalized
-after every mutation — ordering is therefore always deterministic.
-"""
+snapshot embeds tracks + the full clip list so revert restores the
+edit exactly (new clip ids — clip identity is not stable across
+revert, the edit decision is what persists)."""
 from __future__ import annotations
 
 from fractions import Fraction
@@ -23,7 +33,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (Asset, AssetVersion, EntityRevision, Scene, Shot,
-                           Timeline, TimelineClip, new_id, utcnow)
+                           Timeline, TimelineClip, TimelineTrack,
+                           new_id, utcnow)
 
 #: Bounded rational timebases — keeps UI inputs honest without
 #: pretending to support arbitrary rates.
@@ -31,6 +42,8 @@ MAX_FPS_NUM = 240
 MAX_FPS_DEN = 1001
 
 EDL_FORMAT = "ade-edl/1"
+EDL_FORMAT_V2 = "ade-edl/2"
+TRACK_KINDS = ("video", "audio", "overlay")
 
 
 class TimelineError(ValueError):
@@ -69,17 +82,126 @@ def get_timeline(session: Session, project_id: str, timeline_id: str) -> Timelin
     return tl
 
 
-def list_clips(session: Session, timeline_id: str) -> list[TimelineClip]:
+def list_tracks(session: Session, timeline_id: str) -> list[TimelineTrack]:
     return session.execute(
-        select(TimelineClip).where(TimelineClip.timeline_id == timeline_id)
-        .order_by(TimelineClip.position, TimelineClip.id)).scalars().all()
+        select(TimelineTrack).where(
+            TimelineTrack.timeline_id == timeline_id)
+        .order_by(TimelineTrack.position, TimelineTrack.id)).scalars().all()
+
+
+def get_track(session: Session, tl: Timeline, track_id: str) -> TimelineTrack:
+    tr = session.get(TimelineTrack, track_id)
+    if tr is None or tr.timeline_id != tl.id:
+        raise KeyError("track not found on this timeline")
+    return tr
+
+
+def first_video_track(session: Session, timeline_id: str) -> TimelineTrack | None:
+    """The lowest-positioned video lane — the default destination for
+    inserts that don't name a track (and the migration's V1)."""
+    return session.execute(
+        select(TimelineTrack).where(
+            TimelineTrack.timeline_id == timeline_id,
+            TimelineTrack.kind == "video")
+        .order_by(TimelineTrack.position, TimelineTrack.id)
+        .limit(1)).scalar_one_or_none()
+
+
+def list_clips(session: Session, timeline_id: str) -> list[TimelineClip]:
+    """All clips in timeline-time order: track stack position, then
+    start_frames, then id — deterministic even for same-start clips."""
+    track_pos = {t.id: (t.position, t.id)
+                 for t in list_tracks(session, timeline_id)}
+    clips = session.execute(
+        select(TimelineClip).where(
+            TimelineClip.timeline_id == timeline_id)).scalars().all()
+    return sorted(clips, key=lambda c: (
+        track_pos.get(c.track_id, (1 << 30, "")),
+        c.start_frames, c.position, c.id))
+
+
+def track_clips(session: Session, track_id: str) -> list[TimelineClip]:
+    return session.execute(
+        select(TimelineClip).where(TimelineClip.track_id == track_id)
+        .order_by(TimelineClip.start_frames, TimelineClip.position,
+                  TimelineClip.id)).scalars().all()
+
+
+def clip_tl_extent(clip: TimelineClip, tl: Timeline) -> Fraction:
+    """Timeline frames a clip occupies — exact rational:
+    duration_s = (out-in) ÷ src fps, timeline frames = duration × tl fps."""
+    return Fraction(clip.out_frame - clip.in_frame) * Fraction(
+        clip.src_fps_den, clip.src_fps_num) * Fraction(
+            tl.fps_num, tl.fps_den)
 
 
 def _renumber(session: Session, timeline_id: str) -> None:
-    for i, c in enumerate(list_clips(session, timeline_id)):
-        if c.position != i:
-            c.position = i
+    """Position = within-track rank by (start_frames, id). Dense 0..n-1
+    per lane — identical to the C5-A sequence on a single contiguous
+    track, and the only deterministic meaning across lanes."""
+    for t in list_tracks(session, timeline_id):
+        clips = track_clips(session, t.id)
+        for i, c in enumerate(clips):
+            if c.position != i:
+                c.position = i
+    # Trackless clips (defensive — every op assigns a lane): park at
+    # the end of the index space so they never collide with real lanes.
+    orphans = session.execute(
+        select(TimelineClip).where(
+            TimelineClip.timeline_id == timeline_id,
+            TimelineClip.track_id.is_(None))
+        .order_by(TimelineClip.id)).scalars().all()
+    for i, c in enumerate(orphans):
+        c.position = (1 << 20) + i
     session.flush()
+
+
+def _check_track_unlocked(track: TimelineTrack | None) -> None:
+    """Locked lanes refuse clip edits — the flag is an application-level
+    edit guard, not a render decision."""
+    if track is not None and track.locked:
+        raise TimelineError(
+            f"track '{track.name or track.id}' is locked")
+
+
+def _check_track_overlap(session: Session, track: TimelineTrack,
+                         tl: Timeline, *, start: int, extent: Fraction,
+                         ignore_clip_id: str | None = None) -> None:
+    """N1-A refuses same-track overlap — resolution semantics (split,
+    ripple, replace) are N1-C. Gaps are fine; only intersection is
+    rejected, measured with exact rational extents."""
+    if extent <= 0:
+        raise TimelineError("clip extent must be positive")
+    end = Fraction(start) + extent
+    for c in track_clips(session, track.id):
+        if c.id == ignore_clip_id:
+            continue
+        c_end = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        if Fraction(start) < c_end and Fraction(c.start_frames) < end:
+            raise TimelineError(
+                "placement overlaps an existing clip on this track — "
+                "choose a free position (overlap resolution is not "
+                "implemented yet)")
+
+
+def _ceil_frame(x: Fraction) -> int:
+    """Smallest integer timeline frame ≥ x — the integer-grid packing
+    convention. Integer-frame timelines pack exactly as C5-A did;
+    rational extents leave a sub-frame gap rather than overlap."""
+    return -(-x.numerator // x.denominator)
+
+
+def _packed_start(session: Session, track: TimelineTrack,
+                  tl: Timeline) -> int:
+    """Next free integer frame at/after the track's farthest end —
+    where a plain 'append' insert goes. Ceil (not round): rounding
+    down would place the new clip inside the previous clip's tail."""
+    end = Fraction(0)
+    for c in track_clips(session, track.id):
+        e = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        if e > end:
+            end = e
+    return _ceil_frame(end)
 
 
 def _touch(session: Session, tl: Timeline, *, command_id: str | None,
@@ -92,9 +214,19 @@ def _touch(session: Session, tl: Timeline, *, command_id: str | None,
 
 # ---------- revisions ----------
 
+def track_snapshot(t: TimelineTrack) -> dict[str, Any]:
+    return {
+        "id": t.id, "kind": t.kind, "position": t.position,
+        "name": t.name, "visible": t.visible, "locked": t.locked,
+        "muted": t.muted,
+    }
+
+
 def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
     return {
+        "track_id": c.track_id,
         "position": c.position,
+        "start_frames": c.start_frames,
         "source_asset_id": c.source_asset_id,
         "source_version_id": c.source_version_id,
         "source_sha256": c.source_sha256,
@@ -111,6 +243,7 @@ def timeline_snapshot(session: Session, tl: Timeline) -> dict[str, Any]:
         "name": tl.name, "description": tl.description,
         "fps_num": tl.fps_num, "fps_den": tl.fps_den,
         "status": tl.status,
+        "tracks": [track_snapshot(t) for t in list_tracks(session, tl.id)],
         "clips": [clip_snapshot(c) for c in list_clips(session, tl.id)],
     }
 
@@ -148,9 +281,93 @@ def create_timeline(session: Session, project_id: str, *, name: str,
                   fps_num=fps_num, fps_den=fps_den)
     session.add(tl)
     session.flush()
+    # N1-A — every timeline carries its default video lane from birth,
+    # so clips always have somewhere legal to land (matches the
+    # migration's V1 backfill).
+    session.add(TimelineTrack(
+        id=new_id(), project_id=project_id, timeline_id=tl.id,
+        kind="video", position=0, name="V1"))
+    session.flush()
     write_timeline_revision(session, tl, command_id=command_id,
                             summary="Created timeline")
     return tl
+
+
+# ---------- track ops ----------
+
+def add_track(session: Session, tl: Timeline, *, kind: str = "video",
+              name: str = "", command_id: str | None) -> TimelineTrack:
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    if kind not in TRACK_KINDS:
+        raise TimelineError(
+            f"track kind must be one of {', '.join(TRACK_KINDS)}")
+    pos = max((t.position for t in list_tracks(session, tl.id)),
+              default=-1) + 1
+    tr = TimelineTrack(
+        id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
+        kind=kind, position=pos, name=(name or "").strip())
+    session.add(tr)
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary=f"Added {kind} track")
+    return tr
+
+
+def update_track(session: Session, tl: Timeline, track: TimelineTrack, *,
+                 fields: dict, command_id: str | None) -> None:
+    """name/visible/locked/muted. Flags are deliberately settable on a
+    locked track — locking is the edit guard, unlock must remain
+    reachable."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    if "name" in fields:
+        track.name = (fields["name"] or "").strip()
+    for f in ("visible", "locked", "muted"):
+        if f in fields:
+            v = fields[f]
+            if not isinstance(v, bool):
+                raise TimelineError(f"{f} must be a boolean")
+            setattr(track, f, v)
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Updated track")
+
+
+def reorder_track(session: Session, tl: Timeline, track: TimelineTrack, *,
+                  to_position: int, command_id: str | None) -> None:
+    """Stack order — 0 is the bottom lane, higher composites on top."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    tracks = list_tracks(session, tl.id)
+    to_position = _check_int(to_position, "to_position", 0,
+                             len(tracks) - 1)
+    tracks.remove(track)
+    tracks.insert(to_position, track)
+    for i, t in enumerate(tracks):
+        t.position = i
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Reordered track")
+
+
+def remove_track(session: Session, tl: Timeline, track: TimelineTrack, *,
+                 command_id: str | None) -> None:
+    """Refuses non-empty lanes — clip loss is never a side effect."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    if track_clips(session, track.id):
+        raise TimelineError(
+            "track still holds clips — remove them first "
+            "(visibility hides a lane; it never deletes its clips)")
+    session.delete(track)
+    session.flush()
+    for i, t in enumerate(list_tracks(session, tl.id)):
+        if t.position != i:
+            t.position = i
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Removed track")
 
 
 def update_timeline(session: Session, tl: Timeline, *,
@@ -198,10 +415,21 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
                    fps_num=tl.fps_num, fps_den=tl.fps_den)
     session.add(dup)
     session.flush()
+    track_map: dict[str, str] = {}
+    for t in list_tracks(session, tl.id):
+        nt = TimelineTrack(
+            id=new_id(), project_id=tl.project_id, timeline_id=dup.id,
+            kind=t.kind, position=t.position, name=t.name,
+            visible=t.visible, locked=t.locked, muted=t.muted)
+        session.add(nt)
+        track_map[t.id] = nt.id
+    session.flush()
     for c in list_clips(session, tl.id):
         session.add(TimelineClip(
             id=new_id(), project_id=tl.project_id, timeline_id=dup.id,
-            position=c.position, source_asset_id=c.source_asset_id,
+            track_id=track_map.get(c.track_id or ""),
+            position=c.position, start_frames=c.start_frames,
+            source_asset_id=c.source_asset_id,
             source_version_id=c.source_version_id,
             source_sha256=c.source_sha256,
             in_frame=c.in_frame, out_frame=c.out_frame,
@@ -216,6 +444,12 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
 
 def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
                     command_id: str | None) -> None:
+    """Restore a snapshot's edit state. N1-A: the snapshot's lane set
+    is restored exactly — tracks listed by id are recreated when
+    missing, and tracks added after the snapshot (empty once their
+    clips are deleted) are removed. Pre-N1 snapshots (no track
+    fields) restore onto the first video lane with ceil-packed starts
+    — matching the migration's conversion rule."""
     row = session.execute(
         select(EntityRevision).where(
             EntityRevision.entity_type == "timeline",
@@ -227,21 +461,54 @@ def revert_timeline(session: Session, tl: Timeline, to_revision: int, *,
     for f in ("name", "description", "fps_num", "fps_den", "status"):
         if f in snap:
             setattr(tl, f, snap[f])
+    snap_tracks = snap.get("tracks") or []
+    snap_track_ids = {st["id"] for st in snap_tracks}
+    have = {t.id for t in list_tracks(session, tl.id)}
+    for st in snap_tracks:
+        if st["id"] not in have:
+            session.add(TimelineTrack(
+                id=st["id"], project_id=tl.project_id,
+                timeline_id=tl.id, kind=st.get("kind", "video"),
+                position=st.get("position", 0), name=st.get("name", ""),
+                visible=st.get("visible", True),
+                locked=st.get("locked", False),
+                muted=st.get("muted", False)))
+    session.flush()
+    default_lane = first_video_track(session, tl.id)
     session.execute(
         delete(TimelineClip).where(TimelineClip.timeline_id == tl.id))
     session.flush()
+    # Tracks absent from the snapshot are now empty by construction
+    # (their clips were just deleted) — drop them so the restored lane
+    # set matches the snapshot exactly.
+    for t in list_tracks(session, tl.id):
+        if t.id not in snap_track_ids:
+            session.delete(t)
+    session.flush()
+    acc = Fraction(0)  # legacy-snapshot repack (exact rational)
     for i, c in enumerate(snap.get("clips") or []):
-        session.add(TimelineClip(
+        legacy = "start_frames" not in c
+        start = (c.get("start_frames") if not legacy
+                 else _ceil_frame(acc))
+        clip = TimelineClip(
             id=new_id(), project_id=tl.project_id, timeline_id=tl.id,
-            position=i, source_asset_id=c["source_asset_id"],
+            track_id=(default_lane.id if (legacy or not c.get("track_id"))
+                      and default_lane is not None else c.get("track_id")),
+            position=i,
+            start_frames=start,
+            source_asset_id=c["source_asset_id"],
             source_version_id=c["source_version_id"],
             source_sha256=c["source_sha256"],
             in_frame=c["in_frame"], out_frame=c["out_frame"],
             src_frames=c["src_frames"], src_fps_num=c["src_fps_num"],
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
-            shot_id=c.get("shot_id"), scene_id=c.get("scene_id")))
+            shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
+        session.add(clip)
+        if legacy:
+            acc = Fraction(start) + clip_tl_extent(clip, tl)
     session.flush()
+    _renumber(session, tl.id)
     _touch(session, tl, command_id=command_id,
            summary=f"Reverted to revision {to_revision}")
 
@@ -315,11 +582,30 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
                 in_frame: int | None, out_frame: int | None,
                 position: int | None, shot_id: str | None,
                 scene_id: str | None, allow_duplicate: bool,
+                track_id: str | None = None,
+                start_frames: int | None = None,
                 command_id: str | None) -> TimelineClip:
+    """Insert a clip on a lane. Defaults preserve C5-A semantics:
+    first video track, appended after the contiguous run. An explicit
+    ``start_frames`` places it at a timeline-time position — gaps are
+    allowed, same-track overlap is refused (N1-A)."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
     asset, ver, geo = resolve_clip_source(
         session, project_id, asset_id, version_id)
+    if track_id is not None:
+        try:
+            track = get_track(session, tl, track_id)
+        except KeyError:
+            raise TimelineError(
+                "track not found on this timeline") from None
+    else:
+        track = first_video_track(session, tl.id)
+        if track is None:
+            raise TimelineError(
+                "timeline has no video track — add one before "
+                "inserting clips")
+    _check_track_unlocked(track)
     clips = list_clips(session, tl.id)
     if not allow_duplicate and any(
             c.source_asset_id == asset.id
@@ -334,8 +620,6 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
         out_frame, "out_frame", 1, src_frames)
     if i >= o:
         raise TimelineError("in_frame must be before out_frame")
-    pos = _check_int(position, "position", 0, len(clips)) \
-        if position is not None else len(clips)
     if shot_id is not None:
         shot = session.get(Shot, shot_id)
         if shot is None or shot.project_id != project_id:
@@ -346,12 +630,43 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
             raise TimelineError("scene not found in this project")
     clip = TimelineClip(
         id=new_id(), project_id=project_id, timeline_id=tl.id,
-        position=pos, source_asset_id=asset.id,
+        track_id=track.id, source_asset_id=asset.id,
         source_version_id=ver.id, source_sha256=ver.sha256,
         in_frame=i, out_frame=o, src_frames=src_frames,
         src_fps_num=geo["fps_num"], src_fps_den=geo["fps_den"],
         src_duration_s=geo["duration_s"], shot_id=shot_id,
         scene_id=scene_id)
+    extent = clip_tl_extent(clip, tl)
+    if start_frames is not None:
+        clip.start_frames = _check_int(
+            start_frames, "start_frames", 0, 1 << 30)
+        _check_track_overlap(
+            session, track, tl, start=clip.start_frames, extent=extent)
+    elif position is not None:
+        # Legacy positional insert: repack the lane's contiguous run so
+        # the clip lands at that index — identical to C5-A insert-at
+        # when extents are integral. Gapped lanes have no faithful
+        # index↔time mapping: refuse.
+        tc = track_clips(session, track.id)
+        position = _check_int(position, "position", 0, len(tc))
+        run_end = Fraction(0)
+        for c in tc:
+            if c.start_frames != _ceil_frame(run_end):
+                raise TimelineError(
+                    "positional insert needs a contiguous track — "
+                    "use explicit start_frames on gapped lanes")
+            run_end = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        # Repack by ceil-accumulation so index k's start is the packed
+        # end of the merged prefix — stable for rational extents.
+        merged = tc[:position] + [clip] + tc[position:]
+        run_end = Fraction(0)
+        for c in merged:
+            c.start_frames = _ceil_frame(run_end)
+            run_end = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+    else:
+        clip.start_frames = _packed_start(session, track, tl)
+        _check_track_overlap(
+            session, track, tl, start=clip.start_frames, extent=extent)
     session.add(clip)
     session.flush()
     _renumber(session, tl.id)
@@ -370,6 +685,8 @@ def remove_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
                 command_id: str | None) -> None:
     if tl.status != "active":
         raise TimelineError("timeline is archived")
+    _check_track_unlocked(
+        get_track(session, tl, clip.track_id) if clip.track_id else None)
     session.delete(clip)
     session.flush()
     _renumber(session, tl.id)
@@ -377,16 +694,67 @@ def remove_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
 
 
 def move_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
-              to_index: int, command_id: str | None) -> None:
+              to_index: int | None = None,
+              to_track_id: str | None = None,
+              start_frames: int | None = None,
+              command_id: str | None) -> None:
+    """Two legal forms (not both):
+    - ``to_index`` — C5-A sequence reorder on a contiguous track:
+      repacks the lane so the clip takes that index. Refuses gapped
+      lanes (index has no faithful meaning across holes).
+    - ``to_track_id``/``start_frames`` — explicit placement: retimes
+      and/or relanes the clip; same-track overlap refuses (N1-A)."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
-    clips = list_clips(session, tl.id)
-    _check_int(to_index, "to_index", 0, len(clips) - 1)
-    clips.remove(clip)
-    clips.insert(to_index, clip)
-    for i, c in enumerate(clips):
-        c.position = i
+    src_track = (get_track(session, tl, clip.track_id)
+                 if clip.track_id else None)
+    _check_track_unlocked(src_track)
+    if to_index is not None and (to_track_id is not None
+                                 or start_frames is not None):
+        raise TimelineError(
+            "pass to_index or {to_track_id, start_frames}, not both")
+    if to_track_id is None and start_frames is None:
+        # Legacy sequence reorder — only meaningful on a contiguous
+        # lane; on gaps it would silently retime the clip.
+        track = src_track
+        if track is None:
+            raise TimelineError("clip has no track")
+        tc = track_clips(session, track.id)
+        to_index = _check_int(to_index, "to_index", 0, len(tc) - 1)
+        run_end = Fraction(0)
+        for c in tc:
+            if c.start_frames != _ceil_frame(run_end):
+                raise TimelineError(
+                    "index move needs a contiguous track — "
+                    "use explicit start_frames on gapped lanes")
+            run_end = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        tc.remove(clip)
+        tc.insert(to_index, clip)
+        acc = Fraction(0)
+        for c in tc:
+            c.start_frames = _ceil_frame(acc)
+            acc = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+    else:
+        if to_track_id is not None:
+            try:
+                dst_track = get_track(session, tl, to_track_id)
+            except KeyError:
+                raise TimelineError(
+                    "track not found on this timeline") from None
+            _check_track_unlocked(dst_track)
+        else:
+            dst_track = src_track
+        if dst_track is None:
+            raise TimelineError("clip has no track")
+        clip.start_frames = _check_int(
+            start_frames if start_frames is not None
+            else clip.start_frames, "start_frames", 0, 1 << 30)
+        clip.track_id = dst_track.id
+        _check_track_overlap(
+            session, dst_track, tl, start=clip.start_frames,
+            extent=clip_tl_extent(clip, tl), ignore_clip_id=clip.id)
     session.flush()
+    _renumber(session, tl.id)
     _touch(session, tl, command_id=command_id, summary="Moved clip")
 
 
@@ -395,11 +763,21 @@ def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
               command_id: str | None) -> None:
     if tl.status != "active":
         raise TimelineError("timeline is archived")
+    _check_track_unlocked(
+        get_track(session, tl, clip.track_id) if clip.track_id else None)
     i, o = _check_trims(
         clip.in_frame if in_frame is None else in_frame,
         clip.out_frame if out_frame is None else out_frame,
         clip.src_frames)
+    old_i, old_o = clip.in_frame, clip.out_frame
     clip.in_frame, clip.out_frame = i, o
+    # A trim that grows the extent must not push into a neighbor —
+    # same-track overlap is refused everywhere in N1-A.
+    if o - i > old_o - old_i and clip.track_id:
+        track = get_track(session, tl, clip.track_id)
+        _check_track_overlap(
+            session, track, tl, start=clip.start_frames,
+            extent=clip_tl_extent(clip, tl), ignore_clip_id=clip.id)
     session.flush()
     _touch(session, tl, command_id=command_id, summary="Trimmed clip")
 
@@ -422,9 +800,56 @@ def total_duration_frac(clips: list[TimelineClip]) -> Fraction:
     return sum((clip_duration_frac(c) for c in clips), Fraction(0))
 
 
+def program_end_frac(session: Session, tl: Timeline) -> Fraction:
+    """Timeline-time end of the last clip — the honest program length
+    whether the edit is contiguous, gapped, or multitrack."""
+    end = Fraction(0)
+    for c in list_clips(session, tl.id):
+        e = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        if e > end:
+            end = e
+    return end
+
+
+def v1_layout_reason(session: Session, tl: Timeline) -> str | None:
+    """Why a timeline can't be serialized as ade-edl/1, or None if it
+    can. v1 knows exactly one unmuted visible video lane of contiguous
+    clips starting at 0 — anything else would silently change the
+    picture, so we refuse instead of flattening."""
+    tracks = list_tracks(session, tl.id)
+    clipped = [t for t in tracks if track_clips(session, t.id)]
+    if not clipped:
+        return None  # empty timeline serializes as an empty clip list
+    if len(clipped) > 1:
+        return ("multiple tracks hold clips — ade-edl/1 can only "
+                "represent a single sequential video lane")
+    t = clipped[0]
+    if t.kind != "video":
+        return ("the only populated track is "
+                f"'{t.kind}' — ade-edl/1 represents video lanes only")
+    if not t.visible:
+        return "the populated track is hidden — refusing an empty v1 picture"
+    if t.muted:
+        return ("the populated track is muted — ade-edl/1 has no "
+                "mute flag and would export sound")
+    run_end = Fraction(0)
+    for c in track_clips(session, t.id):
+        if Fraction(c.start_frames) < run_end:
+            return "clips overlap on the track"
+        if c.start_frames != _ceil_frame(run_end):
+            return ("clips are not contiguous — ade-edl/1 cannot "
+                    "represent gaps; use ade-edl/2")
+        run_end = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+    return None
+
+
 def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
     """Deterministic `ade-edl/1` serialization — same timeline state
     produces byte-identical JSON (no timestamps, no random ordering).
+
+    Refuses layouts v1 can't express exactly: multiple clipped tracks,
+    hidden/muted sole lanes, gaps, or overlaps — never flattens them
+    silently (N1-A).
 
     Timebase rules: each clip's trims are integer frames in ITS OWN
     source rate (src_fps_num/src_fps_den, preserved exactly — 30000/1001
@@ -433,6 +858,10 @@ def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
     Floats appear only at the boundary, rounded to 6 dp — the integer
     frames in the document are always the authoritative cut points.
     """
+    reason = v1_layout_reason(session, tl)
+    if reason is not None:
+        raise TimelineError(
+            f"timeline cannot be represented as ade-edl/1: {reason}")
     clips_out = []
     total = Fraction(0)
     for c in list_clips(session, tl.id):
@@ -468,4 +897,76 @@ def edl_json(session: Session, tl: Timeline) -> dict[str, Any]:
         "timebase": {"num": tl.fps_num, "den": tl.fps_den},
         "clips": clips_out,
         "total_duration_s": round(float(total), 6),
+    }
+
+
+def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
+    """Deterministic `ade-edl/2` — full-fidelity multitrack document:
+    lanes, integer timeline-frame placement, source trims, pinned
+    versions/hashes, per-lane gaps, provenance.
+
+    Invariant: same timeline state → byte-identical JSON. Clip order is
+    (track position, start_frames, id); gaps are computed per lane as
+    integer frames between consecutive clip ends."""
+    tracks = list_tracks(session, tl.id)
+    tracks_out = [{
+        "id": t.id, "kind": t.kind, "position": t.position,
+        "name": t.name, "visible": t.visible, "locked": t.locked,
+        "muted": t.muted} for t in tracks]
+    clips_out, gaps_out = [], []
+    tl_fps = Fraction(tl.fps_num, tl.fps_den)
+    for t in tracks:
+        run_end = Fraction(0)
+        for c in track_clips(session, t.id):
+            ver = session.get(AssetVersion, c.source_version_id)
+            if ver is not None and ver.sha256 != c.source_sha256:
+                raise TimelineError(
+                    f"clip {c.id}: pinned sha does not match its "
+                    "version — timeline data is inconsistent")
+            media = (ver.media_json or {}) if ver else {}
+            probe = media.get("probe") or {}
+            if Fraction(c.start_frames) > run_end:
+                gaps_out.append({
+                    "track_id": t.id,
+                    "start_frames": int(run_end),
+                    "duration_frames": int(
+                        Fraction(c.start_frames) - run_end),
+                })
+            extent = clip_tl_extent(c, tl)
+            run_end = max(run_end,
+                          Fraction(c.start_frames) + extent)
+            clips_out.append({
+                "clip_id": c.id, "track_id": c.track_id,
+                "order": c.position,
+                "start_frames": c.start_frames,
+                "start_s": round(float(
+                    Fraction(c.start_frames) / tl_fps), 6),
+                "timeline_frames": {
+                    "num": extent.numerator, "den": extent.denominator},
+                "asset_id": c.source_asset_id,
+                "version_id": c.source_version_id,
+                "sha256": c.source_sha256,
+                "in_frame": c.in_frame, "out_frame": c.out_frame,
+                "duration_s": round(float(clip_duration_frac(c)), 6),
+                "source": {
+                    "fps_num": c.src_fps_num, "fps_den": c.src_fps_den,
+                    "frames": c.src_frames,
+                    "duration_s": c.src_duration_s,
+                    "width": probe.get("width"),
+                    "height": probe.get("height"),
+                    "codec": probe.get("codec"),
+                },
+                "shot_id": c.shot_id, "scene_id": c.scene_id,
+            })
+    return {
+        "format": EDL_FORMAT_V2,
+        "timeline_id": tl.id,
+        "revision": tl.revision,
+        "name": tl.name,
+        "timebase": {"num": tl.fps_num, "den": tl.fps_den},
+        "tracks": tracks_out,
+        "clips": clips_out,
+        "gaps": gaps_out,
+        "total_duration_s": round(
+            float(program_end_frac(session, tl) / tl_fps), 6),
     }

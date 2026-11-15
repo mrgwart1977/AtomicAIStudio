@@ -115,6 +115,9 @@ CommandType = Literal[
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
+    "timeline.track.add", "timeline.track.update",
+    "timeline.track.reorder", "timeline.track.remove",
+    "timeline.clip.place",
     "timeline.export",
 ]
 
@@ -632,7 +635,9 @@ class TimelineClipOut(BaseModel):
     id: str
     project_id: str
     timeline_id: str
+    track_id: str | None = None
     position: int
+    start_frames: int = 0
     source_asset_id: str
     source_version_id: str
     source_sha256: str
@@ -644,6 +649,19 @@ class TimelineClipOut(BaseModel):
     src_duration_s: float
     shot_id: str | None
     scene_id: str | None
+    created_at: datetime
+
+
+class TimelineTrackOut(BaseModel):
+    id: str
+    project_id: str
+    timeline_id: str
+    kind: str
+    name: str
+    position: int
+    visible: bool
+    locked: bool
+    muted: bool
     created_at: datetime
 
 
@@ -662,6 +680,7 @@ class TimelineOut(BaseModel):
 
 class TimelineDetailOut(TimelineOut):
     clips: list[TimelineClipOut]
+    tracks: list[TimelineTrackOut] = []
     total_duration_s: float
 
 

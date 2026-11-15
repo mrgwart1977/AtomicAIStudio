@@ -92,6 +92,10 @@ SUPPORTED_COMMANDS = {
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
     "timeline.clip.insert", "timeline.clip.remove",
     "timeline.clip.move", "timeline.clip.trim",
+    # N1-A — multitrack lanes + explicit placement
+    "timeline.track.add", "timeline.track.update",
+    "timeline.track.reorder", "timeline.track.remove",
+    "timeline.clip.place",
     # C5-B — durable FFmpeg render of a pinned EDL
     "timeline.export",
 }
@@ -337,9 +341,16 @@ def _summary(command_type: str, payload: dict) -> str:
             op = command_type.rsplit(".", 1)[1]
             if op == "insert":
                 return "Add clip to timeline"
+            if op == "place":
+                return f"Place clip at frame {payload.get('start_frames', 0)}"
             if op == "move":
                 return f"Move clip to position {(payload.get('to_index') or 0) + 1}"
             return f"{op.capitalize()} clip"
+        if command_type.startswith("timeline.track."):
+            op = command_type.rsplit(".", 1)[1]
+            if op == "add":
+                return f"Add {payload.get('kind', 'video')} track"
+            return f"{op.capitalize()} track"
         return f"{command_type.split('.', 1)[1].capitalize()} timeline"
     parts = _entity_parts(command_type)
     if parts:
@@ -1538,10 +1549,75 @@ def _validate_timeline(session: Session, project: Project,
             raise CommandError(422, str(exc)) from exc
         except KeyError as exc:
             raise CommandError(404, str(exc).strip("'")) from None
+        if payload.get("track_id") is not None:
+            try:
+                tld.get_track(session, tl, payload["track_id"])
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+        if payload.get("start_frames") is not None:
+            try:
+                tld._check_int(payload["start_frames"], "start_frames",
+                               0, 1 << 30)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+    elif command_type == "timeline.clip.place":
+        # N1-A — explicit-lane placement; same checks as insert plus a
+        # required start_frames (that's what makes it 'place').
+        if not payload.get("asset_id"):
+            raise CommandError(422, "asset_id is required")
+        if payload.get("start_frames") is None:
+            raise CommandError(422, "start_frames is required")
+        try:
+            tld.resolve_clip_source(
+                session, project.id, payload["asset_id"],
+                payload.get("version_id"))
+            tld._check_int(payload["start_frames"], "start_frames",
+                           0, 1 << 30)
+            if payload.get("track_id") is not None:
+                tld.get_track(session, tl, payload["track_id"])
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
     elif command_type in ("timeline.clip.remove", "timeline.clip.move",
                           "timeline.clip.trim"):
         if not payload.get("clip_id"):
             raise CommandError(422, "clip_id is required")
+        if command_type == "timeline.clip.move":
+            try:
+                if payload.get("to_track_id") is not None:
+                    tld.get_track(session, tl, payload["to_track_id"])
+                if payload.get("start_frames") is not None:
+                    tld._check_int(payload["start_frames"],
+                                   "start_frames", 0, 1 << 30)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+    elif command_type in ("timeline.track.add", "timeline.track.update",
+                          "timeline.track.reorder",
+                          "timeline.track.remove"):
+        if command_type == "timeline.track.add":
+            kind = payload.get("kind", "video")
+            if kind not in tld.TRACK_KINDS:
+                raise CommandError(
+                    422, "track kind must be one of "
+                    + ", ".join(tld.TRACK_KINDS))
+        else:
+            try:
+                tld.get_track(session, tl, payload.get("track_id") or "")
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+            if command_type == "timeline.track.reorder":
+                try:
+                    tld._check_int(payload.get("to_position"),
+                                   "to_position", 0,
+                                   len(tld.list_tracks(session, tl.id)) - 1)
+                except tld.TimelineError as exc:
+                    raise CommandError(422, str(exc)) from exc
     elif command_type == "timeline.revert":
         if payload.get("to_revision") is None:
             raise CommandError(422, "to_revision is required")
@@ -2004,8 +2080,13 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
             if command_type == "timeline.export":
                 # C5-B — pin the exact EDL bytes this preview saw so a
                 # commit after any timeline edit refuses.
-                out["resolved_timeline"]["edl_sha256"] = _edl_sha(
-                    session, tl)
+                try:
+                    out["resolved_timeline"]["edl_sha256"] = _edl_sha(
+                        session, tl)
+                except tld.TimelineError as exc:
+                    # N1-A — honest unsupported-layout refusal at
+                    # preview, not a misleading pin or a 500.
+                    out["warnings"].append(str(exc))
         except CommandError:
             pass
     return out
@@ -2607,7 +2688,8 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
             except KeyError:
                 raise CommandError(404, "revision not found") from None
             audit["after"]["reverted_to"] = int(payload["to_revision"])
-        elif command_type == "timeline.clip.insert":
+        elif command_type in ("timeline.clip.insert",
+                              "timeline.clip.place"):
             clip = tld.insert_clip(
                 session, t, project_id=project.id,
                 asset_id=payload["asset_id"],
@@ -2618,9 +2700,13 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 shot_id=payload.get("shot_id"),
                 scene_id=payload.get("scene_id"),
                 allow_duplicate=bool(payload.get("allow_duplicate")),
+                track_id=payload.get("track_id"),
+                start_frames=payload.get("start_frames"),
                 command_id=command.id)
             audit["after"]["clip_id"] = clip.id
             audit["after"]["position"] = clip.position
+            audit["after"]["track_id"] = clip.track_id
+            audit["after"]["start_frames"] = clip.start_frames
         elif command_type == "timeline.clip.remove":
             try:
                 clip = tld.get_clip(session, t, payload["clip_id"])
@@ -2634,7 +2720,42 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 raise CommandError(404, "clip not found on this timeline") from None
             tld.move_clip(session, t, clip,
                           to_index=payload.get("to_index"),
+                          to_track_id=payload.get("to_track_id"),
+                          start_frames=payload.get("start_frames"),
                           command_id=command.id)
+        elif command_type == "timeline.track.add":
+            tr = tld.add_track(
+                session, t, kind=payload.get("kind", "video"),
+                name=payload.get("name", ""), command_id=command.id)
+            audit["after"]["track_id"] = tr.id
+        elif command_type == "timeline.track.update":
+            try:
+                tr = tld.get_track(session, t, payload["track_id"])
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+            tld.update_track(
+                session, t, tr,
+                fields={f: payload[f] for f in
+                        ("name", "visible", "locked", "muted")
+                        if f in payload},
+                command_id=command.id)
+        elif command_type == "timeline.track.reorder":
+            try:
+                tr = tld.get_track(session, t, payload["track_id"])
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+            tld.reorder_track(
+                session, t, tr, to_position=payload["to_position"],
+                command_id=command.id)
+        elif command_type == "timeline.track.remove":
+            try:
+                tr = tld.get_track(session, t, payload["track_id"])
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+            tld.remove_track(session, t, tr, command_id=command.id)
         elif command_type == "timeline.clip.trim":
             try:
                 clip = tld.get_clip(session, t, payload["clip_id"])
@@ -3346,8 +3467,13 @@ def _job_request(session: Session, project: Project, command_type: str,
                 or exp.get("revision") != tl.revision):
             raise CommandError(
                 422, "timeline changed since preview — re-preview")
-        edl = tld.edl_json(session, tl)
-        edl_sha = _edl_sha(session, tl)
+        try:
+            edl = tld.edl_json(session, tl)
+            edl_sha = _edl_sha(session, tl)
+        except tld.TimelineError as exc:
+            # N1-A — non-representable layouts refuse v1 export with a
+            # clear unsupported-layout error, never a silent flatten.
+            raise CommandError(422, str(exc)) from exc
         exp_sha = payload.get("expected_edl_sha")
         if exp_sha is not None and exp_sha != edl_sha:
             raise CommandError(
