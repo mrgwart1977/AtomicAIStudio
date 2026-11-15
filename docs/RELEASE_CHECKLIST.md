@@ -407,3 +407,17 @@ Classification legend: **[auto]** verified automated test ·
 - Large-project scalability (#10) — partially advanced by the 1000-clip perf evidence; TB-scale validation stays open
 - All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
 - **N1 is development-complete; this is not production release readiness.**
+
+### N2 milestone note (audio editing — N2-A in review, N2-B..F not started)
+
+- N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
+- Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
+- Lane↔asset kind rule (video→audio lane refused, audio→video lane refused, both directions verified) — **[auto]** + **[installed]**
+- Honest audio-lane export refusal (backend fail-closed; UI badge discloses reason via title) — **[auto]** + **[installed]**
+- EDL v2 carries audio stream identity (rate, channels, layout, samples, exact) without losing source pins — **[auto]** + **[installed]**
+- Undo/redo across audio clips with stable clip identity — **[auto]** + **[installed]**
+- Mixed 44.1 kHz / 48 kHz sources, sample↔timeline rational conversion — **[auto]**
+- Audio-lane rendering/mixing in export — **[blocked]** by design until N2-E; currently refuses visibly populated audio lanes (never silently drops)
+- Waveform display, gain/automation, fades, crossfades, mute/solo mixing, audio preview — **[notrun]** N2-B..N2-F scope, not implemented
+- Human audio-edit UX feel, drag on audio lanes — **[human]**
+- All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.
