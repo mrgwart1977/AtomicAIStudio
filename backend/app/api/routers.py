@@ -957,6 +957,77 @@ def asset_file(
     return FileResponse(path)
 
 
+def _waveform_manifest(db: Session, asset: Asset) -> dict:
+    """The version's waveform manifest (N2-B), or 404/409."""
+    ver = db.get(AssetVersion, asset.current_version_id)
+    media = (ver.media_json or {}) if ver else {}
+    wf = media.get("waveform") or {}
+    if not wf.get("levels"):
+        raise HTTPException(
+            409, "no waveform built for this asset — run "
+                 "asset.waveform first")
+    if wf.get("built_sha256") != (ver.sha256 if ver else None):
+        raise HTTPException(
+            409, "waveform predates the current source version — "
+                 "rebuild via asset.waveform")
+    return wf
+
+
+@api_router.get("/api/projects/{project_id}/assets/{asset_id}/waveform")
+def waveform_manifest(
+    asset_id: str,
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+):
+    """N2-B — the envelope manifest: available LOD levels (samples-per-
+    bucket, bucket counts, CAS shas) + source rate/channels/samples."""
+    asset = db.get(Asset, asset_id)
+    if asset is None or asset.project_id != project.id:
+        raise HTTPException(404, "asset not found in this project")
+    return _waveform_manifest(db, asset)
+
+
+@api_router.get("/api/projects/{project_id}/assets/{asset_id}/waveform/level")
+def waveform_level_slice(
+    request: Request, asset_id: str,
+    level: int, start_bucket: int = 0, end_bucket: int | None = None,
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+):
+    """N2-B — a windowed slice of one LOD level's peaks. The client
+    asks for exactly the bucket range its viewport needs — long audio
+    never lands in frontend memory wholesale."""
+    asset = db.get(Asset, asset_id)
+    if asset is None or asset.project_id != project.id:
+        raise HTTPException(404, "asset not found in this project")
+    wf = _waveform_manifest(db, asset)
+    entry = next((l for l in wf["levels"] if l["spb"] == level), None)
+    if entry is None:
+        raise HTTPException(
+            404, f"no level at {level} samples/bucket — "
+                 f"available: {[l['spb'] for l in wf['levels']]}")
+    from app.db.models import AssetFile
+    af = db.get(AssetFile, entry["sha256"])
+    if af is None:
+        raise HTTPException(404, "waveform blob missing from CAS")
+    path = request.app.state.storage.file_path(db, af)
+    if not path.exists():
+        raise HTTPException(404, "waveform blob missing on disk")
+    import json as _json
+    doc = _json.loads(path.read_bytes())
+    total = doc["buckets"]
+    s = max(0, min(start_bucket, total))
+    e = total if end_bucket is None else max(s, min(end_bucket, total))
+    return {
+        "format": doc["format"],
+        "spb": doc["spb"],
+        "buckets": total,
+        "bucket_start": s,
+        "bucket_end": e,
+        "channels": doc["channels"],
+        "sample_rate": doc["sample_rate"],
+        "peaks": [ch[s:e] for ch in doc["peaks"]],
+    }
+
+
 @api_router.post("/api/projects/{project_id}/assets/upload-source")
 async def upload_source_image(
     request: Request,

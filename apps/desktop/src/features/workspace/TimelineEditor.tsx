@@ -11,6 +11,11 @@ import {
   TRACK_KINDS, KIND_LABEL,
 } from "./timelineMath";
 import { apiFetch } from "../../api/client";
+import {
+  getWaveformManifest, getWaveformSlice, invalidateWaveform,
+  pickLevel,
+} from "./waveform";
+import type { ManifestResult } from "./waveform";
 
 /** N1-B — multitrack timeline editor: lanes with track controls,
  * ruler + playhead, zoom/scroll, and pixel-exact drag placement.
@@ -857,6 +862,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                       onPointerDown={(e) => beginDrag(e, c)}
                       onTrimDown={(e) => beginTrim(e, c)}
                       onKeyDown={(e) => clipKey(e, c)}
+                      trackKind={t.kind}
+                      projectId={detail.project_id}
+                      viewL={viewX.l / ppf}
+                      viewR={viewX.r / ppf}
                     />
                   ))}
                   {/* N1-C — explicit gaps: rendered, labeled, closable. */}
@@ -982,8 +991,131 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   );
 }
 
+/* ---------------- N2-B — audio waveform rendering ---------------- */
+
+/** Canvas peaks for one audio clip. Bucket math is absolute-source
+ * (bucket b = samples [b*spb,(b+1)*spb)) so a clip's sample trims map
+ * to bucket ranges with plain arithmetic — no drift, no per-clip
+ * re-bucketing. Fetches are viewport-bounded via the level API. */
+const WaveformCanvas = memo(function WaveformCanvas({
+  clip, tl, ppf, width, projectId, viewL, viewR,
+}: {
+  clip: TimelineClip;
+  tl: TimelineDetail;
+  ppf: number;
+  width: number;
+  projectId: string;
+  viewL: number;
+  viewR: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [state, setState] = useState<"loading" | "missing" | "error" | "ok">("loading");
+  const [tries, setTries] = useState(0);
+  const rate = clip.src_fps_num / clip.src_fps_den; // samples per second
+  const tlFps = tl.fps_num / tl.fps_den;
+  const samplesPerTlFrame = rate / tlFps;
+  const samplesPerPx = samplesPerTlFrame / ppf;
+  const clipEnd = clip.start_frames + clipTlExtent(clip, tl);
+  const v0 = Math.max(viewL, clip.start_frames);
+  const v1 = Math.min(viewR, clipEnd);
+  const s0 = clip.in_frame + (v0 - clip.start_frames) * samplesPerTlFrame;
+  const s1 = clip.in_frame + (v1 - clip.start_frames) * samplesPerTlFrame;
+
+  const [manifest, setManifest] = useState<ManifestResult | null>(null);
+  // Poll gently while no waveform exists so a just-finished build
+  // appears without a reload — capped at ~2.5 min, then it rests.
+  // A real fetch failure shows "waveform unavailable" immediately.
+  useEffect(() => {
+    let dead = false;
+    let attempts = 0;
+    const ask = () => {
+      if (dead) return;
+      // Bypass the manifest cache — a cached "missing" would hide a
+      // waveform whose build job just completed.
+      invalidateWaveform(projectId, clip.source_asset_id);
+      void getWaveformManifest(projectId, clip.source_asset_id)
+        .then((m) => {
+          if (dead) return;
+          if (m === "missing") {
+            if (++attempts < 40) setTimeout(ask, 4000);
+            else setState("missing");
+          } else {
+            setManifest(m);
+            setState(m === "error" ? "error" : "ok");
+          }
+        });
+    };
+    ask();
+    return () => { dead = true; };
+  }, [projectId, clip.source_asset_id, tries]);
+
+  const level = manifest && manifest !== "error" && manifest !== "missing"
+    ? pickLevel(manifest, samplesPerPx) : null;
+  const b0 = level ? Math.max(0, Math.floor(s0 / level.spb)) : 0;
+  const b1 = level
+    ? Math.min(level.buckets, Math.ceil(s1 / level.spb)) : 0;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !level || b1 <= b0) return;
+    setState("loading");
+    let dead = false;
+    void getWaveformSlice(
+      projectId, clip.source_asset_id, level.spb, b0, b1)
+      .then((sl) => {
+        if (dead) return;
+        if (!sl) { setState("error"); return; }
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { setState("ok"); return; }
+        const H = canvas.height, W = canvas.width;
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = "rgba(45, 212, 191, 0.55)";
+        const rows = Math.max(1, sl.channels);
+        const rowH = H / rows;
+        const pxPerSample = ppf / samplesPerTlFrame;
+        for (let ch = 0; ch < rows; ch++) {
+          const mid = rowH * ch + rowH / 2;
+          const half = rowH / 2 - 1;
+          sl.peaks[ch].forEach(([mn, mx], i) => {
+            const b = sl.bucket_start + i;
+            const x = (b * level.spb - clip.in_frame) * pxPerSample;
+            const w = Math.max(1, level.spb * pxPerSample);
+            const y0 = mid + (mn / 32768) * half;
+            const y1 = mid + (mx / 32768) * half;
+            ctx.fillRect(x, y0, w, Math.max(1, y1 - y0));
+          });
+        }
+        setState("ok");
+      });
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, clip.source_asset_id, clip.in_frame,
+      level?.spb, b0, b1, ppf, width]);
+
+  return (
+    <div className="pointer-events-none absolute inset-0" aria-hidden>
+      <canvas ref={canvasRef} width={Math.max(1, Math.round(width))}
+        height={44} className="h-full w-full opacity-70" />
+      {state !== "ok" && (
+        <span className="absolute bottom-0.5 right-1 text-[8px] text-faint">
+          {state === "loading" ? "waveform…"
+            : state === "missing" ? "no waveform"
+            : "waveform unavailable"}
+        </span>
+      )}
+      {manifest === "error" && (
+        <button
+          className="pointer-events-auto absolute bottom-0.5 left-1 text-[8px] text-teal"
+          onClick={(e) => { e.stopPropagation(); setTries((x) => x + 1); }}
+        >retry</button>
+      )}
+    </div>
+  );
+});
+
 const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
-  draggable, onSelect, onPointerDown, onTrimDown, onKeyDown }: {
+  draggable, onSelect, onPointerDown, onTrimDown, onKeyDown,
+  trackKind, projectId, viewL, viewR }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   ppf: number;
@@ -994,6 +1126,10 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   onPointerDown: (e: React.PointerEvent) => void;
   onTrimDown: (e: React.PointerEvent) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
+  trackKind?: string;
+  projectId: string;
+  viewL?: number;
+  viewR?: number;
 }) {
   const w = Math.max(4, clipTlExtent(clip, tl) * ppf);
   return (
@@ -1016,7 +1152,13 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
       } ${ghosted ? "opacity-40" : ""}`}
       style={{ left: frameToPx(clip.start_frames, ppf), width: w }}
     >
-      <span className="truncate">
+      {trackKind === "audio" && (
+        <WaveformCanvas
+          clip={clip} tl={tl} ppf={ppf} width={w}
+          projectId={projectId} viewL={viewL ?? clip.start_frames}
+          viewR={viewR ?? clipTlEnd(clip, tl)} />
+      )}
+      <span className="relative truncate">
         {clip.source_sha256.slice(0, 10)}… · {clipTlEnd(clip, tl) - clip.start_frames}f
       </span>
       {draggable && w >= 18 && (
@@ -1053,6 +1195,7 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
     setStartF(String(clip.start_frames));
   }, [clip.id, clip.in_frame, clip.out_frame, clip.start_frames]);
   const locked = !active || (track?.locked ?? false);
+  const isAudio = track?.kind === "audio";
   const dur = (clip.out_frame - clip.in_frame)
     * clip.src_fps_den / clip.src_fps_num;
   return (
@@ -1069,8 +1212,12 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
       <p className="mt-1 text-[11px] text-muted">
         Timeline frames {clip.start_frames}–{clipTlEnd(clip, tl)}
         {" · "}{fmtTc(clip.start_frames, tl)} · source {Math.round(dur * 100) / 100}s,
-        trims {clip.in_frame}–{clip.out_frame} of {clip.src_frames}
-        {" @ "}{clip.src_fps_num}/{clip.src_fps_den} fps
+        {isAudio
+          ? ` trims ${clip.in_frame}–${clip.out_frame} of`
+            + ` ${clip.src_frames} samples @ ${clip.src_fps_num} Hz`
+          : ` trims ${clip.in_frame}–${clip.out_frame} of`
+            + ` ${clip.src_frames} @ ${clip.src_fps_num}/`
+            + `${clip.src_fps_den} fps`}
       </p>
       {!locked && (
         <div className="mt-2 flex flex-wrap items-end gap-2 text-[10px]">
@@ -1123,6 +1270,21 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
             onClick={onRemove}
             className="rounded border border-line px-2 py-0.5 text-muted hover:text-red-300 disabled:opacity-40"
           >Remove</button>
+          {track?.kind === "audio" && (
+            <button
+              disabled={busy}
+              onClick={() => {
+                invalidateWaveform(
+                  tl.project_id, clip.source_asset_id);
+                void onRun("asset.waveform", {
+                  asset_id: clip.source_asset_id });
+              }}
+              title={"Queue a durable job that decodes the audio and "
+                + "stores min/max envelope levels in CAS — the "
+                + "waveform appears on this clip when it finishes"}
+              className="rounded border border-line px-2 py-0.5 text-muted hover:text-teal disabled:opacity-40"
+            >Build waveform</button>
+          )}
         </div>
       )}
       {locked && (

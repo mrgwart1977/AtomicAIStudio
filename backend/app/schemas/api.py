@@ -92,6 +92,7 @@ CommandType = Literal[
     "location.create", "location.update", "location.archive",
     "location.unarchive", "location.revert",
     "asset.import", "asset.share", "asset.link", "asset.relink", "assets.verify",
+    "asset.waveform",
     "backup.export", "backup.import", "backup.restore",
     "scene.create", "scene.update", "scene.archive", "scene.unarchive",
     "scene.revert", "scene.duplicate", "scene.move",
