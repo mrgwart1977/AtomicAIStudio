@@ -86,15 +86,23 @@ def runtime_view(session: Session, settings, spec, rt_state: dict,
     }
 
 
-def availability_class(spec: ModelSpec, compat: dict, install: dict) -> str:
-    """Fold classification + install state into the five-way class the UI
-    teaches: can I use it / install it / is it coming / is it blocked."""
+def availability_class(spec: ModelSpec, compat: dict, install: dict,
+                       runtime_ok: bool | None = None) -> str:
+    """Fold classification + install state + runtime operability into the
+    five-way class the UI teaches: can I use it / install it / is it
+    coming / is it blocked.
+
+    runtime_ok False downgrades installed→operational to
+    installed→limited: installed weights alone never imply the model can
+    actually run (no operational runtime binary)."""
     status = compat.get("status") or "unknown"
     installed = install.get("status") == "installed"
     if status == "planned":
         return "planned"
     if installed:
-        return "installed_operational" if status == "compatible" else "installed_limited"
+        if status == "compatible" and runtime_ok is not False:
+            return "installed_operational"
+        return "installed_limited"
     if status in ("compatible", "limited", "unknown"):
         return "installable"
     return "blocked"  # restricted | unavailable | unsupported
@@ -109,21 +117,38 @@ def _model_entry(session: Session, settings, spec: ModelSpec, hw: dict,
         if install.get("install_root") else model_files.models_root(session, settings))
     compat = compatibility.classify_model(spec, hw, {**install, "disk_free_bytes": disk})
     rt_spec = model_catalog.get_runtime(spec.runtime_key)
-    flavors = [f for f in (rt_spec.backends if rt_spec else ())
-               if (rt_state.get(f"{spec.runtime_key}-{f}") or {}).get("status") == "installed"
-               and rt_state[f"{spec.runtime_key}-{f}"]["exe_present"]]
+    hw_backends = {k for k, v in (hw.get("backends") or {}).items()
+                   if v.get("available")}
+    flavor_state = []
+    for f in (rt_spec.backends if rt_spec else ()):
+        st = rt_state.get(f"{spec.runtime_key}-{f}") or {}
+        flavor_state.append({
+            "flavor": f,
+            "installed": bool(st.get("status") == "installed" and st["exe_present"]),
+            "operational": bool(st.get("status") == "installed"
+                                and st.get("verified") and st["exe_present"]
+                                and not st.get("error")),
+            "backend_available": f == "cpu" or f in hw_backends,
+        })
+    installed_flavors = [f["flavor"] for f in flavor_state if f["installed"]]
+    # "operational" = installed + verified + binary present + usable backend
+    runtime_ok = any(
+        f["operational"] and f["backend_available"] for f in flavor_state)
     caps = spec.capabilities or {}
     row = model_rows.get(spec.key)
     bench = (row.meta_json or {}).get("benchmark") if row else None
     return {
         **model_catalog.spec_to_dict(spec),
         "compatibility": compat,
-        "availability": availability_class(spec, compat, install),
+        "availability": availability_class(spec, compat, install,
+                                           runtime_ok=runtime_ok),
         "install": install,
         "runtime": {
             "key": spec.runtime_key,
             "known": rt_spec is not None,
-            "installed_flavors": flavors,
+            "installed_flavors": installed_flavors,
+            "flavors": flavor_state,
+            "any_operational": runtime_ok,
             "planned": rt_spec is not None and rt_spec.version == "planned",
         },
         "estimates": {
@@ -203,6 +228,11 @@ def preflight(session: Session, settings, spec: ModelSpec, hw: dict) -> dict:
                                     and row["verified"] and row["exe_present"]),
             })
     need = spec.requirements.get("min_disk_bytes") or spec.total_bytes
+    # required headroom = model footprint + the configured post-install
+    # free-space floor (same margin gen-job disk preflight enforces)
+    from app.domain import resources
+    headroom = resources.safety_margins(
+        resources.settings_overrides(session))["min_disk_free_bytes"]
     lic = spec.license or {}
     return {
         "model_key": spec.key,
@@ -212,7 +242,9 @@ def preflight(session: Session, settings, spec: ModelSpec, hw: dict) -> dict:
         "download_bytes": spec.total_bytes,
         "models_root": str(root),
         "disk_free_bytes": free,
-        "disk_sufficient": (free is None or need is None or free >= need),
+        "disk_headroom_bytes": headroom,
+        "disk_sufficient": (free is None or need is None
+                            or free >= (need or 0) + headroom),
         "est_vram_bytes": compatibility.estimate_vram(spec),
         "est_ram_bytes": _estimate_ram(spec),
         "estimate_basis": "estimate",

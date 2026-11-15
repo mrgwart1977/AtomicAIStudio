@@ -110,6 +110,45 @@ def test_installed_model_reports_operational_and_benchmarkable(client, tmp_path)
     assert m["install"]["status"] == "installed"
 
 
+def test_installed_weights_without_runtime_are_limited_not_operational(client, tmp_path):
+    """Installed model files alone must not imply operational: with no
+    installed runtime flavor, an otherwise-compatible model is
+    installed_limited — runtime availability is part of the answer."""
+    from app.db.models import RuntimeInstall
+    _install_row(client, "sd15.q8", tmp_path)
+    rep = client.get("/api/compatibility").json()
+    m = next(x for x in rep["models"] if x["key"] == "sd15.q8")
+    assert m["runtime"]["any_operational"] is False
+    assert m["availability"] == "installed_limited"
+    # install a matching runtime flavor with a real binary on disk
+    rt_dir = tmp_path / "rt"; rt_dir.mkdir(exist_ok=True)
+    (rt_dir / "sd.exe").write_bytes(b"x")
+    app = client.app
+    with app.state.session_factory() as s:
+        s.add(RuntimeInstall(
+            id=new_id(), runtime_key="sdcpp-vulkan", version="t",
+            status="installed", install_dir=str(rt_dir),
+            exe_path=str(rt_dir / "sd.exe"), byte_size=1,
+            verified=True, meta_json={}, created_at=utcnow(),
+            updated_at=utcnow()))
+        s.commit()
+    rep = client.get("/api/compatibility").json()
+    m = next(x for x in rep["models"] if x["key"] == "sd15.q8")
+    assert m["runtime"]["installed_flavors"] == ["vulkan"]
+    hw = client.get("/api/hardware").json()
+    if (hw.get("backends") or {}).get("vulkan", {}).get("available"):
+        assert m["runtime"]["any_operational"] is True
+        assert m["availability"] == "installed_operational"
+
+
+def test_benchmark_adapter_shares_gen_lane_admission(client):
+    """Fairness policy: benchmarks take a GPU scheduler slot and pass the
+    same memory admission as generation jobs — same queue, same gates."""
+    adapters = client.get("/api/adapters").json()
+    b = next(a for a in adapters if a["adapter_id"] == "ops.model.benchmark")
+    assert b["lane"] == "gen" and b["needs_gpu"] is True
+
+
 def test_planned_runtime_does_not_claim_operational(client):
     rep = client.get("/api/compatibility").json()
     comfy = next(rt for rt in rep["runtimes"] if rt["key"] == "comfyui")
@@ -128,6 +167,7 @@ def test_preflight_reports_disk_license_estimates_no_autodownload(client):
     pf = r.json()
     assert pf["download_bytes"] > 0
     assert pf["disk_free_bytes"] is None or pf["disk_free_bytes"] >= 0
+    assert pf["disk_headroom_bytes"] > 0  # required headroom is disclosed
     assert pf["disk_sufficient"] in (True, False)
     assert pf["est_vram_bytes"] is None or pf["est_vram_bytes"] > 0
     assert pf["estimate_basis"] == "estimate"
@@ -277,6 +317,13 @@ def test_benchmark_opt_in_measures_and_persists(client, tmp_path, monkeypatch):
     assert len(res["runs"]) == 2
     assert all(rr["duration_ms"] >= 0 for rr in res["runs"])
     assert res["median_duration_ms"] >= 0
+    # reproducibility record: identity + params + conditions + limits
+    assert res["model_file_sha256"] == model_catalog.get("sd15.q8").files[0].sha256
+    assert res["runs"][0]["condition"] == "cold"
+    assert res["runs"][1]["condition"] == "warm"
+    assert isinstance(res["params"]["width"], int)
+    assert "driver_version" in res and "measured_at" in res
+    assert res["measurement_limitations"]
     assert "estimate" in res["estimate_vs_measured"]["warning"].lower() \
         or "ESTIMATE" in res["estimate_vs_measured"]["warning"]
     assert "vram" in res["peak_memory_note"].lower()

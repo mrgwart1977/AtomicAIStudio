@@ -63,7 +63,9 @@ const COMPAT_REPORT = {
     {
       ...MODELS[0],
       availability: "installed_operational",
-      runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"], planned: false },
+      runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"],
+                 flavors: [{ flavor: "vulkan", installed: true, operational: true, backend_available: true }],
+                 any_operational: true, planned: false },
       estimates: { vram_bytes: 5e9, ram_bytes: 3e9, basis: "estimate" },
       resolutions: null, fps: null, durations_s: null,
       benchmark: null, benchmarkable: true, limitations: [],
@@ -71,7 +73,9 @@ const COMPAT_REPORT = {
     {
       ...MODELS[1],
       availability: "installable",
-      runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"], planned: false },
+      runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"],
+                 flavors: [{ flavor: "vulkan", installed: true, operational: true, backend_available: true }],
+                 any_operational: true, planned: false },
       estimates: { vram_bytes: 7e9, ram_bytes: 4e9, basis: "estimate" },
       resolutions: null, fps: null, durations_s: null,
       benchmark: null, benchmarkable: false, limitations: [],
@@ -79,7 +83,8 @@ const COMPAT_REPORT = {
     {
       ...MODELS[2],
       availability: "planned",
-      runtime: { key: "comfyui", known: true, installed_flavors: [], planned: true },
+      runtime: { key: "comfyui", known: true, installed_flavors: [], flavors: [],
+                 any_operational: false, planned: true },
       estimates: { vram_bytes: null, ram_bytes: null, basis: "estimate" },
       resolutions: null, fps: null, durations_s: null,
       benchmark: null, benchmarkable: false, limitations: [],

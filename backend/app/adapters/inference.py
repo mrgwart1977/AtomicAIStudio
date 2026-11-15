@@ -823,10 +823,17 @@ class ModelBenchmarkAdapter:
         limits={"max_runs": 5},
         requires_cloud=False,
         cost_model="free",
-        lane="ops",
-        needs_gpu=False,
+        # Gen lane, needs_gpu: benchmarks acquire a GPU scheduler slot and
+        # pass the same system-RAM admission as generation jobs — the
+        # fairness policy is "same queue, same slots": a benchmark never
+        # bypasses the resource gates a real generation obeys, and a busy
+        # GPU leaves the benchmark queued, not the other way round.
+        lane="gen",
+        needs_gpu=True,
         notes="Explicit opt-in benchmark of an installed model — never runs "
-              "at startup, never downloads, never calls a cloud provider.",
+              "at startup, never downloads, never calls a cloud provider. "
+              "Shares the gen-lane GPU scheduler and memory admission with "
+              "generation jobs (documented fairness policy).",
     )
 
     def __init__(self, session_factory, settings) -> None:
@@ -851,18 +858,15 @@ class ModelBenchmarkAdapter:
             self._gen._resolve({"model_key": spec.key,
                                 **{k: v for k, v in request.items()
                                    if k in ("runtime_key", "runtime_flavor")}})
-        except ValueError as exc:
+        except Exception as exc:
             errors.append(str(exc))
         return errors
 
     async def _run_once(self, handle: JobHandle, spec: ModelSpec,
                         weight: Path, argv_prefix: list[str],
-                        req: dict, run_ix: int, work: Path):
+                        req: dict, run_ix: int, work: Path,
+                        side: int, steps: int):
         """One measured spawn — returns (duration_ms, peak_rss_bytes|None)."""
-        caps = spec.capabilities or {}
-        sizes = caps.get("sizes") or {}
-        side = int(sizes.get("min") or 512)
-        steps = int((caps.get("steps") or {}).get("min") or 4)
         out_png = work / f"bench_{handle.job_id}_{run_ix}.png"
         argv = argv_prefix + [
             "-M", "img_gen", "-m", str(weight),
@@ -939,22 +943,55 @@ class ModelBenchmarkAdapter:
         work = Path(handle.work_dir)
         work.mkdir(parents=True, exist_ok=True)
 
+        caps = spec.capabilities or {}
+        sizes = caps.get("sizes") or {}
+        side = int(sizes.get("min") or 512)
+        steps = int((caps.get("steps") or {}).get("min") or 4)
+
         rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
         flavor, flavor_reason = self._gen._pick_flavor(
             req.get("runtime_flavor"), rt_spec)
         gpu_ix = req.get("assigned_gpu") if isinstance(req.get("assigned_gpu"), int) else None
-        gpus = hardware.probe().get("gpus") or []
-        gpu_name = next((g.get("name") for g in gpus
-                         if isinstance(g.get("index"), int) and g["index"] == (gpu_ix or 0)),
-                        None) if gpus else None
+        hw = hardware.probe()
+        gpus = hw.get("gpus") or []
+        gpu_row = next((g for g in gpus
+                        if isinstance(g.get("index"), int)
+                        and g["index"] == (gpu_ix if gpu_ix and gpu_ix >= 0 else 0)),
+                       None) if gpus else None
+        gpu_name = (gpu_row or {}).get("name") if gpu_ix is None or gpu_ix >= 0 else None
+
+        # Reproducibility identity: which weight file, which runtime build,
+        # which device/driver. File hashing stays with the install-time
+        # checksum — re-hashing multi-GB weights on every benchmark would
+        # dominate the measurement; the catalog-declared sha256 (and the
+        # install row's verified value) is the honest identity.
+        with self._sf() as s:
+            inst = s.execute(
+                select(ModelInstall).where(
+                    ModelInstall.model_key == spec.key,
+                    ModelInstall.status == "installed")
+            ).scalars().first()
+        file_sha = (inst.sha256 if inst and inst.sha256
+                    else (spec.files[0].sha256 or None))
+        rt_row_key = f"sdcpp-{flavor}"
+        with self._sf() as s:
+            rt_row = s.execute(
+                select(RuntimeInstall).where(
+                    RuntimeInstall.runtime_key == rt_row_key)
+            ).scalar_one_or_none()
 
         results: list[dict[str, Any]] = []
         for i in range(runs):
             yield {"progress": 0.05 + 0.9 * (i / runs),
                    "message": f"benchmark run {i + 1}/{runs}"}
             dur, rss = await self._run_once(
-                handle, spec, weight, argv_prefix, req, i, work)
-            results.append({"run": i + 1, "duration_ms": dur,
+                handle, spec, weight, argv_prefix, req, i, work,
+                side, steps)
+            results.append({"run": i + 1,
+                            # run 1 carries cold weight-load cost; later
+                            # runs may benefit from OS/runtime caches
+                            "condition": "cold" if i == 0 else "warm",
+                            "duration_ms": dur,
                             "peak_worker_rss_bytes": rss})
 
         durations = sorted(r["duration_ms"] for r in results)
@@ -965,24 +1002,36 @@ class ModelBenchmarkAdapter:
         result = {
             "model_key": spec.key,
             "model_version": spec.version,
+            "model_file_sha256": file_sha,
             "adapter_id": self.profile.adapter_id,
             "runtime": {"key": "sdcpp", "flavor": flavor,
+                        "version": rt_row.version if rt_row else None,
                         "selection_reason": flavor_reason},
             "gpu": gpu_name, "gpu_index": gpu_ix,
+            "driver_version": (gpu_row or {}).get("driver_version"),
             "runs": results,
             "median_duration_ms": median,
             "peak_worker_rss_bytes": max(peaks) if peaks else None,
             "peak_memory_note": "worker-process host RAM peak (Windows "
                 "working set); VRAM peaks are not portably measurable — "
                 "use the VRAM estimate as guidance, not a measurement",
-            "params": {"size": "model minimum", "steps": "model minimum",
-                       "batch": 1},
+            "params": {"width": side, "height": side, "steps": steps,
+                       "batch": 1, "seed": 1, "cfg_scale": 1.0},
             "estimate_vs_measured": {
                 "estimated_vram_bytes": est,
                 "warning": "Catalog figures are ESTIMATES from model "
                            "anchors; measured numbers here reflect this "
                            "hardware only and will vary run to run.",
             },
+            "measurement_limitations": [
+                "host RSS peak excludes GPU VRAM entirely",
+                "minimal settings (model min size/steps) — not representative "
+                "of production workloads",
+                "single-process timing; OS cache state differs between "
+                "cold (first) and warm runs",
+                "results are valid only for this GPU/driver/runtime build — "
+                "do not extrapolate to other hardware",
+            ],
             "measured_at": utcnow().isoformat(),
         }
         # durable stamp on the install row — survives restarts, visible in

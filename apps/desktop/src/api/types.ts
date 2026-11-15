@@ -783,7 +783,10 @@ export interface BenchmarkResult {
   runtime: { key: string; flavor: string; selection_reason?: string };
   gpu: string | null;
   gpu_index: number | null;
-  runs: { run: number; duration_ms: number; peak_worker_rss_bytes: number | null }[];
+  runs: { run: number; condition: "cold" | "warm"; duration_ms: number; peak_worker_rss_bytes: number | null }[];
+  model_file_sha256: string | null;
+  driver_version: string | null;
+  measurement_limitations: string[];
   median_duration_ms: number;
   peak_worker_rss_bytes: number | null;
   peak_memory_note: string;
@@ -794,7 +797,9 @@ export interface BenchmarkResult {
 
 export interface CompatModelEntry extends ModelCatalogEntry {
   availability: AvailabilityClass;
-  runtime: { key: string; known: boolean; installed_flavors: string[]; planned: boolean };
+  runtime: { key: string; known: boolean; installed_flavors: string[];
+             flavors: { flavor: string; installed: boolean; operational: boolean; backend_available: boolean }[];
+             any_operational: boolean; planned: boolean };
   estimates: { vram_bytes: number | null; ram_bytes: number | null; basis: string };
   resolutions: unknown;
   fps: unknown;
