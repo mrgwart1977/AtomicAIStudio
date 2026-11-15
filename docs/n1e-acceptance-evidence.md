@@ -63,10 +63,32 @@ mounts, never edit math. Drag/zoom/selection responsiveness on real
 hardware is recorded as *not directly measured* (needs human-hands
 session); server-side latency above bounds the command path.
 
-## Installed Windows acceptance — pending
+## Installed Windows acceptance — PASS (8/8 steps)
 
-`scripts/cdp-n1e-acceptance.cjs` drives the installed app: seeds 3
-clips, clicks Undo/Redo buttons, sends Ctrl+Z / Ctrl+Shift+Z via CDP,
-forces a divergent edit to prove redo invalidation, reloads to prove
-stack persistence, and reads API truth for every DOM claim. Executed
-against the NSIS build of the N1-E PR head — results appended below.
+Executed against the NSIS build of the N1-E head (`Atomic Dream
+Engine_0.1.0_x64-setup.exe`, 76.13 MiB, installed to
+`%LOCALAPPDATA%\Atomic Dream Engine`, backend on an ephemeral port).
+Driver: `scripts/cdp-n1e-acceptance.cjs` — real UI input (button
+clicks, CDP key events, confirm-dialog click), API truth on every
+claim. Evidence: `docs/n1e-evidence/` (screenshots + log).
+
+| # | Step | Result |
+|---|------|--------|
+| 1 | Seed: real video + 3×48f clips at 0/48/96 via API commits | PASS |
+| 2 | Undo button enabled with server label ("Undo: Inserted clip"), Redo disabled | PASS |
+| 3 | UI Undo click → 3→2 clips; Redo enabled with label | PASS |
+| 4 | UI Redo click → 2→3 clips restored | PASS |
+| 5 | Ctrl+Z undid; Ctrl+Shift+Z redid (real key events) | PASS |
+| 6 | Ctrl+Z then a divergent edit (Delete + confirm dialog) → Redo disabled — branch invalidated | PASS |
+| 7 | Page reload → undo stack intact ("Undo: Removed clip" still offered) | PASS |
+| 8 | API detail reports `undo_label` + clip state matching the DOM | PASS |
+| 9 | Process terminated cleanly (0 residual processes) | PASS |
+
+Screenshots: `02-undo-enabled.png` … `07-post-reload-undo.png`;
+log: `docs/n1e-evidence/n1e-acceptance.log`.
+
+Not executed: drag/zoom/selection frame-latency measurement on real
+hardware (needs a human-hands session; jsdom culling evidence +
+server-side latency bounds above stand in). Multi-user concurrent-
+session undo is covered by the command layer's `expected_timeline`
+rejection test, not by a second live UI session.

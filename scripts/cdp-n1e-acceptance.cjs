@@ -127,7 +127,9 @@ async function seed() {
   }
   const d = await detail(p.id, tl.id);
   const v1 = d.tracks.find((t) => t.kind === "video");
-  for (let i = 0; i < 3; i++) {
+  // Fill only the deficit — a prior partial run may leave 1–2 clips.
+  const startAt = Math.max(0, d.clips.length) * 48;
+  for (let i = d.clips.length; i < 3; i++) {
     await commit(p.id, "timeline.clip.place",
       { timeline_id: tl.id, track_id: v1.id, asset_id: asset.id,
         start_frames: i * 48, allow_duplicate: true });
@@ -219,12 +221,21 @@ async function scenario(pid, tid) {
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "z", code: "KeyZ", modifiers: 2 });
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "z", code: "KeyZ", modifiers: 2 });
   await sleep(1200);
-  // a real edit through the UI: remove the middle clip via Delete
-  const removed = await evalJs(`(() => {
+  // a real edit through the UI: Delete on a clip → confirm dialog →
+  // click its confirm button (the commit runs from the dialog)
+  await evalJs(`(() => {
     const clips = [...document.querySelectorAll('[data-testid="lane-clip"]')];
     const c = clips[0];
     c.focus(); c.dispatchEvent(new KeyboardEvent("keydown",
       { key: "Delete", bubbles: true })); return true; })()`);
+  await sleep(800);
+  const confirmed = await evalJs(`(() => {
+    const dlg = [...document.querySelectorAll('button')]
+      .find(b => /^(Remove|Confirm|OK|Delete)$/.test(b.textContent.trim())
+        && !b.disabled);
+    if (!dlg) return null;
+    dlg.click(); return dlg.textContent.trim(); })()`);
+  if (!confirmed) throw new Error("confirm dialog did not appear");
   await sleep(1500);
   st = await undoState();
   if (st.redo !== true) {
@@ -299,6 +310,10 @@ async function main() {
   if (!API || !TOKEN) throw new Error("no backend creds sniffed");
   ok(`backend ${API}`);
   const { pid, tid } = await seed();
+  // The project list may have been fetched before the API-side seed —
+  // reload so the UI refetches a list that includes the new project.
+  await send("Page.reload", { ignoreCache: true });
+  await sleep(6000);
   await scenario(pid, tid);
   fs.writeFileSync(`${OUT}/n1e-acceptance.log`, LOG.join("\n") + "\n");
   process.exit(0);
