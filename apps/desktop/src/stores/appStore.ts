@@ -52,6 +52,10 @@ interface AppState {
   setWorkspaceTab: (t: WorkspaceTab) => void;
   setWorkspaceMode: (m: WorkspaceMode) => void;
   setProjects: (p: ProjectCard[]) => void;
+  /** Patch the stored revision pin after a successful commit so the next
+   * expected_revision is correct without a full project refetch —
+   * sequential commits in one handler depend on it. */
+  applyCommitRevision: (projectId: string, revision: number) => void;
   setCurrentProject: (id: string | null) => void;
   upsertJob: (j: Job) => void;
   setPromptDraft: (t: string) => void;
@@ -117,6 +121,13 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
   setProjects: (projects) => set({ projects }),
+  applyCommitRevision: (projectId, revision) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId && revision > p.revision
+          ? { ...p, revision }
+          : p),
+    })),
   upsertJob: (j) => set((s) => ({ jobs: { ...s.jobs, [j.id]: j } })),
   setPromptDraft: (promptDraft) => set({ promptDraft }),
   setAssetKindFilter: (assetKindFilter) => {
@@ -149,7 +160,16 @@ export const useApp = create<AppState>((set, get) => ({
   },
   refreshProjects: async () => {
     const projects = await apiFetch<ProjectCard[]>("/api/projects");
-    set({ projects });
+    // Revisions are server-monotonic: an in-flight GET issued before a
+    // commit resolved must not regress the pin it already advanced.
+    set((s) => ({
+      projects: projects.map((p) => {
+        const cur = s.projects.find((x) => x.id === p.id);
+        return cur && cur.revision > p.revision
+          ? { ...p, revision: cur.revision }
+          : p;
+      }),
+    }));
   },
   refreshProjectData: async () => {
     const pid = get().currentProjectId;
@@ -160,7 +180,11 @@ export const useApp = create<AppState>((set, get) => ({
     ]);
     set((s) => ({
       jobs: Object.fromEntries(jobs.map((j) => [j.id, j])),
-      projects: s.projects.map((p) => (p.id === pid ? { ...p, ...proj } : p)),
+      // Same monotonic guard for the single-project GET: never let an
+      // older response overwrite a newer pinned revision.
+      projects: s.projects.map((p) => (p.id === pid
+        ? { ...p, ...proj, revision: Math.max(p.revision, proj.revision) }
+        : p)),
     }));
     void get().refreshProjects();
   },

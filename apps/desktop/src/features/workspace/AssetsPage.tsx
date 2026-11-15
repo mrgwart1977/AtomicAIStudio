@@ -34,6 +34,15 @@ function isAssisted(a: Asset): boolean {
     || (p.external_provider != null && !isSimulated(a));
 }
 
+/** S-C5 — storage-ready ≠ media-usable. A file whose probe failed is
+ * legitimately registered in CAS but can never be trimmed/inserted —
+ * flag it so it doesn't look like ordinary footage. */
+export function isUnusableMedia(a: Asset): boolean {
+  if (a.kind !== "video" && a.kind !== "image") return false;
+  const probe = a.media_json?.probe as { ok?: boolean } | undefined;
+  return probe?.ok === false;
+}
+
 export function AssetsPage() {
   const project = useApp((s) => s.currentProject());
   const page = useApp((s) => s.assetsPage);
@@ -187,6 +196,11 @@ export function AssetsPage() {
               <div className="flex items-center justify-between gap-1">
                 <span className="truncate text-xs font-medium" title={a.name}>{a.name}</span>
                 {a.status === "missing" && <span className="text-[10px] uppercase text-danger">missing</span>}
+                {isUnusableMedia(a) && (
+                  <span className="text-[10px] uppercase text-danger" title="Registered but couldn't be read as media — not usable on a timeline">
+                    unreadable
+                  </span>
+                )}
                 {a.scope === "shared" && <span className="text-[10px] uppercase text-violet">shared</span>}
                 {isSimulated(a) && <span className="text-[10px] uppercase text-amber">simulated</span>}
                 {isAssisted(a) && <span className="text-[10px] uppercase text-sky">assisted</span>}

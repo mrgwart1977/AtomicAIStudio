@@ -130,8 +130,11 @@ class AssetImportAdapter(_OpsBase):
                     from app.domain import image_safety
                     info = image_safety.inspect_image(out_path.read_bytes())
                     output["media"] = {**info.to_dict(), "source": "import"}
-                except Exception:
-                    pass
+                except Exception as exc:
+                    output["media"] = {"inspect": {"ok": False},
+                                       "source": "import"}
+                    output.setdefault("warnings", []).append(
+                        f"image inspection failed: {exc}")
             # C5-B — imported video must carry measured duration/fps/
             # geometry so timeline trims and exports have real source
             # metadata; probe failure leaves the asset usable but
@@ -142,11 +145,21 @@ class AssetImportAdapter(_OpsBase):
                     info = await asyncio.to_thread(
                         engine.probe, out_path,
                         cancel=handle.cancel_event)
-                    if info.get("ok"):
-                        output["media"] = {"probe": info,
-                                           "source": "import"}
-                except Exception:
-                    pass
+                    output["media"] = {"probe": info, "source": "import"}
+                    # S-C5 — a failed probe must be visible: the file is
+                    # registered (CAS ingest is legitimate), but the job
+                    # output warns and media.probe.ok stays false so the
+                    # UI can flag the asset as unusable for timelines.
+                    if not info.get("ok"):
+                        warn = ("media probe failed — file registered "
+                                "but not usable as video")
+                        output["media"]["warning"] = warn
+                        output.setdefault("warnings", []).append(warn)
+                except Exception as exc:
+                    output["media"] = {"probe": {"ok": False},
+                                       "source": "import"}
+                    output.setdefault("warnings", []).append(
+                        f"media probe error: {exc}")
             if ext:
                 output["external_source"] = {
                     "provider_key": ext.get("provider_key"),

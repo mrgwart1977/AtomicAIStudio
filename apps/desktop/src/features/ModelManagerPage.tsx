@@ -4,6 +4,7 @@ import { useApp } from "../stores/appStore";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import type {
   AvailabilityClass,
+  AvailabilityReason,
   CompatModelEntry,
   CompatibilityReport,
   CompatStatus,
@@ -36,6 +37,20 @@ const AVAIL: Record<AvailabilityClass, { label: string; cls: string }> = {
   installable: { label: "Can be installed", cls: "bg-sky/15 text-sky" },
   planned: { label: "Coming in a future update", cls: "bg-line/40 text-muted" },
   blocked: { label: "Not available", cls: "bg-rose/15 text-rose" },
+};
+
+/** S-C5 — the machine-readable cause behind a blocked/limited verdict,
+ * rendered so "Not available" never collapses license, download, and
+ * hardware gaps into one undifferentiated failure. */
+const REASON: Record<AvailabilityReason, string> = {
+  missing_runtime: "runtime not installed",
+  missing_model_files: "model files missing",
+  license_restricted: "restricted license",
+  download_unavailable: "no verified download",
+  hardware_incompatible: "hardware incompatible",
+  hardware_limited: "limited on this hardware",
+  compatibility_unknown: "compatibility unknown",
+  planned: "planned for a future milestone",
 };
 
 const SUPPORT: Record<string, { label: string; cls: string } | null> = {
@@ -210,6 +225,11 @@ export function ModelManagerPage() {
                   <span className="rounded bg-sky/15 px-2 py-0.5 text-xs capitalize text-sky">{m.modality}</span>
                 )}
                 {avail && <span className={`rounded px-2 py-0.5 text-xs ${avail.cls}`}>{avail.label}</span>}
+                {ce?.availability_reason && (
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">
+                    {REASON[ce.availability_reason] ?? ce.availability_reason}
+                  </span>
+                )}
                 {!avail && <span className={`rounded px-2 py-0.5 text-xs ${c.cls}`}>{c.label}</span>}
                 {s && <span className={`rounded px-2 py-0.5 text-xs ${s.cls}`}>{s.label}</span>}
                 {inst?.status === "failed" && (
@@ -277,7 +297,9 @@ export function ModelManagerPage() {
                 <ul className="mt-2 space-y-0.5 rounded border border-line p-2 text-xs">
                   {check.checks.map((ch) => (
                     <li key={ch.name} className={
-                      ch.ok === false ? (ch.severity === "warning" ? "text-amber" : "text-rose")
+                      ch.ok === false
+                        ? (ch.severity === "warning" ? "text-amber"
+                           : ch.severity === "info" ? "text-muted" : "text-rose")
                         : ch.ok === null ? "text-faint" : "text-teal"}>
                       {ch.ok === false ? "✗" : ch.ok === null ? "·" : "✓"} {ch.name.replaceAll("_", " ")} — {ch.detail}
                     </li>

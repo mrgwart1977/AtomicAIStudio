@@ -456,7 +456,15 @@ export function MediaStep({ state, shotsById, assets, busy, importJobs, onCancel
   onPickAsset: (shotId: string, assetId: string) => void;
 }) {
   const [paths, setPaths] = useState<Record<string, string>>({});
-  const videos = assets.filter((a) => a.kind === "video" && a.status === "ready");
+  // S-C5 — only offer clips a timeline could actually accept: probe
+  // must have confirmed real geometry. Unreadable files stay in the
+  // library (flagged on the Assets page) but can't be picked here.
+  const probeOk = (a: (typeof assets)[number]) =>
+    (a.media_json?.probe as { ok?: boolean } | undefined)?.ok === true;
+  const videos = assets.filter(
+    (a) => a.kind === "video" && a.status === "ready" && probeOk(a));
+  const skipped = assets.filter(
+    (a) => a.kind === "video" && a.status === "ready" && !probeOk(a));
   return (
     <div>
       <h2 className="font-semibold">Attach media to each shot</h2>
@@ -464,6 +472,13 @@ export function MediaStep({ state, shotsById, assets, busy, importJobs, onCancel
         Give each shot a video file from this computer, or pick one
         already in the project. MP4 and MOV work best.
       </p>
+      {skipped.length > 0 && (
+        <p className="mt-3 text-xs text-amber">
+          {skipped.length} file{skipped.length === 1 ? "" : "s"} couldn't be
+          read as video — {skipped.length === 1 ? "it's" : "they're"} kept in
+          the library but can't be used on a timeline.
+        </p>
+      )}
       <ul className="mt-4 space-y-4">
         {state.shot_ids.map((id) => {
           const sh = shotsById.get(id);

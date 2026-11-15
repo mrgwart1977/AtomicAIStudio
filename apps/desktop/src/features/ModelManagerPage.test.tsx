@@ -63,6 +63,7 @@ const COMPAT_REPORT = {
     {
       ...MODELS[0],
       availability: "installed_operational",
+      availability_reason: null,
       runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"],
                  flavors: [{ flavor: "vulkan", installed: true, operational: true, backend_available: true }],
                  any_operational: true, planned: false },
@@ -73,6 +74,7 @@ const COMPAT_REPORT = {
     {
       ...MODELS[1],
       availability: "installable",
+      availability_reason: null,
       runtime: { key: "sdcpp", known: true, installed_flavors: ["vulkan"],
                  flavors: [{ flavor: "vulkan", installed: true, operational: true, backend_available: true }],
                  any_operational: true, planned: false },
@@ -83,6 +85,7 @@ const COMPAT_REPORT = {
     {
       ...MODELS[2],
       availability: "planned",
+      availability_reason: "planned",
       runtime: { key: "comfyui", known: true, installed_flavors: [], flavors: [],
                  any_operational: false, planned: true },
       estimates: { vram_bytes: null, ram_bytes: null, basis: "estimate" },
@@ -103,11 +106,13 @@ const PREFLIGHT = {
   compatibility: { status: "compatible", reasons: [], warnings: [], suggested: {} },
   limitations: [], requires_explicit_approval: true,
   auto_download: false, installable: true,
+  availability_reason: null,
 };
 
 const VALIDATION = {
   model_key: "sd15.q8", read_only: true, ran_inference: false,
   verify_hashes: false, ok: true,
+  summary: { blocking: 0, warning: 0, info: 0 },
   checks: [
     { name: "catalog_metadata", ok: true, detail: "catalog entry complete" },
     { name: "runtime_binary", ok: true, detail: "runtime binary present (vulkan)" },

@@ -17,7 +17,8 @@ const state = () => ({
   shot_assets: {},
 });
 const shots = new Map([["sh1", { title: "Wide", prompt: "", sceneId: "s1" }]]);
-const videoAsset = { id: "a1", name: "clip.mp4", kind: "video", status: "ready" } as const;
+const videoAsset = { id: "a1", name: "clip.mp4", kind: "video", status: "ready",
+  media_json: { probe: { ok: true, fps: 24, duration_s: 4 } } } as const;
 
 describe("MediaStep", () => {
   beforeEach(() => { cleanup(); pickFile.mockReset(); });
@@ -62,5 +63,20 @@ describe("MediaStep", () => {
       busy={null} onImport={vi.fn()} onPickAsset={vi.fn()} />);
     expect(screen.getByText(/Media attached/)).toBeTruthy();
     expect(screen.queryByText("Import")).toBeNull();
+  });
+
+  it("unprobeable videos are never offered as existing clips", () => {
+    const bad = { ...videoAsset, id: "a9", name: "fake.mp4",
+      media_json: { probe: { ok: false, reason: "invalid data" } } };
+    const onPick = vi.fn();
+    render(<MediaStep state={state()} shotsById={shots}
+      assets={[videoAsset, bad] as unknown as Parameters<typeof MediaStep>[0]["assets"]}
+      busy={null} onImport={vi.fn()} onPickAsset={onPick} />);
+    const sel = screen.getByLabelText(/Use existing clip/);
+    // Only the probe-ok clip is selectable; the unreadable one is
+    // excluded and its presence is surfaced as a note.
+    expect(sel.innerHTML).toContain("clip.mp4");
+    expect(sel.innerHTML).not.toContain("fake.mp4");
+    expect(screen.getByText(/couldn't be read as video/)).toBeTruthy();
   });
 });

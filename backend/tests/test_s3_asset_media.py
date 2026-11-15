@@ -87,6 +87,33 @@ def test_missing_file_fails_safe(client):
     assert got["media_json"] == {}
 
 
+def test_video_import_records_probe_failure(client, tmp_path):
+    """S-C5 — a non-video file imported as kind=video must not silently
+    pass as a usable video: the job output records probe.ok=False and a
+    visible warning. The CAS registration itself is legitimate."""
+    p = make_project(client)
+    fake = tmp_path / "notavideo.mp4"
+    fake.write_bytes(b"this is plain text, not a container")
+    rev = client.get(f"/api/projects/{p['id']}").json()["revision"]
+    imp = client.post(f"/api/projects/{p['id']}/commands/commit",
+                      json={"command_type": "asset.import",
+                            "payload": {"source_path": str(fake),
+                                        "name": "notavideo.mp4", "kind": "video"},
+                            "scope": "project",
+                            "expected_revision": rev,
+                            "idempotency_key": "sc5-badvid-01"})
+    assert imp.status_code == 200, imp.text
+    job = wait_for_job(client, p["id"], imp.json()["job_id"])
+    # registration succeeds (CAS ingest is honest)…
+    assert job["status"] == "succeeded"
+    # …but the asset must not claim clean media
+    items = client.get(f"/api/projects/{p['id']}/assets").json()["items"]
+    a = next(x for x in items if x["name"] == "notavideo.mp4")
+    probe = ((a.get("media_json") or {}).get("probe") or {})
+    assert probe.get("ok") is False, a["media_json"]
+    assert a["media_json"].get("warning"), a["media_json"]
+
+
 def test_existing_media_not_overwritten(client):
     """Generation-style media (prompt/model provenance) is preserved;
     only missing dims are filled."""

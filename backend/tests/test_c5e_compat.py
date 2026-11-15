@@ -165,6 +165,30 @@ def test_planned_runtime_does_not_claim_operational(client):
         assert fl["installed"] is False and fl["operational"] is False
 
 
+# ------------------------------------------------------- S-C5 reasons
+
+def test_availability_reason_distinguishes_block_causes(client):
+    """Blocked must not be a hardware lump: license, missing download,
+    and planned each get a distinct machine-readable reason."""
+    rep = client.get("/api/compatibility").json()
+    keys = {m["key"]: m for m in rep["models"]}
+    assert keys["flux.schnell"]["availability"] == "blocked"
+    assert keys["flux.schnell"]["availability_reason"] == "download_unavailable"
+    assert keys["flux.dev"]["availability_reason"] == "license_restricted"
+    assert keys["sdxl.turbo"]["availability_reason"] == "license_restricted"
+    assert keys["hunyuan.video"]["availability_reason"] == "planned"
+    # every entry carries the field (None when nothing adverse applies)
+    for m in rep["models"]:
+        assert "availability_reason" in m
+
+
+def test_availability_reason_installed_without_runtime(client, tmp_path):
+    _install_row(client, "sd15.q8", tmp_path)
+    rep = client.get("/api/compatibility").json()
+    m = next(x for x in rep["models"] if x["key"] == "sd15.q8")
+    assert m["availability_reason"] == "missing_runtime"
+
+
 # ------------------------------------------------------- preflight
 
 def test_preflight_reports_disk_license_estimates_no_autodownload(client):
@@ -269,6 +293,45 @@ def test_capability_contract_reports_unregistered_adapter(client):
     cc = _check(rep, "capability_contract")
     # comfyui adapter isn't registered locally → reported, not hidden
     assert cc["ok"] is False or "not registered" in cc["detail"] or cc["ok"] is True
+
+
+# -------------------------------------------------- S-C5 severity bands
+
+def test_validation_missing_artifact_is_warning_not_blocking(client):
+    """An unpinned download artifact is honest 'download unavailable' —
+    a warning, not a catalog integrity failure, and must not fail the
+    validation rollup."""
+    rep = client.get("/api/models/flux.schnell/validation").json()
+    ap = _check(rep, "artifact_pin")
+    assert ap["ok"] is False and ap["severity"] == "warning"
+    assert rep["summary"]["warning"] >= 1
+    assert rep["ok"] is True  # warnings/info never fail the rollup
+
+
+def test_validation_planned_runtime_is_info_not_blocking(client):
+    rep = client.get("/api/models/qwen.image/validation").json()
+    ra = _check(rep, "runtime_available")
+    assert ra["ok"] is False and ra["severity"] == "info"
+    assert rep["summary"]["info"] >= 1
+    assert rep["ok"] is True
+
+
+def test_validation_integrity_failures_are_blocking(client, tmp_path):
+    # size mismatch = integrity → blocking severity, rollup fails
+    _install_row(client, "sd15.q8", tmp_path)
+    rep = client.get("/api/models/sd15.q8/validation").json()
+    mf = _check(rep, "model_files")
+    assert mf["ok"] is False and mf["severity"] == "blocking"
+    rb = _check(rep, "runtime_binary")  # installed model, no runtime → blocking
+    assert rb["ok"] is False and rb["severity"] == "blocking"
+    assert rep["ok"] is False
+    assert rep["summary"]["blocking"] >= 2
+    # hash mismatch = integrity → blocking too
+    _install_row(client, "sd15.q8", tmp_path, match_size=True)
+    rep = client.get("/api/models/sd15.q8/validation?verify_hashes=true").json()
+    hv = _check(rep, "hash_verification")
+    assert hv["ok"] is False and hv["severity"] == "blocking"
+    assert rep["ok"] is False
 
 
 # ------------------------------------------------------- benchmark
