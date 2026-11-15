@@ -427,11 +427,17 @@ export function TimelinePage() {
               active={selTl.status === "active"}
               busy={busy}
               onRun={run}
-              onRemoveClip={(c: TimelineClip) => setConfirm({
+              onRemoveClip={(c: TimelineClip, ripple: boolean) => setConfirm({
                 title: "Remove clip",
-                body: "Remove this clip from the timeline? The source asset is not deleted.",
+                body: ripple
+                  ? "Remove this clip? Later clips on the same lane shift left to close the gap. The source asset is not deleted."
+                  : "Remove this clip from the timeline? A gap is left behind. The source asset is not deleted.",
                 run: () => { setConfirm(null); run("timeline.clip.remove", {
-                  timeline_id: selTl.id, clip_id: c.id }); },
+                  timeline_id: selTl.id, clip_id: c.id,
+                  ...(ripple ? { ripple_scope: "track" } : {}),
+                  expected_timeline: detail
+                    ? { id: detail.id, revision: detail.revision }
+                    : undefined }); },
               })}
             />
 

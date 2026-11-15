@@ -604,6 +604,7 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
                 scene_id: str | None, allow_duplicate: bool,
                 track_id: str | None = None,
                 start_frames: int | None = None,
+                ripple_scope: str | None = None,
                 command_id: str | None) -> TimelineClip:
     """Insert a clip on a lane. Defaults preserve C5-A semantics:
     first video track, appended after the contiguous run. An explicit
@@ -660,8 +661,29 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
     if start_frames is not None:
         clip.start_frames = _check_int(
             start_frames, "start_frames", 0, 1 << 30)
-        _check_track_overlap(
-            session, track, tl, start=clip.start_frames, extent=extent)
+        if ripple_scope is not None:
+            # Ripple insert: push in-scope clips at/after the point
+            # right by the clip's integer footprint instead of
+            # refusing the collision. A point strictly inside another
+            # clip still refuses — split it first, explicitly.
+            scope = _check_ripple_scope(ripple_scope)
+            for c in track_clips(session, track.id):
+                e = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+                if Fraction(c.start_frames) < Fraction(
+                        clip.start_frames) < e:
+                    raise TimelineError(
+                        "insert point is inside a clip — "
+                        "split it first")
+            tracks = _ripple_tracks(
+                session, tl, scope, track,
+                after_start=clip.start_frames)
+            _shift_following(
+                session, tl, tracks, after_start=clip.start_frames,
+                delta=_ceil_frame(extent), keep={clip.id})
+        else:
+            _check_track_overlap(
+                session, track, tl, start=clip.start_frames,
+                extent=extent)
     elif position is not None:
         # Legacy positional insert: repack the lane's contiguous run so
         # the clip lands at that index — identical to C5-A insert-at
@@ -702,15 +724,33 @@ def get_clip(session: Session, tl: Timeline, clip_id: str) -> TimelineClip:
 
 
 def remove_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
+                ripple_scope: str | None = None,
                 command_id: str | None) -> None:
+    """Non-ripple delete leaves a gap. ``ripple_scope`` shifts clips
+    starting at/after the removed clip's grid end left by its integer
+    footprint — 'track' limits that to the clip's own lane (default,
+    disclosed), 'all' applies it to every unlocked lane."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
-    _check_track_unlocked(
-        get_track(session, tl, clip.track_id) if clip.track_id else None)
-    session.delete(clip)
-    session.flush()
+    track = (get_track(session, tl, clip.track_id)
+             if clip.track_id else None)
+    _check_track_unlocked(track)
+    if ripple_scope is not None and track is not None:
+        scope = _check_ripple_scope(ripple_scope)
+        occ_end = _ceil_end(clip, tl)
+        tracks = _ripple_tracks(session, tl, scope, track,
+                                after_start=occ_end)
+        session.delete(clip)
+        session.flush()
+        _shift_following(session, tl, tracks, after_start=occ_end,
+                         delta=-(occ_end - clip.start_frames))
+    else:
+        session.delete(clip)
+        session.flush()
     _renumber(session, tl.id)
-    _touch(session, tl, command_id=command_id, summary="Removed clip")
+    _touch(session, tl, command_id=command_id,
+           summary="Ripple-deleted clip" if ripple_scope is not None
+           else "Removed clip")
 
 
 def move_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
@@ -780,26 +820,225 @@ def move_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
 
 def trim_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
               in_frame: int | None, out_frame: int | None,
+              ripple_scope: str | None = None,
               command_id: str | None) -> None:
+    """Source-frame trims, start_frames anchored. Non-ripple keeps
+    N1-A semantics: a growing extent must not reach a neighbor.
+    ``ripple_scope`` instead shifts clips starting at/after the clip's
+    old grid end by the change in integer occupancy — the ripple is
+    measured in timeline frames, source trims stay exact."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
-    _check_track_unlocked(
-        get_track(session, tl, clip.track_id) if clip.track_id else None)
+    track = (get_track(session, tl, clip.track_id)
+             if clip.track_id else None)
+    _check_track_unlocked(track)
     i, o = _check_trims(
         clip.in_frame if in_frame is None else in_frame,
         clip.out_frame if out_frame is None else out_frame,
         clip.src_frames)
     old_i, old_o = clip.in_frame, clip.out_frame
+    old_end = _ceil_end(clip, tl)
     clip.in_frame, clip.out_frame = i, o
+    new_end = _ceil_end(clip, tl)
+    delta = new_end - old_end
+    if ripple_scope is not None:
+        if delta != 0 and track is not None:
+            scope = _check_ripple_scope(ripple_scope)
+            tracks = _ripple_tracks(session, tl, scope, track,
+                                    after_start=old_end)
+            _shift_following(session, tl, tracks,
+                             after_start=old_end, delta=delta)
     # A trim that grows the extent must not push into a neighbor —
     # same-track overlap is refused everywhere in N1-A.
-    if o - i > old_o - old_i and clip.track_id:
-        track = get_track(session, tl, clip.track_id)
+    elif o - i > old_o - old_i and clip.track_id:
         _check_track_overlap(
             session, track, tl, start=clip.start_frames,
             extent=clip_tl_extent(clip, tl), ignore_clip_id=clip.id)
     session.flush()
-    _touch(session, tl, command_id=command_id, summary="Trimmed clip")
+    _touch(session, tl, command_id=command_id,
+           summary="Ripple-trimmed clip" if ripple_scope is not None
+           else "Trimmed clip")
+
+
+# ---------- N1-C: split / ripple / gap ops ----------
+
+#: Ripple scope choices — 'track' (the safest default: only the edited
+#: lane's later clips move) or 'all' (every lane's later clips; a
+#: locked lane that would be affected refuses the whole op).
+RIPPLE_SCOPES = ("track", "all")
+
+
+def _check_ripple_scope(scope: Any) -> str:
+    if scope is None:
+        return "track"
+    if scope not in RIPPLE_SCOPES:
+        raise TimelineError(
+            f"ripple scope must be one of {', '.join(RIPPLE_SCOPES)}")
+    return scope
+
+
+def _ceil_end(clip: TimelineClip, tl: Timeline) -> int:
+    """Integer-grid occupancy end: start + ceil(exact extent)."""
+    return clip.start_frames + _ceil_frame(clip_tl_extent(clip, tl))
+
+
+def _ripple_tracks(session: Session, tl: Timeline, scope: str,
+                   anchor: TimelineTrack, *, after_start: int
+                   ) -> list[TimelineTrack]:
+    """In-scope lanes for a ripple. 'track' is just the anchor lane.
+    'all' is every lane — but a locked lane holding clips that the
+    shift would move refuses the whole operation (fail closed)."""
+    if scope == "track":
+        return [anchor]
+    tracks = list_tracks(session, tl.id)
+    for tr in tracks:
+        if tr.locked and any(c.start_frames >= after_start
+                             for c in track_clips(session, tr.id)):
+            raise TimelineError(
+                f"ripple would move clips on locked track "
+                f"'{tr.name or tr.id}' — unlock it or use "
+                f"scope 'track'")
+    return tracks
+
+
+def _shift_following(session: Session, tl: Timeline,
+                     tracks: list[TimelineTrack], *, after_start: int,
+                     delta: int, keep: set[str] | None = None) -> int:
+    """Move clips on `tracks` starting at/after `after_start` by `delta`
+    frames. Order-preserving, so a uniform shift cannot overlap.
+    Returns how many clips moved."""
+    skip = keep or set()
+    moved = 0
+    for tr in tracks:
+        for c in track_clips(session, tr.id):
+            if c.id in skip or c.start_frames < after_start:
+                continue
+            ns = c.start_frames + delta
+            if ns < 0:
+                raise TimelineError(
+                    "shift would push a clip before frame 0")
+            c.start_frames = ns
+            moved += 1
+    return moved
+
+
+def split_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
+               at_frame: int, command_id: str | None) -> TimelineClip:
+    """Frame-accurate split at a TIMELINE frame, strictly inside the
+    clip's occupancy. The cut must land on a SOURCE-frame boundary —
+    the timeline-frame offset into the clip must map to an integer
+    source-frame offset, else we refuse rather than cut mid-frame
+    (honest accuracy for mixed rates). Both fragments keep the full
+    source pin (asset, version, sha256, geometry, shot/scene links)."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    track = (get_track(session, tl, clip.track_id)
+             if clip.track_id else None)
+    _check_track_unlocked(track)
+    if track is None:
+        raise TimelineError("clip has no track")
+    at = _check_int(at_frame, "at_frame", 0, 1 << 30)
+    end = Fraction(clip.start_frames) + clip_tl_extent(clip, tl)
+    if not (Fraction(clip.start_frames) < Fraction(at) < end):
+        raise TimelineError(
+            f"split must land strictly inside the clip "
+            f"(frames {clip.start_frames + 1}..{_ceil_frame(end) - 1})")
+    # Timeline-frame offset → source-frame offset, exact rational:
+    off = Fraction(at - clip.start_frames) * Fraction(
+        tl.fps_den, tl.fps_num) * Fraction(
+            clip.src_fps_num, clip.src_fps_den)
+    if off.denominator != 1:
+        raise TimelineError(
+            "split point doesn't land on a source frame — "
+            "choose a timeline frame that maps to a whole source frame")
+    off_i = int(off)
+    if not 0 < off_i < clip.out_frame - clip.in_frame:
+        raise TimelineError("split would create a zero-length fragment")
+    right = TimelineClip(
+        id=new_id(), project_id=clip.project_id, timeline_id=tl.id,
+        track_id=clip.track_id, position=clip.position,
+        source_asset_id=clip.source_asset_id,
+        source_version_id=clip.source_version_id,
+        source_sha256=clip.source_sha256,
+        in_frame=clip.in_frame + off_i, out_frame=clip.out_frame,
+        src_frames=clip.src_frames,
+        src_fps_num=clip.src_fps_num, src_fps_den=clip.src_fps_den,
+        src_duration_s=clip.src_duration_s,
+        shot_id=clip.shot_id, scene_id=clip.scene_id,
+        start_frames=at)
+    clip.out_frame = clip.in_frame + off_i
+    session.add(right)
+    session.flush()
+    _renumber(session, tl.id)
+    _touch(session, tl, command_id=command_id, summary="Split clip")
+    return right
+
+
+def close_gap(session: Session, tl: Timeline, *, track_id: str,
+              at_frame: int, command_id: str | None) -> int:
+    """Move-to-close-gap: shift the lane's clips after the gap left by
+    the exact integer gap length, so the next clip abuts the previous
+    clip's grid end. The leading gap (0 → first clip) counts too.
+    Returns the gap length closed."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    try:
+        track = get_track(session, tl, track_id)
+    except KeyError:
+        raise TimelineError("track not found on this timeline") from None
+    _check_track_unlocked(track)
+    at = _check_int(at_frame, "at_frame", 0, 1 << 30)
+    prev_end = Fraction(0)
+    gap_len = 0
+    follower_start = 0
+    for c in track_clips(session, track.id):
+        if Fraction(at) < Fraction(c.start_frames):
+            gap_len = c.start_frames - _ceil_frame(prev_end)
+            follower_start = c.start_frames
+            break
+        e = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        if Fraction(at) < e:
+            raise TimelineError(
+                "that frame is inside a clip, not a gap")
+        prev_end = e
+    if gap_len <= 0:
+        raise TimelineError("no gap at that frame")
+    _shift_following(session, tl, [track],
+                     after_start=follower_start, delta=-gap_len)
+    session.flush()
+    _renumber(session, tl.id)
+    _touch(session, tl, command_id=command_id, summary="Closed gap")
+    return gap_len
+
+
+def insert_gap(session: Session, tl: Timeline, *, track_id: str,
+               at_frame: int, frames: int,
+               command_id: str | None) -> int:
+    """Insert-space: shift the lane's clips at/after `at_frame` right
+    by `frames`. Refuses when `at_frame` lands strictly inside a clip —
+    splitting first keeps the intent explicit."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    try:
+        track = get_track(session, tl, track_id)
+    except KeyError:
+        raise TimelineError("track not found on this timeline") from None
+    _check_track_unlocked(track)
+    at = _check_int(at_frame, "at_frame", 0, 1 << 30)
+    n = _check_int(frames, "frames", 1, 1 << 30)
+    for c in track_clips(session, track.id):
+        e = Fraction(c.start_frames) + clip_tl_extent(c, tl)
+        if Fraction(c.start_frames) < Fraction(at) < e:
+            raise TimelineError(
+                "insert point is inside a clip — split it first")
+    moved = _shift_following(session, tl, [track],
+                             after_start=at, delta=n)
+    if moved == 0:
+        raise TimelineError("no clips after that frame — nothing to shift")
+    session.flush()
+    _renumber(session, tl.id)
+    _touch(session, tl, command_id=command_id, summary="Inserted gap")
+    return moved
 
 
 # ---------- edit decision list ----------

@@ -96,6 +96,8 @@ SUPPORTED_COMMANDS = {
     "timeline.track.add", "timeline.track.update",
     "timeline.track.reorder", "timeline.track.remove",
     "timeline.clip.place",
+    # N1-C — frame-accurate split, ripple edits, gap management
+    "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
     # C5-B — durable FFmpeg render of a pinned EDL
     "timeline.export",
 }
@@ -1561,6 +1563,11 @@ def _validate_timeline(session: Session, project: Project,
                                0, 1 << 30)
             except tld.TimelineError as exc:
                 raise CommandError(422, str(exc)) from exc
+        if payload.get("ripple_scope") is not None:
+            try:
+                tld._check_ripple_scope(payload["ripple_scope"])
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
     elif command_type == "timeline.clip.place":
         # N1-A — explicit-lane placement; same checks as insert plus a
         # required start_frames (that's what makes it 'place').
@@ -1576,14 +1583,24 @@ def _validate_timeline(session: Session, project: Project,
                            0, 1 << 30)
             if payload.get("track_id") is not None:
                 tld.get_track(session, tl, payload["track_id"])
+            if payload.get("ripple_scope") is not None:
+                tld._check_ripple_scope(payload["ripple_scope"])
         except tld.TimelineError as exc:
             raise CommandError(422, str(exc)) from exc
         except KeyError as exc:
             raise CommandError(404, str(exc).strip("'")) from None
     elif command_type in ("timeline.clip.remove", "timeline.clip.move",
-                          "timeline.clip.trim"):
+                          "timeline.clip.trim", "timeline.clip.split"):
         if not payload.get("clip_id"):
             raise CommandError(422, "clip_id is required")
+        if command_type == "timeline.clip.split":
+            if payload.get("at_frame") is None:
+                raise CommandError(422, "at_frame is required")
+            try:
+                tld._check_int(payload["at_frame"], "at_frame",
+                               0, 1 << 30)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
         if command_type == "timeline.clip.move":
             try:
                 if payload.get("to_track_id") is not None:
@@ -1596,6 +1613,27 @@ def _validate_timeline(session: Session, project: Project,
             except KeyError:
                 raise CommandError(
                     404, "track not found on this timeline") from None
+        if payload.get("ripple_scope") is not None:
+            try:
+                tld._check_ripple_scope(payload["ripple_scope"])
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+    elif command_type in ("timeline.gap.close", "timeline.gap.insert"):
+        if payload.get("track_id") is None:
+            raise CommandError(422, "track_id is required")
+        if payload.get("at_frame") is None:
+            raise CommandError(422, "at_frame is required")
+        try:
+            tld.get_track(session, tl, payload["track_id"])
+            tld._check_int(payload["at_frame"], "at_frame", 0, 1 << 30)
+            if command_type == "timeline.gap.insert":
+                tld._check_int(payload.get("frames"), "frames",
+                               1, 1 << 30)
+        except tld.TimelineError as exc:
+            raise CommandError(422, str(exc)) from exc
+        except KeyError:
+            raise CommandError(
+                404, "track not found on this timeline") from None
     elif command_type in ("timeline.track.add", "timeline.track.update",
                           "timeline.track.reorder",
                           "timeline.track.remove"):
@@ -2702,6 +2740,7 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 allow_duplicate=bool(payload.get("allow_duplicate")),
                 track_id=payload.get("track_id"),
                 start_frames=payload.get("start_frames"),
+                ripple_scope=payload.get("ripple_scope"),
                 command_id=command.id)
             audit["after"]["clip_id"] = clip.id
             audit["after"]["position"] = clip.position
@@ -2712,7 +2751,9 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 clip = tld.get_clip(session, t, payload["clip_id"])
             except KeyError:
                 raise CommandError(404, "clip not found on this timeline") from None
-            tld.remove_clip(session, t, clip, command_id=command.id)
+            tld.remove_clip(session, t, clip,
+                            ripple_scope=payload.get("ripple_scope"),
+                            command_id=command.id)
         elif command_type == "timeline.clip.move":
             try:
                 clip = tld.get_clip(session, t, payload["clip_id"])
@@ -2764,7 +2805,27 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
             tld.trim_clip(session, t, clip,
                           in_frame=payload.get("in_frame"),
                           out_frame=payload.get("out_frame"),
+                          ripple_scope=payload.get("ripple_scope"),
                           command_id=command.id)
+        elif command_type == "timeline.clip.split":
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            right = tld.split_clip(
+                session, t, clip, at_frame=payload["at_frame"],
+                command_id=command.id)
+            audit["after"]["right_clip_id"] = right.id
+            audit["after"]["split_at_frame"] = payload["at_frame"]
+        elif command_type == "timeline.gap.close":
+            audit["after"]["closed_frames"] = tld.close_gap(
+                session, t, track_id=payload["track_id"],
+                at_frame=payload["at_frame"], command_id=command.id)
+        elif command_type == "timeline.gap.insert":
+            audit["after"]["shifted"] = tld.insert_gap(
+                session, t, track_id=payload["track_id"],
+                at_frame=payload["at_frame"], frames=payload["frames"],
+                command_id=command.id)
         audit["after"]["timeline_id"] = t.id
     except tld.TimelineError as exc:
         raise CommandError(422, str(exc)) from exc

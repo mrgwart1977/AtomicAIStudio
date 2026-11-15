@@ -181,3 +181,63 @@ export function tickInterval(tl: Pick<TimelineDetail, "fps_num" | "fps_den">,
   }
   return Math.round(300 * fps);
 }
+
+/* ---------------- N1-C: split / gap / trim helpers ---------------- */
+
+export interface LaneGap { start: number; frames: number }
+
+/** Integer-grid gaps on a lane: [ceil(prevEnd), nextStart) using the
+ * same ceil convention the backend packs with. The leading gap
+ * (0 → first clip) is included when the lane doesn't start at 0. */
+export function laneGaps(
+  lane: TimelineClip[],
+  tl: Pick<TimelineDetail, "fps_num" | "fps_den">,
+): LaneGap[] {
+  const gaps: LaneGap[] = [];
+  let runEnd = 0;
+  for (const c of lane) {
+    const gapStart = Math.max(0, Math.ceil(runEnd - EPS));
+    if (c.start_frames > gapStart) {
+      gaps.push({ start: gapStart, frames: c.start_frames - gapStart });
+    }
+    runEnd = Math.max(runEnd, c.start_frames + clipTlExtent(c, tl));
+  }
+  return gaps;
+}
+
+/** Mirror of the backend's split rule: timeline frame `at` must land
+ * strictly inside the clip AND map to a whole SOURCE frame — else the
+ * split would cut mid-frame, which the backend refuses. Returns the
+ * integer source-frame offset when legal, else null. */
+export function splitSrcOffset(
+  clip: TimelineClip,
+  tl: Pick<TimelineDetail, "fps_num" | "fps_den">,
+  at: number,
+): number | null {
+  if (at <= clip.start_frames || at >= clip.start_frames
+      + clipTlExtent(clip, tl)) return null;
+  const off = (at - clip.start_frames)
+    * tl.fps_den * clip.src_fps_num / (tl.fps_num * clip.src_fps_den);
+  const i = Math.round(off);
+  if (Math.abs(off - i) > EPS || i <= 0
+      || i >= clip.out_frame - clip.in_frame) return null;
+  return i;
+}
+
+/** Mirror of the backend's overlap rule for a trim preview: would an
+ * extent starting at `start` collide with another clip on the lane? */
+export function extentOverlap(
+  start: number,
+  extent: number,
+  lane: TimelineClip[],
+  selfId: string,
+  tl: Pick<TimelineDetail, "fps_num" | "fps_den">,
+): boolean {
+  const end = start + extent;
+  for (const c of lane) {
+    if (c.id === selfId) continue;
+    const cEnd = c.start_frames + clipTlExtent(c, tl);
+    if (start < cEnd - EPS && end > c.start_frames + EPS) return true;
+  }
+  return false;
+}

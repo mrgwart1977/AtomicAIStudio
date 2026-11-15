@@ -5,9 +5,9 @@ import type {
   TimelineClip, TimelineDetail, TimelineTrack,
 } from "../../api/types";
 import {
-  clipTlEnd, clipTlExtent, compatibleTrack, dropError, fmtTc,
-  frameToPx, laneClips, programEndFrames, snapStart, tickInterval,
-  TRACK_KINDS, KIND_LABEL,
+  clipTlEnd, clipTlExtent, compatibleTrack, dropError, extentOverlap,
+  fmtTc, frameToPx, laneClips, laneGaps, programEndFrames, snapStart,
+  splitSrcOffset, tickInterval, TRACK_KINDS, KIND_LABEL,
 } from "./timelineMath";
 
 /** N1-B — multitrack timeline editor: lanes with track controls,
@@ -15,7 +15,13 @@ import {
  * Drags mutate nothing until pointerup commits `timeline.clip.move`;
  * Escape cancels. The backend stays authoritative — the UI mirrors
  * its rules (locked lanes, overlap, compatibility) only to give
- * honest live feedback. */
+ * honest live feedback.
+ *
+ * N1-C adds: split-at-playhead (source-frame-boundary checked),
+ * explicit ripple mode (track scope, disclosed), right-edge trim
+ * handles with live duration feedback, and gap indicators with
+ * close/insert-space controls — all through the same preview/commit
+ * path, pinned with expected_timeline for stale-approval safety. */
 
 const HEADER_W = 176;   // px — track header column
 const RULER_H = 28;     // px — ruler row
@@ -27,15 +33,21 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   active: boolean;
   busy: boolean;
   onRun: (type: string, payload: Record<string, unknown>) => Promise<boolean>;
-  onRemoveClip: (clip: TimelineClip) => void;
+  onRemoveClip: (clip: TimelineClip, ripple: boolean) => void;
 }) {
   const [ppf, setPpf] = useState(6);                 // px per frame (zoom)
   const [playheadF, setPlayheadF] = useState(0);
   const [selClipId, setSelClipId] = useState<string | null>(null);
   const [renamingTrack, setRenamingTrack] = useState<string | null>(null);
+  const [ripple, setRipple] = useState(false);
+  const [gapFrames, setGapFrames] = useState("24");
   const [dragView, setDragView] = useState<{
     clipId: string; trackId: string; startF: number;
     error: string | null; snapped: boolean;
+  } | null>(null);
+  const [trimView, setTrimView] = useState<{
+    clipId: string; trackId: string; endF: number; outF: number;
+    error: string | null;
   } | null>(null);
   const [addingKind, setAddingKind] = useState<string>("video");
 
@@ -66,6 +78,14 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const programEnd = useMemo(() => programEndFrames(detail), [detail]);
   const contentW = Math.max(1, (programEnd + TAIL_F) * ppf);
   const selClip = detail.clips.find((c) => c.id === selClipId) ?? null;
+
+  /* ---------------- N1-C: expected-revision pin ---------------- */
+  // Every clip edit pins the revision we actually read — a stale pin
+  // 422s and the page offers a refresh instead of overwriting a
+  // concurrent edit. (Track ops stay unpinned: they don't shift clips.)
+  const pin = useCallback(() => ({
+    expected_timeline: { id: detail.id, revision: detail.revision },
+  }), [detail.id, detail.revision]);
 
   // Selection/drag state must not survive a project or timeline switch.
   useEffect(() => {
@@ -149,8 +169,9 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     void onRun("timeline.clip.move", {
       timeline_id: detail.id, clip_id: d.clip.id,
       to_track_id: view.trackId, start_frames: view.startF,
+      ...pin(),
     });
-  }, [detail.id, endDrag, onRun]);
+  }, [detail.id, endDrag, onRun, pin]);
 
   const onPtrKey = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") endDrag();
@@ -218,7 +239,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
       if (dropError(track, startF, clip, lane, detail)) return;
       void onRun("timeline.clip.move", {
         timeline_id: detail.id, clip_id: clip.id,
-        to_track_id: track.id, start_frames: startF,
+        to_track_id: track.id, start_frames: startF, ...pin(),
       });
     } else if ((e.ctrlKey || e.metaKey)
                && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
@@ -230,12 +251,21 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
       if (dropError(next, clip.start_frames, clip, lane, detail)) return;
       void onRun("timeline.clip.move", {
         timeline_id: detail.id, clip_id: clip.id,
-        to_track_id: next.id, start_frames: clip.start_frames,
+        to_track_id: next.id, start_frames: clip.start_frames, ...pin(),
       });
     } else if (e.key === "Delete" || e.key === "Backspace") {
       if (track.locked) return;
       e.preventDefault();
-      onRemoveClip(clip);
+      onRemoveClip(clip, ripple);
+    } else if ((e.key === "s" || e.key === "S")
+               && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (track.locked) return;
+      if (splitSrcOffset(clip, detail, playheadF) === null) return;
+      e.preventDefault();
+      void onRun("timeline.clip.split", {
+        timeline_id: detail.id, clip_id: clip.id,
+        at_frame: playheadF, ...pin(),
+      });
     }
   };
 
@@ -287,10 +317,175 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     });
   };
 
+  /* ---------------- N1-C: trim-end drag ---------------- */
+
+  const trimRef = useRef<{
+    clip: TimelineClip; trackId: string;
+    origOut: number;
+    move: (e: PointerEvent) => void;
+    up: () => void;
+    key: (e: KeyboardEvent) => void;
+  } | null>(null);
+  const trimViewRef = useRef<typeof trimView>(null);
+  trimViewRef.current = trimView;
+
+  const endTrim = useCallback(() => {
+    const t = trimRef.current;
+    trimRef.current = null;
+    trimViewRef.current = null;
+    setTrimView(null);
+    if (t) {
+      window.removeEventListener("pointermove", t.move);
+      window.removeEventListener("pointerup", t.up);
+      window.removeEventListener("keydown", t.key);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onTrimMove = useCallback((e: PointerEvent) => {
+    const t = trimRef.current;
+    if (!t) return;
+    const lane = lanesRef.current.get(t.trackId);
+    if (!lane) return;
+    const rect = lane.getBoundingClientRect();
+    const clip = t.clip;
+    // Snap in SOURCE frames (authoritative) — the timeline extent
+    // follows from the chosen out_frame, never the other way round.
+    const pointerF = (e.clientX - rect.left) / ppf;
+    const srcPerTl = (clip.src_fps_num * detail.fps_den)
+      / (clip.src_fps_den * detail.fps_num);
+    const off = Math.max(1, Math.min(
+      clip.src_frames - clip.in_frame,
+      Math.round((pointerF - clip.start_frames) * srcPerTl)));
+    const outF = clip.in_frame + off;
+    const extent = off / srcPerTl;
+    const laneList = clipsByTrack.get(t.trackId) ?? [];
+    const error = !ripple
+      && extentOverlap(clip.start_frames, extent, laneList, clip.id, detail)
+      ? "Overlaps the next clip — enable Ripple or trim shorter"
+      : null;
+    const view = {
+      clipId: clip.id, trackId: t.trackId,
+      endF: clip.start_frames + extent, outF, error,
+    };
+    trimViewRef.current = view;
+    setTrimView(view);
+  }, [clipsByTrack, detail, ppf, ripple]);
+
+  const onTrimUp = useCallback(() => {
+    const t = trimRef.current;
+    const view = trimViewRef.current;
+    endTrim();
+    if (!t || !view || view.error || view.outF === t.origOut) return;
+    void onRun("timeline.clip.trim", {
+      timeline_id: detail.id, clip_id: t.clip.id,
+      out_frame: view.outF,
+      ...(ripple ? { ripple_scope: "track" } : {}),
+      ...pin(),
+    });
+  }, [detail.id, endTrim, onRun, pin, ripple]);
+
+  const onTrimKey = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Escape") endTrim();
+  }, [endTrim]);
+
+  const beginTrim = useCallback((e: React.PointerEvent, clip: TimelineClip) => {
+    if (!active || busy) return;
+    const track = tracks.find((t) => t.id === clip.track_id);
+    if (!track || track.locked) return;
+    e.stopPropagation(); // the edge handle must not start a move drag
+    const move = (ev: PointerEvent) => tMoveRef.current(ev);
+    const up = () => tUpRef.current();
+    const key = (ev: KeyboardEvent) => tKeyRef.current(ev);
+    trimRef.current = {
+      clip, trackId: track.id, origOut: clip.out_frame, move, up, key,
+    };
+    const view = {
+      clipId: clip.id, trackId: track.id,
+      endF: clip.start_frames + clipTlExtent(clip, detail),
+      outF: clip.out_frame, error: null,
+    };
+    trimViewRef.current = view;
+    setTrimView(view);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("keydown", key);
+    e.preventDefault();
+  }, [active, busy, detail, tracks]);
+
+  const tMoveRef = useRef(onTrimMove); tMoveRef.current = onTrimMove;
+  const tUpRef = useRef(onTrimUp); tUpRef.current = onTrimUp;
+  const tKeyRef = useRef(onTrimKey); tKeyRef.current = onTrimKey;
+
+  useEffect(() => () => {
+    const t = trimRef.current;
+    if (t) {
+      window.removeEventListener("pointermove", t.move);
+      window.removeEventListener("pointerup", t.up);
+      window.removeEventListener("keydown", t.key);
+    }
+  }, []);
+
+  /* ---------------- N1-C: split / gap ops ---------------- */
+
+  // Split target: the selected clip when the playhead sits inside it
+  // on a whole source frame, else the topmost visible clip that does.
+  const splitTarget = useCallback((): TimelineClip | null => {
+    if (selClip && splitSrcOffset(selClip, detail, playheadF) !== null) {
+      return selClip;
+    }
+    for (const t of tracks) {
+      if (!t.visible || t.locked) continue;
+      const lane = clipsByTrack.get(t.id) ?? [];
+      const hit = lane.find(
+        (c) => splitSrcOffset(c, detail, playheadF) !== null);
+      if (hit) return hit;
+    }
+    return null;
+  }, [clipsByTrack, detail, playheadF, selClip, tracks]);
+
+  const doSplit = (clip: TimelineClip) => {
+    if (splitSrcOffset(clip, detail, playheadF) === null) return;
+    void onRun("timeline.clip.split", {
+      timeline_id: detail.id, clip_id: clip.id,
+      at_frame: playheadF, ...pin(),
+    });
+  };
+
+  // Gap ops act on the selected clip's lane when it's editable, else
+  // the first editable video/overlay lane — the disclosed scope.
+  const gapTrack = useCallback((): TimelineTrack | null => {
+    const selT = selClip
+      ? tracks.find((t) => t.id === selClip.track_id) : null;
+    if (selT && selT.visible && !selT.locked && compatibleTrack(selT)) {
+      return selT;
+    }
+    return tracks.find(
+      (t) => t.visible && !t.locked && compatibleTrack(t)) ?? null;
+  }, [selClip, tracks]);
+
+  const insertSpace = () => {
+    const t = gapTrack();
+    const n = parseInt(gapFrames, 10);
+    if (!t || !Number.isInteger(n) || n <= 0) return;
+    void onRun("timeline.gap.insert", {
+      timeline_id: detail.id, track_id: t.id,
+      at_frame: playheadF, frames: n, ...pin(),
+    });
+  };
+
+  const closeGapAt = (t: TimelineTrack, atFrame: number) => {
+    void onRun("timeline.gap.close", {
+      timeline_id: detail.id, track_id: t.id,
+      at_frame: atFrame, ...pin(),
+    });
+  };
+
   const tick = tickInterval(detail, ppf);
   const ticks: number[] = [];
   for (let f = 0; f <= programEnd + TAIL_F; f += tick) ticks.push(f);
   const draggingClip = dragRef.current?.clip ?? null;
+  const trimmingClip = trimRef.current?.clip ?? null;
 
   /* ---------------- render ---------------- */
 
@@ -309,16 +504,70 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
         <span className="text-[11px] text-faint" data-testid="playhead-readout">
           Playhead {fmtTc(playheadF, detail)}
         </span>
+        {active && (
+          <div className="flex flex-wrap items-center gap-2" role="group"
+            aria-label="Editing">
+            <button
+              disabled={busy || !splitTarget()}
+              onClick={() => { const c = splitTarget(); if (c) doSplit(c); }}
+              title={splitTarget()
+                ? "Split the clip under the playhead into two clips (S)"
+                : "Place the playhead inside a clip on a whole source frame to split"}
+              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+              data-testid="split-at-playhead"
+            >Split at playhead</button>
+            <label
+              className="flex items-center gap-1 rounded border border-line px-2 py-0.5 text-[11px] text-muted"
+              title="Ripple: trimming or removing a clip shifts later clips on the SAME lane to fill or make room. Other lanes never move.">
+              <input
+                type="checkbox"
+                checked={ripple}
+                onChange={(e) => setRipple(e.target.checked)}
+                data-testid="ripple-toggle"
+              />
+              Ripple edits (this lane)
+            </label>
+            <input
+              value={gapFrames}
+              onChange={(e) =>
+                setGapFrames(e.target.value.replace(/[^0-9]/g, ""))}
+              aria-label="Insert space frames"
+              title="Frames to insert"
+              className="w-12 rounded border border-line bg-panel px-1.5 py-0.5 text-[11px]"
+            />
+            <button
+              disabled={busy || !gapTrack()}
+              onClick={insertSpace}
+              title="Insert this many empty frames at the playhead on the selected lane (or first editable lane) — later clips shift right"
+              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+              data-testid="insert-space"
+            >Insert space</button>
+            <button
+              disabled={busy || !gapTrack()}
+              onClick={() => { const t = gapTrack(); if (t) closeGapAt(t, playheadF); }}
+              title="Close the gap at the playhead on the selected lane (or first editable lane) — later clips shift left"
+              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+              data-testid="close-gap"
+            >Close gap</button>
+          </div>
+        )}
         <span className="ml-auto text-[10px] text-faint">
           Drag clips along a lane or between lanes · ←/→ nudges 1 frame
-          (Shift = 1 s) · Esc cancels a drag · no undo — use History to
-          revert the whole timeline
+          (Shift = 1 s) · S splits at the playhead · drag a clip's right
+          edge to trim · Esc cancels · History reverts the whole timeline
         </span>
       </div>
-      {dragView?.error && (
+      {(dragView?.error ?? trimView?.error) && (
         <p role="alert" data-testid="drop-error"
           className="mt-1 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
-          {dragView.error}
+          {dragView?.error ?? trimView?.error}
+        </p>
+      )}
+      {trimView && !trimView.error && (
+        <p data-testid="trim-status"
+          className="mt-1 text-[11px] text-muted">
+          Trim end → source frame {trimView.outF}
+          {ripple ? " · later clips on this lane will shift" : ""}
         </p>
       )}
 
@@ -481,13 +730,51 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                       tl={detail}
                       ppf={ppf}
                       selected={selClipId === c.id}
-                      ghosted={dragView?.clipId === c.id}
+                      ghosted={dragView?.clipId === c.id
+                        || trimView?.clipId === c.id}
                       draggable={active && !busy && !t.locked}
                       onSelect={() => setSelClipId(c.id)}
                       onPointerDown={(e) => beginDrag(e, c)}
+                      onTrimDown={(e) => beginTrim(e, c)}
                       onKeyDown={(e) => clipKey(e, c)}
                     />
                   ))}
+                  {/* N1-C — explicit gaps: rendered, labeled, closable. */}
+                  {laneGaps(lane, detail).map((g) => (
+                    <button
+                      key={`gap-${g.start}`}
+                      type="button"
+                      disabled={!active || busy || t.locked}
+                      onClick={() => closeGapAt(t, Math.floor(g.start + g.frames / 2))}
+                      title={t.locked
+                        ? `Gap — ${g.frames} frame${g.frames === 1 ? "" : "s"} (lane locked)`
+                        : `Gap — ${g.frames} frame${g.frames === 1 ? "" : "s"} — click to close`}
+                      className="absolute top-1.5 rounded border border-dashed border-line text-[9px] text-faint hover:border-teal/60 hover:text-teal disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
+                      style={{
+                        left: frameToPx(g.start, ppf) + 2,
+                        width: Math.max(6, g.frames * ppf - 4),
+                        height: LANE_H - 12,
+                      }}
+                      data-testid="lane-gap"
+                    >
+                      {g.frames * ppf >= 44 ? `gap ${g.frames}f` : ""}
+                    </button>
+                  ))}
+                  {trimView && trimmingClip && trimView.trackId === t.id && (
+                    <div
+                      className={`absolute top-1.5 rounded border-2 ${
+                        trimView.error
+                          ? "border-red-400/70 bg-red-400/10"
+                          : "border-teal bg-teal/20"}`}
+                      style={{
+                        left: frameToPx(trimmingClip.start_frames, ppf),
+                        width: Math.max(4,
+                          (trimView.endF - trimmingClip.start_frames) * ppf),
+                        height: LANE_H - 12,
+                      }}
+                      data-testid="trim-ghost"
+                    />
+                  )}
                   {dragView && draggingClip && dragView.trackId === t.id && (
                     <div
                       className={`absolute top-1.5 rounded border-2 border-dashed ${
@@ -557,9 +844,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
           track={tracks.find((t) => t.id === selClip.track_id) ?? null}
           active={active}
           busy={busy}
+          ripple={ripple}
           onClose={() => setSelClipId(null)}
           onRun={onRun}
-          onRemove={() => onRemoveClip(selClip)}
+          onRemove={() => onRemoveClip(selClip, ripple)}
         />
       )}
       {!selClip && detail.clips.length === 0 && (
@@ -574,7 +862,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
 }
 
 const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
-  draggable, onSelect, onPointerDown, onKeyDown }: {
+  draggable, onSelect, onPointerDown, onTrimDown, onKeyDown }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   ppf: number;
@@ -583,6 +871,7 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   draggable: boolean;
   onSelect: () => void;
   onPointerDown: (e: React.PointerEvent) => void;
+  onTrimDown: (e: React.PointerEvent) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
 }) {
   const w = Math.max(4, clipTlExtent(clip, tl) * ppf);
@@ -609,16 +898,27 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
       <span className="truncate">
         {clip.source_sha256.slice(0, 10)}… · {clipTlEnd(clip, tl) - clip.start_frames}f
       </span>
+      {draggable && w >= 18 && (
+        <div
+          role="separator"
+          aria-label={`Trim end of clip ${clip.source_sha256.slice(0, 10)}`}
+          title="Drag to trim the clip's end — source-frame exact"
+          onPointerDown={onTrimDown}
+          className="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-teal/0 hover:bg-teal/40"
+          data-testid="trim-handle"
+        />
+      )}
     </div>
   );
 });
 
-function ClipInspector({ clip, tl, track, active, busy, onClose, onRun, onRemove }: {
+function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, onRemove }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   track: TimelineTrack | null;
   active: boolean;
   busy: boolean;
+  ripple: boolean;
   onClose: () => void;
   onRun: (t: string, p: Record<string, unknown>) => Promise<boolean>;
   onRemove: () => void;
@@ -670,9 +970,14 @@ function ClipInspector({ clip, tl, track, active, busy, onClose, onRun, onRemove
               if (Number.isInteger(i) && Number.isInteger(o)) {
                 void onRun("timeline.clip.trim", {
                   timeline_id: tl.id, clip_id: clip.id,
-                  in_frame: i, out_frame: o });
+                  in_frame: i, out_frame: o,
+                  ...(ripple ? { ripple_scope: "track" } : {}),
+                  expected_timeline: { id: tl.id, revision: tl.revision } });
               }
             }}
+            title={ripple
+              ? "Trim with ripple — later clips on this lane shift to fill or make room"
+              : "Trim in place — later clips stay put"}
             className="rounded bg-action px-2 py-0.5 text-white disabled:opacity-40"
           >Apply trim</button>
           <label className="text-muted">Start frame
