@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clipTlEnd, clipTlExtent, compatibleTrack, dropError,
-  exportEligibility, extentOverlap, fmtTc, laneClips, laneGaps,
+  exportEligibility, exportMode, extentOverlap, fmtTc, laneClips, laneGaps,
   programEndFrames, snapStart, splitSrcOffset, tickInterval,
 } from "./timelineMath";
 import type { TimelineClip, TimelineDetail, TimelineTrack } from "../../api/types";
@@ -116,6 +116,43 @@ describe("dropError", () => {
   it("allows gaps and separate-lane overlaps implicitly", () => {
     const lane = [CLIP("o", { start_frames: 200 })];
     expect(dropError(TRACK("v"), 100, moving, lane, TL)).toBeNull();
+  });
+});
+
+describe("exportMode (N1-D composite eligibility)", () => {
+  const det = (tracks: TimelineTrack[], clips: TimelineClip[]) =>
+    ({ ...TL, tracks, clips, clips_length: clips.length } as TimelineDetail);
+
+  it("sequential lane → sequential", () => {
+    const d = det([TRACK("v1")], [CLIP("a"), CLIP("b", { start_frames: 72 })]);
+    expect(exportMode(d).mode).toBe("sequential");
+  });
+  it("two populated lanes → composite with lane count", () => {
+    const d = det([TRACK("v1"), TRACK("o1", { kind: "overlay", position: 1 })],
+      [CLIP("a"), CLIP("b", { track_id: "o1" })]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("composite");
+    expect(m.lanes).toBe(2);
+  });
+  it("gapped single lane → composite", () => {
+    const d = det([TRACK("v1")], [CLIP("a"), CLIP("b", { start_frames: 100 })]);
+    expect(exportMode(d).mode).toBe("composite");
+  });
+  it("hidden lanes don't count — all-hidden → blocked", () => {
+    const d = det([TRACK("v1", { visible: false })], [CLIP("a")]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("blocked");
+    expect(m.lanes).toBe(0);
+    expect(m.reason).toMatch(/no visible lane/);
+  });
+  it("muted lanes still composite (video only)", () => {
+    const d = det([TRACK("v1"), TRACK("o1", { kind: "overlay", position: 1,
+                                            muted: true })],
+      [CLIP("a"), CLIP("b", { track_id: "o1" })]);
+    expect(exportMode(d).mode).toBe("composite");
+  });
+  it("empty timeline → blocked", () => {
+    expect(exportMode(det([TRACK("v1")], [])).mode).toBe("blocked");
   });
 });
 

@@ -104,11 +104,12 @@ describe("TimelinePage", () => {
     render(createElement(TimelinePage));
     fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
     const badge = await screen.findByTestId("export-capability");
-    expect(badge.textContent).toMatch(/needs N1-D/);
-    // The reason is visible in the export panel, not hidden.
+    // N1-D — two populated lanes composite, not refuse.
+    expect(badge.textContent).toMatch(/Exports 2 lanes — composite/);
     fireEvent.click(screen.getByRole("button", { name: "Export…" }));
-    const blocked = await screen.findByTestId("export-blocked");
-    expect(blocked.textContent).toMatch(/multiple tracks/);
+    expect(screen.queryByTestId("export-blocked")).toBeNull();
+    expect(screen.getByRole("button", { name: "Preview export" })
+      .getAttribute("disabled")).toBeNull();
   });
 
   it("keyboard move + inspector remove go through commands", async () => {

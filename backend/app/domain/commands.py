@@ -3505,12 +3505,23 @@ def _cloud_adapter_id(registry, provider_key: str) -> str:
     return JOB_COMMANDS["generate.text.cloud"]
 
 
+def _export_edl(session: Session, tl) -> dict:
+    """The EDL document an export will actually consume: `ade-edl/1`
+    when the layout is v1-representable, else `ade-edl/2` (N1-D
+    multitrack compositing). Preview and commit MUST agree via this."""
+    from app.domain import timeline as tld
+    try:
+        return tld.edl_json(session, tl)
+    except tld.TimelineError:
+        return tld.edl_json_v2(session, tl)
+
+
 def _edl_sha(session: Session, tl) -> str:
     """Deterministic hash of the canonical EDL document."""
     import hashlib
-    from app.domain import timeline as tld
     return hashlib.sha256(json.dumps(
-        tld.edl_json(session, tl), sort_keys=True).encode()).hexdigest()
+        _export_edl(session, tl),
+        sort_keys=True).encode()).hexdigest()
 
 
 def _job_request(session: Session, project: Project, command_type: str,
@@ -3529,11 +3540,12 @@ def _job_request(session: Session, project: Project, command_type: str,
             raise CommandError(
                 422, "timeline changed since preview — re-preview")
         try:
-            edl = tld.edl_json(session, tl)
+            # N1-D — v1 document when the layout is representable,
+            # else the full-fidelity v2 doc (never a silent flatten;
+            # the chosen doc's sha is pinned below).
+            edl = _export_edl(session, tl)
             edl_sha = _edl_sha(session, tl)
         except tld.TimelineError as exc:
-            # N1-A — non-representable layouts refuse v1 export with a
-            # clear unsupported-layout error, never a silent flatten.
             raise CommandError(422, str(exc)) from exc
         exp_sha = payload.get("expected_edl_sha")
         if exp_sha is not None and exp_sha != edl_sha:
