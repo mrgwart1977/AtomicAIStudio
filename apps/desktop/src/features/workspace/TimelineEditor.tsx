@@ -2,7 +2,7 @@ import {
   memo, useCallback, useEffect, useMemo, useRef, useState,
 } from "react";
 import type {
-  TimelineClip, TimelineDetail, TimelineTrack,
+  TimelineClip, TimelineCrossfade, TimelineDetail, TimelineTrack,
 } from "../../api/types";
 import {
   acceptsClipKind, clipTlEnd, clipTlExtent, compatibleTrack,
@@ -494,6 +494,105 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const tUpRef = useRef(onTrimUp); tUpRef.current = onTrimUp;
   const tKeyRef = useRef(onTrimKey); tKeyRef.current = onTrimKey;
 
+  /* ---------------- N2-D: fade-handle drag (apex) ---------------- */
+
+  const [fadeView, setFadeView] = useState<{
+    clipId: string; edge: "in" | "out"; units: number;
+  } | null>(null);
+  const fadeRef = useRef<{
+    clip: TimelineClip; trackId: string; edge: "in" | "out";
+    move: (e: PointerEvent) => void; up: () => void;
+    key: (e: KeyboardEvent) => void;
+  } | null>(null);
+  const fadeViewRef = useRef<typeof fadeView>(null);
+  fadeViewRef.current = fadeView;
+
+  const endFadeDrag = useCallback(() => {
+    const t = fadeRef.current;
+    fadeRef.current = null;
+    fadeViewRef.current = null;
+    setFadeView(null);
+    if (t) {
+      window.removeEventListener("pointermove", t.move);
+      window.removeEventListener("pointerup", t.up);
+      window.removeEventListener("keydown", t.key);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onFadeMove = useCallback((e: PointerEvent) => {
+    const t = fadeRef.current;
+    if (!t) return;
+    const lane = lanesRef.current.get(t.trackId);
+    if (!lane) return;
+    const rect = lane.getBoundingClientRect();
+    const clip = t.clip;
+    const srcPerTl = (clip.src_fps_num * detail.fps_den)
+      / (clip.src_fps_den * detail.fps_num);
+    const other = t.edge === "in" ? clip.fade_out_units
+      : clip.fade_in_units;
+    const extent = clip.out_frame - clip.in_frame;
+    // Apex position → fade length in source units. The in-fade apex is
+    // `units` into the clip from its left edge; out-fade apex is
+    // `units` from the right edge.
+    const pointerF = (e.clientX - rect.left) / ppf;
+    const tlLen = t.edge === "in"
+      ? pointerF - clip.start_frames
+      : (clip.start_frames + clipTlExtent(clip, detail)) - pointerF;
+    const units = Math.max(0, Math.min(
+      extent - other, Math.round(tlLen * srcPerTl)));
+    const view = { clipId: clip.id, edge: t.edge, units };
+    fadeViewRef.current = view;
+    setFadeView(view);
+  }, [detail, ppf]);
+
+  const onFadeUp = useCallback(() => {
+    const t = fadeRef.current;
+    const view = fadeViewRef.current;
+    endFadeDrag();
+    if (!t || !view) return;
+    void onRun("timeline.clip.fade", {
+      timeline_id: detail.id, clip_id: t.clip.id,
+      [t.edge === "in" ? "fade_in_units" : "fade_out_units"]:
+        view.units,
+      ...pin(),
+    });
+  }, [detail.id, endFadeDrag, onRun, pin]);
+
+  const onFadeKey = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Escape") endFadeDrag();
+  }, [endFadeDrag]);
+
+  const fMoveRef = useRef(onFadeMove); fMoveRef.current = onFadeMove;
+  const fUpRef = useRef(onFadeUp); fUpRef.current = onFadeUp;
+  const fKeyRef = useRef(onFadeKey); fKeyRef.current = onFadeKey;
+
+  const beginFadeDrag = useCallback((e: React.PointerEvent,
+                                     clip: TimelineClip,
+                                     edge: "in" | "out") => {
+    if (!active || busy) return;
+    const track = tracks.find((t) => t.id === clip.track_id);
+    if (!track || track.locked) return;
+    e.stopPropagation();
+    const move = (ev: PointerEvent) => fMoveRef.current(ev);
+    const up = () => fUpRef.current();
+    const key = (ev: KeyboardEvent) => fKeyRef.current(ev);
+    fadeRef.current = { clip, trackId: track.id, edge, move, up, key };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("keydown", key);
+    e.preventDefault();
+  }, [active, busy, tracks]);
+
+  useEffect(() => () => {
+    const f = fadeRef.current;
+    if (f) {
+      window.removeEventListener("pointermove", f.move);
+      window.removeEventListener("pointerup", f.up);
+      window.removeEventListener("keydown", f.key);
+    }
+  }, []);
+
   useEffect(() => () => {
     const t = trimRef.current;
     if (t) {
@@ -938,6 +1037,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                       onSelect={() => setSelClipId(c.id)}
                       onPointerDown={(e) => beginDrag(e, c)}
                       onTrimDown={(e) => beginTrim(e, c)}
+                      onFadeDown={(e, edge) => beginFadeDrag(e, c, edge)}
+                      fadeView={fadeView?.clipId === c.id ? fadeView : null}
+                      xf={(detail.crossfades ?? []).find((x) =>
+                        x.out_clip_id === c.id || x.in_clip_id === c.id)}
                       onKeyDown={(e) => clipKey(e, c)}
                       trackKind={t.kind}
                       projectId={detail.project_id}
@@ -1049,6 +1152,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
           clip={selClip}
           tl={detail}
           track={tracks.find((t) => t.id === selClip.track_id) ?? null}
+          lane={clipsByTrack.get(selClip.track_id ?? "") ?? []}
           active={active}
           busy={busy}
           ripple={ripple}
@@ -1198,7 +1302,8 @@ const WaveformCanvas = memo(function WaveformCanvas({
 const MAX_BMP = 16384;
 
 const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
-  draggable, onSelect, onPointerDown, onTrimDown, onKeyDown,
+  draggable, onSelect, onPointerDown, onTrimDown, onFadeDown, fadeView,
+  xf, onKeyDown,
   trackKind, projectId, viewL, viewR }: {
   clip: TimelineClip;
   tl: TimelineDetail;
@@ -1209,6 +1314,9 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   onSelect: () => void;
   onPointerDown: (e: React.PointerEvent) => void;
   onTrimDown: (e: React.PointerEvent) => void;
+  onFadeDown?: (e: React.PointerEvent, edge: "in" | "out") => void;
+  fadeView?: { clipId: string; edge: "in" | "out"; units: number } | null;
+  xf?: TimelineCrossfade;
   onKeyDown: (e: React.KeyboardEvent) => void;
   trackKind?: string;
   projectId: string;
@@ -1216,6 +1324,16 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   viewR?: number;
 }) {
   const w = Math.max(4, clipTlExtent(clip, tl) * ppf);
+  // N2-D — fade lengths in source units → timeline px. Live drag
+  // values (fadeView) preview the pending commit.
+  const tlPerSrc = clip.src_fps_num > 0
+    ? (clip.src_fps_den * tl.fps_num) / (clip.src_fps_num * tl.fps_den)
+    : 0;
+  const fin = fadeView?.edge === "in" ? fadeView.units : clip.fade_in_units;
+  const fout = fadeView?.edge === "out" ? fadeView.units
+    : clip.fade_out_units;
+  const finW = Math.min(w, fin * tlPerSrc * ppf);
+  const foutW = Math.min(w, fout * tlPerSrc * ppf);
   return (
     <div
       role="button"
@@ -1242,6 +1360,53 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
           projectId={projectId} viewL={viewL ?? clip.start_frames}
           viewR={viewR ?? clipTlEnd(clip, tl)} />
       )}
+      {/* N2-D — fade triangles: shaded wedges at the head/tail edges
+          with a draggable apex handle (source-unit exact commits). */}
+      {trackKind === "audio" && finW > 2 && (
+        <>
+          <div className="pointer-events-none absolute left-0 top-0 h-full bg-fg/10"
+            style={{
+              width: finW,
+              clipPath: "polygon(0 0, 100% 0, 0 100%)",
+            }}
+            data-testid="fade-in-wedge" />
+          <div role="separator"
+            aria-label={`Fade-in ${fin} samples — drag to resize`}
+            title={`Fade in · ${(fin / clip.src_fps_num * clip.src_fps_den).toFixed(2)}s · drag the apex`}
+            onPointerDown={(e) => onFadeDown?.(e, "in")}
+            className="absolute top-0 h-2.5 w-2 cursor-ew-resize rounded-sm bg-teal/70 hover:bg-teal"
+            style={{ left: Math.max(0, finW - 3) }}
+            data-testid="fade-in-handle" />
+        </>
+      )}
+      {trackKind === "audio" && foutW > 2 && (
+        <>
+          <div className="pointer-events-none absolute right-0 top-0 h-full bg-fg/10"
+            style={{
+              width: foutW,
+              clipPath: "polygon(100% 0, 100% 100%, 0 0)",
+            }}
+            data-testid="fade-out-wedge" />
+          <div role="separator"
+            aria-label={`Fade-out ${fout} samples — drag to resize`}
+            title={`Fade out · ${(fout / clip.src_fps_num * clip.src_fps_den).toFixed(2)}s · drag the apex`}
+            onPointerDown={(e) => onFadeDown?.(e, "out")}
+            className="absolute top-0 h-2.5 w-2 cursor-ew-resize rounded-sm bg-teal/70 hover:bg-teal"
+            style={{ right: Math.max(0, foutW - 3) }}
+            data-testid="fade-out-handle" />
+        </>
+      )}
+      {xf && (
+        <span
+          title={xf.satisfied
+            ? `Crossfade · ${xf.tl_frames}f window · ${xf.curve.replace("_", " ")}`
+            : "Crossfade inactive — clips moved; undo or clear it"}
+          className={`pointer-events-none absolute bottom-0.5 left-1 rounded-sm px-0.5 text-[8px] ${
+            xf.satisfied ? "bg-action/40 text-fg" : "bg-red-500/40 text-fg"}`}
+          data-testid="xf-badge">
+          {xf.satisfied ? "⇄" : "⇄!"}
+        </span>
+      )}
       <span className="relative truncate">
         {clip.source_sha256.slice(0, 10)}… · {clipTlEnd(clip, tl) - clip.start_frames}f
       </span>
@@ -1259,10 +1424,11 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   );
 });
 
-function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, onRemove }: {
+function ClipInspector({ clip, tl, track, lane, active, busy, ripple, onClose, onRun, onRemove }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   track: TimelineTrack | null;
+  lane: TimelineClip[];
   active: boolean;
   busy: boolean;
   ripple: boolean;
@@ -1392,6 +1558,19 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
           </span>
         </div>
       )}
+      {/* N2-D — fades + automation + crossfade for audio clips.
+          All metadata until N2-E renders them. */}
+      {isAudio && !locked && (
+        <FadeSection clip={clip} tl={tl} busy={busy} onRun={onRun} />
+      )}
+      {isAudio && (
+        <CrossfadeSection clip={clip} tl={tl} lane={lane} busy={busy}
+          locked={locked} onRun={onRun} />
+      )}
+      {isAudio && !locked && (
+        <AutomationSection clip={clip} tl={tl} busy={busy}
+          onRun={onRun} />
+      )}
       {locked && (
         <p className="mt-2 text-[10px] text-faint">
           {track?.locked
@@ -1399,6 +1578,178 @@ function ClipInspector({ clip, tl, track, active, busy, ripple, onClose, onRun, 
             : "Timeline is archived — read-only."}
         </p>
       )}
+    </div>
+  );
+}
+
+/* ---------- N2-D: inspector sub-sections (audio clips) ---------- */
+
+function FadeSection({ clip, tl, busy, onRun }: {
+  clip: TimelineClip; tl: TimelineDetail; busy: boolean;
+  onRun: (t: string, p: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const rate = clip.src_fps_num / clip.src_fps_den;   // samples/s
+  const [finS, setFinS] = useState(
+    (clip.fade_in_units / rate).toFixed(2));
+  const [foutS, setFoutS] = useState(
+    (clip.fade_out_units / rate).toFixed(2));
+  useEffect(() => {
+    setFinS((clip.fade_in_units / rate).toFixed(2));
+    setFoutS((clip.fade_out_units / rate).toFixed(2));
+  }, [clip.id, clip.fade_in_units, clip.fade_out_units, rate]);
+  const toUnits = (s: string) =>
+    Math.max(0, Math.round(parseFloat(s || "0") * rate));
+  const curveSel = (edge: "in" | "out") => (
+    <select
+      aria-label={`Fade ${edge} curve`}
+      value={edge === "in" ? clip.fade_in_curve : clip.fade_out_curve}
+      disabled={busy}
+      onChange={(e) => void onRun("timeline.clip.fade", {
+        timeline_id: tl.id, clip_id: clip.id,
+        [edge === "in" ? "fade_in_curve" : "fade_out_curve"]:
+          e.target.value })}
+      className="rounded border border-line bg-panel px-1 py-0.5"
+    >
+      <option value="linear">linear</option>
+      <option value="equal_power">equal-power</option>
+    </select>
+  );
+  return (
+    <div className="mt-2 space-y-1 text-[10px]" data-testid="fade-section">
+      <span className="text-muted">Fades (edge-anchored)</span>
+      <div className="flex items-center gap-1.5">
+        <label className="text-faint">in
+          <input value={finS} onChange={(e) => setFinS(e.target.value)}
+            onBlur={() => void onRun("timeline.clip.fade", {
+              timeline_id: tl.id, clip_id: clip.id,
+              fade_in_units: toUnits(finS) })}
+            inputMode="decimal" aria-label="Fade-in seconds"
+            disabled={busy}
+            className="ml-0.5 w-12 rounded border border-line bg-panel px-1 py-0.5" />
+        </label>
+        <span className="text-faint">s</span>
+        {curveSel("in")}
+        <span className="text-faint"
+          title="Fade length in source samples">
+          {clip.fade_in_units} smp
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <label className="text-faint">out
+          <input value={foutS} onChange={(e) => setFoutS(e.target.value)}
+            onBlur={() => void onRun("timeline.clip.fade", {
+              timeline_id: tl.id, clip_id: clip.id,
+              fade_out_units: toUnits(foutS) })}
+            inputMode="decimal" aria-label="Fade-out seconds"
+            disabled={busy}
+            className="ml-0.5 w-12 rounded border border-line bg-panel px-1 py-0.5" />
+        </label>
+        <span className="text-faint">s</span>
+        {curveSel("out")}
+        <span className="text-faint"
+          title="Fade length in source samples">
+          {clip.fade_out_units} smp
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CrossfadeSection({ clip, tl, lane, busy, locked, onRun }: {
+  clip: TimelineClip; tl: TimelineDetail; lane: TimelineClip[];
+  busy: boolean; locked: boolean;
+  onRun: (t: string, p: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const xf = (tl.crossfades ?? []).find(
+    (x) => x.out_clip_id === clip.id || x.in_clip_id === clip.id);
+  const ordered = [...lane].sort((a, b) => a.start_frames - b.start_frames);
+  const idx = ordered.findIndex((c) => c.id === clip.id);
+  const next = idx >= 0 ? ordered[idx + 1] : undefined;
+  if (xf) {
+    return (
+      <div className="mt-2 text-[10px]" data-testid="xf-section">
+        <span className={xf.satisfied ? "text-muted" : "text-red-300"}>
+          Crossfade {xf.satisfied
+            ? `· ${xf.tl_frames}f window · ${xf.curve.replace("_", " ")}`
+            : "inactive — clips moved (undo or clear)"}
+        </span>
+        {!locked && (
+          <button disabled={busy}
+            onClick={() => void onRun("timeline.crossfade.clear", {
+              timeline_id: tl.id, crossfade_id: xf.id })}
+            className="ml-2 rounded border border-line px-1.5 py-0.5 text-muted hover:text-red-300">
+            Clear
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (!next || locked) return null;
+  return (
+    <div className="mt-2 text-[10px]" data-testid="xf-section">
+      <button disabled={busy}
+        title="Create a 12f crossfade window centered on the join — needs free source material on both sides"
+        onClick={() => void onRun("timeline.crossfade.set", {
+          timeline_id: tl.id,
+          out_clip_id: clip.id, in_clip_id: next.id,
+          tl_start: Math.max(0, next.start_frames - 6),
+          tl_frames: 12, curve: "equal_power" })}
+        className="rounded border border-line px-1.5 py-0.5 text-muted hover:text-teal">
+        Crossfade with next clip
+      </button>
+    </div>
+  );
+}
+
+function AutomationSection({ clip, tl, busy, onRun }: {
+  clip: TimelineClip; tl: TimelineDetail; busy: boolean;
+  onRun: (t: string, p: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const pts: { id: string; at_frames: number; gain_db: number }[] =
+    useMemo(() => {
+      try { return JSON.parse(clip.automation_json || "[]"); }
+      catch { return []; }
+    }, [clip.automation_json]);
+  const occ = Math.ceil(clipTlExtent(clip, tl));
+  const commit = (next: typeof pts) => void onRun(
+    "timeline.clip.automation", {
+      timeline_id: tl.id, clip_id: clip.id,
+      points: next.map(({ at_frames, gain_db }) => (
+        { at_frames, gain_db })) });
+  return (
+    <div className="mt-2 text-[10px]" data-testid="automation-section">
+      <span className="text-muted">Gain automation
+        {pts.length > 0 ? ` · ${pts.length} pts` : ""}</span>
+      {pts.map((p, i) => (
+        <div key={p.id} className="mt-0.5 flex items-center gap-1.5">
+          <span className="w-10 text-faint" title="Offset from clip start">
+            +{p.at_frames}f
+          </span>
+          <GainSlider value={p.gain_db} label={`Point ${i + 1}`}
+            disabled={busy}
+            onCommit={(db) => commit(pts.map((q, j) =>
+              j === i ? { ...q, gain_db: db } : q))} />
+          <button disabled={busy} aria-label={`Delete point ${i + 1}`}
+            onClick={() => commit(pts.filter((_, j) => j !== i))}
+            className="rounded border border-line px-1 text-muted hover:text-red-300">✕</button>
+        </div>
+      ))}
+      <button disabled={busy || pts.length >= 64}
+        title="Add a keyframe near the clip's midpoint (edit its value with the slider)"
+        onClick={() => {
+          const used = new Set(pts.map((p) => p.at_frames));
+          const mid = Math.floor(occ / 2);
+          let at = used.has(mid) ? -1 : mid;
+          for (let d = 1; at < 0 && d < occ; d++) {
+            if (mid - d >= 0 && !used.has(mid - d)) at = mid - d;
+            else if (mid + d < occ && !used.has(mid + d)) at = mid + d;
+          }
+          if (at < 0) return;
+          void commit([...pts, { id: "", at_frames: at, gain_db: 0 }]);
+        }}
+        className="mt-1 rounded border border-line px-1.5 py-0.5 text-muted hover:text-teal disabled:opacity-40">
+        + keyframe
+      </button>
     </div>
   );
 }

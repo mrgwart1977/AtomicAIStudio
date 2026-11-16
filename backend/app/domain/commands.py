@@ -102,6 +102,9 @@ SUPPORTED_COMMANDS = {
     "timeline.clip.split", "timeline.gap.close", "timeline.gap.insert",
     # N2-C — audio gain + track controls
     "timeline.clip.gain",
+    # N2-D — fades, crossfades, bounded gain automation
+    "timeline.clip.fade", "timeline.clip.automation",
+    "timeline.crossfade.set", "timeline.crossfade.clear",
     # C5-B — durable FFmpeg render of a pinned EDL
     "timeline.export",
 }
@@ -1628,7 +1631,8 @@ def _validate_timeline(session: Session, project: Project,
             raise CommandError(404, str(exc).strip("'")) from None
     elif command_type in ("timeline.clip.remove", "timeline.clip.move",
                           "timeline.clip.trim", "timeline.clip.split",
-                          "timeline.clip.gain"):
+                          "timeline.clip.gain", "timeline.clip.fade",
+                          "timeline.clip.automation"):
         if not payload.get("clip_id"):
             raise CommandError(422, "clip_id is required")
         if command_type == "timeline.clip.gain":
@@ -1638,6 +1642,38 @@ def _validate_timeline(session: Session, project: Project,
                 tld.check_gain_db(payload["gain_db"])
             except tld.TimelineError as exc:
                 raise CommandError(422, str(exc)) from exc
+        if command_type == "timeline.clip.fade":
+            try:
+                for f in ("fade_in_units", "fade_out_units"):
+                    if f in payload:
+                        tld._check_int(payload[f], f, 0, 1 << 40)
+                for f in ("fade_in_curve", "fade_out_curve"):
+                    if f in payload:
+                        tld.check_fade_curve(payload[f], f)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+        if command_type == "timeline.clip.automation":
+            if not isinstance(payload.get("points"), list):
+                raise CommandError(422, "points must be a list")
+    elif command_type in ("timeline.crossfade.set",
+                          "timeline.crossfade.clear"):
+        if command_type == "timeline.crossfade.set":
+            for f in ("out_clip_id", "in_clip_id"):
+                if not payload.get(f):
+                    raise CommandError(422, f"{f} is required")
+            try:
+                tld._check_int(payload.get("tl_start"), "tl_start",
+                               0, 1 << 30)
+                tld._check_int(payload.get("tl_frames"), "tl_frames",
+                               1, 1 << 30)
+                tld.check_fade_curve(payload.get("curve")
+                                     if payload.get("curve") is not None
+                                     else "equal_power")
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+        else:
+            if not payload.get("crossfade_id"):
+                raise CommandError(422, "crossfade_id is required")
         if command_type == "timeline.clip.split":
             if payload.get("at_frame") is None:
                 raise CommandError(422, "at_frame is required")
@@ -2875,6 +2911,46 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 tld.set_clip_gain(session, t, clip,
                                   gain_db=payload.get("gain_db"),
                                   command_id=command.id)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+        elif command_type in ("timeline.clip.fade",
+                              "timeline.clip.automation"):
+            try:
+                clip = tld.get_clip(session, t, payload["clip_id"])
+            except KeyError:
+                raise CommandError(404, "clip not found on this timeline") from None
+            try:
+                if command_type == "timeline.clip.fade":
+                    tld.set_clip_fades(
+                        session, t, clip,
+                        fields={f: payload[f] for f in (
+                            "fade_in_units", "fade_in_curve",
+                            "fade_out_units", "fade_out_curve")
+                            if f in payload},
+                        command_id=command.id)
+                else:
+                    tld.set_clip_automation(
+                        session, t, clip, points=payload["points"],
+                        command_id=command.id)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+        elif command_type == "timeline.crossfade.set":
+            try:
+                xf = tld.set_crossfade(
+                    session, t, out_clip_id=payload["out_clip_id"],
+                    in_clip_id=payload["in_clip_id"],
+                    tl_start=payload.get("tl_start"),
+                    tl_frames=payload.get("tl_frames"),
+                    curve=payload.get("curve"),
+                    command_id=command.id)
+                audit["after"]["crossfade_id"] = xf.id
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
+        elif command_type == "timeline.crossfade.clear":
+            try:
+                tld.clear_crossfade(session, t,
+                                    crossfade_id=payload["crossfade_id"],
+                                    command_id=command.id)
             except tld.TimelineError as exc:
                 raise CommandError(422, str(exc)) from exc
         elif command_type == "timeline.clip.split":

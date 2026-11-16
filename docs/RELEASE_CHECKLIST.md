@@ -408,7 +408,7 @@ Classification legend: **[auto]** verified automated test ·
 - All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
 - **N1 is development-complete; this is not production release readiness.**
 
-### N2 milestone note (audio editing — N2-A + N2-B merged, N2-C in review, N2-D..F not started)
+### N2 milestone note (audio editing — N2-A + N2-B merged, N2-C in review, N2-D in progress, N2-E..F not started)
 
 - N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
 - Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
@@ -424,7 +424,8 @@ Classification legend: **[auto]** verified automated test ·
 - Waveform timing integrity — absolute source-sample buckets; `clipWaveWindow` clamps to `[in,out]` so trims never display discarded/beyond-out audio; zoom changes LOD never timing — **[auto]** (unit tests incl. nonzero in/out, split halves, 44.1 kHz, 24000/1001)
 - Waveform serve-time integrity — CAS blob sha re-verified per slice; corrupt/unparseable/mismatched-source blobs → 409 — **[auto]** + **[installed]**
 - Waveform editing installed coverage — move, head+tail trim, split (contiguous source halves), undo/redo stable id, restart persistence, export refusal — **[installed]** (14/14, `docs/n2b-evidence/`)
-- **N2-C gain + track controls:** per-clip + per-lane `gain_db` (dB only, −60…+12; linear = 10^(db/20) at mix), lane `solo`; `timeline.clip.gain` + extended `timeline.track.update`; EDL v2 metadata; precedence visible→mute→solo — **[auto]** (22 backend + 4 UI tests; `docs/n2c-gain-controls.md`); UI/installed pending
-- Gain automation, fades, crossfades, audio mixing in export, audio preview — **[notrun]** N2-D..N2-F scope, not implemented
+- **N2-C gain + track controls:** per-clip + per-lane `gain_db` (dB only, −60…+12; linear = 10^(db/20) at mix), lane `solo`; `timeline.clip.gain` + extended `timeline.track.update`; EDL v2 metadata; precedence visible→mute→solo — **[auto]** + **[installed]** (25 backend + 4 UI tests incl. real 0014→0015 upgrade, NaN/±inf refusal, a/v-separation proofs; 14/14 installed `docs/n2c-evidence/` incl. UI solo/mute/reset/locked-mixer/restart)
+- **N2-D fades/crossfades/automation:** per-clip source-unit fades (linear + equal-power curves, edge-anchored), explicit `timeline_crossfades` records borrowing source handles (seam-containing windows only; read-time `satisfied` flag), bounded ≤64-pt clip gain automation (linear-in-dB); N2-E effective-gain contract pinned; UI wedges+apex drags+inspector sections — **[auto]** + **[installed]** (28 backend + 3 UI tests incl. seam/coverage/cross-project refusals; 14/14 installed `docs/n2d-evidence/` incl. UI curve-select + keyframe editing + restart)
+- Audio mixing in export (applies fades/crossfades/gain), audio preview, per-track automation, extra interp curves — **[notrun]** N2-E..N2-F scope, not implemented
 - Human audio-edit UX feel, drag on audio lanes — **[human]**; waveform accuracy vs a known-good editor — **[human]**
 - All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.
