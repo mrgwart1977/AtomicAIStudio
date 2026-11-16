@@ -75,10 +75,11 @@ end-to-end acceptance + completion report.
   in §"per-track automation (deferred)" below; it is the size of a
   milestone on its own and would unacceptably dilute preview +
   acceptance depth inside N2-F. Proposed for N3 audio polish.
-- **Continuous drag-scrub** — ruler seeks during playback re-schedule
-  correctly (short-range scrub); continuous pointer-drag scrubbing
-  re-triggers cleanly but is a [human] perceptual judgment either
-  way. Documented, not oversold.
+- **Continuous drag-scrub** — implemented in N3-B
+  (`docs/n3b-scrubbing.md`): ruler drag-scrubbing auditions bounded
+  windows through the same `scheduleClip` envelope path; the
+  restart-based `scrubTo` remains for seeks during playback.
+  Audible/feel judgment remains [human].
 
 ## Preview architecture
 
@@ -97,6 +98,9 @@ AudioPreviewEngine                        [audioPreview.ts]
   pause(): position() freeze + stop sources (plan/buffers retained)
   stop():  teardown all nodes; dispose() closes the AudioContext
   scrubTo(s): re-schedules from s while playing
+  N3-B: beginScrub/scrubAudition/endScrub/auditionOnce —
+    bounded 350 ms windows, ≤45 ms coalescing, gen-stopped
+    sources; see docs/n3b-scrubbing.md
 ```
 
 ## Envelope resolution (measured)

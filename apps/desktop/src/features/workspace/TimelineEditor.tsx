@@ -371,14 +371,102 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     zoom(e.deltaY < 0 ? 1.2 : 1 / 1.2);
   };
 
-  const seek = (e: React.PointerEvent | React.MouseEvent) => {
-    const el = e.currentTarget as HTMLElement;
-    const r = el.getBoundingClientRect();
+  // N3-B — ruler drag = continuous audio audition. Window-level
+  // pointermove/up/cancel listeners track the gesture — the same
+  // proven pattern as clip drags. Pointer capture is deliberately NOT
+  // used: capture can be lost mid-gesture (native dragstart, retarget
+  // quirks), which wedged scrub state. Each move fires a bounded
+  // audition window; release ends scrub (playback resumes if it was
+  // playing). A plain click gives one short audition blip. Playhead
+  // state updates are rAF-gated so a full timeline re-render happens
+  // at most once per frame regardless of pointer event rate.
+  const scrubDrag = useRef<{
+    el: HTMLElement;
+    move: (e: PointerEvent) => void;
+    up: () => void;
+  } | null>(null);
+  const pendingPhF = useRef<number | null>(null);
+  const phRaf = useRef(0);
+  const setPlayheadDrag = (f: number) => {
+    pendingPhF.current = f;
+    if (phRaf.current) return;
+    phRaf.current = requestAnimationFrame(() => {
+      phRaf.current = 0;
+      if (pendingPhF.current !== null) {
+        setPlayheadF(pendingPhF.current);
+        pendingPhF.current = null;
+      }
+    });
+  };
+  const rulerFrame = (e: React.PointerEvent) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return Math.max(0, Math.round((e.clientX - r.left) / ppf));
+  };
+  const scrubMove = (e: PointerEvent) => {
+    const d = scrubDrag.current;
+    if (!d) return;
+    // live rect each move — the scroller can pan while scrubbing
+    const r = d.el.getBoundingClientRect();
     const f = Math.max(0, Math.round((e.clientX - r.left) / ppf));
+    setPlayheadDrag(f);
+    previewRef.current?.scrubAudition(f / fps);
+  };
+  const scrubEnd = () => {
+    const d = scrubDrag.current;
+    if (!d) return;
+    scrubDrag.current = null;
+    window.removeEventListener("pointermove", d.move);
+    window.removeEventListener("pointerup", d.up);
+    window.removeEventListener("pointercancel", d.up);
+    previewRef.current?.endScrub();
+  };
+  const onRulerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0 || scrubDrag.current) return;
+    const f = rulerFrame(e);
     setPlayheadF(f);
-    // N2-F — short-range scrub: reposition live playback too.
+    const eng = preview();
+    if (eng.state === "idle") void eng.load(detail, detail.project_id);
+    eng.beginScrub();
+    eng.scrubAudition(f / fps);
+    // stable wrapper instances — cleanup removes exactly what was
+    // registered even if the callbacks re-bind mid-drag.
+    const el = e.currentTarget as HTMLElement;
+    const move = (ev: PointerEvent) => scrubMoveRef.current(ev);
+    const up = () => scrubEndRef.current();
+    scrubDrag.current = { el, move, up };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+  const scrubMoveRef = useRef(scrubMove); scrubMoveRef.current = scrubMove;
+  const scrubEndRef = useRef(scrubEnd); scrubEndRef.current = scrubEnd;
+  // Unmount safety — listeners must not outlive the component (the
+  // engine is disposed separately).
+  useEffect(() => () => {
+    const d = scrubDrag.current;
+    if (d) {
+      window.removeEventListener("pointermove", d.move);
+      window.removeEventListener("pointerup", d.up);
+      window.removeEventListener("pointercancel", d.up);
+    }
+    if (phRaf.current) cancelAnimationFrame(phRaf.current);
+  }, []);
+  const onRulerKey = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? Math.max(1, Math.round(fps)) : 1;
+    let f: number | null = null;
+    if (e.key === "ArrowLeft") f = Math.max(0, playheadF - step);
+    else if (e.key === "ArrowRight") f = playheadF + step;
+    else if (e.key === "Home") f = 0;
+    else if (e.key === "End") f = programEnd + TAIL_F;
+    if (f === null) return;
+    e.preventDefault();
+    setPlayheadF(f);
     const eng = previewRef.current;
-    if (eng?.state === "playing") void eng.scrubTo(f / fps);
+    if (eng) {
+      if (eng.state === "idle") void eng.load(detail, detail.project_id);
+      void eng.auditionOnce(f / fps);
+      if (eng.state === "playing") void eng.scrubTo(f / fps);
+    }
   };
 
   /* ---------------- N2-F audio preview transport ------------- */
@@ -392,6 +480,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     // objective preview PCM. No secrets; read-only surface.
     (window as unknown as Record<string, unknown>).__n2fPreview = {
       buildPreviewPlan, renderPlanOffline, engineRef: previewRef,
+      getPpf: () => ppf,
     };
     return () => {
       delete (window as unknown as Record<string, unknown>).__n2fPreview;
@@ -935,12 +1024,20 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
             >
               {detail.name} · {detail.fps_num}/{detail.fps_den} fps
             </div>
+            {/* userDrag/select none + dragstart prevent: otherwise the
+             * browser turns a scrub gesture into a native drag, which
+             * fires pointercancel/lostpointercapture and wedges scrub */}
             <div
               className="sticky top-0 z-20 border-b border-line bg-panel"
-              style={{ width: contentW, height: RULER_H, position: "relative", cursor: "pointer" }}
-              onPointerDown={seek}
+              style={{ width: contentW, height: RULER_H, position: "relative", cursor: "pointer",
+                       userSelect: "none", WebkitUserDrag: "none" } as React.CSSProperties}
+              draggable={false}
+              onDragStart={(e) => e.preventDefault()}
+              onPointerDown={onRulerDown}
+              onKeyDown={onRulerKey}
+              tabIndex={0}
               role="slider"
-              aria-label="Timeline ruler — set playhead"
+              aria-label="Timeline ruler — set playhead (drag to scrub audio; arrows step, Home/End jump)"
               aria-valuemin={0}
               aria-valuemax={programEnd + TAIL_F}
               aria-valuenow={playheadF}
