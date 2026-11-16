@@ -124,6 +124,41 @@ timecode. Same bounded point-list editing surface as clip
 automation — no on-curve dragging (consistent with N2-D's
 documented surface).
 
+## Migration + rollback
+
+`0019_n3a` is additive and idempotent: two `NOT NULL` columns with
+server defaults on `timeline_tracks` only; verified against a
+populated `0018_n2f` database (project/timeline/track/clip rows and
+their values — gain, mute, solo, visibility — survive unchanged,
+new columns land at the neutral `'[]'`/`'linear'`). No backfill, no
+rewrites, no table rebuilds.
+
+Rollback (`downgrade()`) drops both columns: **all stored track
+automation is destroyed** — the same one-way shape as every prior
+migration here. Rolling the app back without downgrading keeps the
+columns harmlessly (pre-N3-A code ignores them); downgrading then
+re-upgrading restores empty automation, not the user's keyframes.
+Backup/export before downgrade if automation data matters.
+
+## Hardening verification (post-review)
+
+- `fixtures/audio-parity/track-automation-combined.json` (9th
+  fixture; the original 7 + the N3-A fixture untouched) exercises
+  combination envelopes at PCM level through the real
+  `_lane_chain`/`_embedded_chain` ffmpeg renders AND
+  `buildPreviewPlan`: lane linear ramp across a satisfied
+  equal-power crossfade (both directions, 11 checkpoints — each
+  measured gain is ramp × xf-env product), step lane automation ×
+  clip fade-in, step lane × clip automation on an adjacent
+  (split-shaped) clip, linear lane ramp on embedded video audio.
+- Absolute-time semantics under edits: clip move keeps keyframes
+  AND remaps offsets to the new absolute span (a pre-stream point
+  emits a negative between() bound; mid-ramp starts measured at
+  PCM level); trim + split leave `automation_json` byte-identical
+  and EDL re-serializes.
+- Boundaries: points at tl 0, at stream start mid-ramp, at/past
+  program end (flat tail — inert, not refused).
+
 ## Boundaries
 
 - Lane automation applies to EVERY contributing stream on the lane —
@@ -132,5 +167,9 @@ documented surface).
 - Preview remains editorial: the measured contract is the render
   (64 Hz sampling, decode/resample differences documented in
   `docs/n2f-preview.md`).
+- Keyframe positions are set at the playhead (frame-exact,
+  deduped to the nearest free absolute frame) — there is no
+  direct numeric position entry; same bounded editing surface as
+  clip automation, documented as the established UX shape.
 - Human checks outstanding: lane-automation feel + audible
   judgment **[human]**.

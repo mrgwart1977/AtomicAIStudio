@@ -197,6 +197,149 @@ def test_track_automation_survives_clip_moves(client):
     assert json.loads(tr["automation_json"])[0]["at_tl_frames"] == 24
 
 
+def test_moved_clip_reads_lane_curve_at_new_position(client):
+    """After a move the lane curve still evaluates at ABSOLUTE time:
+    a keyframe ahead of the clip lands mid-stream (offset +48000);
+    one behind it precedes stream start (offset −144000)."""
+    pid, tid, a1 = _setup(client)
+    _tauto(client, pid, tid, a1["id"], [
+        {"at_tl_frames": 24, "gain_db": -12},
+        {"at_tl_frames": 120, "gain_db": 0}])
+    d = _detail(client, pid, tid)
+    clip = d["clips"][0]
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": tid, "clip_id": clip["id"],
+             "start_frames": 96})
+    from app.domain import timeline_export as tx
+    plan = tx.composite_plan(_n3a_edl(client, pid, tid), {})
+    a = plan["audio_clips"][0]
+    chain = tx._lane_chain(7, a, Fraction(24, 1))
+    # tl 24 → (24−96)·2000 = −144000, quantized to −143999 by the
+    # half-up _q contract (pre-stream: flat head −12); tl 120 →
+    # (120−96)·2000 = +48000 (mid-stream ramp start).
+    assert "between(n,-143999,47999)" in chain
+
+
+def test_track_automation_survives_trim_and_split(client):
+    """Trims and splits are clip edits — lane keyframes are a lane
+    property and pass through untouched, fragments included."""
+    pid, tid, a1 = _setup(client)
+    _tauto(client, pid, tid, a1["id"], [
+        {"at_tl_frames": 0, "gain_db": -12},
+        {"at_tl_frames": 36, "gain_db": 0}])
+    d = _detail(client, pid, tid)
+    clip = d["clips"][0]
+    _commit(client, pid, "timeline.clip.trim",
+            {"timeline_id": tid, "clip_id": clip["id"],
+             "in_frame": 24000})
+    _commit(client, pid, "timeline.clip.split",
+            {"timeline_id": tid, "clip_id": clip["id"],
+             "at_frame": 24})
+    d = _detail(client, pid, tid)
+    assert len(d["clips"]) == 2
+    tr = _track_of(d, a1["id"])
+    assert json.loads(tr["automation_json"]) == [
+        {"id": "p0", "at_tl_frames": 0, "gain_db": -12},
+        {"id": "p1", "at_tl_frames": 36, "gain_db": 0}]
+    # EDL still serializes the lane automation for the edited lane
+    doc = _n3a_edl(client, pid, tid)
+    et = next(x for x in doc["tracks"] if x["id"] == a1["id"])
+    assert [p["at_tl_frames"] for p in et["automation"]] == [0, 36]
+
+
+# ---------- migration (0019_n3a) ----------
+
+def test_migration_0019_preserves_existing_rows(tmp_path):
+    """A populated 0018_n2f database upgrades to 0019_n3a keeping
+    every project/timeline/track/clip row; the new columns default
+    to the neutral envelope ('[]'/'linear')."""
+    import sqlite3
+    import uuid
+    from alembic.config import Config as AlembicConfig
+    from alembic import command as alembic_command
+    from app.main import (_alembic_script_location,
+                          run_migrations)
+
+    url = f"sqlite:///{tmp_path}/n3a.db"
+    run_migrations(url)
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location",
+                        str(_alembic_script_location()))
+    cfg.set_main_option("sqlalchemy.url", url)
+    alembic_command.downgrade(cfg, "0018_n2f")
+
+    db = tmp_path / "n3a.db"
+    con = sqlite3.connect(str(db))
+    pid, tid, trid, aid, vid, cid = (
+        str(uuid.uuid4()) for _ in range(6))
+    now = "2024-01-01 00:00:00"
+    con.execute(
+        "INSERT INTO projects (id, name, template, kind, status,"
+        " aspect_ratio, width, height, fps_num, fps_den, style,"
+        " settings_json, revision, created_at, updated_at) VALUES "
+        f"('{pid}', 'Legacy', 'blank', 'film', 'active', '16:9',"
+        f" 1920, 1080, 24, 1, '{{}}', '{{}}', 0, '{now}', '{now}')")
+    con.execute(
+        "INSERT INTO timelines (id, project_id, name, description,"
+        " fps_num, fps_den, status, revision, undo_stack_json,"
+        " redo_stack_json, created_at, updated_at) VALUES "
+        f"('{tid}', '{pid}', 'Cut', '', 24, 1, 'active',"
+        f" 1, '[]', '[]', '{now}', '{now}')")
+    con.execute(
+        "INSERT INTO timeline_tracks (id, project_id, timeline_id,"
+        " kind, position, name, visible, locked, muted, gain_db,"
+        " solo, created_at) VALUES "
+        f"('{trid}', '{pid}', '{tid}', 'audio', 0, 'A1', 1, 0, 0,"
+        f" -3.0, 1, '{now}')")
+    con.execute(
+        "INSERT INTO assets (id, project_id, name, kind, origin,"
+        " scope, status, uri, sha256, byte_size, provenance_json,"
+        f" current_version_id, created_at) VALUES"
+        f" ('{aid}', '{pid}', 'a.wav', 'audio', 'imported',"
+        f" 'project', 'ready', 'x', 'sha', 1, '{{}}', '{vid}',"
+        f" '{now}')")
+    con.execute(
+        "INSERT INTO asset_versions (id, asset_id, version_no,"
+        f" sha256, media_json, created_at) VALUES ('{vid}',"
+        f" '{aid}', 1, 'sha', '{{}}', '{now}')")
+    con.execute(
+        "INSERT INTO timeline_clips (id, project_id, timeline_id,"
+        " track_id, position, start_frames, source_asset_id,"
+        " source_version_id, source_sha256, in_frame, out_frame,"
+        " src_frames, src_fps_num, src_fps_den, src_duration_s,"
+        " shot_id, scene_id, gain_db, fade_in_units, fade_in_curve,"
+        " fade_out_units, fade_out_curve, automation_json,"
+        " automation_interp, src_has_audio, created_at) VALUES "
+        f"('{cid}', '{pid}', '{tid}', '{trid}', 0, 0, '{aid}',"
+        f" '{vid}', 'sha', 0, 48, 48, 24, 1, 2.0, NULL, NULL,"
+        f" -3.0, 0, 'linear', 0, 'linear', '[]', 'linear', 0,"
+        f" '{now}')")
+    con.commit()
+    con.close()
+
+    run_migrations(url)
+
+    con = sqlite3.connect(str(db))
+    ver = con.execute(
+        "SELECT version_num FROM alembic_version").fetchone()[0]
+    assert ver == "0019_n3a"
+    row = con.execute(
+        "SELECT kind, name, position, visible, muted, gain_db, solo,"
+        f" automation_json, automation_interp FROM timeline_tracks"
+        f" WHERE id='{trid}'").fetchone()
+    assert row[:7] == ("audio", "A1", 0, 1, 0, -3.0, 1)
+    assert row[7:] == ("[]", "linear")   # neutral defaults
+    clip = con.execute(
+        "SELECT start_frames, in_frame, out_frame, gain_db,"
+        f" automation_json FROM timeline_clips WHERE id='{cid}'"
+    ).fetchone()
+    assert clip == (0, 0, 48, -3.0, "[]")
+    assert con.execute(
+        f"SELECT COUNT(*) FROM projects WHERE id='{pid}'"
+    ).fetchone()[0] == 1
+    con.close()
+
+
 # ---------- evaluator (shared with clip automation) ----------
 
 def test_track_automation_evaluator_math():
