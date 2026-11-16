@@ -493,3 +493,85 @@ def test_track_automation_audit_label(client):
     d = _detail(client, pid, tid)
     assert d["undo_label"] == "Set track automation"
     assert r.get("ok", True)
+
+
+# ---------- negative-time / source-handle review (installed-order §2)
+
+def _render_chain(client, chain, rate, n_out):
+    """Render a production filter chain on a constant 0.8 signal and
+    return (stereo-frame count, sample-at fn). PCM pipes to stdout —
+    Defender quarantines .pcm files in temp dirs."""
+    import subprocess
+    from app.domain.media import binaries
+    ff = binaries.ffmpeg()
+    if ff is None:
+        pytest.skip("ffmpeg not resolvable")
+    ffmpeg = ff["path"]
+    total_s = n_out / rate + 0.5
+    r = subprocess.run(
+        [ffmpeg, "-y", "-v", "error",
+         "-f", "lavfi", "-i",
+         f"aevalsrc=exprs=0.8|0.8:d={total_s:.3f}:s={rate}",
+         "-filter_complex", chain,
+         "-f", "s16le", "-ac", "2", "-"],
+        capture_output=True)
+    assert r.returncode == 0, f"ffmpeg failed: {r.stderr[:300]}"
+    pcm = r.stdout
+    n = len(pcm) // 4
+
+    def at(u):
+        idx = int(u)
+        if idx < 0 or idx >= n:
+            return 0.0
+        v = int.from_bytes(pcm[idx * 4:idx * 4 + 2],
+                           "little", signed=True)
+        return abs(v) / 32768.0 / 0.8
+    return n, at
+
+
+def test_negative_bounds_no_prestream_output(client, tmp_path):
+    """§2 — the aeval whose ramp starts at a NEGATIVE sample bound
+    (clip moved past a lane keyframe) emits no negative-time output:
+    the stream length is exact, sample 0 already carries the
+    interpolated mid-ramp value (not silence, not a duplicated
+    edge), and the tail is flat."""
+    pid, tid, a1 = _setup(client)   # 2 s @48k clip on a 24 fps lane
+    _tauto(client, pid, tid, a1["id"], [
+        {"at_tl_frames": 24, "gain_db": -12},
+        {"at_tl_frames": 120, "gain_db": 0}])
+    clip = _detail(client, pid, tid)["clips"][0]
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": tid, "clip_id": clip["id"],
+             "start_frames": 96})
+    from app.domain import timeline_export as tx
+    a = tx.composite_plan(_n3a_edl(client, pid, tid), {})[
+        "audio_clips"][0]
+    chain = tx._lane_chain(0, a, Fraction(24, 1))
+    n, at = _render_chain(client, chain, 48000, 96000)
+    # exact stream length — no negative-time tail, no extension
+    assert n == 96000
+    # n=0: −12 + 12·(0+143999)/191999 ≈ −3.0 dB → ≈0.708
+    assert at(0) == pytest.approx(10 ** (-3 / 20), abs=0.03)
+    # ramp completes at its quantized bound, tail is flat unity
+    assert at(47999) == pytest.approx(1.0, abs=0.01)
+    assert at(48000) == pytest.approx(1.0, abs=0.01)
+    assert at(95999) == pytest.approx(1.0, abs=0.01)
+
+
+def test_keyframes_beyond_program_end_are_inert(client):
+    """§2 — lane keyframes positioned entirely beyond the program
+    end can never extend the render nor perturb the stream: the
+    flat-head rule holds the FIRST value, length stays exact."""
+    pid, tid, a1 = _setup(client)   # clip ends at tl 48
+    _tauto(client, pid, tid, a1["id"], [
+        {"at_tl_frames": 5000, "gain_db": 0},
+        {"at_tl_frames": 6000, "gain_db": -12}])
+    from app.domain import timeline_export as tx
+    a = tx.composite_plan(_n3a_edl(client, pid, tid), {})[
+        "audio_clips"][0]
+    chain = tx._lane_chain(0, a, Fraction(24, 1))
+    n, at = _render_chain(client, chain, 48000, 96000)
+    assert n == 96000                      # no program extension
+    assert at(0) == pytest.approx(1.0, abs=0.01)   # flat head → 0 dB
+    assert at(48000) == pytest.approx(1.0, abs=0.01)
+    assert at(95999) == pytest.approx(1.0, abs=0.01)

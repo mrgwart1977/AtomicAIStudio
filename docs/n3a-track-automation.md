@@ -173,3 +173,53 @@ Backup/export before downgrade if automation data matters.
   clip automation, documented as the established UX shape.
 - Human checks outstanding: lane-automation feel + audible
   judgment **[human]**.
+
+## Merge record
+
+- Final reviewed commit: `ca1c3c98b7f0767e0fb36dc09cc877603d99b341`
+- Merged: PR #134 → `df58439defd1c24c348665929b44ba41cd2f4039`
+
+## Installed Windows acceptance
+
+NSIS build of the final reviewed commit installed and exercised under
+WebView2 CDP (`scripts/cdp-n3a-acceptance.cjs`,
+evidence `docs/n3a-evidence/`). All steps passed:
+
+- Installed startup ran `0018_n2f -> 0019_n3a` on the populated N2
+  database; prior project opens with clips, gain (-4 dB) and solo
+  values preserved; new columns neutral `'[]'`/`'linear'`; existing
+  `backup.export` job succeeds post-migration.
+- Automation CRUD on embedded + 2 audio lanes (linear + step),
+  add/remove keyframe, gain edit, interp swap — all via detail
+  readback.
+- Clip move/trim/split leave lane automation byte-identical; undo/redo
+  round-trips for edits and automation replace-all.
+- Locked lane refuses clip.move (422) while track.automation still
+  applies (lock = clip-edit guard, mixer open by design).
+- Mute A2 and solo A1 exports measured via decoded PCM.
+- Export PCM 9/9: absolute-time duck window, recovery, step drop,
+  embedded ramp, post-split continuity, no clipping, no duration
+  extension (5.000 s for tl 150 @30/1).
+- Preview parity 7/7 incl. seek-into-ramp (0.1115 vs 0.0966); transport
+  play/stop clean.
+- Full app restart: automation byte-identical, interps preserved,
+  moved clip position preserved, revision unchanged.
+- Clean shutdown via window close: no `atomic-dream-engine.exe` /
+  `atomic-backend.exe` orphans.
+
+## Negative-time / source-handle review
+
+`between(n,-143999,47999)` is the _q()-quantized source-handle bound
+when a lane keyframe at tl 0 lands one source-frame early on a
+head-borrowed stream (n is stream-relative; the stream starts before
+its clip's timeline occupancy). Verified in
+`backend/tests/test_n3a_track_automation.py`:
+
+- `adelay`-trimmed stream emits exactly its program length — no
+  negative-time output, no pre-stream emission, no duplicated samples.
+- Sample 0 measures mid-ramp (~-3 dB down) — the curve is evaluated
+  at absolute timeline time, not clamped to clip start.
+- Keyframes past program end give a flat tail; program duration is
+  never extended.
+- Borrowed crossfade heads sit inside the same expression path; frame
+  zero is a normal evaluation point, not a special case.

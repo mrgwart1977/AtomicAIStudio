@@ -1,0 +1,55 @@
+N3-A INSTALLED ACCEPTANCE — consolidated log
+App: NSIS install of commit ca1c3c98b7f0767e0fb36dc09cc877603d99b341
+Install dir: %LOCALAPPDATA%\Atomic Dream Engine  |  CDP port 9227
+Date: 2026-11-16  |  Driver: scripts/cdp-n3a-acceptance.cjs
+
+[0] migration — installed-app startup ran `0018_n2f -> 0019_n3a` on the
+    populated N2 database (backend log line captured in session).
+    projects listed: 62; prior N2-F project FOUND (N2F-1794803055263)
+    N2 project opens: 6 clips, A2-music gain -4 dB PRESERVED,
+    lane automation defaults neutral '[]'/'linear' on every track.
+[1] scene — embedded video lane (220Hz @48k), dialogue A1 (440Hz @48k
+    tl30-120), music A2 (330Hz @44.1k tl0-150), FILM @30/1fps
+[2] track automation — created on all 3 lanes (A1 linear 3pt ramp,
+    V1 linear 0->-12dB embedded, A2 step 0->-15dB @tl75);
+    add/remove keyframe, gain edit (-18->-15), interp swap
+    step->linear->step — all verified through detail readback
+[3] edits — clip.move dialogue 30->60, clip.trim music in=44100,
+    clip.split music @tl75: lane automation_json BYTE-IDENTICAL,
+    music split into 2 fragments
+[4] undo/redo — split/trim/move undone and redone; automation
+    clear->undo->redo->restore round-trips verified
+[5] locked lane — clip.move -> 422 on locked A1; track.automation
+    still applies (lock = clip-edit guard, mixer open) — then unlocked.
+    mute A2 -> export -> 330 absent, 440 intact;
+    solo A1 -> export -> 330 + embedded 220 silenced, 440 intact
+[6] export FILM — 3.0s render -> h264 150f 30/1 + aac 48000 stereo,
+    dur 5.000s (NO program extension). PCM checks 9/9:
+      no dialogue 0.5-1.8s (clip moved to tl60): OK
+      lane duck window 440 dips at ABSOLUTE 2.4-2.7s: OK
+      lane duck recovers by 3.7-3.95s: OK
+      music step early > late (~-15dB): OK
+      music present after split boundary: OK
+      embedded lane ramp late < early: OK
+      embedded present early: OK
+      no clipping / not silent: OK
+[7] preview — plan 4 clips (1 embedded); offline render vs export PCM:
+      lane-ramp duck parity     0.0966 vs 0.0960 OK
+      lane-ramp recover parity  0.2966 vs 0.3011 OK
+      step pre parity           0.3536 vs 0.3526 OK
+      step post parity          0.0627 vs 0.0628 OK
+      embedded ramp early       0.1533 vs 0.1524 OK
+      embedded ramp late        0.0523 vs 0.0517 OK
+      seek-into-ramp parity     0.1115 vs 0.0966 OK
+      transport play advanced (Playhead 2:12) then stopped clean
+[8] backup — backup.export job SUCCEEDED post-migration
+[9] restart — full tree kill, fresh launch:
+      4 clips, A1 automation byte-identical, interps
+      linear/step/linear, moved clip at tl60, revision 37 -> 37
+[10] shutdown — CloseMainWindow -> app + backend exited;
+     tasklist: no atomic-dream-engine.exe, no atomic-backend.exe
+     orphan processes: NONE
+
+PASS — all steps, no critical/high findings.
+Driver files: scripts/cdp-n3a-acceptance.cjs (full + --verify-only mode)
+PCM renders + sources: docs/n3a-evidence/media/
