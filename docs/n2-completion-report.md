@@ -1,7 +1,7 @@
 # N2 — audio milestone completion report
 
-Status: N2-A…N2-E merged; **N2-F implemented, final engineering
-review complete** (PR #132, unmerged at gate time). This report is
+Status: **N2-A…N2-F all merged** — PR #132 merged as `d67329d`
+on reviewed head `cf5d390`; post-merge CI 6/6 green. This report is
 the milestone record — capabilities, PR/merge history, CI, installed
 evidence, performance, limitations, and remaining gates. It does not
 claim full product acceptance: the human-required checks and `#96`
@@ -25,7 +25,7 @@ remain open.
 | #126–#128 | N2-A / N2-B / N2-C | (earlier milestones) | `f6df73d` (N2-C) | 6/6 ✓ |
 | #130 | N2-D | `e79631b` | `621de12dbf0e526bb1944d7fe74240bd7e5f9bcb` | run 43779937024 — 6/6 ✓ |
 | #131 | N2-E | `f01ff5d` | `81ff693` | run 43792728210 — 6/6 ✓ |
-| #132 | N2-F | see §3 | **unmerged — awaiting approval** | see §3 |
+| #132 | N2-F | `cf5d390` | `d67329dda3d1c2984f4af9ac4fddeb709bc409df` | run 43807362638 — 6/6 ✓ (incl. package NSIS build+upload) |
 
 ## 3. CI evidence
 
