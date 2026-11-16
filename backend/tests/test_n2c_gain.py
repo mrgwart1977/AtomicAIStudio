@@ -290,9 +290,10 @@ def test_edl_v1_unchanged_by_gain(client):
     assert "gain_db" not in str(e)
 
 
-def test_export_still_refuses_visible_audio_lane(client):
-    """N2-C establishes the control model — populated visible audio
-    lanes still refuse loudly until N2-E."""
+def test_export_renders_soloed_audio_lane_now(client):
+    """N2-E renders audio lanes — a soloed audio lane no longer
+    refuses on lane grounds; the synthetic fixture fails only on
+    missing source bytes, never on 'audio lanes'."""
     pid = make_project(client)["id"]
     t = _tl(client, pid)
     a1 = _atrack(client, pid, t["id"])
@@ -303,7 +304,7 @@ def test_export_still_refuses_visible_audio_lane(client):
                 {"timeline_id": t["id"], "profile": "720p"})
     j = wait_for_job(client, pid, r["job_id"])
     assert j["status"] == "failed"
-    assert "audio lanes" in (j["error"] or "").lower()
+    assert "audio lanes" not in (j["error"] or "").lower()
 
 
 # ---------- migration ----------

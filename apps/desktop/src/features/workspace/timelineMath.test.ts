@@ -160,6 +160,70 @@ describe("exportMode (N1-D composite eligibility)", () => {
   it("empty timeline → blocked", () => {
     expect(exportMode(det([TRACK("v1")], [])).mode).toBe("blocked");
   });
+
+  // ---------- N2-E — audio lanes composite; audibility reported ----
+  it("video + audible audio lane → composite with 'tracks' audio", () => {
+    const d = det([TRACK("v1"), TRACK("a1", { kind: "audio", position: 1,
+                                           solo: false })],
+      [CLIP("a"), CLIP("b", { track_id: "a1" })]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("composite");
+    expect(m.audio).toBe("tracks");
+  });
+  it("audio-only timeline composites — black canvas + mix", () => {
+    const d = det([TRACK("a1", { kind: "audio" })],
+      [CLIP("a", { track_id: "a1" })]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("composite");
+    expect(m.audio).toBe("tracks");
+  });
+  it("muted audio lane → video's own audio still counts ('embedded')", () => {
+    const d = det([TRACK("v1"),
+                   TRACK("a1", { kind: "audio", position: 1,
+                                 muted: true })],
+      [CLIP("a"), CLIP("b", { track_id: "a1" })]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("composite");
+    expect(m.audio).toBe("embedded");
+  });
+  it("every lane muted → audio reported 'none'", () => {
+    const d = det([TRACK("v1", { muted: true }),
+                   TRACK("a1", { kind: "audio", position: 1,
+                                 muted: true })],
+      [CLIP("a"), CLIP("b", { track_id: "a1" })]);
+    const m = exportMode(d);
+    expect(m.mode).toBe("composite");
+    expect(m.audio).toBe("none");
+  });
+  it("soloed video lane silences the audio lane → 'embedded'", () => {
+    const d = det([TRACK("v1", { solo: true }),
+                   TRACK("a1", { kind: "audio", position: 1 })],
+      [CLIP("a"), CLIP("b", { track_id: "a1" })]);
+    const m = exportMode(d);
+    expect(m.audio).toBe("embedded");
+  });
+  it("unsatisfied crossfade on an audible lane → blocked", () => {
+    const A = CLIP("A", { track_id: "a1" });
+    const B = CLIP("B", { track_id: "a1", start_frames: 48 });
+    const d = { ...det([TRACK("a1", { kind: "audio" })], [A, B]),
+      crossfades: [{ id: "x1", out_clip_id: "A", in_clip_id: "B",
+                     tl_start: 40, tl_frames: 8, curve: "equal_power",
+                     satisfied: false }] } as TimelineDetail;
+    const m = exportMode(d);
+    expect(m.mode).toBe("blocked");
+    expect(m.reason).toMatch(/crossfade/);
+  });
+  it("unsatisfied crossfade on a muted lane is inert — still composite", () => {
+    const A = CLIP("A", { track_id: "a1" });
+    const B = CLIP("B", { track_id: "a1", start_frames: 48 });
+    const d = { ...det([TRACK("v1"),
+                        TRACK("a1", { kind: "audio", position: 1,
+                                      muted: true })], [CLIP("v"), A, B]),
+      crossfades: [{ id: "x1", out_clip_id: "A", in_clip_id: "B",
+                     tl_start: 40, tl_frames: 8, curve: "equal_power",
+                     satisfied: false }] } as TimelineDetail;
+    expect(exportMode(d).mode).toBe("composite");
+  });
 });
 
 describe("exportEligibility (mirrors v1_layout_reason)", () => {

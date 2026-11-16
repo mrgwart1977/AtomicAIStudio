@@ -238,7 +238,11 @@ def test_edl_v1_refuses_populated_audio_lane(client):
         or "multiple tracks" in r.json()["detail"]
 
 
-def test_export_preview_refuses_visible_audio_lane(client):
+def test_export_preview_no_longer_refuses_visible_audio_lane(client):
+    """N2-E renders audio lanes — a populated visible audio lane is a
+    renderable input now, not a refusal. This synthetic fixture still
+    fails at source resolution (no real bytes behind the CAS row),
+    which is honest: it never complains about the audio lane."""
     pid = make_project(client)["id"]
     t = _tl(client, pid)
     v1 = next(x for x in _detail(client, pid, t["id"])["tracks"]
@@ -246,13 +250,13 @@ def test_export_preview_refuses_visible_audio_lane(client):
     _place(client, pid, t["id"], _video(client, pid), v1["id"])
     a1 = _atrack(client, pid, t["id"])
     _place(client, pid, t["id"], _audio(client, pid), a1["id"])
-    # Commit queues the job (durable); adapter validation then fails
-    # it closed — nothing is silently discarded.
     r = _commit(client, pid, "timeline.export",
                 {"timeline_id": t["id"], "profile": "720p"})
     job = wait_for_job(client, pid, r["job_id"])
     assert job["status"] == "failed"
-    assert "audio lanes" in (job.get("error") or "")
+    assert "audio lanes" not in (job.get("error") or "")
+    assert "unavailable" in (job.get("error") or "").lower() \
+        or "missing" in (job.get("error") or "").lower()
 
 
 def test_export_ok_when_audio_lane_hidden(client):
@@ -334,8 +338,9 @@ def test_audio_remove_ripple(client):
     assert d["clips"][0]["start_frames"] == 12  # 60 - 48 (2s extent)
 
 
-def test_composite_plan_refuses_audio_lane_direct():
-    """Unit: composite_plan raises on a visible populated audio lane."""
+def test_composite_plan_accepts_audio_lane_direct():
+    """Unit: composite_plan resolves a visible populated audio lane
+    into mixed-audio inputs (N2-E); hidden lanes contribute nothing."""
     from app.domain.timeline_export import composite_plan
     edl = {"format": "ade-edl/2",
            "timebase": {"num": 24, "den": 1},
@@ -345,12 +350,21 @@ def test_composite_plan_refuses_audio_lane_direct():
                       "start_frames": 0, "in_frame": 0,
                       "out_frame": 48000, "sha256": "x" * 64,
                       "timeline_frames": {"num": 48, "den": 1},
-                      "source": {"fps_num": 48000, "fps_den": 1}}]}
-    with pytest.raises(ValueError, match="audio lanes"):
-        composite_plan(edl, {})
+                      "source": {"fps_num": 48000, "fps_den": 1,
+                                 "sample_rate": 48000}}]}
+    plan = composite_plan(edl, {})
+    assert plan["clips"] == []
+    assert [a["clip_id"] for a in plan["audio_clips"]] == ["c1"]
+    assert plan["audio_clips"][0]["rate"] == 48000
     # Hidden lane is a render decision — planning proceeds empty.
     edl["tracks"][0]["visible"] = False
-    assert composite_plan(edl, {})["clips"] == []
+    plan = composite_plan(edl, {})
+    assert plan["clips"] == [] and plan["audio_clips"] == []
+    # An audio clip with no measured rate anywhere refuses closed.
+    edl["tracks"][0]["visible"] = True
+    del edl["clips"][0]["source"]["sample_rate"]
+    with pytest.raises(ValueError, match="sample rate"):
+        composite_plan(edl, {})
 
 
 # ---------- real ffprobe + import adapter ----------

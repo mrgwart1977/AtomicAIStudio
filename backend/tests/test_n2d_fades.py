@@ -423,13 +423,14 @@ def test_stale_revision_refused(client):
     assert r.status_code == 409
 
 
-def test_export_still_refuses_with_fades(client):
-    """N2-D is metadata only — a populated visible audio lane still
-    refuses export until N2-E."""
+def test_export_with_fades_no_longer_lane_refused(client):
+    """N2-E renders fades — a faded audio lane plans cleanly; this
+    fixture still fails only on missing source bytes."""
     pid, tid, a1, clip = _setup(client)
     _fade(client, pid, tid, clip["id"], fade_in_units=4800)
     r = _commit(client, pid, "timeline.export",
                 {"timeline_id": tid, "profile": "720p"}, expect=200)
     from tests.conftest import wait_for_job
     j = wait_for_job(client, pid, r["job_id"])
-    assert j["status"] == "failed" and "audio lanes" in j["error"]
+    assert j["status"] == "failed"
+    assert "audio lanes" not in (j["error"] or "")

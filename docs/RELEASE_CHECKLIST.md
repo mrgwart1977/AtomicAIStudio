@@ -408,7 +408,7 @@ Classification legend: **[auto]** verified automated test ·
 - All previously tracked blockers remain open as recorded — incl. **#96** (mandatory live-artifact-retrieval blocker), #5-#15, #22-#27.
 - **N1 is development-complete; this is not production release readiness.**
 
-### N2 milestone note (audio editing — N2-A + N2-B merged, N2-C in review, N2-D in progress, N2-E..F not started)
+### N2 milestone note (audio editing — N2-A..N2-D merged, N2-E in review, N2-F not started)
 
 - N2-A audio foundation (audio-capable lanes reuse `TimelineTrack.kind="audio"`; sample-exact clip model; CAS-pinned sources; probe metadata: codec/rate/channels/layout/sample count) — **[auto]** + **[installed]** (7/7, `docs/n2a-evidence/`)
 - Audio import via durable jobs (probe, fail-closed invalid input, cancel/restart reconcile) — **[auto]** + **[installed]** (real WAV `pcm_s16le` 48 kHz stereo, exact 48,000 samples)
@@ -417,7 +417,7 @@ Classification legend: **[auto]** verified automated test ·
 - EDL v2 carries audio stream identity (rate, channels, layout, samples, exact) without losing source pins — **[auto]** + **[installed]**
 - Undo/redo across audio clips with stable clip identity — **[auto]** + **[installed]**
 - Mixed 44.1 kHz / 48 kHz sources, sample↔timeline rational conversion — **[auto]**
-- Audio-lane rendering/mixing in export — **[blocked]** by design until N2-E; currently refuses visibly populated audio lanes (never silently drops)
+- Audio-lane rendering/mixing in export — **implemented in N2-E** (see N2-E row below); pre-N2-E refusal replaced by real rendering
 - **N2-B waveform envelopes:** `asset.waveform` durable job → streaming decode → deterministic min/max LOD levels in CAS pinned to source sha — **[auto]** + **[installed]** (9/9, `docs/n2b-evidence/`; rerun skips; stale-version manifest → honest 409)
 - Waveform canvas inside audio `LaneClip`s — viewport-culled, zoom-aware LOD switching, loading/missing/error+retry states, pointer-transparent — **[auto]** + **[installed]**
 - Waveform perf — `[auto]` bench (`backend/bench_waveform.py`): 5 min build 1.5 s; 1 h 12.9 s / 5.7 MB blob / 57 MB peak; 3 h 36.3 s / 4.3 MB blob / 43 MB peak (bucket-capped); 102-clip multi-lane scroll 60 fps / 7 MB heap / 0 revisit fetches **[installed]**
@@ -426,6 +426,9 @@ Classification legend: **[auto]** verified automated test ·
 - Waveform editing installed coverage — move, head+tail trim, split (contiguous source halves), undo/redo stable id, restart persistence, export refusal — **[installed]** (14/14, `docs/n2b-evidence/`)
 - **N2-C gain + track controls:** per-clip + per-lane `gain_db` (dB only, −60…+12; linear = 10^(db/20) at mix), lane `solo`; `timeline.clip.gain` + extended `timeline.track.update`; EDL v2 metadata; precedence visible→mute→solo — **[auto]** + **[installed]** (25 backend + 4 UI tests incl. real 0014→0015 upgrade, NaN/±inf refusal, a/v-separation proofs; 14/14 installed `docs/n2c-evidence/` incl. UI solo/mute/reset/locked-mixer/restart)
 - **N2-D fades/crossfades/automation:** per-clip source-unit fades (linear + equal-power curves, edge-anchored), explicit `timeline_crossfades` records borrowing source handles (seam-containing windows only; read-time `satisfied` flag), bounded ≤64-pt clip gain automation (linear-in-dB); N2-E effective-gain contract pinned; UI wedges+apex drags+inspector sections — **[auto]** + **[installed]** (28 backend + 3 UI tests incl. seam/coverage/cross-project refusals; 14/14 installed `docs/n2d-evidence/` incl. UI curve-select + keyframe editing + restart)
-- Audio mixing in export (applies fades/crossfades/gain), audio preview, per-track automation, extra interp curves — **[notrun]** N2-E..N2-F scope, not implemented
-- Human audio-edit UX feel, drag on audio lanes — **[human]**; waveform accuracy vs a known-good editor — **[human]**
+- **N2-E audio mixing & export:** dedicated audio lanes render through the composite graph (atrim source-units → **asetpts PTS reset** → aeval gain+automation → afade fades/xf → resample-last → sample-exact silence placement → amix normalize=0 → alimiter limit=0.95/level=0/latency=1 → AAC 48k stereo); audibility = visible+mute+solo; satisfied crossfades borrow source handles; detached-xf on audible lane fails closed; audio-only renders black canvas; export UI discloses mix content — **[auto]** (52 backend tests: plan units + real-ffmpeg PCM-measured renders — fps-matrix onsets, click/AAC-pipeline control, xf envelope shapes vs math contract, combined gain stages, limiter ceiling/latency/quiet-honesty, embedded mute/solo/hidden picture+audio, cancel/missing/hash-mismatch/ffmpeg-nonzero/disk-space/cleanup — + 6 exportMode UI tests) + **[installed]**
+- N2-E review fix: afade anchors on frame PTS — `asetpts=PTS-STARTPTS` must precede envelope filters or fades on trimmed/head-borrowed streams silently no-op — **[auto]** (regression-pinned in chain-shape test + full-window xf envelope measurements)
+- N2-E durability: v2-path cancel mid-render cleans work dir, missing/hash-mismatched/undecodable sources fail closed, ffmpeg nonzero cleans partial output, disk-space estimate refuses pre-render, interrupted-job reconcile on startup — **[auto]**
+- Audio preview scrubbing, per-track automation, extra interp curves — **[notrun]** N2-F scope, not implemented
+- Human audio-edit UX feel, drag on audio lanes — **[human]**; audible fade/crossfade/mix judgment vs reference — **[human]** (N2-E renders it; ears required); waveform accuracy vs a known-good editor — **[human]**
 - All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.

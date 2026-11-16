@@ -164,10 +164,11 @@ per mix: `mix = Σ lane_out` over audible lanes only.
 
 ## Boundaries
 
-- Fades/crossfades/automation are **not rendered** — N2-E mixes and
-  applies them; until then visible populated audio lanes refuse
-  export.
+- Fades/crossfades/automation **are rendered** as of N2-E — see
+  `docs/n2e-mixing.md` for the render architecture (envelopes at
+  native rate, equal_power → afade `qsin`, single quantization
+  point).
 - No on-curve dragging of automation points this round — the point
   list is the bounded editing surface.
 - Human checks outstanding: fade/curve UX feel **[human]**;
-  crossfade audition **[N2-E + human]**.
+  crossfade audition **[human — now audible after N2-E]**.

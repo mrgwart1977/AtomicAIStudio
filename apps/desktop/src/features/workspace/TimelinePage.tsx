@@ -322,7 +322,12 @@ export function TimelinePage() {
                     ? exportModeInfo.reason ?? undefined
                     : exportModeInfo.mode === "sequential"
                       ? "This cut is a single sequential video lane — it exports via the fast path."
-                      : `Multitrack composite — ${exportModeInfo.lanes} visible lane(s) render over black; hidden and muted lanes contribute nothing.`}
+                      : `Multitrack composite — ${exportModeInfo.lanes} visible lane(s) render over black; hidden and muted lanes contribute nothing.${
+                        exportModeInfo.audio === "tracks"
+                          ? " Audible audio lanes mix into the output."
+                          : exportModeInfo.audio === "embedded"
+                            ? " Video-lane audio mixes into the output."
+                            : " No audible audio — the video is silent."}`}
                   className={`rounded border px-1.5 py-0.5 text-[10px] ${
                     exportModeInfo.mode === "blocked"
                       ? "border-line text-faint"
@@ -379,7 +384,12 @@ export function TimelinePage() {
                 data-testid="export-panel">
                 <p className="text-xs text-muted">
                   {exportModeInfo.mode === "composite"
-                    ? `Render this cut to a single MP4 — ${exportModeInfo.lanes} visible lane(s) composite over black, timeline gaps render black, muted lanes contribute no audio.`
+                    ? `Render this cut to a single MP4 — ${exportModeInfo.lanes} visible lane(s) composite over black, timeline gaps render black, muted lanes contribute no audio.${
+                      exportModeInfo.audio === "tracks"
+                        ? " Audible audio lanes mix in with gains, fades, crossfades and automation."
+                        : exportModeInfo.audio === "embedded"
+                          ? " Video-lane audio mixes in at each lane's gain."
+                          : " Output is silent — no audible audio lanes."}`
                     : "Render this cut to a single MP4 video file."}
                 </p>
                 {exportModeInfo.mode === "blocked" && (
