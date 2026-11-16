@@ -1,0 +1,136 @@
+{
+  "name": "N3-A hardening — track automation × xf/fade/clip-automation combos",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0,
+     "automation_interp": "linear",
+     "automation": [
+       {"at_tl_frames": 30, "gain_db": 0},
+       {"at_tl_frames": 90, "gain_db": -12}]},
+    {"id": "a2", "kind": "audio", "position": 1, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0,
+     "automation_interp": "step",
+     "automation": [
+       {"at_tl_frames": 0, "gain_db": 0},
+       {"at_tl_frames": 45, "gain_db": -12}]},
+    {"id": "v1", "kind": "video", "position": 2, "visible": true,
+     "muted": false, "solo": false, "gain_db": -6,
+     "automation_interp": "linear",
+     "automation": [
+       {"at_tl_frames": 0, "gain_db": 0},
+       {"at_tl_frames": 90, "gain_db": -12}]}
+  ],
+  "clips": [
+    {"id": "ca", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "start_frames": 30, "in_frame": 0, "out_frame": 48000,
+     "src_frames": 57600, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "cb", "track_id": "a1", "asset_id": "asrc2",
+     "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "start_frames": 60, "in_frame": 12000, "out_frame": 60000,
+     "src_frames": 60000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "s1", "track_id": "a2", "asset_id": "asrc3",
+     "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+     "start_frames": 15, "in_frame": 0, "out_frame": 96000,
+     "src_frames": 96000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 12000, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "s2", "track_id": "a2", "asset_id": "asrc4",
+     "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+     "start_frames": 75, "in_frame": 0, "out_frame": 96000,
+     "src_frames": 96000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [{"at_frames": 0, "gain_db": -6}],
+     "automation_interp": "linear"},
+    {"id": "e1", "track_id": "v1", "asset_id": "av1",
+     "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+     "start_frames": 0, "in_frame": 0, "out_frame": 90,
+     "src_frames": 90, "src_fps": {"num": 30, "den": 1},
+     "src_has_audio": true,
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [
+    {"id": "x1", "out_clip_id": "ca", "in_clip_id": "cb",
+     "tl_start": 55, "tl_frames": 10, "curve": "equal_power",
+     "satisfied": true}
+  ],
+  "probes": {
+    "ca": {"sample_rate": 48000},
+    "cb": {"sample_rate": 48000},
+    "s1": {"sample_rate": 48000},
+    "s2": {"sample_rate": 48000},
+    "e1": {"audio": [{"sample_rate": 48000}]}
+  },
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["ca", "cb", "s1", "s2", "e1"],
+    "clips": {
+      "ca": {
+        "tl_start_s": 1.0, "tl_end_s": 2.1666667,
+        "src_start_s": 0.0, "seg_dur_s": 1.1666667, "embedded": false,
+        "env": [
+          {"u": 0,     "g": 1.0},
+          {"u": 40000, "g": 0.5623413},
+          {"u": 44000, "g": 0.4904706},
+          {"u": 48000, "g": 0.3543945},
+          {"u": 52000, "g": 0.1810747},
+          {"u": 55990, "g": 0.0004378}
+        ]
+      },
+      "cb": {
+        "tl_start_s": 1.8333333, "tl_end_s": 3.0,
+        "src_start_s": 0.0833333, "seg_dur_s": 1.1666667,
+        "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.0},
+          {"u": 8000,  "g": 0.3543945},
+          {"u": 16000, "g": 0.4466836},
+          {"u": 40000, "g": 0.3162278},
+          {"u": 55990, "g": 0.2512233}
+        ]
+      },
+      "s1": {
+        "tl_start_s": 0.5, "tl_end_s": 2.5,
+        "src_start_s": 0.0, "seg_dur_s": 2.0, "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.0},
+          {"u": 6000,  "g": 0.5},
+          {"u": 12000, "g": 1.0},
+          {"u": 47000, "g": 1.0},
+          {"u": 49000, "g": 0.2511886},
+          {"u": 80000, "g": 0.2511886}
+        ]
+      },
+      "s2": {
+        "tl_start_s": 2.5, "tl_end_s": 4.5,
+        "src_start_s": 0.0, "seg_dur_s": 2.0, "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.1258925},
+          {"u": 48000, "g": 0.1258925},
+          {"u": 95900, "g": 0.1258925}
+        ]
+      },
+      "e1": {
+        "tl_start_s": 0.0, "tl_end_s": 3.0,
+        "src_start_s": 0.0, "seg_dur_s": 3.0, "embedded": true,
+        "env": [
+          {"u": 0,      "g": 0.5011872},
+          {"u": 48000,  "g": 0.3162278},
+          {"u": 96000,  "g": 0.1995262},
+          {"u": 143900, "g": 0.1260129}
+        ]
+      }
+    }
+  }
+}

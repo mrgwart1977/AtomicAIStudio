@@ -37,6 +37,7 @@ const HEADER_W = 176;   // px — track header column
 const RULER_H = 28;     // px — ruler row
 const LANE_H = 56;      // px — one lane
 const MIX_ROW_H = 22;   // px — extra mix-controls row on audio/video lanes
+const AUTO_H = 92;      // px — expanded track-automation panel
 
 const GAIN_DB_MIN = -60, GAIN_DB_MAX = 12; // mirrors backend contract
 
@@ -97,6 +98,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const [playheadF, setPlayheadF] = useState(0);
   const [selClipId, setSelClipId] = useState<string | null>(null);
   const [renamingTrack, setRenamingTrack] = useState<string | null>(null);
+  const [autoTracks, setAutoTracks] = useState<Set<string>>(new Set());
   const [ripple, setRipple] = useState(false);
   const [gapFrames, setGapFrames] = useState("24");
   const [audioAssets, setAudioAssets] = useState<
@@ -959,9 +961,11 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
             const lane = clipsByTrack.get(t.id) ?? [];
             const dimmed = !t.visible;
             const mixable = t.kind === "audio" || t.kind === "video";
+            const rowH = (mixable ? LANE_H + MIX_ROW_H : LANE_H)
+              + (autoTracks.has(t.id) ? AUTO_H : 0);
             return (
               <div key={t.id} className="flex"
-                style={{ height: mixable ? LANE_H + MIX_ROW_H : LANE_H }}
+                style={{ height: rowH }}
                 data-testid={`lane-${t.id}`}>
                 {/* track header — sticky left */}
                 <div
@@ -1092,10 +1096,30 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                         disabled={busy || !active}
                         onCommit={(db) => patchTrack(t, { gain_db: db })}
                       />
+                      <button
+                        aria-label={`${autoTracks.has(t.id) ? "Hide" : "Show"} ${t.name} automation`}
+                        data-testid={`auto-toggle-${t.id}`}
+                        disabled={busy || !active}
+                        title="Track gain automation — keyframes at absolute timeline positions; applies to every clip on this lane (incl. embedded audio)"
+                        onClick={() => setAutoTracks(prev => {
+                          const n = new Set(prev);
+                          if (n.has(t.id)) n.delete(t.id); else n.add(t.id);
+                          return n;
+                        })}
+                        className={`shrink-0 rounded border px-1 text-[9px] ${
+                          autoTracks.has(t.id)
+                            ? "border-action/60 text-action"
+                            : "border-line text-muted hover:text-fg"}`}
+                      >ƒ</button>
                       {t.solo && (
                         <span className="text-[9px] text-action">soloed</span>
                       )}
                     </div>
+                  )}
+                  {mixable && autoTracks.has(t.id) && (
+                    <TrackAutomationSection track={t} tl={detail}
+                      busy={busy || !active}
+                      playheadF={playheadF} onRun={onRun} />
                   )}
                 </div>
                 {/* lane body */}
@@ -1105,8 +1129,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                     else lanesRef.current.delete(t.id);
                   }}
                   className={`relative border-b border-line ${dimmed ? "opacity-50" : ""}`}
-                  style={{ width: contentW,
-                    height: mixable ? LANE_H + MIX_ROW_H : LANE_H }}
+                  style={{ width: contentW, height: rowH }}
                   data-testid={`lane-body-${t.id}`}
                 >
                   {lane.length === 0 && (
@@ -1792,6 +1815,82 @@ function CrossfadeSection({ clip, tl, lane, busy, locked, onRun }: {
           tl_frames: 12, curve: "equal_power" })}
         className="rounded border border-line px-1.5 py-0.5 text-muted hover:text-teal">
         Crossfade with next clip
+      </button>
+    </div>
+  );
+}
+
+/** N3-A — per-track gain automation editor. Points are keyed at
+ * ABSOLUTE timeline frames (not clip-local), so they ride the lane
+ * itself: moving/trimming/splitting clips never orphans them, and a
+ * single ramp can span clips, gaps, and embedded audio alike.
+ * Commits the whole list as one undo step, same as clip automation. */
+function TrackAutomationSection({ track, tl, busy, playheadF, onRun }: {
+  track: TimelineTrack; tl: TimelineDetail; busy: boolean;
+  playheadF: number;
+  onRun: (t: string, p: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const pts: { id: string; at_tl_frames: number; gain_db: number }[] =
+    useMemo(() => {
+      try { return JSON.parse(track.automation_json || "[]"); }
+      catch { return []; }
+    }, [track.automation_json]);
+  const commit = (next: typeof pts, interp?: string) => void onRun(
+    "timeline.track.automation", {
+      timeline_id: tl.id, track_id: track.id,
+      points: next.map(({ at_tl_frames, gain_db }) => (
+        { at_tl_frames, gain_db })),
+      interp: interp ?? track.automation_interp ?? "linear" });
+  return (
+    <div className="mt-1 flex flex-col gap-0.5 overflow-y-auto text-[10px]"
+      style={{ maxHeight: AUTO_H - 8 }}
+      data-testid={`track-auto-${track.id}`}>
+      <div className="flex items-center gap-1">
+        <span className="text-muted">Track automation
+          {pts.length > 0 ? ` · ${pts.length} pts` : ""}</span>
+        <select aria-label="Track automation interpolation"
+          value={track.automation_interp ?? "linear"}
+          disabled={busy}
+          onChange={(e) => commit(pts, e.target.value)}
+          title="How lane gain moves between keyframes: linear ramps in dB, step holds each value until the next point"
+          className="rounded border border-line bg-panel px-1 py-0.5">
+          <option value="linear">linear</option>
+          <option value="step">step</option>
+        </select>
+      </div>
+      {pts.map((p, i) => (
+        <div key={p.id} className="flex items-center gap-1">
+          <span className="w-14 shrink-0 text-faint"
+            title={`Absolute timeline frame ${p.at_tl_frames}`}>
+            {fmtTc(p.at_tl_frames, tl)}
+          </span>
+          <GainSlider value={p.gain_db} label={`Keyframe ${i + 1}`}
+            disabled={busy}
+            onCommit={(db) => commit(pts.map((q, j) =>
+              j === i ? { ...q, gain_db: db } : q))} />
+          <button disabled={busy} aria-label={`Delete keyframe ${i + 1}`}
+            onClick={() => commit(pts.filter((_, j) => j !== i))}
+            className="rounded border border-line px-1 text-muted hover:text-red-300">✕</button>
+        </div>
+      ))}
+      <button disabled={busy || pts.length >= 256}
+        title="Add a keyframe at the playhead (edit its value with the slider)"
+        onClick={() => {
+          const used = new Set(pts.map((p) => p.at_tl_frames));
+          let at = Math.round(playheadF);
+          if (used.has(at)) {
+            let found = -1;
+            for (let d = 1; found < 0 && d < (1 << 20); d++) {
+              if (!used.has(at + d)) found = at + d;
+              else if (at - d >= 0 && !used.has(at - d)) found = at - d;
+            }
+            at = found;
+          }
+          if (at < 0) return;
+          void commit([...pts, { id: "", at_tl_frames: at, gain_db: 0 }]);
+        }}
+        className="mt-0.5 self-start rounded border border-line px-1.5 py-0.5 text-muted hover:text-teal disabled:opacity-40">
+        + keyframe at playhead
       </button>
     </div>
   );

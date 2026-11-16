@@ -105,6 +105,8 @@ SUPPORTED_COMMANDS = {
     # N2-D — fades, crossfades, bounded gain automation
     "timeline.clip.fade", "timeline.clip.automation",
     "timeline.crossfade.set", "timeline.crossfade.clear",
+    # N3-A — per-track gain automation (absolute timeline frames)
+    "timeline.track.automation",
     # C5-B — durable FFmpeg render of a pinned EDL
     "timeline.export",
 }
@@ -365,6 +367,8 @@ def _summary(command_type: str, payload: dict) -> str:
             op = command_type.rsplit(".", 1)[1]
             if op == "add":
                 return f"Add {payload.get('kind', 'video')} track"
+            if op == "automation":
+                return "Set track automation"
             return f"{op.capitalize()} track"
         return f"{command_type.split('.', 1)[1].capitalize()} timeline"
     parts = _entity_parts(command_type)
@@ -1723,7 +1727,8 @@ def _validate_timeline(session: Session, project: Project,
                 404, "track not found on this timeline") from None
     elif command_type in ("timeline.track.add", "timeline.track.update",
                           "timeline.track.reorder",
-                          "timeline.track.remove"):
+                          "timeline.track.remove",
+                          "timeline.track.automation"):
         if command_type == "timeline.track.add":
             kind = payload.get("kind", "video")
             if kind not in tld.TRACK_KINDS:
@@ -1736,6 +1741,15 @@ def _validate_timeline(session: Session, project: Project,
             except KeyError:
                 raise CommandError(
                     404, "track not found on this timeline") from None
+            if command_type == "timeline.track.automation":
+                if not isinstance(payload.get("points"), list):
+                    raise CommandError(422, "points must be a list")
+                if (payload.get("interp") is not None
+                        and payload["interp"]
+                        not in tld.AUTOMATION_INTERPS):
+                    raise CommandError(
+                        422, "interp must be one of "
+                        + ", ".join(tld.AUTOMATION_INTERPS))
             if command_type == "timeline.track.reorder":
                 try:
                     tld._check_int(payload.get("to_position"),
@@ -2898,6 +2912,19 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 raise CommandError(
                     404, "track not found on this timeline") from None
             tld.remove_track(session, t, tr, command_id=command.id)
+        elif command_type == "timeline.track.automation":
+            try:
+                tr = tld.get_track(session, t, payload["track_id"])
+            except KeyError:
+                raise CommandError(
+                    404, "track not found on this timeline") from None
+            try:
+                tld.set_track_automation(
+                    session, t, tr, points=payload["points"],
+                    interp=payload.get("interp"),
+                    command_id=command.id)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from exc
         elif command_type == "timeline.clip.trim":
             try:
                 clip = tld.get_clip(session, t, payload["clip_id"])

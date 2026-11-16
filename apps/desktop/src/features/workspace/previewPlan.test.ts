@@ -13,7 +13,8 @@ import type {
 const TRACK = (id: string, over: Partial<TimelineTrack> = {}): TimelineTrack => ({
   id, project_id: "p", timeline_id: "t", kind: "audio", name: id,
   position: 0, visible: true, locked: false, muted: false, solo: false,
-  gain_db: 0, created_at: "2026-01-01", ...over,
+  gain_db: 0, automation_json: "[]", automation_interp: "linear",
+  created_at: "2026-01-01", ...over,
 });
 
 const CLIP = (id: string, track_id: string,
@@ -217,5 +218,73 @@ describe("buildPreviewPlan — schedule + envelopes", () => {
     const p = buildPreviewPlan(d);
     expect(p.clips).toEqual([]);
     expect(p.detachedXfs).toEqual([]);
+  });
+
+  // ---------- N3-A — per-track automation (absolute tl frames) ------
+
+  it("track automation evaluates at absolute timeline positions", () => {
+    const auto = JSON.stringify(
+      [{ at_tl_frames: 24, gain_db: 0 },
+       { at_tl_frames: 48, gain_db: -12 }]);
+    const t = TRACK("a1", { automation_json: auto });
+    // Clip occupies tl [24,48) — 1 s of 48k samples at 24 fps.
+    const d = TL([t], [CLIP("c1", "a1", { start_frames: 24,
+                                          out_frame: 48000 })]);
+    const c = buildPreviewPlan(d).clips[0];
+    expect(c.env(0)).toBeCloseTo(1, 3);              // tl 24 → 0 dB
+    expect(c.env(0.5)).toBeCloseTo(10 ** (-6 / 20), 2); // tl 36 → −6
+    expect(c.env(0.99)).toBeCloseTo(10 ** (-11.88 / 20), 2);
+    // The SAME lane curve over a clip placed later reads the moved
+    // position — the envelope follows the lane, not the clip.
+    const moved = TL([t], [CLIP("c1", "a1", { start_frames: 36,
+                                              out_frame: 48000 })]);
+    const c2 = buildPreviewPlan(moved).clips[0];
+    expect(c2.env(0)).toBeCloseTo(10 ** (-6 / 20), 2); // tl 36 → −6
+  });
+
+  it("track automation applies to embedded video audio (A4)", () => {
+    const t = TRACK("v1", { kind: "video", gain_db: -6,
+      automation_interp: "step",
+      automation_json: JSON.stringify(
+        [{ at_tl_frames: 0, gain_db: 0 },
+         { at_tl_frames: 48, gain_db: -12 }]) });
+    const d = TL([t], [CLIP("v", "v1", { src_fps_num: 24,
+      in_frame: 0, out_frame: 72, src_frames: 72 })]);
+    const c = buildPreviewPlan(d).clips[0];
+    expect(c.embedded).toBe(true);
+    expect(c.env(0.5)).toBeCloseTo(10 ** (-6 / 20), 3);  // tl 12 → −6
+    expect(c.env(2.5)).toBeCloseTo(10 ** (-18 / 20), 3); // tl 60 → −18
+  });
+
+  it("track automation anchors absolute time across xf head borrow", () => {
+    // B's stream pulls 6 tl frames of head handle; a lane keyframe
+    // at B's occupancy start (tl 36) evaluates 6 frames into the
+    // extended stream — not at stream sample 0.
+    const t = TRACK("a1", {
+      automation_json: JSON.stringify(
+        [{ at_tl_frames: 36, gain_db: 0 },
+         { at_tl_frames: 60, gain_db: -12 }]) });
+    const d = TL([t],
+      [CLIP("a", "a1", { out_frame: 72000 }),
+       CLIP("b", "a1", { start_frames: 36, in_frame: 48000,
+                         out_frame: 96000 })],
+      [XF({ out_clip_id: "a", in_clip_id: "b" })]);
+    const p = buildPreviewPlan(d);
+    const b = p.clips.find(c => c.clipId === "b")!;
+    // Stream starts at tl 30 (window S); tl 42 is 12f in = 0.5 s —
+    // past the xf fade-in → only the lane ramp applies (−3 dB).
+    expect(b.env(0.5)).toBeCloseTo(10 ** (-3 / 20), 2);
+  });
+
+  it("A3 contract — clip+track+clipAuto+trackAuto sum once", () => {
+    const t = TRACK("a1", { gain_db: -6,
+      automation_json: JSON.stringify(
+        [{ at_tl_frames: 0, gain_db: -6 }]) });
+    const d = TL([t], [CLIP("c1", "a1", { gain_db: -6,
+      automation_json: JSON.stringify(
+        [{ at_frames: 0, gain_db: -6 }]) })]);
+    // −6 clip + −6 track + −6 clipAuto + −6 trackAuto = −24 dB once.
+    expect(buildPreviewPlan(d).clips[0].env(0.5))
+      .toBeCloseTo(10 ** (-24 / 20), 3);
   });
 });

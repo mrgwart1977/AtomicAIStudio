@@ -963,6 +963,11 @@ export interface TimelineTrack {
   gain_db: number;
   /** N2-C — when ≥1 lane is soloed, non-soloed lanes are silent. */
   solo: boolean;
+  /** N3-A — JSON keyframe list [{id, at_tl_frames, gain_db}] keyed in
+   * ABSOLUTE timeline frames (clip-local clips use `at_frames`). */
+  automation_json: string;
+  /** N3-A — lane keyframe interpolation: "linear" (dB ramp) | "step". */
+  automation_interp: string;
   created_at: string;
 }
 

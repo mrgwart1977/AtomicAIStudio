@@ -25,7 +25,9 @@ const FIELD_TOL = 1e-4;
 interface Fx {
   name: string;
   tl_fps: { num: number; den: number };
-  tracks: Partial<TimelineTrack>[];
+  tracks: (Partial<TimelineTrack> & {
+    automation?: { at_tl_frames: number; gain_db: number }[];
+  })[];
   clips: (Partial<TimelineClip> & {
     id: string; track_id: string; src_fps: { num: number; den: number };
     automation?: { at_frames: number; gain_db: number }[];
@@ -51,6 +53,9 @@ function toDetail(fx: Fx): TimelineDetail {
     visible: t.visible ?? true, locked: false,
     muted: t.muted ?? false, gain_db: t.gain_db ?? 0,
     solo: t.solo ?? false, created_at: "2026-01-01",
+    automation_json: JSON.stringify(
+      (t.automation ?? []).map((p, k) => ({ id: `k${k}`, ...p }))),
+    automation_interp: t.automation_interp ?? "linear",
   }));
   const clips: TimelineClip[] = fx.clips.map((c, i) => {
     const rate = c.src_fps.num / c.src_fps.den;

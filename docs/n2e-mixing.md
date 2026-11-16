@@ -195,7 +195,9 @@ unsatisfied crossfade on an audible lane is surfaced as blocked
 
 ## Boundaries
 
-- Per-track automation remains deferred (see docs/n2f-preview.md).
+- Per-track automation shipped in N3-A — `track_automation_db`
+  folds into the same aeval dB sum (one `pow` stage per clip, audio
+  lanes + embedded); see `docs/n3a-track-automation.md`.
   N2-F shipped `s_curve`/`exponential` curves, `step` interpolation,
   and WebAudio audio-lane preview.
 - Human listening judgment on mixes is a **[human]** check.

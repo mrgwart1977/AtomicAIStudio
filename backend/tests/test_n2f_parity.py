@@ -85,7 +85,10 @@ def _fx_edl(fx: dict) -> dict:
                     "visible": t.get("visible", True),
                     "muted": t.get("muted", False),
                     "solo": t.get("solo", False),
-                    "gain_db": t.get("gain_db", 0.0)}
+                    "gain_db": t.get("gain_db", 0.0),
+                    "automation": t.get("automation", []),
+                    "automation_interp": t.get("automation_interp",
+                                               "linear")}
                    for t in fx["tracks"]],
         "clips": clips,
         "crossfades": [dict(x) for x in fx.get("crossfades", [])],
@@ -121,7 +124,7 @@ def _measure_env(ffmpeg: str, tmp: Path, a: dict,
     ffmpeg + the production chain do the work."""
     rate = int(a.get("rate") or 48000)
     if a.get("embedded"):
-        chain = tx._embedded_chain(0, a)
+        chain = tx._embedded_chain(0, a, tl_fps)
         total_s = float(a["in_s"] + a["dur_s"]) + 0.5
     else:
         chain = tx._lane_chain(0, a, tl_fps)

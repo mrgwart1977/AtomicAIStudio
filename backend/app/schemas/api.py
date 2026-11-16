@@ -124,6 +124,7 @@ CommandType = Literal[
     "timeline.clip.gain",
     "timeline.clip.fade", "timeline.clip.automation",
     "timeline.crossfade.set", "timeline.crossfade.clear",
+    "timeline.track.automation",
     "timeline.export",
 ]
 
@@ -691,6 +692,8 @@ class TimelineTrackOut(BaseModel):
     muted: bool
     gain_db: float = 0.0
     solo: bool = False
+    automation_json: str = "[]"
+    automation_interp: str = "linear"
     created_at: datetime
 
 

@@ -1,0 +1,68 @@
+{
+  "name": "N3-A track automation — linear lane ramp on audio clip + step on embedded",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0,
+     "automation_interp": "linear",
+     "automation": [
+       {"at_tl_frames": 15, "gain_db": -12},
+       {"at_tl_frames": 45, "gain_db": 0}]},
+    {"id": "v1", "kind": "video", "position": 1, "visible": true,
+     "muted": false, "solo": false, "gain_db": -6,
+     "automation_interp": "step",
+     "automation": [
+       {"at_tl_frames": 0, "gain_db": 0},
+       {"at_tl_frames": 60, "gain_db": -12}]}
+  ],
+  "clips": [
+    {"id": "c1", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 15, "in_frame": 0, "out_frame": 48000,
+     "src_frames": 48000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0,
+     "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "e1", "track_id": "v1", "asset_id": "av1",
+     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "start_frames": 0, "in_frame": 0, "out_frame": 90,
+     "src_frames": 90, "src_fps": {"num": 30, "den": 1},
+     "src_has_audio": true,
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [],
+  "probes": {
+    "c1": {"sample_rate": 48000},
+    "e1": {"audio": [{"sample_rate": 48000}]}
+  },
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["c1", "e1"],
+    "clips": {
+      "c1": {
+        "tl_start_s": 0.5, "tl_end_s": 1.5,
+        "src_start_s": 0.0, "seg_dur_s": 1.0, "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.2511886},
+          {"u": 8000,  "g": 0.3162278},
+          {"u": 24000, "g": 0.5011872},
+          {"u": 40000, "g": 0.7943282},
+          {"u": 47900, "g": 0.9971282}
+        ]
+      },
+      "e1": {
+        "tl_start_s": 0.0, "tl_end_s": 3.0,
+        "src_start_s": 0.0, "seg_dur_s": 3.0, "embedded": true,
+        "env": [
+          {"u": 0,      "g": 0.5011872},
+          {"u": 95999,  "g": 0.5011872},
+          {"u": 96000,  "g": 0.1258925},
+          {"u": 143900, "g": 0.1258925}
+        ]
+      }
+    }
+  }
+}
