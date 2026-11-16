@@ -307,9 +307,17 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
                 "embedded": True,
                 "in_s": in_s, "dur_s": dur_s, "tl_start_s":
                     start / tl_fps,
+                "start_tl": start,
                 "track_db": float(t.get("gain_db") or 0.0),
                 "clip_db": 0.0, "automation": [], "xf": None,
                 "fade_in": None, "fade_out": None,
+                # N3-A — lane automation DOES apply to embedded audio
+                # (it's a lane-level envelope of timeline position,
+                # not a clip edit); clip fades/automation/xf still
+                # don't exist here.
+                "track_auto": _track_pts(t),
+                "track_auto_interp": str(t.get("automation_interp")
+                                         or "linear"),
             }
     # Crossfades — only satisfied records on audible lanes extend the
     # pair's streams; an unsatisfied record there fails closed.
@@ -334,6 +342,14 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
             "audio_clips": list(audio_clips.values()),
             "program_frames": end_frames,
             "fps_num": tl_fps.numerator, "fps_den": tl_fps.denominator}
+
+
+def _track_pts(t: dict) -> list[dict[str, Any]]:
+    """N3-A — lane automation keyframes [{at_tl (Fraction timeline
+    frames, ABSOLUTE), gain_db}]."""
+    return [{"at_tl": Fraction(int(p["at_tl_frames"])),
+             "gain_db": float(p["gain_db"])}
+            for p in (t.get("automation") or [])]
 
 
 def _audio_entry(c: dict, t: dict, start: Fraction, extent: Fraction,
@@ -368,6 +384,11 @@ def _audio_entry(c: dict, t: dict, start: Fraction, extent: Fraction,
                      "curve": fout.get("curve") or "linear"},
         "automation": auto,
         "automation_interp": str(c.get("automation_interp")
+                                 or "linear"),
+        # N3-A — lane automation folded into the same dB sum, keyed
+        # at absolute timeline frames.
+        "track_auto": _track_pts(t),
+        "track_auto_interp": str(t.get("automation_interp")
                                  or "linear"),
         "xf": None,
     }
@@ -492,7 +513,7 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
         mix_in = "[abase]"
         for j, a in enumerate(a_inputs):
             if a["embedded"]:
-                proc = _embedded_chain(a["input_idx"], a)
+                proc = _embedded_chain(a["input_idx"], a, tl_fps)
                 lead = round(float(a["tl_start_s"]) * AUDIO_RATE)
             else:
                 proc = _lane_chain(a["input_idx"], a, tl_fps)
@@ -534,15 +555,29 @@ def _lin(db: float) -> float:
     return 10.0 ** (db / 20.0)
 
 
-def _embedded_chain(k: int, a: dict) -> str:
+def _embedded_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     """Video-embedded audio: seconds-based trim (the clip's source
-    units are video frames), resample, stereo, track gain only —
-    fades/automation/crossfades are audio-lane-only by domain rule."""
+    units are video frames), resample, stereo, track gain —
+    fades/clip-automation/crossfades are audio-lane-only by domain
+    rule. N3-A: TRACK automation still applies — it's a lane-level
+    envelope keyed on absolute timeline frames, not a clip edit; the
+    aeval runs at 48 kHz (post-resample), so `n` counts 48 k samples
+    from stream start = the clip's timeline start."""
     in_s = float(a["in_s"])
     end_s = float(a["in_s"] + a["dur_s"])
     chain = (f"[{k}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
              f"aresample={AUDIO_RATE},aformat=channel_layouts=stereo")
-    if a["track_db"]:
+    tpts = a.get("track_auto") or []
+    if tpts:
+        tstep = a.get("track_auto_interp") == "step"
+        offs = [_q((p["at_tl"] - a["start_tl"]) * AUDIO_RATE / tl_fps)
+                for p in tpts]
+        expr = (f"{_flt(a['track_db'])}"
+                f"+({_seg_expr(offs, [p['gain_db'] for p in tpts],
+                                tstep)})")
+        env = f"pow(10,({expr})/20)"
+        chain += f",aeval=exprs='val(0)*({env})|val(1)*({env})'"
+    elif a["track_db"]:
         chain += f",volume={_flt(_lin(a['track_db']))}"
     return chain + ",asetpts=PTS-STARTPTS"
 
@@ -573,7 +608,7 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
              "asetpts=PTS-STARTPTS,"
              "aformat=channel_layouts=stereo")
     db_sum = a["clip_db"] + a["track_db"]
-    if a["automation"]:
+    if a["automation"] or a.get("track_auto"):
         chain += f",aeval=exprs='{_auto_exprs(a, db_sum, tl_fps)}'"
     elif db_sum:
         chain += f",volume={_flt(_lin(db_sum))}"
@@ -594,30 +629,59 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     return chain + f",aresample={AUDIO_RATE},asetpts=PTS-STARTPTS"
 
 
-def _auto_exprs(a: dict, db_sum: float, tl_fps: Fraction) -> str:
-    """aeval `exprs` value: one interpolation per channel applying
-    (clip+track dB + automation) as pow(10,db/20) on the raw sample.
-    `n` is the stream-local sample index at native rate — keyframe
-    offsets land there via the single quantize point."""
-    pts = a["automation"]
-    step = a.get("automation_interp") == "step"
-    offs = [_q((a["head_tl"] + p["off_tl"]) * a["rate"] / tl_fps)
-            for p in pts]
-    g = [p["gain_db"] for p in pts]
-    expr = _flt(g[-1] + db_sum)
-    for i in range(len(pts) - 1, 0, -1):
-        lo, hi, g_lo, g_hi = offs[i - 1], offs[i], g[i - 1], g[i]
+def _seg_expr(offs: list[int], gains: list[float],
+              step: bool) -> str:
+    """aeval fragment evaluating automation dB at stream-local sample
+    n — linear-in-dB ramps between neighbors ('linear') or holds
+    ('step'), flat outside the end points. `offs` are pre-quantized
+    sample positions; identical positions collapse to a
+    deterministic hold (the left value wins)."""
+    expr = _flt(gains[-1])
+    for i in range(len(offs) - 1, 0, -1):
+        lo, hi, g_lo, g_hi = offs[i - 1], offs[i], gains[i - 1], gains[i]
         if hi <= lo:  # same quantized sample — deterministic step
-            seg, cond = _flt(g_lo + db_sum), f"eq(n,{lo})"
+            seg, cond = _flt(g_lo), f"eq(n,{lo})"
         elif step:  # step mode — hold lo's value up to hi
-            seg, cond = _flt(g_lo + db_sum), f"between(n,{lo},{hi - 1})"
+            seg, cond = _flt(g_lo), f"between(n,{lo},{hi - 1})"
         else:
-            seg = (f"{_flt(g_lo + db_sum)}+({_flt(g_hi - g_lo)})"
+            seg = (f"{_flt(g_lo)}+({_flt(g_hi - g_lo)})"
                    f"*(n-{lo})/{hi - lo}")
             cond = f"between(n,{lo},{hi - 1})"
         expr = f"if({cond},{seg},{expr})"
-    expr = f"if(lt(n,{offs[0]}),{_flt(g[0] + db_sum)},{expr})"
-    env = f"pow(10,({expr})/20)"
+    expr = f"if(lt(n,{offs[0]}),{_flt(gains[0])},{expr})"
+    return expr
+
+
+def _auto_exprs(a: dict, db_sum: float, tl_fps: Fraction) -> str:
+    """aeval `exprs` value: one interpolation per channel applying
+    (clip dB + track dB + clip automation + track automation) as a
+    single pow(10,x/20) — the A3 gain contract in one expression, so
+    every factor multiplies exactly once. `n` is the stream-local
+    sample index at native rate; all keyframe positions land there
+    via the single quantize point.
+
+    Clip points are clip-local tl-frame offsets from `head_tl`; N3-A
+    track points are ABSOLUTE timeline frames — the stream begins at
+    (start_tl − head_tl), so a head-borrowed crossfade stream
+    evaluates the lane curve at positions before the clip's own
+    occupancy — the correct absolute-time reading."""
+    terms = [_flt(db_sum)]
+    pts = a["automation"]
+    if pts:
+        step = a.get("automation_interp") == "step"
+        offs = [_q((a["head_tl"] + p["off_tl"]) * a["rate"] / tl_fps)
+                for p in pts]
+        terms.append(
+            f"({_seg_expr(offs, [p['gain_db'] for p in pts], step)})")
+    tpts = a.get("track_auto") or []
+    if tpts:
+        tstep = a.get("track_auto_interp") == "step"
+        stream0 = a["start_tl"] - a["head_tl"]
+        toffs = [_q((p["at_tl"] - stream0) * a["rate"] / tl_fps)
+                 for p in tpts]
+        terms.append(
+            f"({_seg_expr(toffs, [p['gain_db'] for p in tpts], tstep)})")
+    env = f"pow(10,({'+'.join(terms)})/20)"
     return f"val(0)*({env})|val(1)*({env})"
 
 

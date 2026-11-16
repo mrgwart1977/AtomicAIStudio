@@ -777,6 +777,15 @@ class TimelineTrack(Base):
     # non-soloed lanes are silent regardless of their own mute/gain.
     gain_db: Mapped[float] = mapped_column(Float, default=0.0)
     solo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # N3-A — per-track gain automation: a bounded keyframe list
+    # [{id, at_tl_frames, gain_db}] sorted by position, keyed in
+    # ABSOLUTE timeline frames (unlike clip automation's clip-local
+    # offsets, so clip moves/trims never orphan lane keyframes).
+    # Interp is the same vocabulary as clips: 'linear' (dB ramp) |
+    # 'step' (hold). Applied once, inside the shared dB sum.
+    automation_json: Mapped[str] = mapped_column(Text, default="[]")
+    automation_interp: Mapped[str] = mapped_column(
+        String(10), default="linear")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

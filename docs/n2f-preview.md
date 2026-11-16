@@ -121,15 +121,16 @@ as the FFmpeg chain: `tri`→u, `qsin`→sin(πu/2)/cos(πu/2),
 afade contract — verified against FFmpeg source + PCM); automation
 interpolates in the dB domain identically to aeval, incl. `step`.
 
-## Per-track automation (deferred — architecture)
+## Per-track automation — implemented in N3-A
 
-Model: `TimelineTrack.automation_json` keyframes `{at_tl_frames,
-gain_db}` (timeline-absolute, sorted, bounded, dB-checked) +
-`timeline.track.automation` command + EDL `track.automation`.
-Render: for each audible clip, intersect the track curve over the
-clip's stream window and fold into the same aeval dB sum (one
-pow() — nothing double-applies). Preview: same folding into the
-composite envelope. UI: a track-level keyframe lane/editor.
+Shipped per this sketch — `TimelineTrack.automation_json` keyframes
+`{at_tl_frames, gain_db}`, `timeline.track.automation`, EDL
+`track.automation`, single-aeval folding, preview env folding, and
+a track-header editor. See `docs/n3a-track-automation.md` for the
+as-built contract; the one difference from this sketch is that
+embedded audio DOES fold lane automation (a lane envelope of
+position, not a clip edit — clip fades/automation still don't
+apply to embedded audio).
 
 ## Acceptance shape
 

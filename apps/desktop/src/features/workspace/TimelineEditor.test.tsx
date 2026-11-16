@@ -20,6 +20,7 @@ const TRACK = (id: string, over: Partial<TimelineTrack> = {}): TimelineTrack => 
   name: id.toUpperCase(), position: 0,
   visible: true, locked: false, muted: false,
   gain_db: 0, solo: false,
+  automation_json: "[]", automation_interp: "linear",
   created_at: "2026-01-01", ...over,
 });
 

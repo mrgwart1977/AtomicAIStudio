@@ -39,6 +39,10 @@ export function fadeGain(pos: number, n: number, curve: string,
 
 export interface AutoPoint { at_frames: number; gain_db: number }
 
+/** N3-A — lane keyframes carry `at_tl_frames` (absolute timeline
+ * frames) instead of the clip-local `at_frames`. */
+export interface TrackAutoPoint { at_tl_frames: number; gain_db: number }
+
 /** Interpolated dB at a clip-local tl-frame offset — ports
  * domain/timeline.automation_gain_db. */
 export function automationGainDb(points: AutoPoint[], at: number,
@@ -58,6 +62,18 @@ export function automationGainDb(points: AutoPoint[], at: number,
     }
   }
   return points[points.length - 1].gain_db;
+}
+
+/** Lane gain in dB at an ABSOLUTE timeline frame — ports
+ * domain/timeline.track_automation_gain_db: the same piecewise
+ * evaluator, keyed by `at_tl_frames` instead of `at_frames`. */
+export function trackAutomationGainDb(points: TrackAutoPoint[],
+                                      tlFrames: number,
+                                      interp: string): number {
+  return automationGainDb(
+    points.map(p => ({ at_frames: p.at_tl_frames,
+                       gain_db: p.gain_db })),
+    tlFrames, interp);
 }
 
 export interface PreviewClip {
@@ -142,6 +158,16 @@ export interface PreviewPlan {
 export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
   const tlFps = detail.fps_num / detail.fps_den;
   const audible = audibleLanes(detail);
+  // N3-A — parse each lane's automation once; keyed at absolute
+  // timeline frames so it's an envelope of position, not of clips.
+  const trackAuto = new Map<string, { pts: TrackAutoPoint[];
+                                      interp: string }>();
+  for (const t of detail.tracks) {
+    const pts = parseTrackAutomation(t.automation_json);
+    if (pts.length) {
+      trackAuto.set(t.id, { pts, interp: t.automation_interp || "linear" });
+    }
+  }
   const byId = new Map<string, PlanClip>();
   const embedded: PreviewClip[] = [];
   for (const c of detail.clips) {
@@ -149,18 +175,24 @@ export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
     if (!t || !audible.has(t.id)) continue;
     const srcRate = c.src_fps_num / c.src_fps_den;
     if (t.kind !== "audio") {
-      // Video/overlay lane — embedded audio only, track gain is the
-      // whole envelope (clip_db/fades/automation/xf don't apply).
+      // Video/overlay lane — embedded audio only; clip_db/fades/
+      // clip-automation/xf don't apply, but the LANE envelope does
+      // (track gain + track automation — A4).
       if (!c.src_has_audio || !srcRate) continue;
-      const g = Math.pow(10, (t.gain_db || 0) / 20);
+      const ta = trackAuto.get(t.id);
       const t0 = c.start_frames / tlFps;
       const dur = (c.out_frame - c.in_frame) / srcRate;
+      const env = (tS: number): number => {
+        const tDb = ta ? trackAutomationGainDb(
+          ta.pts, c.start_frames + tS * tlFps, ta.interp) : 0;
+        return Math.pow(10, ((t.gain_db || 0) + tDb) / 20);
+      };
       embedded.push({
         clipId: c.id, assetId: c.source_asset_id,
         sha256: c.source_sha256,
         tlStartS: t0, tlEndS: t0 + dur,
         srcStartS: c.in_frame / srcRate, segDurS: dur,
-        rate: 0, embedded: true, env: () => g,
+        rate: 0, embedded: true, env,
       });
       continue;
     }
@@ -197,6 +229,7 @@ export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
     const dbSum = c.gain_db + p.track.gain_db;
     const auto = parseAutomation(c.automation_json);
     const interp = c.automation_interp || "linear";
+    const ta = trackAuto.get(p.track.id);
     const t0 = (p.startTl - p.headTl) / tlFps;
     const segUnits = p.segEndSrc - p.segStartSrc;
     const env = (tS: number): number => {
@@ -205,7 +238,11 @@ export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
       // automation keyed at clip-local tl frames: occupancy starts
       // at head_src on the extended stream.
       const uTl = (u - p.headSrc) * tlFps / p.rate;
-      let gDb = dbSum + automationGainDb(auto, uTl, interp);
+      // N3-A — the lane envelope reads the ABSOLUTE timeline
+      // position (startTl + uTl), including head-borrowed samples.
+      const tDb = ta ? trackAutomationGainDb(
+        ta.pts, p.startTl + uTl, ta.interp) : 0;
+      let gDb = dbSum + automationGainDb(auto, uTl, interp) + tDb;
       let g = Math.pow(10, gDb / 20);
       const fin = c.fade_in_units, fout = c.fade_out_units;
       if (fin > 0 && u < p.headSrc + fin) {
@@ -247,6 +284,21 @@ function parseAutomation(json: string): AutoPoint[] {
            .filter(p => Number.isFinite(p.at_frames)
                      && Number.isFinite(p.gain_db))
            .sort((a, b) => a.at_frames - b.at_frames)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTrackAutomation(json: string): TrackAutoPoint[] {
+  try {
+    const pts = JSON.parse(json || "[]");
+    return Array.isArray(pts)
+      ? pts.map(p => ({ at_tl_frames: Number(p.at_tl_frames),
+                        gain_db: Number(p.gain_db) }))
+           .filter(p => Number.isFinite(p.at_tl_frames)
+                     && Number.isFinite(p.gain_db))
+           .sort((a, b) => a.at_tl_frames - b.at_tl_frames)
       : [];
   } catch {
     return [];

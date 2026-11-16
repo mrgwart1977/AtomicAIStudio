@@ -240,6 +240,8 @@ def track_snapshot(t: TimelineTrack) -> dict[str, Any]:
         "name": t.name, "visible": t.visible, "locked": t.locked,
         "muted": t.muted,
         "gain_db": t.gain_db, "solo": t.solo,
+        "automation_json": getattr(t, "automation_json", "[]"),
+        "automation_interp": getattr(t, "automation_interp", "linear"),
     }
 
 
@@ -596,6 +598,92 @@ def automation_gain_db(points: list[dict], at_frames: float, *,
     return float(points[-1]["gain_db"])
 
 
+# ---------- N3-A: per-track gain automation ----------
+
+#: Bounded model for lane-level keyframes. Track points are keyed in
+#: ABSOLUTE timeline frames and span the whole program — the bound is
+#: larger than the clip bound (whose points cover only one clip's
+#: occupancy) but still finite and deterministic.
+TRACK_AUTOMATION_MAX_POINTS = 256
+
+#: Track keyframes may be positioned anywhere on the timeline — same
+#: ceiling other timeline-frame fields use. Points past the program
+#: end are valid and inert (the flat tail holds the last value).
+TRACK_AUTOMATION_MAX_FRAME = 1 << 30
+
+
+def track_automation_points(track: TimelineTrack) -> list[dict[str, Any]]:
+    """Stored lane keyframes [{id, at_tl_frames, gain_db}] — keyed in
+    ABSOLUTE timeline frames (unlike clip automation's clip-local
+    offsets; lane envelopes are a function of timeline position, not
+    of whichever clips happen to cover it)."""
+    try:
+        pts = json.loads(getattr(track, "automation_json", "[]") or "[]")
+    except (TypeError, ValueError):
+        return []
+    return pts if isinstance(pts, list) else []
+
+
+def set_track_automation(session: Session, tl: Timeline,
+                         track: TimelineTrack, *, points: list,
+                         interp: str | None = None,
+                         command_id: str | None) -> None:
+    """Replace the lane's gain keyframes — same stored representation
+    as clip automation ([{id, position, gain_db}] sorted, unique
+    positions, gain bounds as clip/track gain, missing ids assigned
+    p{i}) but `at_tl_frames` is an absolute timeline frame: clip moves,
+    trims, and splits can never orphan it. One commit, one undo step."""
+    if tl.status != "active":
+        raise TimelineError("timeline is archived")
+    if track.kind == "overlay":
+        raise TimelineError(
+            "track automation is meaningless on overlay lanes "
+            "(no audio output)")
+    if interp is not None:
+        if interp not in AUTOMATION_INTERPS:
+            raise TimelineError(
+                f"interp must be one of {', '.join(AUTOMATION_INTERPS)}")
+        track.automation_interp = interp
+    if not isinstance(points, list):
+        raise TimelineError("points must be a list")
+    if len(points) > TRACK_AUTOMATION_MAX_POINTS:
+        raise TimelineError(
+            f"at most {TRACK_AUTOMATION_MAX_POINTS} automation points")
+    cleaned: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for i, p in enumerate(points):
+        if not isinstance(p, dict):
+            raise TimelineError("automation points must be objects")
+        at = _check_int(p.get("at_tl_frames"), "at_tl_frames",
+                        0, TRACK_AUTOMATION_MAX_FRAME - 1)
+        if at in seen:
+            raise TimelineError(
+                f"duplicate automation point at timeline frame {at}")
+        seen.add(at)
+        cleaned.append({
+            "id": (p.get("id") if isinstance(p.get("id"), str)
+                   and p["id"] else f"p{i}"),
+            "at_tl_frames": at,
+            "gain_db": check_gain_db(p.get("gain_db"))})
+    cleaned.sort(key=lambda p: p["at_tl_frames"])
+    track.automation_json = json.dumps(cleaned, separators=(",", ":"))
+    session.flush()
+    _touch(session, tl, command_id=command_id,
+           summary="Set track automation")
+
+
+def track_automation_gain_db(points: list[dict], tl_frames: float, *,
+                             interp: str = "linear") -> float:
+    """Lane gain in dB at an ABSOLUTE timeline frame — the same
+    piecewise evaluator as clip automation (`linear` dB ramp | `step`
+    hold, flat outside the first/last point), keyed by `at_tl_frames`
+    instead of the clip-local `at_frames`. One interpolation
+    implementation, two position domains."""
+    return automation_gain_db(
+        [{"at_frames": p["at_tl_frames"], "gain_db": p["gain_db"]}
+         for p in points], tl_frames, interp=interp)
+
+
 def list_crossfades(session: Session, timeline_id: str
                     ) -> list[TimelineCrossfade]:
     return session.execute(
@@ -926,14 +1014,18 @@ def _restore_snapshot(session: Session, tl: Timeline,
                 locked=st.get("locked", False),
                 muted=st.get("muted", False),
                 gain_db=st.get("gain_db", 0.0),
-                solo=st.get("solo", False)))
+                solo=st.get("solo", False),
+                automation_json=st.get("automation_json", "[]"),
+                automation_interp=st.get("automation_interp",
+                                         "linear")))
         else:
             # N1-E — restore mutable lane fields too, or undoing a
             # reorder/rename/visibility/lock/mute edit silently keeps
             # the post-edit lane state.
             tr = have[st["id"]]
             for f in ("position", "name", "visible", "locked",
-                      "muted", "gain_db", "solo"):
+                      "muted", "gain_db", "solo", "automation_json",
+                      "automation_interp"):
                 if f in st:
                     setattr(tr, f, st[f])
     session.flush()
@@ -1858,7 +1950,13 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
         "name": t.name, "visible": t.visible, "locked": t.locked,
         "muted": t.muted,
         # N2-C — lane mix controls. dB only; the mixer converts.
-        "gain_db": t.gain_db, "solo": t.solo} for t in tracks]
+        "gain_db": t.gain_db, "solo": t.solo,
+        # N3-A — lane gain keyframes keyed in absolute timeline
+        # frames; the exporter interpolates them in the shared dB
+        # sum per contributing stream.
+        "automation": track_automation_points(t),
+        "automation_interp": getattr(t, "automation_interp",
+                                     "linear")} for t in tracks]
     clips_out, gaps_out = [], []
     tl_fps = Fraction(tl.fps_num, tl.fps_den)
     for t in tracks:

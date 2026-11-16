@@ -439,7 +439,7 @@ Classification legend: **[auto]** verified automated test ·
 - **N2-F review fix — mono up-mix parity:** render's aformat stereo uses center-mix L=R=in/√2 (−3.01 dB measured); WebAudio up-mixes mono at full gain — `scheduleClip` folds 1/√2 into mono-buffer envelopes — **[installed]** (mono embedded + mono sfx parities)
 - **N2-F review — transport reliability:** 24 rapid scrubs across gap/boundary/xf/EOF → live node count stays at scheduled-window size; stop drains to 0; workspace unmount disposes engine — **[installed]**
 - Embedded video audio in WebAudio preview — **done in review** (see row above)
-- Per-track automation — **[notrun]** deferred (architecture sketched in `docs/n2f-preview.md`); needs new model dimension + editor
+- Per-track automation — **implemented in N3-A** (`docs/n3a-track-automation.md`): persisted `automation_json`, `timeline.track.automation` command, aeval folding incl. embedded, preview folding, header editor, shared fixture parity — **[auto]** pending PR review
 - Preview↔render sample-exactness — **[notrun]** preview is an editorial aid (64 Hz envelope, WebAudio resampling, no limiter) — measured tolerances documented, not claimed sample-exact
 - Human: audible preview/scrub judgment, transport feel — **[human]**
 - Human audio-edit UX feel, drag on audio lanes — **[human]**; audible fade/crossfade/mix judgment vs reference — **[human]** (N2-E renders it; ears required); waveform accuracy vs a known-good editor — **[human]**
