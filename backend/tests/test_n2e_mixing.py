@@ -279,6 +279,9 @@ def test_lane_chain_deterministic_shape():
     assert chain.endswith("aresample=48000,asetpts=PTS-STARTPTS")
     # resample LAST — envelopes applied at native rate
     assert chain.index("afade") < chain.index("aresample")
+    # PTS reset immediately after atrim — afade anchors on frame pts,
+    # so envelope windows MUST see stream-local sample indices
+    assert chain.index("asetpts") < chain.index("afade")
 
 
 def test_auto_exprs_interp_in_db_domain():

@@ -54,7 +54,9 @@ once**, all in the linear domain, at the clip's **native sample
 rate** (resample is last):
 
 ```
-atrim segment → aformat stereo
+atrim segment
+  → asetpts=PTS-STARTPTS   (REQUIRED — see below)
+  → aformat stereo
   → aeval: val(c) × 10^((clip_db + track_db + interp_db(n))/20)
        — clip gain + track gain folded into ONE dB sum; automation
          keyframes interpolate linearly in dB over stream-local
@@ -71,6 +73,41 @@ Curve mapping (afade enum): `linear` → `tri`(0),
 `equal_power` → `qsin`(1) — the sin/cos pair whose in+out product
 sums to unity power. (`hsin` is the sin² S-curve — **not**
 equal-power; don't confuse them.)
+
+**The PTS reset is load-bearing**: afade anchors `start_sample`
+against each frame's **PTS in samples**, and `atrim` keeps the
+source PTS — a stream cut at source sample 36000 arrives with
+pts=36000, so a `start_sample=0` fade-in is already "past" and
+silently no-ops. `asetpts=PTS-STARTPTS` immediately after `atrim`
+makes every envelope anchor stream-local. (Found during the N2-E
+review: incoming-crossfade fade-ins never applied before the fix.)
+
+## Master mix & limiter
+
+```
+per-stream full-timeline inputs (leading silence + content)
+  → amix=inputs=N+1:duration=first:normalize=0
+      (silent `abase` pins the program length; no attenuation)
+  → alimiter=limit=0.95:attack=5:release=50:level=0:latency=1
+      ceiling −0.45 dBFS measured at filter level (peak ≤0.95);
+      level=0 disables FFmpeg's default auto-makeup so quiet mixes
+      are NOT pumped up; latency=1 compensates the ~220-sample
+      lookahead — measured onset unchanged, program not extended
+  → aac 160 kbps @48 kHz
+```
+
+AAC roundtrip overshoots the ceiling slightly (lossy codec) —
+measured <0.99, never full-scale. A program with zero audible
+streams maps no audio track at all (video-only output).
+
+## Durability
+
+Same durable job path as video export: pinned-sha byte verification
+before render, probe-stage stream checks, disk-space estimate
+refusal, cancel → `JobCancelled` + partial output unlinked, nonzero
+exit/timeout/empty output → failed + cleanup, post-render
+`engine.probe` verification, work-dir purge, startup reconciliation
+of interrupted jobs. No phantom output assets on any failure path.
 
 ## Crossfades at render time
 
@@ -106,6 +143,17 @@ refused.
   sample (~8 µs), never cumulative.
 - Output: stereo, 48 kHz, AAC 160 kbps, duration bounded by the
   pinned program frames.
+
+**Measured tolerance** (decoded PCM, ffmpeg 9.0.2 full build):
+placement onsets land within ~4 ms of the rational expectation
+across 24/25/30 fps, 24000/1001, 30000/1001, mixed 44.1/48 kHz
+sources, and a 60 s timeline — after subtracting the AAC encode→
+decode pipeline contribution measured by the click-control test
+(priming is trimmed via the mp4 edit list, so codec Δ ≈ 0).
+Program duration holds within one AAC frame (1024 samples).
+We do NOT claim sub-sample end-to-end sync: the guarantee is
+<1 sample of quantization error at each anchor, verified at
+millisecond resolution on decoded output.
 
 ## Refusals (fail closed, clear errors)
 

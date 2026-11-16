@@ -269,13 +269,160 @@ async function main() {
     throw new Error(`pcm mix wrong: 440pre=${m440pre.toFixed(3)} 880post=${m880post.toFixed(3)} winRms=${winRms.toFixed(3)}`);
   if (!(levelRatio > 1.4 && levelRatio < 2.8))
     throw new Error(`gain ratio wrong: 440/880=${levelRatio.toFixed(3)}`);
-  // fade-in: early RMS much lower than steady
-  const fadeEarly = rms(pcm, 400, 9000), steady = rms(pcm, 40000, 80000);
-  if (!(fadeEarly < steady * 0.6 && steady > 0.08))
+  // fade-in: first third of the 0.25 s eqp ramp is much quieter
+  // than the steady-state body (expected ratio ≈0.35)
+  const fadeEarly = rms(pcm, 400, 4000), steady = rms(pcm, 40000, 80000);
+  if (!(fadeEarly < steady * 0.55 && steady > 0.08))
     throw new Error(`fade-in not rendered: early=${fadeEarly.toFixed(3)} steady=${steady.toFixed(3)}`);
   ok(`440pre=${m440pre.toFixed(3)} 880post=${m880post.toFixed(3)} `
      + `win(440=${m440win.toFixed(3)},880=${m880win.toFixed(3)},rms=${winRms.toFixed(3)}) `
      + `fadeEarly=${fadeEarly.toFixed(3)}/${steady.toFixed(3)}`);
+
+  /* 4b — embedded video audio renders; picture + stream verified */
+  step("4b) embedded video audio + picture verified");
+  const vsrc = `${OUT}\\media\\vid.mp4`;
+  execFileSync(`${FFMPEG_BIN}\\ffmpeg.exe`, [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x480:rate=24",
+    "-f", "lavfi", "-i", "sine=frequency=660:duration=2",
+    "-af", "volume=4.0", "-c:a", "aac", "-shortest",
+    "-c:v", "libopenh264", "-pix_fmt", "yuv420p", vsrc],
+    { stdio: "ignore" });
+  await waitJob(p.id, (await commit(p.id, "asset.import",
+    { source_path: path.resolve(vsrc), kind: "video" })).job_id);
+  const vAsset = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.find((a) => a.name.includes("vid"));
+  await commit(p.id, "timeline.create", { name: "EMBED", fps_num: 24, fps_den: 1 });
+  const tlE = (await api("GET", `/api/projects/${p.id}/timelines`)).find((t) => t.name === "EMBED");
+  let dE = await detail(p.id, tlE.id);
+  const v1E = dE.tracks.find((t) => t.kind === "video");
+  await commit(p.id, "timeline.clip.place",
+    { timeline_id: tlE.id, track_id: v1E.id, asset_id: vAsset.id,
+      start_frames: 0, in_frame: 0, out_frame: 48 });
+  await waitJob(p.id, (await commit(p.id, "timeline.export",
+    { timeline_id: tlE.id, profile: "720p" })).job_id);
+  const outE = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.find((a) => a.origin === "rendered" && a.name === "EMBED export.mp4");
+  const dlE = await fetch(`${API}/api/projects/${p.id}/assets/${outE.id}/file`,
+    { headers: { "X-Atomic-Token": TOKEN } });
+  const mp4E = `${OUT}\\media\\n2e-embed.mp4`;
+  fs.writeFileSync(mp4E, Buffer.from(await dlE.arrayBuffer()));
+  // picture: decode a mid frame → non-black; audio: 660Hz present
+  execFileSync(`${FFMPEG_BIN}\\ffmpeg.exe`, [
+    "-y", "-v", "error", "-ss", "1", "-i", mp4E, "-frames:v", "1",
+    "-f", "rawvideo", "-pix_fmt", "gray", `${OUT}\\media\\embed-frame.raw`],
+    { stdio: "ignore" });
+  const frame = fs.readFileSync(`${OUT}\\media\\embed-frame.raw`);
+  if (![...frame].some((b) => b > 16)) throw new Error("video frame is black");
+  const pcmE = decodePcm(mp4E, `${OUT}\\media\\embed.pcm`);
+  const m660 = mag(pcmE, 660, 8000, 60000);
+  if (!(m660 > 0.1)) throw new Error(`embedded audio missing: ${m660.toFixed(3)}`);
+  ok(`picture non-black + embedded 660Hz=${m660.toFixed(3)}`);
+
+  /* 4c — overlapping lanes: solo + un-solo measured in output */
+  step("4c) overlapping lanes + solo verified in output");
+  await commit(p.id, "timeline.create", { name: "SOLOT", fps_num: 24, fps_den: 1 });
+  const tlS = (await api("GET", `/api/projects/${p.id}/timelines`)).find((t) => t.name === "SOLOT");
+  await commit(p.id, "timeline.track.add", { timeline_id: tlS.id, kind: "audio", name: "SA1" });
+  await commit(p.id, "timeline.track.add", { timeline_id: tlS.id, kind: "audio", name: "SA2" });
+  let dS = await detail(p.id, tlS.id);
+  const s1 = dS.tracks.find((t) => t.name === "SA1");
+  const s2 = dS.tracks.find((t) => t.name === "SA2");
+  await commit(p.id, "timeline.clip.place",
+    { timeline_id: tlS.id, track_id: s1.id, asset_id: a440.id, start_frames: 0 });
+  await commit(p.id, "timeline.clip.place",
+    { timeline_id: tlS.id, track_id: s2.id, asset_id: a880.id, start_frames: 0 });
+  await commit(p.id, "timeline.track.update",
+    { timeline_id: tlS.id, track_id: s2.id, solo: true });
+  await waitJob(p.id, (await commit(p.id, "timeline.export",
+    { timeline_id: tlS.id, profile: "720p" })).job_id);
+  const outS = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.filter((a) => a.origin === "rendered" && a.name === "SOLOT export.mp4").pop();
+  const dlS = await fetch(`${API}/api/projects/${p.id}/assets/${outS.id}/file`,
+    { headers: { "X-Atomic-Token": TOKEN } });
+  const mp4S = `${OUT}\\media\\n2e-solo.mp4`;
+  fs.writeFileSync(mp4S, Buffer.from(await dlS.arrayBuffer()));
+  const pcmS = decodePcm(mp4S, `${OUT}\\media\\solo.pcm`);
+  const s440 = mag(pcmS, 440, 4000, 40000), s880 = mag(pcmS, 880, 4000, 40000);
+  if (!(s880 > 0.15 && s440 < 0.03))
+    throw new Error(`solo wrong: 880=${s880.toFixed(3)} 440=${s440.toFixed(3)}`);
+  await commit(p.id, "timeline.track.update",
+    { timeline_id: tlS.id, track_id: s2.id, solo: false });
+  await waitJob(p.id, (await commit(p.id, "timeline.export",
+    { timeline_id: tlS.id, profile: "720p" })).job_id);
+  const outS2 = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.find((a) => a.origin === "rendered" && a.name === "SOLOT export.mp4"
+      && a.id !== outS.id);
+  const dlS2 = await fetch(`${API}/api/projects/${p.id}/assets/${outS2.id}/file`,
+    { headers: { "X-Atomic-Token": TOKEN } });
+  const mp4S2 = `${OUT}\\media\\n2e-solo2.mp4`;
+  fs.writeFileSync(mp4S2, Buffer.from(await dlS2.arrayBuffer()));
+  const pcmS2 = decodePcm(mp4S2, `${OUT}\\media\\solo2.pcm`);
+  if (!(mag(pcmS2, 440, 4000, 40000) > 0.15 && mag(pcmS2, 880, 4000, 40000) > 0.15))
+    throw new Error("un-solo: both lanes should be audible");
+  ok("solo silences other lane; clearing solo restores both");
+
+  /* 4d — 44.1kHz source lands on the 48k output grid */
+  step("4d) 44.1kHz source mixes onto the 48k output");
+  const w330 = `${OUT}\\media\\tone330-44k.wav`;
+  execFileSync(`${FFMPEG_BIN}\\ffmpeg.exe`, [
+    "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=4",
+    "-af", "volume=4.0", "-ar", "44100", "-ac", "2", w330],
+    { stdio: "ignore" });
+  await waitJob(p.id, (await commit(p.id, "asset.import",
+    { source_path: path.resolve(w330), kind: "audio" })).job_id);
+  const a330 = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.find((a) => a.name.includes("tone330"));
+  await commit(p.id, "timeline.create", { name: "RATES", fps_num: 24, fps_den: 1 });
+  const tlR = (await api("GET", `/api/projects/${p.id}/timelines`)).find((t) => t.name === "RATES");
+  await commit(p.id, "timeline.track.add", { timeline_id: tlR.id, kind: "audio", name: "A1" });
+  const dR = await detail(p.id, tlR.id);
+  await commit(p.id, "timeline.clip.place",
+    { timeline_id: tlR.id, track_id: dR.tracks.find((t) => t.kind === "audio").id,
+      asset_id: a330.id, start_frames: 24 });
+  await waitJob(p.id, (await commit(p.id, "timeline.export",
+    { timeline_id: tlR.id, profile: "720p" })).job_id);
+  const outR = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.find((a) => a.origin === "rendered" && a.name === "RATES export.mp4");
+  const dlR = await fetch(`${API}/api/projects/${p.id}/assets/${outR.id}/file`,
+    { headers: { "X-Atomic-Token": TOKEN } });
+  const mp4R = `${OUT}\\media\\n2e-rates.mp4`;
+  fs.writeFileSync(mp4R, Buffer.from(await dlR.arrayBuffer()));
+  const pcmR = decodePcm(mp4R, `${OUT}\\media\\rates.pcm`);
+  const m330 = mag(pcmR, 330, 56000, 80000);   // placed at 1.0 s
+  if (!(m330 > 0.1)) throw new Error(`44.1k source missing: ${m330.toFixed(3)}`);
+  ok(`44.1kHz source rendered at 1s mark: mag=${m330.toFixed(3)}`);
+
+  /* 4e — export cancel mid-render: cancelled, cleaned, no output */
+  step("4e) export cancels mid-render — cleaned, no phantom output");
+  const preRendered = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.filter((a) => a.origin === "rendered").length;
+  await commit(p.id, "timeline.create", { name: "LONG", fps_num: 24, fps_den: 1 });
+  const tlL = (await api("GET", `/api/projects/${p.id}/timelines`)).find((t) => t.name === "LONG");
+  const dL = await detail(p.id, tlL.id);
+  const v1L = dL.tracks.find((t) => t.kind === "video");
+  await commit(p.id, "timeline.clip.place",
+    { timeline_id: tlL.id, track_id: v1L.id, asset_id: vAsset.id,
+      start_frames: 0 });
+  const jrL = await commit(p.id, "timeline.export",
+    { timeline_id: tlL.id, profile: "720p" });
+  let cancelled = false;
+  for (let i = 0; i < 60; i++) {
+    const st = (await api("GET", `/api/projects/${p.id}/jobs`))
+      .find((j) => j.id === jrL.job_id);
+    if (st && st.status === "running") {
+      const rc = await apiRaw("POST", `/api/jobs/${jrL.job_id}/cancel`);
+      if (!rc.ok) throw new Error("cancel: " + rc.status);
+      cancelled = true; break;
+    }
+    if (st && ["succeeded", "failed", "cancelled"].includes(st.status)) break;
+    await sleep(200);
+  }
+  const jL = await waitJob(p.id, jrL.job_id, true);
+  const postRendered = (await api("GET", `/api/projects/${p.id}/assets?limit=50`))
+    .items.filter((a) => a.origin === "rendered").length;
+  if (!cancelled || jL.status !== "cancelled" || postRendered !== preRendered)
+    throw new Error(`cancel wrong: landed=${cancelled} status=${jL.status} assets ${preRendered}→${postRendered}`);
+  ok("job cancelled mid-render — no output asset materialized");
 
   /* 5 — detached crossfade fails the export closed */
   step("5) detached crossfade → export fails closed");

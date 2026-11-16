@@ -506,7 +506,14 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             mix_in += f"[am{j}]"
         a_parts.append(
             f"{mix_in}amix=inputs={len(a_inputs) + 1}:"
-            f"duration=first:normalize=0,alimiter=limit=0.95[a]")
+            f"duration=first:normalize=0,"
+            # Explicit limiter contract — never rely on defaults:
+            # ceiling −0.45 dBFS, 5 ms attack / 50 ms release,
+            # level=0 disables auto-makeup (default would boost
+            # quiet mixes), latency=1 compensates the lookahead
+            # delay so the mix stays sample-aligned.
+            f"alimiter=limit=0.95:attack=5:release=50:"
+            f"level=0:latency=1[a]")
         parts += a_parts
     argv += ["-filter_complex", ";".join(parts)]
     argv += ["-map", f"[{cur}]"]
@@ -542,6 +549,10 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     units at the clip's native rate (resample LAST):
 
       atrim source segment (incl. borrowed xf handles)
+      → asetpts=PTS-STARTPTS — REQUIRED: afade anchors start_sample
+        on the frame PTS, which atrim leaves in source units; without
+        the reset a trimmed or head-borrowed stream starts at a
+        nonzero pts and its fade-in/out windows are already "past"
       → aformat stereo (2-channel layout before aeval's val(c))
       → gain envelope: aeval clip+track dB + automation interpolated
         linearly in dB over stream-local sample offsets — or a plain
@@ -555,6 +566,7 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     rate = a["rate"]
     chain = (f"[{k}:a]atrim=start_sample={a['seg_start_src']}"
              f":end_sample={a['seg_end_src']},"
+             "asetpts=PTS-STARTPTS,"
              "aformat=channel_layouts=stereo")
     db_sum = a["clip_db"] + a["track_db"]
     if a["automation"]:
