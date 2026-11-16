@@ -103,34 +103,49 @@ sample-exactness is not claimed.
 
 ### Installed acceptance measurements (NSIS build, WebView2)
 
-`scripts/cdp-n3b-acceptance.cjs` — 12/12 steps on a real Windows
-install (`docs/n3b-evidence/`):
+`scripts/cdp-n3b-acceptance.cjs` — **16/16 steps** on a real Windows
+install (`docs/n3b-evidence/n3b-acceptance.txt`), final review head
+`e3b97ac`, merged via PR #136 → **`9824526`**.
 
+- **Layout (B1)**: Activity rail is a collapsible layout sibling —
+  12 `elementFromPoint` probes across the visible ruler resolve to
+  ruler elements with zero audit-panel hits, expanded (288 px),
+  collapsed (32 px rail, ruler viewport +~250 px), at 900 px width
+  and 1.5× device scale. Audit controls re-expand independently.
 - **Real CDP pointer drag** 30f→85f ×20 moves: **20/20 delivered**,
-  move→audition latency **p50 5 ms, p95 ≤ ~60 ms** (includes the
-  throttle window, JS scheduling 0.2–0.4 ms, and 20 ms start lead;
-  browser pointermove coalescing merged some dispatches).
-- **Rapid 60-move burst**: 61 pointer calls → 21 auditions (**~34 %
-  scheduled** — throttle coalesces; no runaway sources).
-- **Live-node bound**: `maxLive` 4 (≤ 2× clips under the window);
-  live nodes drain to **0** on every release — no stale audio.
-- **Scrub while playing → release**: resumes playback at the release
-  position (measured 5.23 s after releasing at frame 140 ≈ 4.67 s +
-  ~0.6 s playback — smooth scrub→play transition).
+  delivered→audition latency **p50 4–5 ms, p95 ≤ ~60 ms**.
+- **Phase latency (B4, measured inside the engine)**: input→handler
+  p50 0.9 ms / p95 ≤2.2 ms; handler→scheduling p50 0.5 ms /
+  p95 ≤5.6 ms (coalesce wait); schedule loop p50 0.3–0.4 ms;
+  scheduling→expected onset p50 20 ms (fixed lead).
+  `estOutputLatencyMs` ≈ 40–48 ms is reported as the AudioContext's
+  device estimate — **audible onset is not objectively measurable
+  here (no loopback) and is never claimed**.
+- **Transport matrix (B2)**: stopped→release stays stopped at the
+  release position; paused→release stays paused; playing→release
+  resumes at 5.23 s ≈ release 4.67 s + playback; **playing/stopped →
+  Escape cancel restores the pre-scrub position AND transport**;
+  dispose on project switch/unmount; clean close mid-scrub.
+- **Lifecycle (B3)**: 24-move zigzag → bounded auditions, maxLive 4,
+  live 0 after release; release *outside* the ruler still ends the
+  scrub; gaps/gap windows schedule zero sources; tail-end auditions
+  truncate to remaining duration; repeated cycles leave no nodes.
+- **Rapid 60-move burst**: 61 pointer calls → 21 auditions (~34 %
+  scheduled — throttle coalesces; no runaway sources).
 - **Keyboard**: arrows ±1 frame (Shift ±1 s) and Home/End each fire
   one bounded audition blip.
-- **fps variants**: clip placed at frame 48 renders its onset at the
-  rational position on 24/1, 25/1, 30/1, **24000/1001 (2.002 s)** and
-  **30000/1001 (1.6016 s)** — same rational timing model as playback.
-- **Mixed sample rates**: 44.1 kHz and 48 kHz sources in one plan;
-  windowed offline renders match the FFmpeg export PCM within the
-  N2-F editorial tolerances.
-- **Long timeline**: 20 clips / 4 lanes / ~46 s — plan decode+build
-  414 ms, 350 ms window render ~3 ms.
-- **Perf during scrub**: ~+0.6 s process-CPU over a 2 s drag, app
-  RSS ~33 MB steady, backend ~135 MB; repeated scrubbing, project
-  switch (engine disposed), and window close mid-scrub all leave no
-  orphan processes and zero live nodes.
+- **fps variants**: clip at frame 48 onsets at the rational position
+  on 24/1, 25/1, 30/1, **24000/1001 (2.002 s)**, **30000/1001
+  (1.6016 s)** — same rational timing model as playback.
+- **Mixed sample rates**: 44.1 kHz + 48 kHz sources; windowed offline
+  renders match FFmpeg export PCM within N2-F editorial tolerances.
+- **Long timeline**: 20 clips / 4 lanes / ~46 s — decode+build
+  ~390–550 ms, 350 ms window render ~3 ms.
+- **Perf during scrub**: ~+0.7 s process-CPU over a 2 s drag, app
+  RSS ~28 MB, backend ~135 MB.
+- **Restart persistence (B6)**: app closed mid-scrub leaves no
+  orphans; relaunch preserves the timeline (5 clips), the satisfied
+  crossfade, and 3-point clip automation; engine reloads clean.
 
 ### Known limits
 
