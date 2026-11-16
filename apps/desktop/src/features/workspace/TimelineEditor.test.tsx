@@ -219,7 +219,7 @@ describe("TimelineEditor", () => {
     }));
     fireEvent.click(screen.getByTestId("lane-clip"));
     // Fade-in seconds field → units commit (0.5s @48k = 24000).
-    const fin = await screen.findByLabelText("Fade-in seconds");
+    const fin = await screen.findByLabelText("Fade-in length in seconds");
     fireEvent.change(fin, { target: { value: "0.5" } });
     fireEvent.blur(fin);
     await waitFor(() => expect(onRun).toHaveBeenCalledWith(
@@ -231,10 +231,13 @@ describe("TimelineEditor", () => {
     await waitFor(() => expect(onRun).toHaveBeenCalledWith(
       "timeline.clip.fade",
       expect.objectContaining({ fade_out_curve: "equal_power" })));
-    // Existing automation point renders; delete commits the list.
+    // Existing automation point renders (numeric position input);
+    // delete commits the list.
     expect(screen.getByTestId("automation-section").textContent)
-      .toContain("+12f");
-    fireEvent.click(screen.getByLabelText("Delete point 1"));
+      .toContain("1 pts");
+    expect(screen.getByLabelText("Offset frame for keyframe 1")
+      .getAttribute("value")).toBe("12");
+    fireEvent.click(screen.getByLabelText("Delete keyframe 1"));
     await waitFor(() => expect(onRun).toHaveBeenCalledWith(
       "timeline.clip.automation",
       expect.objectContaining({ clip_id: "c0", points: [] })));
@@ -755,5 +758,251 @@ describe("TimelineEditor", () => {
     // Still polling for a build — label shows the hint, not an error.
     expect(screen.queryByText("waveform unavailable")).toBeNull();
     expect(screen.getByText("waveform…")).toBeTruthy();
+  });
+
+  /* ---------- N3-C: automation editing UX ---------- */
+
+  const AUTO_TRACK = () => TRACK("a1", {
+    kind: "audio", name: "Music",
+    automation_json:
+      '[{"id":"k1","at_tl_frames":24,"gain_db":0},' +
+      '{"id":"k2","at_tl_frames":48,"gain_db":-6},' +
+      '{"id":"k3","at_tl_frames":72,"gain_db":0}]',
+  });
+
+  it("N3-C: track automation — numeric position + gain entry commit", async () => {
+    setup(DETAIL({ tracks: [AUTO_TRACK()], clips: [] }));
+    fireEvent.click(screen.getByLabelText("Show Music automation"));
+    const sec = screen.getByTestId("track-auto-a1");
+    // curve viz + rows + numeric inputs render
+    expect(sec.querySelector('svg[role="img"]')
+      ?.getAttribute("aria-label")).toContain("3 keyframes");
+    expect(sec.querySelectorAll('[role="group"]')).toHaveLength(3);
+    // position entry: kf1 24 → 30
+    const pos = screen.getByLabelText("Timeline frame for keyframe 1");
+    fireEvent.change(pos, { target: { value: "30" } });
+    fireEvent.keyDown(pos, { key: "Enter" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.automation", expect.objectContaining({
+        track_id: "a1",
+        points: [{ at_tl_frames: 30, gain_db: 0 },
+                 { at_tl_frames: 48, gain_db: -6 },
+                 { at_tl_frames: 72, gain_db: 0 }] })));
+    // gain entry: kf1 0 → -20
+    const gain = screen.getByLabelText("Keyframe 1 gain in dB");
+    fireEvent.change(gain, { target: { value: "-20" } });
+    fireEvent.keyDown(gain, { key: "Enter" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.automation", expect.objectContaining({
+        points: [{ at_tl_frames: 24, gain_db: -20 },
+                 { at_tl_frames: 48, gain_db: -6 },
+                 { at_tl_frames: 72, gain_db: 0 }] })));
+  });
+
+  it("N3-C: duplicate position + out-of-range + bad gain rejected in-UI", async () => {
+    setup(DETAIL({ tracks: [AUTO_TRACK()], clips: [] }));
+    fireEvent.click(screen.getByLabelText("Show Music automation"));
+    const pos = screen.getByLabelText("Timeline frame for keyframe 1");
+    // duplicate of kf2's position
+    fireEvent.change(pos, { target: { value: "48" } });
+    fireEvent.keyDown(pos, { key: "Enter" });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(onRun).not.toHaveBeenCalledWith(
+      "timeline.track.automation", expect.anything());
+    // out of range
+    fireEvent.change(pos, { target: { value: "-5" } });
+    fireEvent.keyDown(pos, { key: "Enter" });
+    expect(await screen.findAllByRole("alert")).not.toHaveLength(0);
+    // bad gain — pos alert persists, so assert ≥1 alert, not exactly one
+    const gain = screen.getByLabelText("Keyframe 1 gain in dB");
+    fireEvent.change(gain, { target: { value: "999" } });
+    fireEvent.keyDown(gain, { key: "Enter" });
+    expect((await screen.findAllByRole("alert")).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(onRun).not.toHaveBeenCalledWith(
+      "timeline.track.automation", expect.anything());
+  });
+
+  it("N3-C: keyframe row selects, keyboard-Delete removes, is tabbable", async () => {
+    setup(DETAIL({ tracks: [AUTO_TRACK()], clips: [] }));
+    fireEvent.click(screen.getByLabelText("Show Music automation"));
+    const row = screen.getByRole("group", { name: /Keyframe 2 at frame 48/ });
+    expect(row.tabIndex).toBe(0);   // keyboard-focusable
+    fireEvent.click(row);           // select
+    fireEvent.keyDown(row, { key: "Delete" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.automation", expect.objectContaining({
+        points: [{ at_tl_frames: 24, gain_db: 0 },
+                 { at_tl_frames: 72, gain_db: 0 }] })));
+  });
+
+  it("N3-C: track interpolation select commits the chosen mode", async () => {
+    setup(DETAIL({ tracks: [AUTO_TRACK()], clips: [] }));
+    fireEvent.click(screen.getByLabelText("Show Music automation"));
+    fireEvent.change(
+      screen.getByLabelText("Track automation interpolation"),
+      { target: { value: "step" } });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.track.automation",
+      expect.objectContaining({ interp: "step" })));
+  });
+
+  it("N3-C: clip automation enforces clip-local occupancy bound", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [CLIP("au0", { track_id: "a1",
+        src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+        in_frame: 0, out_frame: 96000,
+        automation_json:
+          '[{"id":"k1","at_frames":10,"gain_db":-3},' +
+          '{"id":"k2","at_frames":20,"gain_db":0}]' })],
+    }));
+    fireEvent.click(screen.getByTestId("lane-clip"));
+    const pos = await screen.findByLabelText("Offset frame for keyframe 2");
+    const max = Number(pos.getAttribute("max"));
+    fireEvent.change(pos, { target: { value: String(max + 1) } });
+    fireEvent.keyDown(pos, { key: "Enter" });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(onRun).not.toHaveBeenCalledWith(
+      "timeline.clip.automation", expect.anything());
+    // in-bound commit
+    fireEvent.change(pos, { target: { value: String(max - 1) } });
+    fireEvent.keyDown(pos, { key: "Enter" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.clip.automation", expect.objectContaining({
+        clip_id: "au0",
+        points: [{ at_frames: 10, gain_db: -3 },
+                 { at_frames: max - 1, gain_db: 0 }] })));
+  });
+
+  /* ---------- N3-C: crossfade editing UX ---------- */
+
+  it("N3-C: crossfade shows participants/curve/region; duration edits commit", async () => {
+    apiFetch.mockRejectedValue(new Error("409: no waveform"));
+    setup(DETAIL({
+      tracks: [TRACK("a1", { kind: "audio", name: "Music" })],
+      clips: [
+        CLIP("c0", { track_id: "a1", src_fps_num: 48000,
+          src_fps_den: 1, src_frames: 96000, out_frame: 48000 }),
+        CLIP("c1", { track_id: "a1", start_frames: 24,
+          source_sha256: "cd".repeat(32),
+          src_fps_num: 48000, src_fps_den: 1, src_frames: 96000,
+          in_frame: 4800, out_frame: 96000 }),
+      ],
+      crossfades: [{
+        id: "x1", project_id: "p", timeline_id: "t",
+        out_clip_id: "c0", in_clip_id: "c1",
+        tl_start: 22, tl_frames: 4, curve: "equal_power",
+        satisfied: true, created_at: "2026-01-01",
+      }],
+    }));
+    // region band on the lane
+    expect(screen.getByTestId("xf-region")).toBeTruthy();
+    fireEvent.click(screen.getAllByTestId("lane-clip")[0]);
+    const sect = await screen.findByTestId("xf-section");
+    // participants shown by sha prefix + explicit window text
+    expect(sect.textContent).toContain("ababababab");
+    expect(sect.textContent).toContain("cdcdcdcdcd");
+    expect(sect.textContent).toContain("4f window");
+    // curve select shows current curve
+    expect((screen.getByLabelText("Crossfade curve") as HTMLSelectElement)
+      .value).toBe("equal_power");
+    // precise duration edit: 4 → 12
+    const len = screen.getByLabelText("Crossfade length in frames");
+    fireEvent.change(len, { target: { value: "12" } });
+    fireEvent.keyDown(len, { key: "Enter" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.crossfade.set", expect.objectContaining({
+        out_clip_id: "c0", in_clip_id: "c1",
+        tl_start: 22, tl_frames: 12, curve: "equal_power" })));
+    // boundary edit: start 22 → 20
+    const start = screen.getByLabelText("Crossfade start frame");
+    fireEvent.change(start, { target: { value: "20" } });
+    fireEvent.keyDown(start, { key: "Enter" });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.crossfade.set",
+      expect.objectContaining({ tl_start: 20, tl_frames: 4 })));
+    // curve edit
+    fireEvent.change(screen.getByLabelText("Crossfade curve"),
+      { target: { value: "linear" } });
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(
+      "timeline.crossfade.set",
+      expect.objectContaining({ curve: "linear" })));
+  });
+
+  /* ---------- N3-C: navigation ---------- */
+
+  /** jsdom has no layout — give the scroller real dimensions. */
+  const stubScroller = (w = 1000, total = 6000) => {
+    const sc = screen.getByTestId("timeline-scroll");
+    Object.defineProperty(sc, "clientWidth", { value: w, configurable: true });
+    Object.defineProperty(sc, "scrollWidth", { value: total, configurable: true });
+    vi.spyOn(sc, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, right: w, bottom: 400, width: w, height: 400,
+        x: 0, y: 0, toJSON: () => ({}) } as DOMRect);
+    return sc;
+  };
+
+  it("N3-C: PageDown/PageUp pan one visible span, clamped", () => {
+    setup();
+    const sc = stubScroller();
+    const ruler = screen.getByTestId("timeline-ruler");
+    fireEvent.keyDown(ruler, { key: "PageDown" });
+    expect(sc.scrollLeft).toBeGreaterThan(400);   // ~0.9 × (1000-176)
+    const after = sc.scrollLeft;
+    fireEvent.keyDown(ruler, { key: "PageUp" });
+    expect(sc.scrollLeft).toBeLessThan(after);
+    expect(sc.scrollLeft).toBe(0);                // back to start, clamped
+  });
+
+  it("N3-C: clip drag near the right edge auto-scrolls, bounded", () => {
+    setup();
+    stubLaneRects();
+    const sc = stubScroller();
+    const clip = screen.getAllByTestId("lane-clip")[1];
+    fireEvent.pointerDown(clip, { clientX: 462, clientY: 10, pointerId: 1 });
+    // pointer held inside the 48px right-edge band → +32px per move
+    fireEvent.pointerMove(window, { clientX: 985, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 985, clientY: 10 });
+    expect(sc.scrollLeft).toBe(64);
+    // middle of the view: no scroll
+    fireEvent.pointerMove(window, { clientX: 400, clientY: 10 });
+    expect(sc.scrollLeft).toBe(64);
+    fireEvent.pointerUp(window, { clientX: 400, clientY: 10 });
+  });
+
+  it("N3-C: zoom in/out rescales layout (playhead anchor adjusts scroll)", () => {
+    setup();
+    const sc = stubScroller();
+    const clip = screen.getAllByTestId("lane-clip")[1];
+    expect(clip.style.left).toBe(`${72 * 6}px`);
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+    expect(parseFloat(clip.style.left)).toBeCloseTo(72 * 8.4, 5);
+    fireEvent.click(screen.getByLabelText("Zoom out"));
+    expect(parseFloat(clip.style.left)).toBeCloseTo(72 * 6, 5);
+    // scroll adjustment is rAF-scheduled, never NaN/negative
+    expect(sc.scrollLeft).toBeGreaterThanOrEqual(0);
+  });
+
+  it("N3-C: every interactive control in the editor has an accessible name", () => {
+    setup(DETAIL({ tracks: [AUTO_TRACK()], clips: [] }));
+    fireEvent.click(screen.getByLabelText("Show Music automation"));
+    const root = screen.getByTestId("timeline-editor");
+    const els = [...root.querySelectorAll(
+      "button,input,select,[tabindex='0']")]
+      .filter((el) => !(el as HTMLElement).hasAttribute("disabled"));
+    const named = (el: Element) =>
+      el.getAttribute("aria-label")
+      || el.getAttribute("aria-labelledby")
+      || el.getAttribute("title")
+      || (el.closest("label")?.textContent ?? "").trim()
+      || (el.textContent ?? "").trim();
+    const unnamed = els.filter((el) => !named(el));
+    expect(unnamed.map((el) => el.outerHTML.slice(0, 80))).toEqual([]);
+    // ruler exposes slider semantics incl. a spoken value
+    const ruler = screen.getByTestId("timeline-ruler");
+    expect(ruler.getAttribute("role")).toBe("slider");
+    expect(ruler.getAttribute("aria-valuetext")).toContain("Playhead");
   });
 });

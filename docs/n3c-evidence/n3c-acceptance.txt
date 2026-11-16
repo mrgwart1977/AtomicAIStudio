@@ -1,0 +1,55 @@
+   OK — backend http://127.0.0.1:56783
+   OK — media: embedded mp4 + 440/550/330/660 wavs (330 @44.1k, 660 1.5s)
+[1] 1) scene — embedded V1, dialogue+xf A1, music A2, tiny+gap A3 @30fps
+   OK — scene: 5 clips, xf satisfied=true, clip fades+auto, lane ramps on A2+V1, tiny 3-frame clip
+[2] 2) export FILM — PCM baseline for parity comparison
+   OK — export dur 8.000s @30/1
+   OK — dialogue pre-duck present: OK
+   OK — step duck ≈ −9 dB: OK
+   OK — xf out-leg fades to silence: OK
+   OK — xf in-leg at full gain: OK
+   OK — music lane duck: OK
+   OK — embedded lane ramp: OK
+   OK — tiny 3-frame clip audible at 1.55s: OK
+   OK — no audio past program end (8.1s+): OK
+[3] 3) navigate to FILM, engine loads
+   OK — engine ready — 5 clips + xf + lane automation
+[4] 4) layout — activity rail collapse keeps the ruler unobstructed
+   OK — activity aside present: true (jobs exist — rail is up)
+   OK — expanded: 12 probes across visible ruler — all ruler, none aside
+   OK — collapsed rail width 32px (expect ~32)
+   OK — ruler visible span grew: 735px
+   OK — re-expanded to 288px; narrow@1.5x probes all clean; audit controls independently reachable
+[5] 5) track automation — numeric pos/gain, validation, interp, undo
+   OK — editor open — "Automation curve — 3 keyframes", 3 rows + numeric pos/gain inputs
+   OK — validation — duplicate position rejected in-UI: "a keyframe is already there"
+   OK — range error shown: "range 0–288"
+   OK — gain entry committed; 999dB rejected: "-60–12 dB"
+   OK — keyboard Delete removed keyframe 3 (one undo step)
+   OK — undo/redo through automation commits verified
+   OK — interpolation select commits + restores (linear<->step)
+[6] 6) clip automation bounds + crossfade region/partners/curve/errors
+   OK — inspector — 3 clip keyframes (occupancy max 89); xf curve=equal_power start=108 len=24
+   OK — clip-local bound enforced — "range 0–89"
+   OK — crossfade region band rendered on lane (140px wide)
+   OK — xf duration edited via numeric entry — 24f→40f committed
+   OK — insufficient-handle rejection surfaced with explanation (unchanged at 40f)
+   OK — xf curve select commits; restored to 24f equal_power for parity
+[7] 7) navigation — edge auto-scroll, playhead-anchored zoom, keyboard pan
+   OK — edge auto-scroll during ruler drag — scrollLeft 0→192 (bounded steps)
+   OK — anchored zoom — playhead screen-x 896→896→896 (±8px)
+   OK — PageDown/PageUp pan — scrollLeft 0→647→0
+[8] 8) accessibility — names on all controls, focus, values
+   OK — 128 interactive controls — all named, none tabindex<0; ruler role=slider valuetext="Playhead at 1:10 (frame 40)"
+   OK — keyframe rows are tabbable + focusable (no pointer-only controls)
+   OK — 760px@1.5x — ruler probes clean (narrow-window + high-DPI)
+[9] 9) perf — dense automation + 120-clip timeline, bounded DOM
+   OK — WIDE built — 120 clips; dense lane automation (200 pts)
+   OK — virtualization bounded — 5 DOM clip nodes for 120 total
+   OK — zoom click → settled: 12ms
+   OK — WIDE engine — load 1157ms, plan 0.1ms (120 clips), 350ms window render 10ms (0.35s)
+   OK — app RSS 27.32421875MB / backend 104.83203125MB
+[10] 10) regression — engine scrub + parity spot-check + clean close
+   OK — drag 10 delivered/0 coalesced, 19 auditions, live 0, sched 0.5ms
+   OK — windowed parity intact — xf tail renders 550Hz (render 568 vs export 0.299)
+   OK — clean close — no orphan app/backend processes
