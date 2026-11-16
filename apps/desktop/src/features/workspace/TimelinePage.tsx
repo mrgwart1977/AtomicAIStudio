@@ -45,22 +45,29 @@ export function TimelinePage() {
     useState<CommandProposal | null>(null);
   const [exportJobId, setExportJobId] = useState<string | null>(null);
 
+  // N3-C — key fetches on project.id, not the project object: a command
+  // commit refreshes `projects` (new object identity), which previously
+  // recreated this callback → the mount effect refired → setLoading(true)
+  // → the whole page unmounted to "Loading…" and remounted, wiping all
+  // TimelineEditor local state (open automation lanes, inspector
+  // selection, playhead, scroll) on EVERY commit.
+  const pid = project?.id;
   const refreshList = useCallback(async () => {
-    if (!project) return;
+    if (!pid) return;
     const tls = await apiFetch<Timeline[]>(
-      `/api/projects/${project.id}/timelines`);
+      `/api/projects/${pid}/timelines`);
     setTimelines(tls);
-  }, [project]);
+  }, [pid]);
 
   const refreshDetail = useCallback(async () => {
-    if (!project || !selected) { setDetail(null); return; }
+    if (!pid || !selected) { setDetail(null); return; }
     const d = await apiFetch<TimelineDetail>(
-      `/api/projects/${project.id}/timelines/${selected}`);
+      `/api/projects/${pid}/timelines/${selected}`);
     setDetail(d);
     const revs = await apiFetch<TimelineRevision[]>(
-      `/api/projects/${project.id}/timelines/${selected}/revisions`);
+      `/api/projects/${pid}/timelines/${selected}/revisions`);
     setRevisions(revs);
-  }, [project, selected]);
+  }, [pid, selected]);
 
   // Project switching must not carry a timeline selection across —
   // the old id doesn't exist in the new project (and state like open

@@ -22,16 +22,17 @@ vi.mock("../../components/ConfirmDialog", () => ({
 }));
 
 const PROJECT = { id: "p1", revision: 7, name: "Demo", status: "active" };
+let CURRENT = PROJECT;
 vi.mock("../../stores/appStore", () => ({
   useApp: (sel: (s: unknown) => unknown) => sel({
-    currentProject: () => PROJECT,
+    currentProject: () => CURRENT,
     refreshProjectData: () => Promise.resolve(),
   }),
 }));
 // TimelinePage calls useApp.getState() for the live revision.
 import { useApp } from "../../stores/appStore";
 (useApp as unknown as { getState: () => unknown }).getState = () => ({
-  currentProject: () => PROJECT,
+  currentProject: () => CURRENT,
 });
 
 const TL = {
@@ -67,7 +68,7 @@ function route(url: string) {
 
 describe("TimelinePage", () => {
   beforeEach(() => {
-    cleanup(); vi.clearAllMocks();
+    cleanup(); vi.clearAllMocks(); CURRENT = PROJECT;
     apiFetch.mockImplementation(route);
     commitCommand.mockResolvedValue({});
   });
@@ -164,6 +165,25 @@ describe("TimelinePage", () => {
     fireEvent.click(btn);
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
       expect.stringContaining("/timelines/t1")));
+  });
+
+  // N3-C C4 regression: a command commit refreshes the project row —
+  // the store hands a NEW project object (same id). The editor must not
+  // remount: the mount effect's callbacks key on project.id, not the
+  // object identity, or setLoading(true) wipes editor state (selection,
+  // inspector, playhead) on every commit.
+  it("does not remount the editor when the project object refreshes", async () => {
+    const { rerender } = render(createElement(TimelinePage));
+    fireEvent.click(await screen.findByRole("button", { name: /Cut 1/ }));
+    const editor = await screen.findByTestId("timeline-editor");
+    fireEvent.click((await screen.findAllByTestId("lane-clip"))[0]);
+    await screen.findByTestId("clip-inspector");
+    // simulate refreshProjectData(): same project id, new identity.
+    CURRENT = { ...PROJECT, revision: 8 };
+    rerender(createElement(TimelinePage));
+    await waitFor(() =>
+      expect(screen.getByTestId("timeline-editor")).toBe(editor));
+    expect(screen.getByTestId("clip-inspector")).toBeTruthy();
   });
 
   it("create goes through timeline.create", async () => {
