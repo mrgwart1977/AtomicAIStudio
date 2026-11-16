@@ -16,6 +16,8 @@ import {
   invalidateWaveform, pickLevel,
 } from "./waveform";
 import type { ManifestResult } from "./waveform";
+import { AudioPreviewEngine } from "./audioPreview";
+import type { PreviewState } from "./audioPreview";
 
 /** N1-B — multitrack timeline editor: lanes with track controls,
  * ruler + playhead, zoom/scroll, and pixel-exact drag placement.
@@ -98,6 +100,10 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const [gapFrames, setGapFrames] = useState("24");
   const [audioAssets, setAudioAssets] = useState<
     { id: string; name: string }[] | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewState>("idle");
+  const previewRef = useRef<AudioPreviewEngine | null>(null);
+  const preview = () => (previewRef.current ??=
+    new AudioPreviewEngine());
   const [dragView, setDragView] = useState<{
     clipId: string; trackId: string; startF: number;
     error: string | null; snapped: boolean;
@@ -365,7 +371,56 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   const seek = (e: React.PointerEvent | React.MouseEvent) => {
     const el = e.currentTarget as HTMLElement;
     const r = el.getBoundingClientRect();
-    setPlayheadF(Math.max(0, Math.round((e.clientX - r.left) / ppf)));
+    const f = Math.max(0, Math.round((e.clientX - r.left) / ppf));
+    setPlayheadF(f);
+    // N2-F — short-range scrub: reposition live playback too.
+    const eng = previewRef.current;
+    if (eng?.state === "playing") void eng.scrubTo(f / fps);
+  };
+
+  /* ---------------- N2-F audio preview transport ------------- */
+  // Playhead is the transport's sync source: play starts from it,
+  // rAF drives it while playing, ruler seeks scrub the engine.
+  useEffect(() => {
+    const eng = preview();
+    eng.onStateChange = setPreviewState;
+    return () => {
+      eng.onStateChange = null;
+      void eng.dispose();
+      previewRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail.id]);
+
+  useEffect(() => {
+    if (previewState !== "playing") return;
+    const eng = previewRef.current;
+    if (!eng) return;
+    let raf = 0;
+    const tick = () => {
+      setPlayheadF(Math.max(0, Math.round(eng.positionS() * fps)));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [previewState, fps]);
+
+  const previewPlay = async () => {
+    const eng = preview();
+    if (eng.state === "idle" || eng.state === "error") {
+      await eng.load(detail, detail.project_id);
+    }
+    if (eng.state === "ready") await eng.play(playheadF / fps);
+  };
+  const previewPause = () => {
+    const eng = previewRef.current;
+    if (eng?.state === "playing") {
+      setPlayheadF(Math.max(0, Math.round(eng.pause() * fps)));
+    }
+  };
+  const previewStop = () => {
+    previewRef.current?.stop();
+    setPlayheadF(0);
   };
 
   /* ---------------- track ops ---------------- */
@@ -726,6 +781,37 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
         <span className="text-[11px] text-faint" data-testid="playhead-readout">
           Playhead {fmtTc(playheadF, detail)}
         </span>
+        <div className="flex items-center gap-1" role="group"
+          aria-label="Audio preview">
+          <button
+            disabled={busy || previewState === "loading"
+                      || previewState === "playing"}
+            onClick={() => void previewPlay()}
+            title="Preview the audio mix from the playhead (decodes source audio locally; honors gain, fades, automation, crossfades, mute/solo)"
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+            data-testid="preview-play"
+          >{previewState === "loading" ? "Loading…" : "▶ Audio"}</button>
+          <button
+            disabled={previewState !== "playing"}
+            onClick={previewPause}
+            title="Pause preview"
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+            data-testid="preview-pause"
+          >Pause</button>
+          <button
+            disabled={previewState === "idle" || previewState === "loading"}
+            onClick={previewStop}
+            title="Stop preview and rewind the playhead"
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-teal disabled:opacity-40"
+            data-testid="preview-stop"
+          >■</button>
+          {previewState === "error" && (
+            <span className="text-[11px] text-rose"
+              data-testid="preview-error">
+              {previewRef.current?.error ?? "preview failed"}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1" role="group" aria-label="History">
           <button
             disabled={busy || !detail.undo_label}
@@ -1612,6 +1698,8 @@ function FadeSection({ clip, tl, busy, onRun }: {
     >
       <option value="linear">linear</option>
       <option value="equal_power">equal-power</option>
+      <option value="s_curve">s-curve</option>
+      <option value="exponential">exponential</option>
     </select>
   );
   return (
@@ -1711,15 +1799,25 @@ function AutomationSection({ clip, tl, busy, onRun }: {
       catch { return []; }
     }, [clip.automation_json]);
   const occ = Math.ceil(clipTlExtent(clip, tl));
-  const commit = (next: typeof pts) => void onRun(
+  const commit = (next: typeof pts, interp?: string) => void onRun(
     "timeline.clip.automation", {
       timeline_id: tl.id, clip_id: clip.id,
       points: next.map(({ at_frames, gain_db }) => (
-        { at_frames, gain_db })) });
+        { at_frames, gain_db })),
+      interp: interp ?? clip.automation_interp ?? "linear" });
   return (
     <div className="mt-2 text-[10px]" data-testid="automation-section">
       <span className="text-muted">Gain automation
         {pts.length > 0 ? ` · ${pts.length} pts` : ""}</span>
+      <select aria-label="Automation interpolation"
+        value={clip.automation_interp ?? "linear"}
+        disabled={busy}
+        onChange={(e) => commit(pts, e.target.value)}
+        title="How gain moves between keyframes: linear ramps in dB, step holds each value until the next point"
+        className="ml-1 rounded border border-line bg-panel px-1 py-0.5">
+        <option value="linear">linear</option>
+        <option value="step">step</option>
+      </select>
       {pts.map((p, i) => (
         <div key={p.id} className="mt-0.5 flex items-center gap-1.5">
           <span className="w-10 text-faint" title="Offset from clip start">

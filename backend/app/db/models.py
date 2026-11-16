@@ -833,6 +833,10 @@ class TimelineClip(Base):
     fade_out_units: Mapped[int] = mapped_column(Integer, default=0)
     fade_out_curve: Mapped[str] = mapped_column(String(20), default="linear")
     automation_json: Mapped[str] = mapped_column(Text, default="[]")
+    # N2-F — keyframe interpolation: 'linear' (dB-ramp between
+    # neighbors) or 'step' (hold value until the next point).
+    automation_interp: Mapped[str] = mapped_column(
+        String(10), default="linear")
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True)
     scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

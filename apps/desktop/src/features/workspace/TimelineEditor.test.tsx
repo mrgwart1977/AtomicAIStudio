@@ -12,6 +12,7 @@ import type { TimelineClip, TimelineDetail, TimelineTrack } from "../../api/type
 const apiFetch = vi.fn();
 vi.mock("../../api/client", () => ({
   apiFetch: (...a: unknown[]) => apiFetch(...a),
+  fetchAssetBytes: () => Promise.resolve(new ArrayBuffer(8)),
 }));
 
 const TRACK = (id: string, over: Partial<TimelineTrack> = {}): TimelineTrack => ({

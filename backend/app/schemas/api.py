@@ -659,6 +659,7 @@ class TimelineClipOut(BaseModel):
     fade_out_units: int = 0
     fade_out_curve: str = "linear"
     automation_json: str = "[]"
+    automation_interp: str = "linear"
     shot_id: str | None
     scene_id: str | None
     created_at: datetime

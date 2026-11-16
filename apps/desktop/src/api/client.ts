@@ -69,6 +69,22 @@ export async function fetchAssetObjectUrl(
   return URL.createObjectURL(await res.blob());
 }
 
+/** Same authenticated fetch, returning raw bytes — for consumers that
+ * decode rather than display (N2-F audio preview). Avoids the
+ * blob-URL → fetch round-trip, which WebView2's custom scheme cannot
+ * complete. */
+export async function fetchAssetBytes(
+  projectId: string, assetId: string,
+): Promise<ArrayBuffer> {
+  const { baseUrl, token } = await getBackendInfo();
+  const res = await fetch(
+    `${baseUrl}/api/projects/${projectId}/assets/${assetId}/file`,
+    { headers: { "X-Atomic-Token": token } },
+  );
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.arrayBuffer();
+}
+
 /** Drop the cached backend info so the next connect re-asks the shell
  * for the sidecar's port + session token. Used after an authentication
  * refusal — a sidecar restart or token rotation mints a new token that

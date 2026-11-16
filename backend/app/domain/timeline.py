@@ -259,6 +259,7 @@ def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
         "gain_db": c.gain_db,
         "fade_in_units": c.fade_in_units,
         "fade_in_curve": c.fade_in_curve,
+        "automation_interp": getattr(c, "automation_interp", "linear"),
         "fade_out_units": c.fade_out_units,
         "fade_out_curve": c.fade_out_curve,
         "automation_json": c.automation_json,
@@ -420,11 +421,19 @@ def set_clip_gain(session: Session, tl: Timeline, clip: TimelineClip, *,
 #: the fade (g(t)=t/N). 'equal_power' uses the constant-power pair —
 #: in: g(t)=sin(πt/2N), out: g(t)=cos(πt/2N) — so a paired crossfade
 #: sums to unity power (sin²+cos²=1) instead of dipping in the middle.
-FADE_CURVES = ("linear", "equal_power")
+#: N2-F adds: 's_curve' — the sin²/cos² S-curve (gentle at both ends);
+#: 'exponential' — a fixed exponential ramp (perceived-even loudness
+#: for fades, maps to afade exp).
+FADE_CURVES = ("linear", "equal_power", "s_curve", "exponential")
 
 #: Automation bounds — bounded initial model: at most this many
 #: gain keyframes per clip.
 AUTOMATION_MAX_POINTS = 64
+
+#: N2-F — automation interpolation modes. 'linear' interpolates in
+#: dB between neighbors; 'step' holds each keyframe's value until the
+#: next (piecewise-constant, deterministic).
+AUTOMATION_INTERPS = ("linear", "step")
 
 
 def check_fade_curve(v: Any, field: str = "curve") -> str:
@@ -493,9 +502,16 @@ def fade_gain(curve: str, pos: int, n: int, *, out: bool = False
     t = min(max(pos / n, 0.0), 1.0)
     if curve == "linear":
         g = 1.0 - t if out else t
-    else:  # equal_power
+    elif curve == "equal_power":
         g = math.cos(t * math.pi / 2) if out else math.sin(
             t * math.pi / 2)
+    elif curve == "s_curve":
+        g = math.cos(t * math.pi / 2) ** 2 if out else math.sin(
+            t * math.pi / 2) ** 2
+    else:  # exponential — afade exp: in e^{-11.5129(1−t)} (≈10^{-5(1−t)}),
+        # out e^{-11.5129·t} — a fixed −50 dB/decade-style ramp whose
+        # tail reaches unity exactly at the edge. FFmpeg contract.
+        g = math.exp(-11.512925464970227 * (t if out else 1 - t))
     return g
 
 
@@ -512,16 +528,23 @@ def automation_points(clip: TimelineClip) -> list[dict[str, Any]]:
 
 def set_clip_automation(session: Session, tl: Timeline,
                         clip: TimelineClip, *, points: list,
+                        interp: str | None = None,
                         command_id: str | None) -> None:
     """Replace the clip's gain keyframes. Bounded model: ≤64 points,
     integer `at_frames` within the clip's integer occupancy [0,
     ceil(extent)), unique positions, gain bounds as clip gain. Points
     are stored sorted by position — deterministic serialization.
-    Interpolation is linear in dB between neighbors, flat at the
-    ends (documented; rendered at N2-E)."""
+    Interpolation is `clip.automation_interp`: 'linear' in dB between
+    neighbors, or 'step' (hold each value until the next point); flat
+    outside the first/last point either way."""
     if tl.status != "active":
         raise TimelineError("timeline is archived")
     _require_audio_lane_clip(session, clip, "gain automation")
+    if interp is not None:
+        if interp not in AUTOMATION_INTERPS:
+            raise TimelineError(
+                f"interp must be one of {', '.join(AUTOMATION_INTERPS)}")
+        clip.automation_interp = interp
     if not isinstance(points, list):
         raise TimelineError("points must be a list")
     if len(points) > AUTOMATION_MAX_POINTS:
@@ -550,10 +573,11 @@ def set_clip_automation(session: Session, tl: Timeline,
            summary="Set clip automation")
 
 
-def automation_gain_db(points: list[dict], at_frames: float) -> float:
+def automation_gain_db(points: list[dict], at_frames: float, *,
+                       interp: str = "linear") -> float:
     """Interpolated gain in dB at a clip-local position — linear in
-    dB between neighbors, constant before the first/after the last
-    point. Deterministic."""
+    dB between neighbors for 'linear', held constant for 'step';
+    flat before the first/after the last point. Deterministic."""
     if not points:
         return 0.0
     if at_frames <= points[0]["at_frames"]:
@@ -562,6 +586,8 @@ def automation_gain_db(points: list[dict], at_frames: float) -> float:
         return float(points[-1]["gain_db"])
     for a, b in zip(points, points[1:]):
         if a["at_frames"] <= at_frames <= b["at_frames"]:
+            if interp == "step":
+                return float(a["gain_db"])
             span = b["at_frames"] - a["at_frames"]
             t = 0.0 if span == 0 else (at_frames - a["at_frames"]) / span
             return float(a["gain_db"]) + t * (float(b["gain_db"])
@@ -851,6 +877,7 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
             fade_out_units=c.fade_out_units,
             fade_out_curve=c.fade_out_curve,
             automation_json=c.automation_json,
+            automation_interp=c.automation_interp,
             shot_id=c.shot_id, scene_id=c.scene_id))
     session.flush()
     for x in list_crossfades(session, tl.id):
@@ -952,6 +979,7 @@ def _restore_snapshot(session: Session, tl: Timeline,
             fade_out_units=c.get("fade_out_units", 0),
             fade_out_curve=c.get("fade_out_curve", "linear"),
             automation_json=c.get("automation_json", "[]"),
+            automation_interp=c.get("automation_interp", "linear"),
             shot_id=c.get("shot_id"), scene_id=c.get("scene_id"))
         row = live_clips.get(c.get("id")) if c.get("id") else None
         if row is not None:
@@ -1598,6 +1626,7 @@ def split_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
         fade_out_units=clip.fade_out_units,
         fade_out_curve=clip.fade_out_curve,
         automation_json=json.dumps(right_pts, separators=(",", ":")),
+        automation_interp=clip.automation_interp,
         shot_id=clip.shot_id, scene_id=clip.scene_id,
         start_frames=at)
     clip.out_frame = clip.in_frame + off_i
@@ -1859,6 +1888,8 @@ def edl_json_v2(session: Session, tl: Timeline) -> dict[str, Any]:
                             "curve": c.fade_out_curve},
                 },
                 "automation": automation_points(c),
+                "automation_interp": getattr(c, "automation_interp",
+                                             "linear"),
                 "source": {
                     "fps_num": c.src_fps_num, "fps_den": c.src_fps_den,
                     "frames": c.src_frames,

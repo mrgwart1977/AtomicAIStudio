@@ -993,6 +993,8 @@ export interface TimelineClip {
   fade_out_curve: string;
   /** N2-D — JSON keyframe list [{id, at_frames, gain_db}]. */
   automation_json: string;
+  /** N2-F — keyframe interpolation: "linear" (dB ramp) | "step". */
+  automation_interp: string;
   shot_id: string | null;
   scene_id: string | null;
   created_at: string;

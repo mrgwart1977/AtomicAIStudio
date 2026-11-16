@@ -69,10 +69,20 @@ atrim segment
   → aresample=48000 → asetpts
 ```
 
-Curve mapping (afade enum): `linear` → `tri`(0),
-`equal_power` → `qsin`(1) — the sin/cos pair whose in+out product
-sums to unity power. (`hsin` is the sin² S-curve — **not**
-equal-power; don't confuse them.)
+Curve mapping (afade names): `linear` → `tri`,
+`equal_power` → `qsin` — the sin/cos pair whose in+out product
+sums to unity power. N2-F adds `s_curve` → `hsin` (the sin²/cos²
+S-curve — *also* unity-power but gentler at both ends) and
+`exponential` → `exp` (the afade contract g_in=e^{−11.5129(1−t)},
+g_out=e^{−11.5129·t} — a −50 dB ramp across the fade; verified
+against `libavfilter/af_afade.c` and decoded PCM). (`hsin` is the
+sin² S-curve — **not** the sin/cos equal-power pair; don't confuse
+them.)
+
+N2-F automation interpolation: `automation_interp` is `linear`
+(default — dB ramp between keyframes) or `step` (hold each
+keyframe's value until the next; the aeval segment becomes a
+constant — `between(n,lo,hi−1)` of the left value).
 
 **The PTS reset is load-bearing**: afade anchors `start_sample`
 against each frame's **PTS in samples**, and `atrim` keeps the
@@ -185,8 +195,9 @@ unsatisfied crossfade on an audible lane is surfaced as blocked
 
 ## Boundaries
 
-- Per-track automation, additional curves/interpolations, and
-  audio-preview scrubbing remain deferred (N2-F).
+- Per-track automation remains deferred (see docs/n2f-preview.md).
+  N2-F shipped `s_curve`/`exponential` curves, `step` interpolation,
+  and WebAudio audio-lane preview.
 - Human listening judgment on mixes is a **[human]** check.
 - Output duration bounds and cancellation/restart semantics are
   unchanged from C5-B (supervised run, `duration=first`, `-t` cap).
