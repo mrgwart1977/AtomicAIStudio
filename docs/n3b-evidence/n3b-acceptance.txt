@@ -1,0 +1,70 @@
+   OK — backend http://127.0.0.1:55629
+   OK — media: embedded mp4 + 440/550/330/660 wavs (330 @44.1k, 660 1.5s)
+[1] 1) scene — embedded V1, dialogue+xf A1, music A2, tiny+gap A3 @30fps
+   OK — scene: 5 clips, xf satisfied=true, clip fades+auto, lane ramps on A2+V1, tiny 3-frame clip
+[2] 2) export FILM — PCM baseline for parity comparison
+   OK — export dur 8.000s @30/1
+   OK — dialogue pre-duck present: OK
+   OK — step duck ≈ −9 dB: OK
+   OK — xf out-leg fades to silence: OK
+   OK — xf in-leg at full gain: OK
+   OK — music lane duck: OK
+   OK — embedded lane ramp: OK
+   OK — tiny 3-frame clip audible at 1.55s: OK
+   OK — no audio past program end (8.1s+): OK
+[3] 3) navigate to FILM, engine loads
+   OK — engine ready — 5 clips + xf + lane automation
+[4] 4) layout — activity rail collapse keeps the ruler unobstructed
+   OK — activity aside present: true (jobs exist — rail is up)
+   OK — expanded: 12 probes across visible ruler — all ruler, none aside
+   OK — collapsed rail width 32px (expect ~32)
+   OK — ruler visible span grew: 735px
+   OK — re-expanded to 288px; narrow@1.5x probes all clean; audit controls independently reachable
+[5] 5) windowed audition parity — offline render windows vs export
+   OK —   pre-duck dialogue: window 0.3571 vs export 0.3469 OK
+   OK —   step-ducked dialogue: window 0.1282 vs export 0.1249 OK
+   OK —   crossfade in-leg (550): window 0.3522 vs export 0.3534 OK
+   OK —   music lane duck: window 0.0959 vs export 0.1022 OK
+   OK —   embedded ramp early: window 0.1643 vs export 0.1591 OK
+   OK —   embedded ramp late: window 0.0708 vs export 0.0690 OK
+   OK — past-end window rms 0.00000 OK
+[6] 6) REAL drag — window-tracked moves, bounded nodes, phase latency
+   OK — drag 30f→85f ×20: delivered 20 coalesced 0 | move→audition p50 4ms p95 57ms | calls 21 auditions 21 maxLive 4 | engine sched 0.30ms lead 20.0ms
+   OK — phase latency — input→handler p50 0.9 p95 2.2 max 4.5 (n=21)ms
+   OK — phase latency — handler→schedule p50 0.5 p95 5.6 max 39.6 (n=21)ms
+   OK — phase latency — schedule loop p50 0.4 p95 0.5 max 0.6 (n=21)ms
+   OK — phase latency — schedule→expected onset p50 20.0 p95 20.0 max 20.0 (n=21)ms
+   OK — est device output latency 48.0ms (expected-onset proxy — audible onset not objectively measurable, no loopback)
+   OK — playhead after drag: Playhead 2:25 | nodes drained to 0
+[7] 7) rapid drag burst — 60 moves, throttle coalesces
+   OK — burst: 61 pointer calls → 21 auditions (34% scheduled), maxLive 4
+[8] 8) scrub while playing → smooth resume on release
+   OK — state during end: playing — resumed playing=true, pos 5.23s (Playhead 5:07)
+[9] 9) transport matrix — Escape cancel restores pre-scrub state
+   OK — playing→scrub→Escape: state playing, pos 0.92s (pre-scrub 0.47s + playback)
+   OK — stopped→scrub→Escape: state ready, pos 0.00s (restored ≈0.00)
+[10] 10) lifecycle — zigzag burst, release outside ruler bounds
+   OK — zigzag 24 moves: auditions 8, maxLive 4, release-outside → state ready, live 0
+[11] 11) keyboard — arrow steps + Home/End audition blips
+   OK — 3× ArrowRight → playhead Playhead 1:29, auditions 3
+   OK — Home → Playhead 0:00
+[12] 12) fps variants — 24/25/30/24000:1001/30000:1001 timeline→source mapping
+   OK —   24/1: clip@48f → 2.0000s — onset pre 0.000 post 0.328 OK
+   OK —   25/1: clip@48f → 1.9200s — onset pre 0.000 post 0.328 OK
+   OK —   30/1: clip@48f → 1.6000s — onset pre 0.000 post 0.328 OK
+   OK —   24000/1001: clip@48f → 2.0020s — onset pre 0.000 post 0.328 OK
+   OK —   30000/1001: clip@48f → 1.6016s — onset pre 0.000 post 0.328 OK
+[13] 13) long timeline — 20 clips / 4 lanes / 60s — schedule cost
+   OK — BIG: 20 clips across 4 lanes over ~46s
+   OK — BIG window render: 20 clips, decode 386ms, render 2ms
+[14] 14) project switch → engine disposal; CPU/mem during scrub
+   OK — drag CPU +0.8s, app RSS 28MB (was 27), backend RSS 136MB
+   OK — preview hook after nav-away: disposed OK
+[15] 15) close mid-scrub — graceful quit, no orphans
+   OK — mid-scrub: state scrubbing, live nodes 3
+   OK — post-close: app gone, backend gone
+[16] 16) restart persistence — relaunch keeps timeline + automation
+   OK — backend http://127.0.0.1:55629
+   OK — backend http://127.0.0.1:64691
+   OK — persisted: 5 clips, xf satisfied=true, clip automation 3 pts, rev 18
+   OK — post-restart engine ready
