@@ -43,9 +43,13 @@ class FakeGain {
 }
 class FakeCtx {
   currentTime = 0; state: AudioContextState = "running";
+  baseLatency = 0.01; outputLatency = 0.005;
   sources: FakeSrc[] = []; destination = {};
   createBufferSource() { const s = new FakeSrc(); this.sources.push(s); return s; }
   createGain() { return new FakeGain(); }
+  async decodeAudioData(_b: ArrayBuffer) {
+    return { duration: 30, numberOfChannels: 2 } as AudioBuffer;
+  }
   async resume() { this.state = "running"; }
   async close() { this.state = "closed"; }
 }
@@ -66,6 +70,26 @@ const wire = (plan: PreviewPlan, clips: string[]) => {
   (eng as unknown as { master: unknown }).master = ctx.destination;
   return { eng, ctx };
 };
+
+/** Minimal valid TimelineDetail for the real load() path. */
+const detailOne = () => ({
+  id: "t1", project_id: "p1", name: "T", fps_num: 30, fps_den: 1,
+  status: "active", revision: 1,
+  tracks: [{ id: "tr1", timeline_id: "t1", kind: "audio",
+             name: "A1", sort_order: 0, visible: true, locked: false,
+             muted: false, solo: false, gain_db: 0,
+             automation_json: "[]", automation_interp: "linear" }],
+  clips: [{ id: "c1", timeline_id: "t1", track_id: "tr1",
+            source_asset_id: "a1", source_sha256: "x",
+            source_rate: 48000, source_fps_num: 30, source_fps_den: 1,
+            start_frames: 0, in_frame: 0, out_frame: 48000,
+            gain_db: 0, automation_json: "[]",
+            automation_interp: "step",
+            fade_in_units: 0, fade_in_curve: "linear",
+            fade_out_units: 0, fade_out_curve: "linear",
+            src_has_audio: true }],
+  crossfades: [],
+}) as unknown as TimelineDetail;
 
 describe("clipsInWindow", () => {
   const plan = planOf(
@@ -196,30 +220,208 @@ describe("scrub audition lifecycle", () => {
     });
 });
 
+describe("transport state matrix", () => {
+  it("stopped → scrub → release stays stopped at release position",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng, ctx } = wire(plan, ["a"]);
+      eng.state = "ready";
+      eng.beginScrub();
+      eng.scrubAudition(7);
+      await (eng as unknown as EnginePriv).fireAudition();
+      eng.endScrub();
+      expect(eng.state).toBe("ready");             // not playing
+      expect(eng.positionS()).toBeCloseTo(7);
+      expect(ctx.sources.filter(s => !s.stopped).length).toBe(0);
+    });
+
+  it("paused → scrub → release stays paused at release position",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng } = wire(plan, ["a"]);
+      await eng.play(2);
+      eng.pause();                                  // paused at 2s
+      eng.beginScrub();
+      eng.scrubAudition(9);
+      await (eng as unknown as EnginePriv).fireAudition();
+      eng.endScrub();
+      expect(eng.state).toBe("ready");
+      expect(eng.positionS()).toBeCloseTo(9);       // release pos held
+    });
+
+  it("playing → scrub → release resumes at the release position",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng, ctx } = wire(plan, ["a"]);
+      await eng.play(1);
+      eng.beginScrub();
+      eng.scrubAudition(15);
+      await (eng as unknown as EnginePriv).fireAudition();
+      eng.endScrub();
+      expect(eng.state).toBe("playing");
+      // resume anchored at 15s: a live source started at tl offset 15
+      const live = ctx.sources.filter(s => !s.stopped);
+      expect(live.length).toBe(1);
+      expect(live[0].started!.off).toBeCloseTo(15); // srcStartS+offset
+    });
+
+  it("playing → scrub → cancel restores position + resumes from it",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng, ctx } = wire(plan, ["a"]);
+      await eng.play(3);
+      ctx.currentTime = 0.55;                       // 0.5s elapsed
+      const expected = eng.positionS();             // ≈3.5, live pos
+      eng.beginScrub();
+      eng.scrubAudition(20);
+      await (eng as unknown as EnginePriv).fireAudition();
+      const pos0 = eng.cancelScrub();
+      expect(pos0).toBeCloseTo(expected);           // scrub-start pos
+      expect(eng.state).toBe("playing");            // transport restored
+      const live = ctx.sources.filter(s => !s.stopped);
+      expect(live[0].started!.off).toBeCloseTo(expected, 1);
+    });
+
+  it("stopped → scrub → cancel restores position, stays stopped",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng } = wire(plan, ["a"]);
+      eng.state = "ready";
+      await eng.scrubTo(4);                         // paused position 4
+      eng.beginScrub();
+      eng.scrubAudition(30);
+      await (eng as unknown as EnginePriv).fireAudition();
+      const pos0 = eng.cancelScrub();
+      expect(pos0).toBeCloseTo(4);
+      expect(eng.state).toBe("ready");
+      expect(eng.positionS()).toBeCloseTo(4);
+    });
+
+  it("cancelScrub is a no-op outside scrub mode", async () => {
+    const plan = planOf(clip("a", 0, 60));
+    const { eng } = wire(plan, ["a"]);
+    eng.state = "ready";
+    expect(eng.cancelScrub()).toBeNull();
+    expect(eng.state).toBe("ready");
+  });
+
+  it("dispose mid-scrub tears everything down (project switch/unmount)",
+    async () => {
+      const plan = planOf(clip("a", 0, 60), clip("b", 0, 60));
+      const { eng, ctx } = wire(plan, ["a", "b"]);
+      eng.beginScrub();
+      eng.scrubAudition(1);
+      await (eng as unknown as EnginePriv).fireAudition();
+      await eng.dispose();
+      expect(eng.state).toBe("idle");
+      expect(ctx.state).toBe("closed");
+      expect(ctx.sources.every(s => s.stopped)).toBe(true);
+      // late scrub calls are inert on a disposed engine
+      eng.scrubAudition(2);
+      expect(eng.scrubStats.auditions).toBe(1);
+    });
+});
+
+describe("scrub lifecycle edge cases", () => {
+  it("rapid alternating directions stay bounded (supersede + drain)",
+    async () => {
+      const plan = planOf(clip("a", 0, 60), clip("b", 0, 60));
+      const { eng, ctx } = wire(plan, ["a", "b"]);
+      eng.beginScrub();
+      for (let i = 0; i < 20; i++) {
+        // zig-zag: ±5s every move — gens supersede, nodes drain
+        eng.scrubAudition(i % 2 === 0 ? 10 + i * 0.1 : 10 - i * 0.1);
+        await (eng as unknown as EnginePriv).fireAudition();
+      }
+      expect(eng.scrubStats.maxLive).toBeLessThanOrEqual(2);
+      expect((eng as unknown as EnginePriv).live.length)
+        .toBeLessThanOrEqual(2);
+      expect(ctx.sources.slice(0, -2).every(s => s.stopped)).toBe(true);
+    });
+
+  it("scrub across a crossfade boundary auditions both legs",
+    async () => {
+      // xf region [4,6): outgoing a (0,6), incoming b (4,12)
+      const plan = planOf(clip("a", 0, 6), clip("b", 4, 12));
+      const { eng, ctx } = wire(plan, ["a", "b"]);
+      eng.beginScrub();
+      eng.scrubAudition(4.5);                       // inside the overlap
+      await (eng as unknown as EnginePriv).fireAudition();
+      expect(ctx.sources.length).toBe(2);
+      eng.endScrub();
+    });
+
+  it("audition at a clip's tail end bounds the scheduled duration",
+    async () => {
+      const plan = planOf(clip("a", 0, 2), clip("b", 5, 9));
+      const { eng, ctx } = wire(plan, ["a", "b"]);
+      eng.beginScrub();
+      eng.scrubAudition(1.95);                      // a ends at 2.0
+      await (eng as unknown as EnginePriv).fireAudition();
+      expect(ctx.sources.length).toBe(1);
+      expect(ctx.sources[0].started!.dur!)
+        .toBeCloseTo(0.05, 2);                      // truncated at tail
+      eng.endScrub();
+    });
+
+  it("repeated play/scrub/pause cycles keep state + live set clean",
+    async () => {
+      const plan = planOf(clip("a", 0, 120));
+      const { eng, ctx } = wire(plan, ["a"]);
+      for (let i = 0; i < 5; i++) {
+        await eng.play(i);
+        eng.pause();
+        eng.beginScrub();
+        eng.scrubAudition(10 + i);
+        await (eng as unknown as EnginePriv).fireAudition();
+        eng.endScrub();
+      }
+      expect(eng.state).toBe("ready");
+      // only released-window sources remain un-stopped… none do —
+      // every endScrub stops the audition gen and nothing resumes.
+      expect(ctx.sources.every(s => s.stopped)).toBe(true);
+    });
+
+  it("scrub during loading stays in scrub mode after buffers land",
+    async () => {
+      vi.mocked(fetchAssetBytes).mockResolvedValue(new ArrayBuffer(8));
+      const plan = planOf(clip("a", 0, 60));
+      const { eng } = wire(plan, ["a"]);
+      eng.state = "loading";
+      eng.beginScrub();
+      await eng.load(detailOne(), "p1");            // real load path
+      expect(eng.state).toBe("scrubbing");          // not clobbered
+      eng.endScrub();
+      expect(eng.state).toBe("ready");              // buffers → ready
+    });
+
+  it("latency rings fill per phase; report carries est output latency",
+    async () => {
+      const plan = planOf(clip("a", 0, 60));
+      const { eng } = wire(plan, ["a"]);
+      eng.beginScrub();
+      for (let i = 0; i < 4; i++) {
+        eng.scrubAudition(i * 0.5, performance.now() - 2 - i);
+        await (eng as unknown as EnginePriv).fireAudition();
+      }
+      const r = eng.latencyReport();
+      expect(r.input.n).toBe(4);
+      expect(r.queue.n).toBe(4);
+      expect(r.sched.n).toBe(4);
+      expect(r.lead.n).toBe(4);
+      expect(r.lead.p50).toBeGreaterThan(0);        // +20ms schedule lead
+      expect(r.input.max).toBeGreaterThan(0);
+      expect(typeof r.estOutputLatencyMs).toBe("number");
+      eng.endScrub();
+    });
+});
+
 describe("decode-error feedback", () => {
   it("load() maps a failed fetch/decode to state=error + message",
     async () => {
       vi.mocked(fetchAssetBytes).mockRejectedValue(new Error("404"));
       const eng = new AudioPreviewEngine();
-      const detail = {
-        id: "t1", project_id: "p1", name: "T", fps_num: 30, fps_den: 1,
-        status: "active", revision: 1,
-        tracks: [{ id: "tr1", timeline_id: "t1", kind: "audio",
-                   name: "A1", sort_order: 0, visible: true, locked: false,
-                   muted: false, solo: false, gain_db: 0,
-                   automation_json: "[]", automation_interp: "linear" }],
-        clips: [{ id: "c1", timeline_id: "t1", track_id: "tr1",
-                  source_asset_id: "a1", source_sha256: "x",
-                  source_rate: 48000, source_fps_num: 30, source_fps_den: 1,
-                  start_frames: 0, in_frame: 0, out_frame: 48000,
-                  gain_db: 0, automation_json: "[]",
-                  automation_interp: "step",
-                  fade_in_units: 0, fade_in_curve: "linear",
-                  fade_out_units: 0, fade_out_curve: "linear",
-                  src_has_audio: true }],
-        crossfades: [],
-      } as unknown as TimelineDetail;
-      await eng.load(detail, "p1");
+      await eng.load(detailOne(), "p1");
       expect(eng.state).toBe("error");
       expect(eng.error).toBeTruthy();   // surfaced to the UI's error span
     });

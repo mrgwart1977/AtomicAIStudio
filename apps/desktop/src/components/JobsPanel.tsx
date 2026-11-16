@@ -27,6 +27,15 @@ export function JobsPanel() {
   const assetsPage = useApp((s) => s.assetsPage);
   const assets = assetsPage?.items ?? [];
   const [base, setBase] = useState<{ baseUrl: string; token: string } | null>(null);
+  // Collapsible: the open panel takes ~288px of the main row, which
+  // shrinks the timeline's horizontal scroll viewport and leaves part
+  // of the ruler unreachable under it. Persisted; collapsed by
+  // default on narrow windows.
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    const saved = localStorage.getItem("atomic.activityCollapsed");
+    if (saved !== null) return saved === "1";
+    return window.innerWidth < 1200;
+  });
 
   useEffect(() => {
     void getBackendInfo().then(setBase);
@@ -34,10 +43,53 @@ export function JobsPanel() {
 
   const list = Object.values(jobs).sort((a, b) => b.created_at.localeCompare(a.created_at));
   if (list.length === 0) return null;
+  const runningCount = list.filter(
+    (j) => j.status === "running" || j.status === "queued").length;
+  const toggle = () => setCollapsed((c) => {
+    const v = !c;
+    localStorage.setItem("atomic.activityCollapsed", v ? "1" : "0");
+    return v;
+  });
+
+  if (collapsed) {
+    return (
+      <aside
+        className="flex w-8 shrink-0 flex-col items-center gap-2 border-l border-line bg-panel py-2"
+        aria-label="Activity"
+      >
+        <button
+          onClick={toggle}
+          aria-label="Show activity panel"
+          aria-expanded={false}
+          title="Show activity"
+          className="rounded border border-line px-1 py-0.5 text-[10px] text-muted hover:text-fg"
+        >
+          ◂
+        </button>
+        <span
+          className="text-[10px] text-faint"
+          style={{ writingMode: "vertical-rl" }}
+        >
+          Activity{runningCount > 0 ? ` · ${runningCount}` : ""}
+        </span>
+      </aside>
+    );
+  }
 
   return (
-    <aside className="w-72 overflow-y-auto border-l border-line bg-panel p-4" aria-label="Activity">
-      <h2 className="text-sm font-semibold text-muted">Activity</h2>
+    <aside className="w-72 shrink-0 overflow-y-auto border-l border-line bg-panel p-4" aria-label="Activity">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-muted">Activity</h2>
+        <button
+          onClick={toggle}
+          aria-label="Hide activity panel"
+          aria-expanded={true}
+          title="Hide activity"
+          className="rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:text-fg"
+        >
+          ▸
+        </button>
+      </div>
       <ul className="mt-3 space-y-3">
         {list.map((j) => {
           const asset = j.output_asset_id ? assets.find((a) => a.id === j.output_asset_id) : null;

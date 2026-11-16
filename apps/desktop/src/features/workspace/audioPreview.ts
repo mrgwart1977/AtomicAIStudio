@@ -26,6 +26,27 @@ export const SCRUB_WINDOW_S = 0.35;
 /** Min interval between audition generations — coalesces pointer
  * streams faster than this into the latest position. */
 export const SCRUB_MIN_INTERVAL_MS = 45;
+/** Bound for the latency sample rings — enough for a session of
+ * acceptance runs without unbounded growth. */
+const LAT_SAMPLES = 600;
+
+interface LatSummary { n: number; p50: number; p95: number; max: number }
+
+function pushLat(ring: number[], v: number): void {
+  ring.push(v);
+  if (ring.length > LAT_SAMPLES) ring.shift();
+}
+
+function summarizeLat(ring: number[]): LatSummary {
+  if (!ring.length) return { n: 0, p50: 0, p95: 0, max: 0 };
+  const s = [...ring].sort((a, b) => a - b);
+  return {
+    n: s.length,
+    p50: s[Math.floor((s.length - 1) * 0.50)],
+    p95: s[Math.floor((s.length - 1) * 0.95)],
+    max: s[s.length - 1],
+  };
+}
 
 export class AudioPreviewEngine {
   private ctx: AudioContext | null = null;
@@ -38,14 +59,28 @@ export class AudioPreviewEngine {
   private detailKey = "";
   private scrubActive = false;      // pointer held down / scrub mode
   private scrubWasPlaying = false;  // resume playback on release
+  private scrubStartS = 0;          // position when the scrub began
   private scrubGen = 0;             // supersedes pending auditions
   private scrubTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingS: number | null = null;
+  private pendingTs = 0;            // handler-entry time of pending call
   private lastAuditionAt = 0;
-  /** Live counters for acceptance measurement — read-only surface. */
+  /** Live counters for acceptance measurement — read-only surface.
+   * Latency rings are bounded (LAT_SAMPLES) and split the gesture→
+   * onset path into objectively measurable phases:
+   *   inputMs — pointer event.timeStamp → scrubAudition entry
+   *   queueMs — handler entry → audition scheduling begins (coalesce)
+   *   schedMs — the scheduling loop itself
+   *   leadMs  — scheduling call → scheduled start (ctx.currentTime→at)
+   * None of these is AUDIBLE latency: the true onset additionally
+   * includes the device output path, estimated via ctx.outputLatency
+   * (see latencyReport()) — reported as an estimate, never measured
+   * audible latency. */
   readonly scrubStats = {
     calls: 0, auditions: 0, maxLive: 0,
     lastScheduleMs: 0, lastLeadMs: 0,
+    inputMs: [] as number[], queueMs: [] as number[],
+    schedMs: [] as number[], leadMs: [] as number[],
   };
   state: PreviewState = "idle";
   error: string | null = null;
@@ -174,6 +209,7 @@ export class AudioPreviewEngine {
     if (this.scrubActive) return;
     this.scrubActive = true;
     this.scrubWasPlaying = this.state === "playing";
+    this.scrubStartS = this.positionS();
     if (this.scrubWasPlaying) this.stopLive();
     this.scrubGen++;
     this.setState("scrubbing");
@@ -182,15 +218,22 @@ export class AudioPreviewEngine {
   /** Audition a bounded window at timeline second `s`. Pointer streams
    * faster than SCRUB_MIN_INTERVAL_MS coalesce to the latest position;
    * each fired generation stops the previous one's nodes, so live
-   * sources stay bounded by the clip count under the window. */
-  scrubAudition(s: number): void {
+   * sources stay bounded by the clip count under the window.
+   * `evTimeStamp` (the pointer event's DOMHighResTimeStamp) feeds the
+   * input→handler latency ring. */
+  scrubAudition(s: number, evTimeStamp?: number): void {
     if (!this.scrubActive || !this.plan) return;
+    const now = performance.now();
+    if (evTimeStamp !== undefined && evTimeStamp > 0) {
+      pushLat(this.scrubStats.inputMs, now - evTimeStamp);
+    }
     this.anchorTlS = s;
     this.scrubStats.calls++;
     this.pendingS = s;
+    this.pendingTs = now;
     if (this.scrubTimer !== null) return;
     const wait = Math.max(0, SCRUB_MIN_INTERVAL_MS
-                          - (performance.now() - this.lastAuditionAt));
+                          - (now - this.lastAuditionAt));
     this.scrubTimer = setTimeout(() => {
       this.scrubTimer = null;
       void this.fireAudition();
@@ -204,6 +247,7 @@ export class AudioPreviewEngine {
     const gen = ++this.scrubGen;
     this.stopLive();
     const t0 = performance.now();
+    pushLat(this.scrubStats.queueMs, t0 - this.pendingTs);
     let ctx: AudioContext;
     try { ctx = this.audioCtx(); }
     catch {
@@ -221,8 +265,31 @@ export class AudioPreviewEngine {
     this.scrubStats.auditions++;
     this.scrubStats.lastScheduleMs = this.lastAuditionAt - t0;
     this.scrubStats.lastLeadMs = (at - ctx.currentTime) * 1000;
+    pushLat(this.scrubStats.schedMs, this.scrubStats.lastScheduleMs);
+    pushLat(this.scrubStats.leadMs, this.scrubStats.lastLeadMs);
     this.scrubStats.maxLive = Math.max(this.scrubStats.maxLive,
                                        this.live.length);
+  }
+
+  /** Phase-latency summary for acceptance: p50/p95/max per measurable
+   * phase (input→handler, handler→scheduling, schedule-loop cost,
+   * scheduling→expected onset). `estOutputLatencyMs` is the
+   * AudioContext's own device-latency estimate — the closest honest
+   * proxy for onset→audible, reported separately because audible
+   * latency is not objectively measurable here (no loopback). */
+  latencyReport(): {
+    input: LatSummary; queue: LatSummary; sched: LatSummary;
+    lead: LatSummary; estOutputLatencyMs: number | null;
+  } {
+    return {
+      input: summarizeLat(this.scrubStats.inputMs),
+      queue: summarizeLat(this.scrubStats.queueMs),
+      sched: summarizeLat(this.scrubStats.schedMs),
+      lead: summarizeLat(this.scrubStats.leadMs),
+      estOutputLatencyMs: this.ctx
+        ? ((this.ctx.outputLatency ?? this.ctx.baseLatency ?? 0) * 1000)
+        : null,
+    };
   }
 
   /** Single bounded audition without entering scrub mode — click and
@@ -268,6 +335,31 @@ export class AudioPreviewEngine {
     this.scrubWasPlaying = false;
     this.setState(this.buffers.size ? "ready" : "idle");
     if (was) void this.play(pos);
+  }
+
+  /** Cancel the gesture rather than release it: restores the position
+   * AND the transport state from before the scrub began — the
+   * deterministic Escape/blur state. A scrub that interrupted
+   * playback resumes from the pre-scrub position; a stopped/paused
+   * scrub snaps the playhead back and stays stopped. Returns the
+   * restored position, or null when no scrub was active. */
+  cancelScrub(): number | null {
+    if (!this.scrubActive) return null;
+    const pos0 = this.scrubStartS;
+    this.scrubActive = false;
+    this.scrubGen++;
+    if (this.scrubTimer !== null) {
+      clearTimeout(this.scrubTimer);
+      this.scrubTimer = null;
+    }
+    this.pendingS = null;
+    this.stopLive();
+    const was = this.scrubWasPlaying;
+    this.scrubWasPlaying = false;
+    this.anchorTlS = pos0;
+    this.setState(this.buffers.size ? "ready" : "idle");
+    if (was) void this.play(pos0);
+    return pos0;
   }
 
   private stopLive(): void {

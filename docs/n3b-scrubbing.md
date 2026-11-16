@@ -25,9 +25,30 @@ scheduling path, no new decode pipeline, no render-chain changes.
 - **Pointer release** → `endScrub()`: every live source is stopped
   immediately (no stale audio), then playback resumes from the final
   position if the scrub interrupted it (smooth scrub→play).
+- **Escape or window blur** → `cancelScrub()` — the documented
+  deterministic cancel: the playhead returns to the position it had
+  when the gesture began, and the transport returns to its pre-scrub
+  state (a playing transport resumes *from the pre-scrub position*; a
+  stopped one stays stopped). No accidental playback activation.
 - **Click or arrow key** (ruler has focus; arrows ±1 frame,
   Shift ±1 s, Home/End jump) → `auditionOnce()`: one bounded window
   without entering scrub mode.
+
+### Transport-state contract (one authoritative state)
+
+`engine.state` is the single authoritative transport state:
+
+| before      | gesture        | after                                    |
+|-------------|----------------|------------------------------------------|
+| stopped     | scrub → release| stopped at release position (`ready`)    |
+| paused      | scrub → release| paused at release position (`ready`)     |
+| playing     | scrub → release| `playing`, resumed from release position |
+| playing     | scrub → cancel | `playing`, resumed from scrub-start pos  |
+| stopped     | scrub → cancel | `ready` at the scrub-start position      |
+| any         | project switch / unmount / close | `dispose()` — nodes stopped, ctx closed |
+
+`play()` and `auditionOnce()` are ignored while `scrubActive` — the
+drag owns the transport; there is exactly one state.
 
 ## Bounds — why this is not an unbounded source sequence
 
@@ -60,13 +81,25 @@ there is no separate scrub clock.
 
 ## Latency contract (measured, not claimed)
 
-`scrubStats` exposes real numbers for acceptance:
-`calls` / `auditions` / `maxLive` / `lastScheduleMs` (JS scheduling
-cost) / `lastLeadMs` (schedule lead before first sample ≈ 20 ms).
-Perceived drag→audio latency ≈ throttle coalesce (≤45 ms) +
-scheduleMs + leadMs. Preview is still editorial — the N2-F
-tolerances (64 Hz envelope sampling, decode/resample, AAC priming,
-limiter) apply; sample-exactness is not claimed.
+`scrubStats` exposes bounded per-phase sample rings plus counters;
+`latencyReport()` returns p50/p95/max/n for each measurable phase:
+
+| phase | ring | what it measures |
+|-------|------|------------------|
+| pointer input → scrub handler | `inputMs` | `event.timeStamp` → `scrubAudition` entry |
+| handler → audio scheduling | `queueMs` | handler entry → `fireAudition` start (includes the ≤45 ms coalesce wait) |
+| scheduling loop | `schedMs` | the scheduleClip loop itself |
+| scheduling → expected onset | `leadMs` | `ctx.currentTime` → scheduled start (~20 ms lead) |
+
+`latencyReport().estOutputLatencyMs` additionally reports the
+AudioContext's own `outputLatency`/`baseLatency` estimate — the
+expected-onset→audible proxy. **Audible latency is not objectively
+measurable in this environment** (no loopback capture); it is
+reported as an estimate and never conflated with scheduling latency.
+
+Preview is still editorial — the N2-F tolerances (64 Hz envelope
+sampling, decode/resample, AAC priming, limiter) apply;
+sample-exactness is not claimed.
 
 ### Installed acceptance measurements (NSIS build, WebView2)
 
@@ -102,8 +135,12 @@ install (`docs/n3b-evidence/`):
 ### Known limits
 
 - No **edge auto-scroll**: the playhead stops at the visible ruler
-  edge (the audit aside occupies the right side); scroll first, then
-  drag — same as other N2 editors.
+  edge; scroll first, then drag — same as other N2 editors.
+- The **Activity rail is collapsible** (right side): when expanded it
+  is a real layout sibling — the ruler's scroll viewport ends at its
+  edge, nothing overlays it. Collapse it (or it auto-collapses under
+  ~1200 px window width) for maximum ruler width. Persisted via
+  `localStorage["atomic.activityCollapsed"]`.
 - Audition windows are 350 ms editorial previews, not transport
   playback — constant loudness during a held position is by design.
 - Decode/`AudioContext` failures surface as `state="error"` with the

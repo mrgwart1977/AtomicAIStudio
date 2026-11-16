@@ -377,13 +377,19 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   // used: capture can be lost mid-gesture (native dragstart, retarget
   // quirks), which wedged scrub state. Each move fires a bounded
   // audition window; release ends scrub (playback resumes if it was
-  // playing). A plain click gives one short audition blip. Playhead
-  // state updates are rAF-gated so a full timeline re-render happens
-  // at most once per frame regardless of pointer event rate.
+  // playing). Escape or window blur CANCELS instead: the engine
+  // restores the pre-scrub position and transport state — the
+  // documented deterministic cancel. A plain click gives one short
+  // audition blip. Playhead state updates are rAF-gated so a full
+  // timeline re-render happens at most once per frame regardless of
+  // pointer event rate.
   const scrubDrag = useRef<{
     el: HTMLElement;
+    startF: number;
     move: (e: PointerEvent) => void;
     up: () => void;
+    key: (e: KeyboardEvent) => void;
+    blur: () => void;
   } | null>(null);
   const pendingPhF = useRef<number | null>(null);
   const phRaf = useRef(0);
@@ -409,16 +415,31 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     const r = d.el.getBoundingClientRect();
     const f = Math.max(0, Math.round((e.clientX - r.left) / ppf));
     setPlayheadDrag(f);
-    previewRef.current?.scrubAudition(f / fps);
+    previewRef.current?.scrubAudition(f / fps, e.timeStamp);
+  };
+  const removeScrubListeners = (d: NonNullable<typeof scrubDrag.current>) => {
+    window.removeEventListener("pointermove", d.move);
+    window.removeEventListener("pointerup", d.up);
+    window.removeEventListener("pointercancel", d.up);
+    window.removeEventListener("keydown", d.key);
+    window.removeEventListener("blur", d.blur);
   };
   const scrubEnd = () => {
     const d = scrubDrag.current;
     if (!d) return;
     scrubDrag.current = null;
-    window.removeEventListener("pointermove", d.move);
-    window.removeEventListener("pointerup", d.up);
-    window.removeEventListener("pointercancel", d.up);
+    removeScrubListeners(d);
     previewRef.current?.endScrub();
+  };
+  const scrubCancel = () => {
+    const d = scrubDrag.current;
+    if (!d) return;
+    scrubDrag.current = null;
+    pendingPhF.current = null;      // drop any in-flight move update
+    removeScrubListeners(d);
+    const pos0 = previewRef.current?.cancelScrub();
+    if (pos0 != null) setPlayheadF(Math.max(0, Math.round(pos0 * fps)));
+    else setPlayheadF(d.startF);
   };
   const onRulerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || scrubDrag.current) return;
@@ -427,28 +448,31 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
     const eng = preview();
     if (eng.state === "idle") void eng.load(detail, detail.project_id);
     eng.beginScrub();
-    eng.scrubAudition(f / fps);
+    eng.scrubAudition(f / fps, e.timeStamp);
     // stable wrapper instances — cleanup removes exactly what was
     // registered even if the callbacks re-bind mid-drag.
     const el = e.currentTarget as HTMLElement;
     const move = (ev: PointerEvent) => scrubMoveRef.current(ev);
     const up = () => scrubEndRef.current();
-    scrubDrag.current = { el, move, up };
+    const key = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") { ev.preventDefault(); scrubCancelRef.current(); }
+    };
+    const blur = () => scrubCancelRef.current();
+    scrubDrag.current = { el, startF: f, move, up, key, blur };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
+    window.addEventListener("keydown", key);
+    window.addEventListener("blur", blur);
   };
   const scrubMoveRef = useRef(scrubMove); scrubMoveRef.current = scrubMove;
   const scrubEndRef = useRef(scrubEnd); scrubEndRef.current = scrubEnd;
+  const scrubCancelRef = useRef(scrubCancel); scrubCancelRef.current = scrubCancel;
   // Unmount safety — listeners must not outlive the component (the
   // engine is disposed separately).
   useEffect(() => () => {
     const d = scrubDrag.current;
-    if (d) {
-      window.removeEventListener("pointermove", d.move);
-      window.removeEventListener("pointerup", d.up);
-      window.removeEventListener("pointercancel", d.up);
-    }
+    if (d) removeScrubListeners(d);
     if (phRaf.current) cancelAnimationFrame(phRaf.current);
   }, []);
   const onRulerKey = (e: React.KeyboardEvent) => {

@@ -218,6 +218,10 @@ const engStats = () => evalJs(`(() => {
            lastScheduleMs: e.scrubStats.lastScheduleMs,
            lastLeadMs: e.scrubStats.lastLeadMs, live: e.live.length,
            pos: e.positionS() }; })()`);
+const latReport = () => evalJs(
+  `window.__n2fPreview.engineRef.current.latencyReport()`);
+const fmtLat = (s) =>
+  `p50 ${s.p50.toFixed(1)} p95 ${s.p95.toFixed(1)} max ${s.max.toFixed(1)} (n=${s.n})`;
 /** Drag from frame f0 to f1 in `steps` moves, release at f1.
  * waitEach: for every dispatched move, first wait for it to be
  * DELIVERED (calls++ — browsers coalesce pointermove streams, so
@@ -426,8 +430,92 @@ async function main() {
     throw new Error(`engine not ready: ${JSON.stringify(loaded)}`);
   ok(`engine ready — ${detailJson.clips.length} clips + xf + lane automation`);
 
-  /* ---------- 4. windowed offline parity vs export PCM ---------- */
-  step("4) windowed audition parity — offline render windows vs export");
+  /* ---------- 4. layout — activity rail must not obstruct ruler ---- */
+  step("4) layout — activity rail collapse keeps the ruler unobstructed");
+  // B1: the Activity aside is a collapsible flex sibling — never an
+  // overlay on the ruler. Verify: (a) every pixel row across the
+  // visible ruler resolves to a ruler element, (b) the panel
+  // collapses to a slim rail and re-expands, (c) it stays correct at
+  // narrow width and non-100% scale.
+  const rulerClear = async () => {
+    const rr = await rulerRect();
+    const probes = await evalJs(`(() => {
+      const out = [];
+      for (let i = 0; i < 12; i++) {
+        const x = ${rr.left} + (${rr.visRight - 4 - rr.left}) * i / 11;
+        const el = document.elementFromPoint(x, ${rr.top});
+        const aside = el && el.closest('aside[aria-label="Activity"]');
+        const inRuler = el && el.closest('[data-testid="timeline-ruler"]');
+        out.push({ x: Math.round(x), tag: el ? el.tagName : "NONE",
+                   aside: !!aside, ruler: !!inRuler });
+      }
+      return out; })()`);
+    return probes;
+  };
+  const asideW = () => evalJs(`(() => {
+    const a = document.querySelector('aside[aria-label="Activity"]');
+    return a ? a.getBoundingClientRect().width : 0; })()`);
+  const hasAside = (await asideW()) > 0;
+  ok(`activity aside present: ${hasAside} (jobs exist — rail is up)`);
+  if (hasAside) {
+    // EXPANDED: panel takes real layout width — ruler viewport ends
+    // at its left edge; nothing overlaps.
+    let probes = await rulerClear();
+    let bad = probes.filter(q => q.aside || !q.ruler);
+    if (bad.length)
+      throw new Error("ruler obstructed while expanded: " +
+                      JSON.stringify(bad.slice(0, 3)));
+    ok(`expanded: ${probes.length} probes across visible ruler — all ruler, none aside`);
+    // collapse it (no-op click if a prior run left it collapsed)
+    await evalJs(`(() => {
+      const b = document.querySelector('[aria-label="Hide activity panel"]');
+      if (b) b.click(); return !!b; })()`);
+    await sleep(300);
+    const w2 = await asideW();
+    ok(`collapsed rail width ${w2}px (expect ~32)`);
+    if (w2 > 60) throw new Error("rail did not collapse");
+    const rr2 = await rulerRect();
+    ok(`ruler visible span grew: ${(rr2.visRight - rr2.left).toFixed(0)}px`);
+    probes = await rulerClear();
+    bad = probes.filter(q => q.aside || !q.ruler);
+    if (bad.length)
+      throw new Error("ruler obstructed while collapsed: " +
+                      JSON.stringify(bad.slice(0, 3)));
+    // NARROW + SCALED viewport — rail must stay a sibling, never overlay
+    await send("Emulation.setDeviceMetricsOverride",
+      { width: 900, height: 700, deviceScaleFactor: 1.5, mobile: false });
+    await sleep(400);
+    probes = await rulerClear();
+    bad = probes.filter(q => q.aside || !q.ruler);
+    if (bad.length)
+      throw new Error("ruler obstructed at 900px@1.5x: " +
+                      JSON.stringify(bad.slice(0, 3)));
+    await send("Emulation.clearDeviceMetricsOverride");
+    await sleep(400);
+    // re-expand — audit controls independently accessible
+    await evalJs(`(() => {
+      const b = document.querySelector('[aria-label="Show activity panel"]');
+      if (b) b.click(); return !!b; })()`);
+    await sleep(300);
+    const w3 = await asideW();
+    if (w3 < 100) throw new Error("activity panel did not re-expand");
+    ok(`re-expanded to ${w3}px; narrow@1.5x probes all clean; ` +
+       `audit controls independently reachable`);
+    // collapse again for the drag steps — wider ruler viewport
+    await evalJs(`(() => {
+      const b = document.querySelector('[aria-label="Hide activity panel"]');
+      if (b) b.click(); return !!b; })()`);
+    await sleep(300);
+  } else {
+    const probes = await rulerClear();
+    if (probes.some(q => !q.ruler))
+      throw new Error("ruler probes missed ruler: " +
+                      JSON.stringify(probes.slice(0, 3)));
+    ok("no activity aside — ruler fully clear");
+  }
+
+  /* ---------- 5. windowed offline parity vs export PCM ---------- */
+  step("5) windowed audition parity — offline render windows vs export");
   const winRender = async (fromS, windowS) => evalJs(`(async () => {
     const h = window.__n2fPreview;
     const plan = h.buildPreviewPlan(${JSON.stringify(detailJson)});
@@ -475,8 +563,8 @@ async function main() {
   ok(`past-end window rms ${g.rms.toFixed(5)} ${g.rms < 0.01 ? "OK" : "FAIL"}`);
   if (g.rms >= 0.01) throw new Error("past-end window not silent");
 
-  /* ---------- 5. real drag-scrub via CDP Input ---------- */
-  step("5) REAL drag — window-tracked moves, bounded nodes, latency");
+  /* ---------- 6. real drag-scrub via CDP Input ---------- */
+  step("6) REAL drag — window-tracked moves, bounded nodes, phase latency");
   // scroll so 30→85 sits inside the ~75-frame visible window (the
   // audit aside clips the ruler's right edge — real users scroll to
   // reach far frames; span covers pre-duck → step-duck → xf head)
@@ -494,6 +582,20 @@ async function main() {
      `calls ${st.calls} auditions ${st.auditions} maxLive ${st.maxLive} | ` +
      `engine sched ${st.lastScheduleMs.toFixed(2)}ms ` +
      `lead ${st.lastLeadMs.toFixed(1)}ms`);
+  // B4 — phase-split latency, measured inside the engine:
+  // input = event.timeStamp→handler entry; queue = handler→scheduling
+  // (coalesce wait); sched = schedule loop; lead = scheduling→expected
+  // onset. estOutputLatencyMs is the context's device estimate — the
+  // expected-audible proxy, NOT a measured audible latency.
+  const lr = await latReport();
+  ok(`phase latency — input→handler ${fmtLat(lr.input)}ms`);
+  ok(`phase latency — handler→schedule ${fmtLat(lr.queue)}ms`);
+  ok(`phase latency — schedule loop ${fmtLat(lr.sched)}ms`);
+  ok(`phase latency — schedule→expected onset ${fmtLat(lr.lead)}ms`);
+  ok(`est device output latency ${lr.estOutputLatencyMs?.toFixed(1) ?? "n/a"}ms ` +
+     `(expected-onset proxy — audible onset not objectively measurable, no loopback)`);
+  if (!lr.queue.n || !lr.lead.n)
+    throw new Error("phase latency rings empty");
   if (drag.delivered === 0) throw new Error("no pointer moves delivered");
   if (latSorted.length && p95 > 300)
     throw new Error("drag latency bound exceeded");
@@ -505,8 +607,8 @@ async function main() {
   const tc = await playheadReadout();
   ok(`playhead after drag: ${tc} | nodes drained to ${st.live}`);
 
-  /* ---------- 6. rapid scrub burst — coalescing bound ---------- */
-  step("6) rapid drag burst — 60 moves, throttle coalesces");
+  /* ---------- 7. rapid scrub burst — coalescing bound ---------- */
+  step("7) rapid drag burst — 60 moves, throttle coalesces");
   const b0 = await engStats();
   await scrollRuler(30);
   await dragFrames(20, 80, 60, 0, false);       // raw-speed burst
@@ -520,8 +622,8 @@ async function main() {
     throw new Error("throttle did not coalesce burst");
   if (b1.live !== 0) throw new Error("stale nodes after burst release");
 
-  /* ---------- 7. scrub during playback → resume ---------- */
-  step("7) scrub while playing → smooth resume on release");
+  /* ---------- 8. scrub during playback → resume ---------- */
+  step("8) scrub while playing → smooth resume on release");
   await evalJs(`document.querySelector('[data-testid="preview-play"]').click()`);
   await sleep(800);
   const before = await engStats();
@@ -538,8 +640,100 @@ async function main() {
   await evalJs(`document.querySelector('[data-testid="preview-stop"]').click()`);
   await sleep(300);
 
-  /* ---------- 8. keyboard seek + audition ---------- */
-  step("8) keyboard — arrow steps + Home/End audition blips");
+  /* ---------- 9. transport matrix — Escape cancel + stopped scrub -- */
+  step("9) transport matrix — Escape cancel restores pre-scrub state");
+  // playing → scrub → Escape: deterministic cancel = playhead snaps
+  // to the pre-scrub position AND playback resumes from there.
+  await evalJs(`document.querySelector('[data-testid="preview-play"]').click()`);
+  await sleep(500);
+  const cPos0 = (await engStats()).pos;  // live pos — cancel restores this
+  await scrollRuler(60);
+  {
+    const r = await rulerRect(); const ppf = await ppfNow();
+    const clampX = (f) => Math.min(r.left + f * ppf, r.visRight - 4);
+    await mouse("mousePressed", clampX(50), r.top, 1, "left");
+    for (const f of [55, 60, 65, 70])
+      await mouse("mouseMoved", clampX(f), r.top, 1, "none");
+    await sleep(120);
+    const mid = await engStats();
+    if (mid.state !== "scrubbing")
+      throw new Error("expected scrubbing mid-drag, got " + mid.state);
+    await send("Input.dispatchKeyEvent",
+      { type: "keyDown", key: "Escape", code: "Escape",
+        windowsVirtualKeyCode: 27 });
+    await send("Input.dispatchKeyEvent",
+      { type: "keyUp", key: "Escape", code: "Escape",
+        windowsVirtualKeyCode: 27 });
+    await sleep(500);
+  }
+  const cPos1 = await engStats();
+  ok(`playing→scrub→Escape: state ${cPos1.state}, pos ` +
+     `${cPos1.pos.toFixed(2)}s (pre-scrub ${cPos0.toFixed(2)}s + playback)`);
+  if (cPos1.state !== "playing")
+    throw new Error("cancel did not resume playback");
+  if (cPos1.pos < cPos0 - 0.3 || cPos1.pos > cPos0 + 2.5)
+    throw new Error(`cancel position off: ${cPos1.pos} vs ~${cPos0}`);
+  await evalJs(`document.querySelector('[data-testid="preview-stop"]').click()`);
+  await sleep(300);
+  // stopped → scrub → Escape: snaps back, stays stopped (no accidental
+  // playback activation — the "one authoritative state" invariant)
+  await scrollRuler(80);
+  {
+    const r = await rulerRect(); const ppf = await ppfNow();
+    const clampX = (f) => Math.min(r.left + f * ppf, r.visRight - 4);
+    const s0 = (await engStats()).pos;         // pre-press — restore target
+    await mouse("mousePressed", clampX(70), r.top, 1, "left");
+    for (const f of [75, 80, 85, 90])
+      await mouse("mouseMoved", clampX(f), r.top, 1, "none");
+    await sleep(120);
+    await send("Input.dispatchKeyEvent",
+      { type: "keyDown", key: "Escape", code: "Escape",
+        windowsVirtualKeyCode: 27 });
+    await send("Input.dispatchKeyEvent",
+      { type: "keyUp", key: "Escape", code: "Escape",
+        windowsVirtualKeyCode: 27 });
+    await sleep(300);
+    const sEnd = await engStats();
+    ok(`stopped→scrub→Escape: state ${sEnd.state}, pos ` +
+       `${sEnd.pos.toFixed(2)}s (restored ≈${s0.toFixed(2)})`);
+    if (sEnd.state === "playing")
+      throw new Error("cancel activated playback from stopped");
+    if (Math.abs(sEnd.pos - s0) > 0.4)
+      throw new Error("cancel did not restore pre-scrub position");
+    if (sEnd.live !== 0) throw new Error("stale nodes after cancel");
+  }
+
+  /* ---------- 10. lifecycle — zigzag burst + release outside ruler - */
+  step("10) lifecycle — zigzag burst, release outside ruler bounds");
+  await scrollRuler(30);
+  {
+    const r = await rulerRect(); const ppf = await ppfNow();
+    const clampX = (f) => Math.min(r.left + f * ppf, r.visRight - 4);
+    const z0 = await engStats();
+    await mouse("mousePressed", clampX(20), r.top, 1, "left");
+    // alternating direction every move — generator supersession under
+    // direction reversal must keep live nodes bounded
+    for (let i = 1; i <= 24; i++) {
+      const f = i % 2 === 0 ? 20 + i * 1.5 : 20 + (i - 1) * 1.5 - 6;
+      await mouse("mouseMoved", clampX(Math.max(5, f)), r.top, 1, "none");
+    }
+    // release OUTSIDE the ruler — window-level listeners still end it
+    await mouse("mouseReleased", clampX(30), r.top - 46, 0, "left");
+    await sleep(250);
+    const z1 = await engStats();
+    ok(`zigzag 24 moves: auditions ${z1.auditions - z0.auditions}, ` +
+       `maxLive ${z1.maxLive}, release-outside → state ${z1.state}, ` +
+       `live ${z1.live}`);
+    if (z1.state === "scrubbing")
+      throw new Error("release outside ruler left scrub active");
+    if (z1.live !== 0)
+      throw new Error("stale live nodes after outside release");
+    if (z1.maxLive > detailJson.clips.length + 2)
+      throw new Error("zigzag live-node bound exceeded");
+  }
+
+  /* ---------- 11. keyboard seek + audition ---------- */
+  step("11) keyboard — arrow steps + Home/End audition blips");
   await evalJs(`document.querySelector('[data-testid="timeline-ruler"]').focus()`);
   const k0 = await engStats();
   for (const key of ["ArrowRight", "ArrowRight", "ArrowRight"])
@@ -557,7 +751,7 @@ async function main() {
   ok(`Home → ${await playheadReadout()}`);
 
   /* ---------- 9. fps-variant timelines — tl→src mapping ---------- */
-  step("9) fps variants — 24/25/30/24000:1001/30000:1001 timeline→source mapping");
+  step("12) fps variants — 24/25/30/24000:1001/30000:1001 timeline→source mapping");
   const fpsVariants = [[24, 1], [25, 1], [30, 1], [24000, 1001], [30000, 1001]];
   for (const [num, den] of fpsVariants) {
     const name = `FPS${num}of${den}`;
@@ -602,7 +796,7 @@ async function main() {
   }
 
   /* ---------- 10. many-clips long timeline — performance ---------- */
-  step("10) long timeline — 20 clips / 4 lanes / 60s — schedule cost");
+  step("13) long timeline — 20 clips / 4 lanes / 60s — schedule cost");
   await commit(p.id, "timeline.create", { name: "BIG", fps_num: 30, fps_den: 1 });
   const big = (await api("GET", `/api/projects/${p.id}/timelines`))
     .find((x) => x.name === "BIG");
@@ -647,7 +841,7 @@ async function main() {
   ok(`BIG window render: ${bigProbe.planClips} clips, decode ${bigProbe.decodeMs}ms, render ${bigProbe.renderMs}ms`);
 
   /* ---------- 11. project-switch dispose + perf sample ---------- */
-  step("11) project switch → engine disposal; CPU/mem during scrub");
+  step("14) project switch → engine disposal; CPU/mem during scrub");
   const m0 = await procSample("atomic-dream-engine");
   const m0b = await procSample("atomic-backend");
   await navTo(p.name);
@@ -674,7 +868,7 @@ async function main() {
   if (!hookGone) throw new Error("engine not disposed on project switch");
 
   /* ---------- 12. shutdown during scrub — orphans ---------- */
-  step("12) close mid-scrub — graceful quit, no orphans");
+  step("15) close mid-scrub — graceful quit, no orphans");
   await navTo(p.name);
   await sleep(800);
   await evalJs(`(async () => {
@@ -702,6 +896,61 @@ async function main() {
   const beLeft = left("atomic-backend.exe");
   ok(`post-close: app ${appLeft ? "RUNNING" : "gone"}, backend ${beLeft ? "RUNNING (orphan)" : "gone"}`);
   if (beLeft || appLeft) throw new Error("orphan processes after mid-scrub close");
+
+  /* ---------- 16. restart persistence — data survives a relaunch --- */
+  step("16) restart persistence — relaunch keeps timeline + automation");
+  const env = { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
+    `--remote-debugging-port=${PORT}` };
+  const child = spawn(EXE, [], { env, detached: true, stdio: "ignore" });
+  child.unref();
+  ws = null;
+  await attachWsWait(60000);
+  await creds();
+  // the freshly spawned backend may rebind ports — verify the captured
+  // API actually answers; re-capture from live traffic if not.
+  let apiUp = false;
+  for (let i = 0; i < 30 && !apiUp; i++) {
+    try {
+      const r = await fetch(`${API}/api/projects`,
+        { headers: { "X-Atomic-Token": TOKEN } });
+      if (r.status < 500) { apiUp = true; break; }
+    } catch { /* backend still starting */ }
+    API = null; TOKEN = null;
+    await creds();
+  }
+  if (!apiUp) throw new Error("backend unreachable after relaunch");
+  await navTo(p.name);
+  await sleep(800);
+  let persist = null;
+  for (let i = 0; i < 20; i++) {
+    try { persist = await detail(p.id, tl.id); break; }
+    catch { await sleep(1000); }
+  }
+  if (!persist) throw new Error("timeline detail unreachable post-restart");
+  const auto = JSON.parse(
+    (persist.clips.find(c => c.source_asset_id === aD.id) || {})
+      .automation_json || "[]");
+  const xfOk = persist.crossfades.length === 1 && persist.crossfades[0].satisfied;
+  ok(`persisted: ${persist.clips.length} clips, xf satisfied=${xfOk}, ` +
+     `clip automation ${auto.length} pts, rev ${persist.revision}`);
+  if (persist.clips.length !== d.clips.length || !xfOk || auto.length !== 3)
+    throw new Error("restart persistence check failed");
+  // engine reloads the persisted detail cleanly
+  await evalJs(`(async () => {
+    const h = window.__n2fPreview;
+    await h.engineRef.current.load(
+      ${JSON.stringify(persist)}, ${JSON.stringify(p.id)});
+  })()`);
+  const rel = await engStats();
+  if (!rel || rel.state !== "ready")
+    throw new Error("engine not ready after restart");
+  ok(`post-restart engine ready`);
+  execFileSync("powershell", ["-NoProfile", "-Command",
+    `(Get-Process atomic-dream-engine -ErrorAction SilentlyContinue | ` +
+    `Select-Object -First 1).CloseMainWindow() | Out-Null`]);
+  await sleep(3500);
+  if (left("atomic-backend.exe"))
+    throw new Error("backend orphaned after restart close");
 
   fs.writeFileSync(`${OUT}\\n3b-acceptance.txt`, LOG.join("\n"));
   console.log(`\nN3-B ACCEPTANCE: PASS ${STEP}/${STEP} steps — ${OUT}`);
