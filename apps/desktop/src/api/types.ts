@@ -984,6 +984,10 @@ export interface TimelineClip {
   src_fps_num: number;
   src_fps_den: number;
   src_duration_s: number;
+  /** N2-F — probed-at-insert: the pinned source carries an audio
+   * stream. Video-lane clips with this set contribute embedded audio
+   * to preview/export. */
+  src_has_audio: boolean;
   /** N2-C — per-clip gain in decibels (0 = unity). Audio clips only. */
   gain_db: number;
   /** N2-D — fade length in SOURCE units (samples for audio). */
@@ -993,6 +997,8 @@ export interface TimelineClip {
   fade_out_curve: string;
   /** N2-D — JSON keyframe list [{id, at_frames, gain_db}]. */
   automation_json: string;
+  /** N2-F — keyframe interpolation: "linear" (dB ramp) | "step". */
+  automation_interp: string;
   shot_id: string | null;
   scene_id: string | null;
   created_at: string;

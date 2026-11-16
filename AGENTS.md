@@ -26,3 +26,4 @@
 - Zustand rule: never return `?? []` / `?? {}` / `.map/.filter` inside `useApp` selectors — new ref each call = infinite re-render. Select the stable field, derive outside.
 - Gotchas: Git Bash mangles `$_` and `/S` in PowerShell one-liners — use files or `//S`; headless Edge `--dump-dom` is unreliable here, use `scripts/cdp-diag.cjs`.
 - M2 requires owner approval.
+- N-series (timeline): N1-A..N1-E + N2-A..N2-E merged. N2-F on `feat/n2f-audio-preview` — WebAudio preview (`previewPlan.ts` ports `composite_plan`/`_apply_xf`/`fade_gain`/`automation_gain_db`; `audioPreview.ts` engine), s_curve/exponential curves, step automation interp. **afade anchors on frame PTS — `asetpts=PTS-STARTPTS` must follow `atrim` before any envelope filter.** afade curve contracts: linear→tri, equal_power→qsin, s_curve→hsin, exponential→exp (e^{-11.5129(1-t)}/e^{-11.5129t}).

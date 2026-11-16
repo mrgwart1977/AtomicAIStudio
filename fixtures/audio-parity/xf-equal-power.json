@@ -1,0 +1,59 @@
+{
+  "name": "satisfied equal-power crossfade — tail/head handle extension",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0}
+  ],
+  "clips": [
+    {"id": "ca", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 30, "in_frame": 0, "out_frame": 48000,
+     "src_frames": 57600, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "cb", "track_id": "a1", "asset_id": "asrc2",
+     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "start_frames": 60, "in_frame": 12000, "out_frame": 60000,
+     "src_frames": 60000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [
+    {"id": "x1", "out_clip_id": "ca", "in_clip_id": "cb",
+     "tl_start": 55, "tl_frames": 10, "curve": "equal_power",
+     "satisfied": true}
+  ],
+  "probes": {"ca": {"sample_rate": 48000}, "cb": {"sample_rate": 48000}},
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["ca", "cb"],
+    "clips": {
+      "ca": {
+        "tl_start_s": 1.0, "tl_end_s": 2.1666667,
+        "src_start_s": 0.0, "seg_dur_s": 1.1666667, "embedded": false,
+        "env": [
+          {"u": 39990, "g": 1.0},
+          {"u": 40000, "g": 1.0},
+          {"u": 44000, "g": 0.9238795},
+          {"u": 48000, "g": 0.7071068},
+          {"u": 52000, "g": 0.3826834},
+          {"u": 55990, "g": 0.00098}
+        ]
+      },
+      "cb": {
+        "tl_start_s": 1.8333333, "tl_end_s": 3.0,
+        "src_start_s": 0.0833333, "seg_dur_s": 1.1666667,
+        "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.0},
+          {"u": 8000,  "g": 0.7071068},
+          {"u": 15990, "g": 1.0},
+          {"u": 40000, "g": 1.0}
+        ]
+      }
+    }
+  }
+}

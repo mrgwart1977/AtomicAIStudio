@@ -1655,6 +1655,12 @@ def _validate_timeline(session: Session, project: Project,
         if command_type == "timeline.clip.automation":
             if not isinstance(payload.get("points"), list):
                 raise CommandError(422, "points must be a list")
+            if (payload.get("interp") is not None
+                    and payload["interp"]
+                    not in tld.AUTOMATION_INTERPS):
+                raise CommandError(
+                    422, "interp must be one of "
+                    + ", ".join(tld.AUTOMATION_INTERPS))
     elif command_type in ("timeline.crossfade.set",
                           "timeline.crossfade.clear"):
         if command_type == "timeline.crossfade.set":
@@ -2931,6 +2937,7 @@ def _commit_timeline(session: Session, project: Project, command: CreativeComman
                 else:
                     tld.set_clip_automation(
                         session, t, clip, points=payload["points"],
+                        interp=payload.get("interp"),
                         command_id=command.id)
             except tld.TimelineError as exc:
                 raise CommandError(422, str(exc)) from exc

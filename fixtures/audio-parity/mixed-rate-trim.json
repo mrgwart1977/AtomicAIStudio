@@ -1,0 +1,35 @@
+{
+  "name": "44.1k source, nonzero trim, timeline gap at 30000/1001",
+  "tl_fps": {"num": 30000, "den": 1001},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0}
+  ],
+  "clips": [
+    {"id": "c1", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 30, "in_frame": 88200, "out_frame": 176400,
+     "src_frames": 264600, "src_fps": {"num": 44100, "den": 1},
+     "gain_db": 0,
+     "fade_in_units": 4410, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [],
+  "probes": {"c1": {"sample_rate": 44100}},
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["c1"],
+    "clips": {
+      "c1": {
+        "tl_start_s": 1.001, "tl_end_s": 3.001,
+        "src_start_s": 2.0, "seg_dur_s": 2.0, "embedded": false,
+        "env": [
+          {"u": 2205,  "g": 0.5},
+          {"u": 4410,  "g": 1.0},
+          {"u": 80000, "g": 1.0}
+        ]
+      }
+    }
+  }
+}

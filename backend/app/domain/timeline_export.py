@@ -214,11 +214,13 @@ def h264_encoder(ffmpeg: str, runner) -> str:
 
 AUDIO_RATE = 48000  # output sample rate (contract: initially 48 kHz)
 
-#: afade curve enum values for the pinned N2-D curves: tri=linear
-#: slope; qsin = quarter-sine — the sin/cos pair whose in+out
-#: envelopes sum to unity power (the equal-power contract). hsin is
-#: the sin² S-curve, NOT equal-power — don't confuse them.
-_FADE_CURVE = {"linear": "0", "equal_power": "1"}
+#: afade curve names for the pinned fade-curve vocabulary: tri =
+#: linear slope; qsin = quarter-sine — the sin/cos pair whose in+out
+#: envelopes sum to unity power (the equal-power contract); hsin =
+#: the sin² S-curve (gentle at both ends); exp = a fixed exponential
+#: ramp. N2-F adds s_curve → hsin and exponential → exp.
+_FADE_CURVE = {"linear": "tri", "equal_power": "qsin",
+               "s_curve": "hsin", "exponential": "exp"}
 
 
 def _q(v: Fraction) -> int:
@@ -365,6 +367,8 @@ def _audio_entry(c: dict, t: dict, start: Fraction, extent: Fraction,
         "fade_out": {"n": int(fout.get("units") or 0),
                      "curve": fout.get("curve") or "linear"},
         "automation": auto,
+        "automation_interp": str(c.get("automation_interp")
+                                 or "linear"),
         "xf": None,
     }
 
@@ -374,7 +378,7 @@ def _apply_xf(x: dict, out_c: dict, in_c: dict, tl_fps: Fraction) -> None:
     anchor the complementary window envelopes (docs/n2d-fades.md)."""
     S, E = Fraction(int(x["tl_start"])), Fraction(
         int(x["tl_start"]) + int(x["tl_frames"]))
-    curve = _FADE_CURVE.get(x.get("curve")) or "0"
+    curve = _FADE_CURVE.get(x.get("curve")) or "tri"
     # Source-unit conversion: tl frames → this clip's native samples.
     def src(tl_f: Fraction, rate: int) -> int:
         return _q(tl_f * rate / tl_fps)
@@ -577,12 +581,12 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     if fin["n"] > 0:
         chain += (f",afade=t=in:start_sample={a['head_src']}"
                   f":nb_samples={fin['n']}"
-                  f":curve={_FADE_CURVE.get(fin['curve'], '0')}")
+                  f":curve={_FADE_CURVE.get(fin['curve'], 'tri')}")
     if fout["n"] > 0:
         off = a["head_src"] + a["extent_src"] - fout["n"]
         chain += (f",afade=t=out:start_sample={off}"
                   f":nb_samples={fout['n']}"
-                  f":curve={_FADE_CURVE.get(fout['curve'], '0')}")
+                  f":curve={_FADE_CURVE.get(fout['curve'], 'tri')}")
     if xf is not None:
         kind = "in" if xf["role"] == "in" else "out"
         chain += (f",afade=t={kind}:start_sample={xf['off']}"
@@ -596,18 +600,21 @@ def _auto_exprs(a: dict, db_sum: float, tl_fps: Fraction) -> str:
     `n` is the stream-local sample index at native rate — keyframe
     offsets land there via the single quantize point."""
     pts = a["automation"]
+    step = a.get("automation_interp") == "step"
     offs = [_q((a["head_tl"] + p["off_tl"]) * a["rate"] / tl_fps)
             for p in pts]
     g = [p["gain_db"] for p in pts]
     expr = _flt(g[-1] + db_sum)
     for i in range(len(pts) - 1, 0, -1):
         lo, hi, g_lo, g_hi = offs[i - 1], offs[i], g[i - 1], g[i]
-        if hi > lo:
+        if hi <= lo:  # same quantized sample — deterministic step
+            seg, cond = _flt(g_lo + db_sum), f"eq(n,{lo})"
+        elif step:  # step mode — hold lo's value up to hi
+            seg, cond = _flt(g_lo + db_sum), f"between(n,{lo},{hi - 1})"
+        else:
             seg = (f"{_flt(g_lo + db_sum)}+({_flt(g_hi - g_lo)})"
                    f"*(n-{lo})/{hi - lo}")
             cond = f"between(n,{lo},{hi - 1})"
-        else:  # same quantized sample — deterministic step
-            seg, cond = _flt(g_lo + db_sum), f"eq(n,{lo})"
         expr = f"if({cond},{seg},{expr})"
     expr = f"if(lt(n,{offs[0]}),{_flt(g[0] + db_sum)},{expr})"
     env = f"pow(10,({expr})/20)"
