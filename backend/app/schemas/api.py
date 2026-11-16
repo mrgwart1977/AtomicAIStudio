@@ -653,6 +653,7 @@ class TimelineClipOut(BaseModel):
     src_fps_num: int
     src_fps_den: int
     src_duration_s: float
+    src_has_audio: bool = True
     gain_db: float = 0.0
     fade_in_units: int = 0
     fade_in_curve: str = "linear"

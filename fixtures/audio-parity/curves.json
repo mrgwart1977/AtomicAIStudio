@@ -1,0 +1,59 @@
+{
+  "name": "s_curve fade-in, exponential fade-out and fade-in",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0},
+    {"id": "a2", "kind": "audio", "position": 1, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0}
+  ],
+  "clips": [
+    {"id": "c1", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 0, "in_frame": 0, "out_frame": 48000,
+     "src_frames": 48000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0,
+     "fade_in_units": 4800, "fade_in_curve": "s_curve",
+     "fade_out_units": 4800, "fade_out_curve": "exponential",
+     "automation": [], "automation_interp": "linear"},
+    {"id": "c2", "track_id": "a2", "asset_id": "asrc2",
+     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "start_frames": 0, "in_frame": 0, "out_frame": 48000,
+     "src_frames": 48000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0,
+     "fade_in_units": 4800, "fade_in_curve": "exponential",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [],
+  "probes": {"c1": {"sample_rate": 48000}, "c2": {"sample_rate": 48000}},
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["c1", "c2"],
+    "clips": {
+      "c1": {
+        "tl_start_s": 0.0, "tl_end_s": 1.0,
+        "src_start_s": 0.0, "seg_dur_s": 1.0, "embedded": false,
+        "env": [
+          {"u": 1200,  "g": 0.1464466},
+          {"u": 2400,  "g": 0.5},
+          {"u": 3600,  "g": 0.8535534},
+          {"u": 43200, "g": 1.0},
+          {"u": 44400, "g": 0.0562341},
+          {"u": 45600, "g": 0.0031623},
+          {"u": 46800, "g": 0.0001778}
+        ]
+      },
+      "c2": {
+        "tl_start_s": 0.0, "tl_end_s": 1.0,
+        "src_start_s": 0.0, "seg_dur_s": 1.0, "embedded": false,
+        "env": [
+          {"u": 1200,  "g": 0.0001778},
+          {"u": 2400,  "g": 0.0031623},
+          {"u": 3600,  "g": 0.0562341},
+          {"u": 4800,  "g": 1.0}
+        ]
+      }
+    }
+  }
+}

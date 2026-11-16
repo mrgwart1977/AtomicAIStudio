@@ -16,8 +16,9 @@ import {
   invalidateWaveform, pickLevel,
 } from "./waveform";
 import type { ManifestResult } from "./waveform";
-import { AudioPreviewEngine } from "./audioPreview";
+import { AudioPreviewEngine, renderPlanOffline } from "./audioPreview";
 import type { PreviewState } from "./audioPreview";
+import { buildPreviewPlan } from "./previewPlan";
 
 /** N1-B — multitrack timeline editor: lanes with track controls,
  * ruler + playhead, zoom/scroll, and pixel-exact drag placement.
@@ -384,7 +385,14 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
   useEffect(() => {
     const eng = preview();
     eng.onStateChange = setPreviewState;
+    // N2-F acceptance hook — the installed driver drives an
+    // OfflineAudioContext through this same scheduling code to get
+    // objective preview PCM. No secrets; read-only surface.
+    (window as unknown as Record<string, unknown>).__n2fPreview = {
+      buildPreviewPlan, renderPlanOffline, engineRef: previewRef,
+    };
     return () => {
+      delete (window as unknown as Record<string, unknown>).__n2fPreview;
       eng.onStateChange = null;
       void eng.dispose();
       previewRef.current = null;
@@ -407,9 +415,9 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
 
   const previewPlay = async () => {
     const eng = preview();
-    if (eng.state === "idle" || eng.state === "error") {
-      await eng.load(detail, detail.project_id);
-    }
+    // Always rebuild the plan — gain/fade/xf/track edits since the
+    // last load must reach this play's envelopes (buffers stay cached).
+    await eng.load(detail, detail.project_id);
     if (eng.state === "ready") await eng.play(playheadF / fps);
   };
   const previewPause = () => {

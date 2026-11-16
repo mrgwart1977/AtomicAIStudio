@@ -50,7 +50,7 @@ const CLIP = (i: number) => ({
   source_asset_id: `a${i}`, source_version_id: `v${i}`,
   source_sha256: "ab".repeat(32), in_frame: 0, out_frame: 72,
   src_frames: 72, src_fps_num: 24, src_fps_den: 1,
-  src_duration_s: 3.0, shot_id: null, scene_id: null,
+  src_duration_s: 3.0, src_has_audio: true, shot_id: null, scene_id: null,
   created_at: "2026-01-01",
 });
 

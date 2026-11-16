@@ -1,0 +1,41 @@
+{
+  "name": "clip+track gain with linear fade-in and s_curve fade-out",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": -3}
+  ],
+  "clips": [
+    {"id": "c1", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 15, "in_frame": 48000, "out_frame": 96000,
+     "src_frames": 96000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": -6,
+     "fade_in_units": 4800, "fade_in_curve": "linear",
+     "fade_out_units": 9600, "fade_out_curve": "s_curve",
+     "automation": [], "automation_interp": "linear"}
+  ],
+  "crossfades": [],
+  "probes": {"c1": {"sample_rate": 48000}},
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["c1"],
+    "clips": {
+      "c1": {
+        "tl_start_s": 0.5, "tl_end_s": 1.5,
+        "src_start_s": 1.0, "seg_dur_s": 1.0, "embedded": false,
+        "env": [
+          {"u": 0,     "g": 0.0},
+          {"u": 1200,  "g": 0.0887034},
+          {"u": 2400,  "g": 0.1774067},
+          {"u": 4800,  "g": 0.3548134},
+          {"u": 24000, "g": 0.3548134},
+          {"u": 38400, "g": 0.3548134},
+          {"u": 43200, "g": 0.1774067},
+          {"u": 45600, "g": 0.0519590},
+          {"u": 47990, "g": 0.0001}
+        ]
+      }
+    }
+  }
+}

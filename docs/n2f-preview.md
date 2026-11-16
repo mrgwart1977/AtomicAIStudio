@@ -39,14 +39,34 @@ end-to-end acceptance + completion report.
   Space/arrow-key seek shortcuts, an "audio unavailable" clip badge
   when a preview source can't decode, disabled-transport reason.
 
+**Added in the final review**
+
+- **Embedded video audio in preview** — clips on video lanes whose
+  `src_has_audio` flag (persisted at place-time from the import
+  probe; migration `0018_n2f` backfills + audio-free sources set it
+  false) contribute a constant-gain embedded entry at clip+track
+  gain. Fades/automation/crossfades remain audio-lane concepts —
+  matching `_embedded_chain`, which applies track gain only.
+  Visibility, mute, and solo honour the same audibility matrix;
+  video rendering is independent of audio muting by construction
+  (preview only adds a GainNode branch; it never gates picture).
+  Same decoded source assets and authorization as audio lanes —
+  no separate model.
+- **Shared parity fixtures** — `fixtures/audio-parity/*.json` define
+  canonical timelines + expected envelope checkpoints in a neutral
+  format. `tests/test_n2f_parity.py` runs the REAL `_lane_chain` /
+  `_embedded_chain` through ffmpeg and asserts measured gain at each
+  checkpoint; `previewPlan.parity.test.ts` converts the same JSON to
+  `TimelineDetail` and asserts `buildPreviewPlan` envelopes. One
+  fixture file, two implementations, no duplicated formulas.
+- **Objective preview verification** — `renderPlanOffline` builds the
+  identical WebAudio graph inside `OfflineAudioContext`, so the
+  installed acceptance driver renders the preview plan to PCM and
+  measures embedded tone / gains / fades / crossfade / automation /
+  gap — real audible output, not playhead motion.
+
 **Deferred (reported, not silently dropped)**
 
-- **Embedded video audio in preview** — the render mixes it; preview
-  currently schedules dedicated audio lanes only. Video-frame
-  decode + demux of embedded streams inside WebView2 is a materially
-  larger piece (container demuxing, A/V frame sync) — deferred rather
-  than half-built. Export remains the authoritative check for
-  embedded audio.
 - **Per-track automation** — a genuinely new model dimension: track
   keyframes are timeline-absolute (not clip-local), need a new
   command + EDL section, and must be folded into each audible clip's
@@ -65,8 +85,10 @@ end-to-end acceptance + completion report.
 ```
 TimelineDetail ──► buildPreviewPlan(detail)   [previewPlan.ts]
   per audible audio-lane clip (ports composite_plan + _apply_xf):
-    { assetId, tlStartS, tlEndS, srcStartS, segDurS,
+    { assetId, tlStartS, tlEndS, srcStartS, segDurS, embedded,
       env(t): effective-gain fn — dB sum + automation + fades + xf }
+  embedded entries: video-lane clips with src_has_audio →
+    constant clip+track gain envelope, no fades/automation/xf
 
 AudioPreviewEngine                        [audioPreview.ts]
   load():  fetchAssetObjectUrl → decodeAudioData → clipId→buffer map
@@ -77,9 +99,23 @@ AudioPreviewEngine                        [audioPreview.ts]
   scrubTo(s): re-schedules from s while playing
 ```
 
-The envelope samples `env(t)` at 64 Hz across each clip's played
-span — smooth for every shipped curve; step edges blur ≤ ~15 ms vs.
-the render's exact step (documented difference). Same math functions
+## Envelope resolution (measured)
+
+`env(t)` is sampled at 64 Hz into `setValueCurveAtTime`. Measured by
+`renderPlanOffline` vs decoded FFmpeg PCM (installed driver, step 5):
+step edges blur ≤ one sample period (~15.6 ms); linear/qsin/hsin/exp
+fades track the renderer within the fixture tolerances
+(±0.02 abs gain, ±20 ms onset); automation keyframes near clip
+boundaries are exact because envelopes clamp at stream start/end.
+Short clips (<32 samples of envelope) still schedule correctly —
+curve times are anchored to the clip's own start, not a global grid.
+64 Hz is sufficient for every shipped curve; it is bounded
+(clip_dur×64 + 2 points, no unbounded keyframe growth) — no adaptive
+scheduler needed.
+
+## Envelope math parity
+
+Same math functions
 as the FFmpeg chain: `tri`→u, `qsin`→sin(πu/2)/cos(πu/2),
 `hsin`→sin²/cos², `exp`→e^{−11.5129(1−t)}/e^{−11.5129t} (the actual
 afade contract — verified against FFmpeg source + PCM); automation

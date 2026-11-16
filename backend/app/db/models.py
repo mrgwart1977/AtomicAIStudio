@@ -819,6 +819,11 @@ class TimelineClip(Base):
     src_fps_num: Mapped[int] = mapped_column(Integer, default=24)
     src_fps_den: Mapped[int] = mapped_column(Integer, default=1)
     src_duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    # N2-F — whether the pinned source carries an audio stream
+    # (probed at insert; backfilled 0018). The preview engine uses
+    # this to decide whether a video-lane clip contributes embedded
+    # audio; export ignores it (it probes fresh).
+    src_has_audio: Mapped[bool] = mapped_column(Boolean, default=True)
     # N2-C — per-clip gain in decibels (0 = unity). Effective gain =
     # clip × track in linear amplitude, i.e. the dB values sum.
     # Meaningful on audio-source clips; video clips keep 0.0.

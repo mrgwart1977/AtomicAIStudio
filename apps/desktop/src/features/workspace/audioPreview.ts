@@ -1,8 +1,9 @@
 /**
  * N2-F audio preview engine — WebAudio playback of the preview plan
- * (previewPlan.ts). Audio-lane clips only; the effective-gain model
- * is the same as the N2-E render (one envelope per clip, applied
- * once). Not sample-exact vs. the AAC render — see docs/n2f-preview.md
+ * (previewPlan.ts): audio-lane clips plus video-lane clips whose
+ * source carries audio (embedded). The effective-gain model is the
+ * same as the N2-E render (one envelope per clip, applied once).
+ * Not sample-exact vs. the AAC render — see docs/n2f-preview.md
  * for measured tolerances.
  *
  * Lifecycle: `engine.load(detail)` → `play(fromS)` → `pause()` /
@@ -41,8 +42,10 @@ export class AudioPreviewEngine {
    * Re-loads only when the snapshot key changes. */
   async load(detail: TimelineDetail, projectId: string): Promise<void> {
     this.plan = buildPreviewPlan(detail);
-    const key = this.plan.clips.map(c => `${c.clipId}:${c.sha256}`
-      + `:${c.tlStartS}`).join("|");
+    // Buffer cache keys on source bytes only — moves/edits rebuild
+    // the plan but don't re-decode unchanged sources.
+    const key = this.plan.clips.map(c => `${c.clipId}:${c.sha256}`)
+      .join("|");
     if (key === this.detailKey && this.buffers.size) {
       this.setState("ready");
       return;
@@ -106,32 +109,13 @@ export class AudioPreviewEngine {
     this.setState("playing");
   }
 
-  private schedule(ctx: AudioContext, c: PreviewClip, buf: AudioBuffer,
+  private schedule(ctx: BaseAudioContext, c: PreviewClip, buf: AudioBuffer,
                    at: number, fromS: number): void {
-    if (fromS >= c.tlEndS) return;                 // already past
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const gain = ctx.createGain();
-    src.connect(gain).connect(this.master!);
-    const lead = Math.max(0, c.tlStartS - fromS);
-    const startAt = at + lead;
-    const streamOffsetS = fromS > c.tlStartS ? fromS - c.tlStartS : 0;
-    const srcOffset = c.srcStartS + streamOffsetS;
-    const dur = Math.min(c.segDurS - streamOffsetS,
-                         buf.duration - srcOffset);
-    if (dur <= 0) { src.disconnect(); gain.disconnect(); return; }
-    // Envelope: sample the plan's env() at ENVELOPE_HZ over the played
-    // span — one setValueCurveAtTime per clip, applied exactly once.
-    const n = Math.max(2, Math.ceil(dur * ENVELOPE_HZ));
-    const curve = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      curve[i] = c.env(streamOffsetS + (i / (n - 1)) * dur);
-    }
-    gain.gain.setValueCurveAtTime(curve, startAt, dur);
-    src.start(startAt, srcOffset, dur);
-    this.live.push({ src, gain });
-    src.onended = () => {
-      this.live = this.live.filter(l => l.src !== src);
+    const nodes = scheduleClip(ctx, c, buf, at, fromS, this.master!);
+    if (!nodes) return;
+    this.live.push(nodes);
+    nodes.src.onended = () => {
+      this.live = this.live.filter(l => l.src !== nodes.src);
     };
   }
 
@@ -184,4 +168,64 @@ export class AudioPreviewEngine {
     }
     this.setState("idle");
   }
+}
+
+/** Schedule one clip's buffer through a per-clip GainNode — the
+ * single envelope-application point shared by live playback and the
+ * offline render used by acceptance measurement. Returns the live
+ * nodes, or null when nothing of the clip falls inside [fromS, ∞).
+ */
+export function scheduleClip(
+  ctx: BaseAudioContext, c: PreviewClip, buf: AudioBuffer,
+  at: number, fromS: number, dest: AudioNode,
+): { src: AudioBufferSourceNode; gain: GainNode } | null {
+  if (fromS >= c.tlEndS) return null;              // already past
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const gain = ctx.createGain();
+  src.connect(gain).connect(dest);
+  const lead = Math.max(0, c.tlStartS - fromS);
+  const startAt = at + lead;
+  const streamOffsetS = fromS > c.tlStartS ? fromS - c.tlStartS : 0;
+  const srcOffset = c.srcStartS + streamOffsetS;
+  const dur = Math.min(c.segDurS - streamOffsetS,
+                       buf.duration - srcOffset);
+  if (dur <= 0) { src.disconnect(); gain.disconnect(); return null; }
+  // Envelope: sample the plan's env() at ENVELOPE_HZ over the played
+  // span — one setValueCurveAtTime per clip, applied exactly once.
+  // Mono parity: the render up-mixes mono→stereo at the center-mix
+  // level (L=R=in/√2 — measured −3.01 dB through aformat); WebAudio
+  // up-mixes a mono buffer at full gain. Fold the same 1/√2 into the
+  // envelope so preview matches the render's power convention.
+  const monoScale = buf.numberOfChannels === 1 ? Math.SQRT1_2 : 1;
+  const n = Math.max(2, Math.ceil(dur * ENVELOPE_HZ));
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    curve[i] = c.env(streamOffsetS + (i / (n - 1)) * dur) * monoScale;
+  }
+  gain.gain.setValueCurveAtTime(curve, startAt, dur);
+  src.start(startAt, srcOffset, dur);
+  return { src, gain };
+}
+
+/** Render a plan through an OfflineAudioContext using the SAME
+ * scheduleClip path live playback uses — the objective PCM the
+ * acceptance driver compares against the FFmpeg export. `buffers`
+ * is clipId → decoded AudioBuffer (the caller decodes, so this works
+ * for both wav lanes and embedded mp4 audio). Renders `durationS`
+ * seconds at `rate` Hz starting at timeline second `fromS` — nonzero
+ * `fromS` exercises the seek path (envelopes sampled mid-stream,
+ * exactly as a live scrub schedules them). */
+export async function renderPlanOffline(
+  plan: PreviewPlan, buffers: Map<string, AudioBuffer>,
+  durationS: number, rate = 48000, fromS = 0,
+): Promise<AudioBuffer> {
+  const off = new OfflineAudioContext(2, Math.ceil(durationS * rate), rate);
+  const master = off.createGain();
+  master.connect(off.destination);
+  for (const c of plan.clips) {
+    const buf = buffers.get(c.clipId);
+    if (buf) scheduleClip(off, c, buf, 0.02, fromS, master);
+  }
+  return off.startRendering();
 }

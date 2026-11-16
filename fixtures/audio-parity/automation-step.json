@@ -1,0 +1,40 @@
+{
+  "name": "step-interpolated automation — value holds then jumps",
+  "tl_fps": {"num": 30, "den": 1},
+  "tracks": [
+    {"id": "a1", "kind": "audio", "position": 0, "visible": true,
+     "muted": false, "solo": false, "gain_db": 0}
+  ],
+  "clips": [
+    {"id": "c1", "track_id": "a1", "asset_id": "asrc1",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "start_frames": 0, "in_frame": 0, "out_frame": 96000,
+     "src_frames": 96000, "src_fps": {"num": 48000, "den": 1},
+     "gain_db": 0, "fade_in_units": 0, "fade_in_curve": "linear",
+     "fade_out_units": 0, "fade_out_curve": "linear",
+     "automation": [{"at_frames": 15, "gain_db": -12},
+                    {"at_frames": 45, "gain_db": 0}],
+     "automation_interp": "step"}
+  ],
+  "crossfades": [],
+  "probes": {"c1": {"sample_rate": 48000}},
+  "expect": {
+    "detached_xfs": [],
+    "clip_ids": ["c1"],
+    "clips": {
+      "c1": {
+        "tl_start_s": 0.0, "tl_end_s": 2.0,
+        "src_start_s": 0.0, "seg_dur_s": 2.0, "embedded": false,
+        "env": [
+          {"u": 12000, "g": 0.2511886},
+          {"u": 23990, "g": 0.2511886},
+          {"u": 24000, "g": 0.2511886},
+          {"u": 36000, "g": 0.2511886},
+          {"u": 71990, "g": 0.2511886},
+          {"u": 72000, "g": 1.0},
+          {"u": 84000, "g": 1.0}
+        ]
+      }
+    }
+  }
+}

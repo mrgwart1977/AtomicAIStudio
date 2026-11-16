@@ -30,7 +30,7 @@ const CLIP = (id: string, over: Partial<TimelineClip> = {}): TimelineClip => ({
   source_sha256: "ab".repeat(32),
   in_frame: 0, out_frame: 72,
   src_frames: 72, src_fps_num: 24, src_fps_den: 1,
-  src_duration_s: 3, gain_db: 0,
+  src_duration_s: 3, src_has_audio: true, gain_db: 0,
   fade_in_units: 0, fade_in_curve: "linear",
   fade_out_units: 0, fade_out_curve: "linear",
   automation_json: "[]",

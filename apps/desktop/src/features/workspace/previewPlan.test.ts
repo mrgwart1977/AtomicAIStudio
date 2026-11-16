@@ -24,7 +24,7 @@ const CLIP = (id: string, track_id: string,
   source_sha256: "ab".repeat(32),
   in_frame: 0, out_frame: 48000,
   src_frames: 144000, src_fps_num: 48000, src_fps_den: 1,
-  src_duration_s: 3, gain_db: 0,
+  src_duration_s: 3, src_has_audio: true, gain_db: 0,
   fade_in_units: 0, fade_in_curve: "linear",
   fade_out_units: 0, fade_out_curve: "linear",
   automation_json: "[]", automation_interp: "linear",
@@ -102,16 +102,49 @@ describe("audibleLanes — N2-C precedence", () => {
 });
 
 describe("buildPreviewPlan — schedule + envelopes", () => {
-  it("schedules audible audio-lane clips at tl seconds, skips video", () => {
+  it("schedules audible clips; video without audio is skipped", () => {
     const d = TL([TRACK("a1"), TRACK("v1", { kind: "video" })],
                  [CLIP("c1", "a1"),
                   CLIP("c2", "a1", { start_frames: 24 }),
-                  CLIP("v", "v1", { src_fps_num: 24 })]);
+                  CLIP("v", "v1", { src_fps_num: 24,
+                                    src_has_audio: false })]);
     const p = buildPreviewPlan(d);
     expect(p.clips.map(c => c.clipId)).toEqual(["c1", "c2"]);
     expect(p.clips[0].tlStartS).toBeCloseTo(0);
     expect(p.clips[1].tlStartS).toBeCloseTo(1);
     expect(p.clips[0].segDurS).toBeCloseTo(1);
+  });
+
+  it("video-lane clip with audio contributes embedded stream at "
+     + "track gain only", () => {
+    const d = TL([TRACK("v1", { kind: "video", gain_db: -6 })],
+                 [CLIP("v", "v1", { src_fps_num: 24, in_frame: 24,
+                                    out_frame: 72, src_frames: 96,
+                                    start_frames: 12 })]);
+    const p = buildPreviewPlan(d);
+    expect(p.clips.length).toBe(1);
+    const c = p.clips[0];
+    expect(c.embedded).toBe(true);
+    expect(c.tlStartS).toBeCloseTo(0.5, 4);
+    expect(c.tlEndS).toBeCloseTo(2.5, 4);
+    expect(c.srcStartS).toBeCloseTo(1.0, 4);
+    expect(c.segDurS).toBeCloseTo(2.0, 4);
+    expect(c.env(0.5)).toBeCloseTo(10 ** (-6 / 20), 3);
+    expect(c.env(1.9)).toBeCloseTo(10 ** (-6 / 20), 3);
+  });
+
+  it("embedded entry honours mute/solo/visible like export", () => {
+    const mk = (t: Partial<TimelineTrack>) =>
+      TL([TRACK("v1", { kind: "video", ...t })],
+         [CLIP("v", "v1", { src_fps_num: 24, out_frame: 48 })]);
+    expect(buildPreviewPlan(mk({ muted: true })).clips).toEqual([]);
+    expect(buildPreviewPlan(mk({ visible: false })).clips).toEqual([]);
+    const solo = TL([TRACK("v1", { kind: "video" }),
+                     TRACK("a1", { kind: "audio", solo: true })],
+        [CLIP("v", "v1", { src_fps_num: 24, out_frame: 48 }),
+         CLIP("a", "a1")]);
+    expect(buildPreviewPlan(solo).clips.map(c => c.clipId))
+      .toEqual(["a"]);
   });
 
   it("clip+track dB sum once into the envelope", () => {

@@ -256,6 +256,7 @@ def clip_snapshot(c: TimelineClip) -> dict[str, Any]:
         "src_frames": c.src_frames,
         "src_fps_num": c.src_fps_num, "src_fps_den": c.src_fps_den,
         "src_duration_s": c.src_duration_s,
+        "src_has_audio": getattr(c, "src_has_audio", True),
         "gain_db": c.gain_db,
         "fade_in_units": c.fade_in_units,
         "fade_in_curve": c.fade_in_curve,
@@ -871,6 +872,7 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
             in_frame=c.in_frame, out_frame=c.out_frame,
             src_frames=c.src_frames, src_fps_num=c.src_fps_num,
             src_fps_den=c.src_fps_den, src_duration_s=c.src_duration_s,
+            src_has_audio=c.src_has_audio,
             gain_db=c.gain_db,
             fade_in_units=c.fade_in_units,
             fade_in_curve=c.fade_in_curve,
@@ -891,6 +893,17 @@ def duplicate_timeline(session: Session, tl: Timeline, *,
     write_timeline_revision(session, dup, command_id=command_id,
                             summary="Duplicated timeline")
     return dup
+
+
+def _src_has_audio(session: Session, version_id: str | None) -> bool:
+    """Re-derive the flag for snapshot rows that predate the column:
+    audio probes pin `sample_rate`, video probes pin `audio_streams`
+    — either present means the source decodes audio."""
+    ver = session.get(AssetVersion, version_id) if version_id else None
+    if ver is None:
+        return False
+    probe = (ver.media_json or {}).get("probe") or {}
+    return bool(probe.get("audio_streams") or probe.get("sample_rate"))
 
 
 def _restore_snapshot(session: Session, tl: Timeline,
@@ -973,6 +986,9 @@ def _restore_snapshot(session: Session, tl: Timeline,
             src_frames=c["src_frames"], src_fps_num=c["src_fps_num"],
             src_fps_den=c["src_fps_den"],
             src_duration_s=c.get("src_duration_s", 0.0),
+            src_has_audio=(c["src_has_audio"] if "src_has_audio" in c
+                           else _src_has_audio(session,
+                                               c["source_version_id"])),
             gain_db=c.get("gain_db", 0.0),
             fade_in_units=c.get("fade_in_units", 0),
             fade_in_curve=c.get("fade_in_curve", "linear"),
@@ -1109,7 +1125,8 @@ def source_geometry(version: AssetVersion) -> dict[str, Any]:
         frames = max(1, round(float(dur) * float(fps)))
     return {"frames": frames, "fps_num": num, "fps_den": den,
             "duration_s": float(dur), "width": probe.get("width"),
-            "height": probe.get("height"), "codec": probe.get("codec")}
+            "height": probe.get("height"), "codec": probe.get("codec"),
+            "has_audio": bool(probe.get("audio_streams"))}
 
 
 def _fps_to_rational(fps: float) -> tuple[int, int]:
@@ -1144,7 +1161,7 @@ def source_geometry_audio(version: AssetVersion) -> dict[str, Any]:
             "it cannot be trimmed safely")
     return {"frames": samples, "fps_num": rate, "fps_den": 1,
             "duration_s": float(dur), "width": None, "height": None,
-            "codec": probe.get("codec"),
+            "codec": probe.get("codec"), "has_audio": True,
             "sample_rate": rate, "channels": probe.get("channels"),
             "channel_layout": probe.get("channel_layout")}
 
@@ -1254,7 +1271,9 @@ def insert_clip(session: Session, tl: Timeline, *, project_id: str,
         source_version_id=ver.id, source_sha256=ver.sha256,
         in_frame=i, out_frame=o, src_frames=src_frames,
         src_fps_num=geo["fps_num"], src_fps_den=geo["fps_den"],
-        src_duration_s=geo["duration_s"], shot_id=shot_id,
+        src_duration_s=geo["duration_s"],
+        src_has_audio=bool(geo.get("has_audio", True)),
+        shot_id=shot_id,
         scene_id=scene_id)
     extent = clip_tl_extent(clip, tl)
     if start_frames is not None:
@@ -1618,6 +1637,7 @@ def split_clip(session: Session, tl: Timeline, clip: TimelineClip, *,
         src_frames=clip.src_frames,
         src_fps_num=clip.src_fps_num, src_fps_den=clip.src_fps_den,
         src_duration_s=clip.src_duration_s,
+        src_has_audio=clip.src_has_audio,
         gain_db=clip.gain_db,
         # N2-D — fades are edge-anchored: the left fragment keeps the
         # IN fade (its in edge is unchanged; its new out edge is the

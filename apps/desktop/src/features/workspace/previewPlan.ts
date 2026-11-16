@@ -73,6 +73,10 @@ export interface PreviewClip {
   segDurS: number;
   /** Source rate (samples/sec for audio lanes). */
   rate: number;
+  /** Video-lane clip contributing its embedded audio — constant
+   * track-gain envelope, no fades/automation/xf (render contract:
+   * embedded entries carry track_db only). */
+  embedded: boolean;
   /** Effective-gain(t) — t = seconds into the stream (0 = start). */
   env: (tS: number) => number;
 }
@@ -95,7 +99,8 @@ const q = (v: number) => Math.floor(v + 0.5);
  * hidden → silent; muted → silent; non-empty solo set silences the
  * rest. Preview only schedules AUDIBLE audio-lane clips. */
 export function audibleLanes(detail: TimelineDetail): Set<string> {
-  const solo = new Set(detail.tracks.filter(t => t.solo).map(t => t.id));
+  const solo = new Set(detail.tracks
+    .filter(t => t.solo && t.kind !== "overlay").map(t => t.id));
   return new Set(detail.tracks.filter(t =>
     t.visible && !t.muted && (!solo.size || solo.has(t.id))).map(t => t.id));
 }
@@ -131,17 +136,36 @@ export interface PreviewPlan {
 }
 
 /** Build the preview schedule from a timeline detail snapshot —
- * ports composite_plan's audio section (audio lanes only; embedded
- * video audio is deferred — see docs/n2f-preview.md). */
+ * ports composite_plan's audio section: audible dedicated lanes get
+ * the full envelope; audible video-lane clips with `src_has_audio`
+ * contribute their embedded audio at constant track gain. */
 export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
   const tlFps = detail.fps_num / detail.fps_den;
   const audible = audibleLanes(detail);
   const byId = new Map<string, PlanClip>();
+  const embedded: PreviewClip[] = [];
   for (const c of detail.clips) {
     const t = detail.tracks.find(tr => tr.id === c.track_id);
-    if (!t || t.kind !== "audio" || !audible.has(t.id)) continue;
+    if (!t || !audible.has(t.id)) continue;
+    const srcRate = c.src_fps_num / c.src_fps_den;
+    if (t.kind !== "audio") {
+      // Video/overlay lane — embedded audio only, track gain is the
+      // whole envelope (clip_db/fades/automation/xf don't apply).
+      if (!c.src_has_audio || !srcRate) continue;
+      const g = Math.pow(10, (t.gain_db || 0) / 20);
+      const t0 = c.start_frames / tlFps;
+      const dur = (c.out_frame - c.in_frame) / srcRate;
+      embedded.push({
+        clipId: c.id, assetId: c.source_asset_id,
+        sha256: c.source_sha256,
+        tlStartS: t0, tlEndS: t0 + dur,
+        srcStartS: c.in_frame / srcRate, segDurS: dur,
+        rate: 0, embedded: true, env: () => g,
+      });
+      continue;
+    }
     // Audio lanes: src fps is the sample rate (N2-A unit contract).
-    const rate = c.src_fps_num / c.src_fps_den || 48000;
+    const rate = srcRate || 48000;
     byId.set(c.id, {
       clip: c, track: t, rate,
       segStartSrc: c.in_frame, segEndSrc: c.out_frame,
@@ -153,11 +177,16 @@ export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
     });
   }
   const detachedXfs: string[] = [];
+  const embeddedIds = new Set(embedded.map(c => c.clipId));
   for (const x of detail.crossfades) {
     const o = byId.get(x.out_clip_id), i = byId.get(x.in_clip_id);
-    if (!o && !i) continue;           // pair's lane is inaudible
+    if (!o && !i
+        && !embeddedIds.has(x.out_clip_id)
+        && !embeddedIds.has(x.in_clip_id)) continue; // lane inaudible
+    // Export raises on a crossfade touching an embedded (video-lane)
+    // entry — fail closed identically here.
     if (!o || !i || !x.satisfied) {
-      detachedXfs.push(x.id);         // fail-closed — same as export
+      detachedXfs.push(x.id);
       continue;
     }
     applyXf(x, o, i, tlFps);
@@ -197,9 +226,10 @@ export function buildPreviewPlan(detail: TimelineDetail): PreviewPlan {
       tlStartS: t0, tlEndS: t0 + segUnits / p.rate,
       srcStartS: p.segStartSrc / p.rate,
       segDurS: segUnits / p.rate,
-      rate: p.rate, env,
+      rate: p.rate, embedded: false, env,
     });
   }
+  clips.push(...embedded);
   clips.sort((a, b) => a.tlStartS - b.tlStartS);
   const durationS = Math.max(0, ...detail.clips.map(c =>
     (c.start_frames

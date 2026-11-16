@@ -273,8 +273,9 @@ def test_lane_chain_deterministic_shape():
     assert "aeval=exprs='val(0)" in chain
     # automation keyframes: tl frames → native samples (×2000/fps24→48k)
     assert "n-0)" in chain and "48000" in chain
-    assert "afade=t=in:start_sample=0:nb_samples=4800:curve=1" in chain
-    assert ("afade=t=out:start_sample=45600:nb_samples=2400:curve=0"
+    assert ("afade=t=in:start_sample=0:nb_samples=4800:curve=qsin"
+            in chain)
+    assert ("afade=t=out:start_sample=45600:nb_samples=2400:curve=tri"
             in chain)
     assert chain.endswith("aresample=48000,asetpts=PTS-STARTPTS")
     # resample LAST — envelopes applied at native rate

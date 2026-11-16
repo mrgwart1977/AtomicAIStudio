@@ -125,6 +125,14 @@ const procMem = (name) => {
       parseInt(m[1].replace(/,/g, ""), 10) / 1024).reduce((a, b) => a + b, 0);
   } catch { return 0; }
 };
+const procCpuS = (name) => {
+  try {
+    const out = execFileSync("powershell", ["-NoProfile", "-Command",
+      `(Get-Process -Name '${name.replace(".exe", "")}' -EA 0 |` +
+      ` Measure-Object CPU -Sum).Sum`]).toString().trim();
+    return parseFloat(out) || 0;
+  } catch { return 0; }
+};
 
 async function navToTimeline(pname) {
   // Reload first — the app's project list is store-cached at startup
@@ -399,8 +407,8 @@ async function main() {
   chk("not silent", peak > 0.02);
   if (checks.some(([, c]) => !c)) throw new Error("PCM checks failed");
 
-  /* ---------- 5. preview transport ---------- */
-  step("5) preview transport — load, play, pause, seek, stop");
+  /* ---------- 5a. offline preview render — objective PCM parity ---------- */
+  step("5a) OfflineAudioContext render vs FFmpeg export PCM");
   let navOk = false;
   for (let att = 0; att < 4 && !navOk; att++) {
     try { await navToTimeline(p.name); navOk = true; }
@@ -411,6 +419,135 @@ async function main() {
   }
   if (!navOk) throw new Error("navigation never stabilized");
   await sleep(1200);
+  // Same scheduling code (scheduleClip) + same sources, rendered in
+  // an OfflineAudioContext — the preview's objective PCM output.
+  const detailJson = await detail(p.id, tl.id);
+  const offPcm = await evalJs(`(async () => {
+    const h = window.__n2fPreview;
+    if (!h) return {err:"hook missing"};
+    const plan = h.buildPreviewPlan(${JSON.stringify(detailJson)});
+    const off = new OfflineAudioContext(2, 48000, 48000);
+    const buffers = new Map();
+    for (const c of plan.clips) {
+      const res = await fetch("${API}/api/projects/" +
+        ${JSON.stringify(p.id)} + "/assets/" + c.assetId + "/file",
+        {headers:{"X-Atomic-Token":${JSON.stringify(TOKEN)}}});
+      const ab = await res.arrayBuffer();
+      buffers.set(c.clipId, await off.decodeAudioData(ab));
+    }
+    const dur = Math.max(...plan.clips.map(c=>c.tlEndS), 10.5) + 0.3;
+    const rendered = await h.renderPlanOffline(plan, buffers, dur, 48000);
+    const L = rendered.getChannelData(0), R = rendered.getChannelData(1);
+    const mono = new Float32Array(L.length);
+    for (let i=0;i<L.length;i++) mono[i]=(L[i]+R[i])/2;
+    const mag = (f,s0,s1) => {
+      const w=2*Math.PI*f/48000, cw=2*Math.cos(w); let a=0,b=0;
+      for (let i=Math.floor(s0*48000); i<Math.floor(s1*48000); i++){
+        const v=mono[i]+cw*a-b; b=a; a=v; }
+      const n=Math.max(1,Math.floor((s1-s0)*48000));
+      return 2*Math.sqrt(Math.max(0,a*a+b*b-cw*a*b))/n; };
+    const rms = (s0,s1) => { let s=0,n=0;
+      for (let i=Math.floor(s0*48000); i<Math.floor(s1*48000); i++){s+=mono[i]*mono[i];n++;}
+      return Math.sqrt(s/Math.max(1,n)); };
+    const out = {};
+    out.m220_early = mag(220,0.5,1.5);
+    out.m440_pre  = mag(440,0.2,0.8);
+    out.m440_in   = mag(440,1.2,1.9);
+    out.m440_duck = mag(440,2.5,3.5);
+    out.m440_xf   = mag(440,4.85,5.15);
+    out.m550_post = mag(550,5.4,6.2);
+    out.m330_early= mag(330,0.5,1.5);
+    out.m330_mid  = mag(330,1.0,3.0);
+    out.m330_late = mag(330,6.5,8.0);
+    out.m880_pre  = mag(880,5.0,6.0);
+    out.m880_in   = mag(880,7.5,8.5);
+    out.peak      = rms(0,10.5);
+    out.nClips    = plan.clips.length;
+    out.embedded  = plan.clips.filter(c=>c.embedded).length;
+    out.detached  = plan.detachedXfs.length;
+    return out; })()`);
+  if (offPcm.err) throw new Error("offline render: " + offPcm.err);
+  ok(`offline plan: ${offPcm.nClips} clips (${offPcm.embedded} embedded), detached=${offPcm.detached}`);
+  const near = (a, b, tol, name) => {
+    const okv = Math.abs(a - b) <= tol;
+    ok(`${name}: preview ${a.toFixed(4)} vs export ${b.toFixed(4)} ${okv ? "OK" : "FAIL"}`);
+    checks.push([name, okv]);
+  };
+  // Preview vs ffmpeg export — same windows, loose band for AAC
+  // codec noise + 64Hz envelope sampling.
+  near(offPcm.m220_early, m220(0.5,1.5), 0.05, "embedded 220 parity");
+  near(offPcm.m440_pre,  m440(0.2,0.8), 0.03, "gap silence parity");
+  near(offPcm.m440_in,   m440(1.2,1.9), 0.06, "dialogue parity");
+  near(offPcm.m440_duck, m440(2.5,3.5), 0.05, "step duck parity");
+  near(offPcm.m440_xf,   m440(4.85,5.15), 0.06, "xf out parity");
+  near(offPcm.m550_post, m550(5.4,6.2), 0.06, "xf in parity");
+  near(offPcm.m330_mid,  m330(1.0,3.0), 0.05, "music parity");
+  near(offPcm.m330_late, m330(6.5,8.0), 0.05, "swell parity");
+  near(offPcm.m880_in,   m880(7.5,8.5), 0.05, "sfx parity");
+  chk("preview non-silent", offPcm.peak > 0.02);
+  chk("preview no clip", offPcm.peak < 0.9);
+  if (checks.some(([, c]) => !c)) throw new Error("preview parity failed");
+
+  // Seek-point envelope accuracy — a render started mid-clip must
+  // reproduce the same envelope values as the continuous render at
+  // the same absolute position (the env fn is position-invariant;
+  // this exercises scheduleClip's streamOffsetS path end-to-end).
+  const seekChk = await evalJs(`(async () => {
+    const h = window.__n2fPreview;
+    const plan = h.buildPreviewPlan(${JSON.stringify(detailJson)});
+    const off2 = new OfflineAudioContext(2, 48000, 48000);
+    const buffers = new Map();
+    for (const c of plan.clips) {
+      const res = await fetch("${API}/api/projects/" +
+        ${JSON.stringify(p.id)} + "/assets/" + c.assetId + "/file",
+        {headers:{"X-Atomic-Token":${JSON.stringify(TOKEN)}}});
+      const ab = await res.arrayBuffer();
+      buffers.set(c.clipId, await off2.decodeAudioData(ab));
+    }
+    const magOf = (buf, f, s0, s1) => {
+      const L = buf.getChannelData(0), R = buf.getChannelData(1);
+      const w = 2*Math.PI*f/48000, cw = 2*Math.cos(w); let a=0,b=0;
+      for (let i=Math.floor(s0*48000); i<Math.floor(s1*48000); i++){
+        const v=(L[i]+R[i])/2+cw*a-b; b=a; a=v; }
+      const n=Math.max(1,Math.floor((s1-s0)*48000));
+      return 2*Math.sqrt(Math.max(0,a*a+b*b-cw*a*b))/n; };
+    // All offline renders anchor at +0.02s (scheduleClip's lead):
+    // local t = absolute (fromS + t − 0.02).
+    // Continuous reference render from 0 for window comparisons.
+    const rCont = await h.renderPlanOffline(plan, buffers, 6.0, 48000, 0);
+    // seek into the crossfade window (tl 4.8–5.2): render from 4.9,
+    // compare absolute 4.92–5.18 against the continuous render.
+    const rXf = await h.renderPlanOffline(plan, buffers, 1.0, 48000, 4.9);
+    // seek into the step-duck (tl 2.0–4.0): render 0.9s from 2.6
+    const rDk = await h.renderPlanOffline(plan, buffers, 0.9, 48000, 2.6);
+    // seek into the gap (tl 0.3–1.0): render 0.4s from 0.4
+    const rGap = await h.renderPlanOffline(plan, buffers, 0.4, 48000, 0.4);
+    // seek before a clip boundary — dialogue starts at exactly
+    // 30f/(30000/1001) = 1.001s; seeked render from 0.95 places it at
+    // local 0.02 + (1.001 − 0.95) = 0.071.
+    const rBnd = await h.renderPlanOffline(plan, buffers, 0.5, 48000, 0.95);
+    return {
+      xf_seek:  magOf(rXf, 440, 0.04, 0.30),
+      xf_cont:  magOf(rCont, 440, 4.94, 5.20),
+      duck_440: magOf(rDk, 440, 0.05, 0.8),
+      gap_440:  magOf(rGap, 440, 0.03, 0.35),
+      bnd_440_pre: magOf(rBnd, 440, 0.0, 0.05),
+      bnd_440_post: magOf(rBnd, 440, 0.10, 0.45) }; })()`);
+  near(seekChk.xf_seek, seekChk.xf_cont, 0.06,
+       "seek-into-crossfade envelope parity");
+  near(seekChk.duck_440, offPcm.m440_duck, 0.05,
+       "seek-into-step-automation envelope parity");
+  chk("seek-into-gap silent", seekChk.gap_440 < 0.01);
+  chk("boundary seek: silent before 1.0s clip start",
+      seekChk.bnd_440_pre < 0.01);
+  chk("boundary seek: clip audible after 1.0s",
+      seekChk.bnd_440_post > 0.04);
+  if (checks.some(([, c]) => !c)) {
+    throw new Error("seek-envelope checks failed");
+  }
+
+  /* ---------- 5b. preview transport ---------- */
+  step("5b) preview transport — load, play, pause, seek, stop");
   const hasPlay = await evalJs(`!!document.querySelector('[data-testid="preview-play"]')`);
   if (!hasPlay) throw new Error("preview-play button missing");
   const tPlay0 = Date.now();
@@ -443,6 +580,51 @@ async function main() {
     ok(`stop → ${stopped}`);
   } else { ok("stop rewound to 0"); }
 
+  /* ---------- 5c. transport reliability — seeks, leaks, teardown ---------- */
+  step("5c) scrub across boundaries + node-leak + teardown");
+  // resume playback, then rapid scrubs across gap/boundary/xf/EOF
+  await evalJs(`document.querySelector('[data-testid="preview-play"]').click()`);
+  await sleep(600);
+  const scrub = await evalJs(`(async()=>{
+    const e = window.__n2fPreview?.engineRef?.current;
+    if (!e) return {err:"engine gone"};
+    const spots = [0.5, 1.2, 4.9, 5.0, 7.2, 20.0, 9.9, 0.0, 3.3];
+    const seen = [];
+    for (const s of spots) { await e.scrubTo(s); seen.push(e.positionS()); }
+    // rapid-fire 15 more — stale nodes must not accumulate
+    for (let i=0;i<15;i++) await e.scrubTo((i%5)*1.7);
+    return { err:null, live:e.live.length, state:e.state,
+             buffers:e.buffers.size,
+             end:e.positionS() }; })()`);
+  if (scrub.err) throw new Error("scrub: " + scrub.err);
+  ok(`9+15 scrubs → live nodes ${scrub.live}, buffers ${scrub.buffers}, state ${scrub.state}`);
+  if (scrub.live > offPcm.nClips + 2) {
+    throw new Error(`source/gain nodes leak — ${scrub.live} live after rapid seeks`);
+  }
+  // stop → live nodes drained to zero
+  await evalJs(`document.querySelector('[data-testid="preview-stop"]').click()`);
+  await sleep(300);
+  const drained = await evalJs(
+    `window.__n2fPreview?.engineRef?.current?.live?.length ?? -1`);
+  if (drained !== 0) throw new Error(`stop left ${drained} live nodes`);
+  ok("stop drained all live nodes");
+  // project switch disposes the engine — the hook must disappear
+  await evalJs(`[...document.querySelectorAll("button,a")]
+    .find(e=>e.textContent.trim().includes("← Projects")
+          ||e.textContent.trim()==="Projects")?.click()`);
+  await sleep(1500);
+  const hookGone = await evalJs(`window.__n2fPreview === undefined`);
+  if (!hookGone) {
+    ok("hook persisted (editor still mounted?) — navigating home");
+    await evalJs(`[...document.querySelectorAll("button,a")]
+      .find(e=>e.textContent.trim()==="Home")?.click()`);
+    await sleep(1200);
+    if (!await evalJs(`window.__n2fPreview === undefined`)) {
+      throw new Error("preview engine not disposed on project switch");
+    }
+  }
+  ok("engine disposed on workspace unmount — no stale playback");
+
   /* ---------- 6. cancel ---------- */
   step("6) cancel mid-export — cleaned, no phantom output");
   const r6 = await commit(p.id, "timeline.export",
@@ -454,9 +636,10 @@ async function main() {
   ok("export cancelled cleanly");
 
   /* ---------- 7. perf ---------- */
-  step("7) perf — repeated exports + memory");
+  step("7) perf — exports, CPU, memory, preview latency");
   const mem0 = procMem("atomic-dream-engine.exe");
   const beMem = procMem("atomic-backend.exe") || procMem("python.exe");
+  const cpu0 = procCpuS("atomic-backend.exe");
   const times = [];
   for (let i = 0; i < 3; i++) {
     const t = Date.now();
@@ -465,11 +648,16 @@ async function main() {
     await waitJob(p.id, rj.job_id);
     times.push(Date.now() - t);
   }
+  const cpuWall = times.reduce((a, b) => a + b, 0) / 1000;
+  const cpuUsed = procCpuS("atomic-backend.exe") - cpu0;
   const mem1 = procMem("atomic-dream-engine.exe");
   ok(`exports: ${times.map(t => (t / 1000).toFixed(1) + "s").join(", ")}`
+     + ` | backend CPU ${cpuUsed.toFixed(1)}s over ${cpuWall.toFixed(1)}s`
+     + ` wall (${(cpuUsed / Math.max(0.1, cpuWall) * 100).toFixed(0)}%)`
      + ` | app RSS ${mem0.toFixed(0)}→${mem1.toFixed(0)} MB`
      + ` | backend RSS ${beMem.toFixed(0)} MB`
-     + ` | preview decode ${(loadMs / 1000).toFixed(1)}s`);
+     + ` | preview decode ${(loadMs / 1000).toFixed(1)}s`
+     + ` | scrub restart ~0.05s schedule lead`);
 
   /* ---------- 8. restart persistence ---------- */
   step("8) restart — film + xf + assets survive");
@@ -486,7 +674,7 @@ async function main() {
   ok("app stays running for manual close; backend verified below");
 
   fs.writeFileSync(`${OUT}\\n2f-acceptance.log`, LOG.join("\n"));
-  console.log(`\nN2-F ACCEPTANCE: PASS ${STEP}/9 steps — ${OUT}`);
+  console.log(`\nN2-F ACCEPTANCE: PASS ${STEP}/${STEP} steps — ${OUT}`);
 }
 
 main().then(() => process.exit(0)).catch((e) => {
