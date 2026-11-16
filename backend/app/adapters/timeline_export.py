@@ -67,10 +67,9 @@ class TimelineExportAdapter:
             try:
                 plan = tx.composite_plan(edl, {})
             except ValueError as exc:
-                # e.g. N2-A — a populated visible audio lane refuses.
                 errs.append(str(exc))
             else:
-                if not plan["clips"]:
+                if not plan["clips"] and not plan["audio_clips"]:
                     errs.append("no visible lane holds clips — nothing "
                                 "to composite")
                 elif plan["program_frames"] <= 0:
@@ -135,10 +134,17 @@ class TimelineExportAdapter:
         handle.check_cancel()
 
         yield {"progress": 0.12, "stage": "probing sources"}
+        track_kind = {t["id"]: t.get("kind")
+                      for t in edl.get("tracks") or []}
         probes = []
-        for p in paths:
+        for c, p in zip(clips, paths):
+            # Audio-lane sources are audio-kind files — engine.probe
+            # requires a video stream, so they take the audio prober.
+            prober = (engine.probe_audio
+                      if track_kind.get(c.get("track_id")) == "audio"
+                      else engine.probe)
             meta = await asyncio.to_thread(
-                engine.probe, p, cancel=handle.cancel_event)
+                prober, p, cancel=handle.cancel_event)
             if not meta.get("ok"):
                 raise ValueError(
                     f"probe failed for {p.name}: {meta.get('reason')}")
@@ -179,7 +185,7 @@ class TimelineExportAdapter:
 
         yield {"progress": 0.3, "stage": "rendering"}
         if is_v2:
-            if not plan["clips"]:
+            if not plan["clips"] and not plan["audio_clips"]:
                 raise ValueError(
                     "no visible lane holds clips — nothing to composite")
             target = tx.composite_canvas(plan, profile_name,

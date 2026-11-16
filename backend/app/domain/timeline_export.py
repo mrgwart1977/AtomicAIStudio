@@ -194,41 +194,100 @@ def h264_encoder(ffmpeg: str, runner) -> str:
 #   limit rather than clip.
 # - Output duration is exact: program_end_frames / timeline_fps as a
 #   rational second count; the fps filter quantizes every input.
+#
+# N2-E — dedicated audio lanes render through the same graph:
+# - Audibility (N2-C contract): visible + unmuted + in the solo set
+#   when any lane is soloed; hidden/muted/non-solo lanes contribute
+#   no audio (video lanes still show picture — solo is audio-only).
+# - The effective-gain contract (docs/n2d-fades.md) is applied as one
+#   multiplicative envelope per clip: clip gain + track gain folded
+#   into a single dB sum, automation interpolated in dB at native
+#   sample rate, fades and crossfade envelopes as afade anchors in
+#   source units — nothing is applied twice.
+# - Satisfied crossfades extend the pair's streams into their source
+#   handles (out-clip tail → win_end, in-clip head → win_start) and
+#   apply complementary fade envelopes over the window. A record
+#   reporting satisfied=false on an AUDIBLE lane fails closed.
+# - Quantization happens at exactly one documented point per value:
+#   timeline frames → 48 kHz samples (or native-rate source units for
+#   envelope anchors) via round-half-up on exact rationals.
+
+AUDIO_RATE = 48000  # output sample rate (contract: initially 48 kHz)
+
+#: afade curve enum values for the pinned N2-D curves: tri=linear
+#: slope; qsin = quarter-sine — the sin/cos pair whose in+out
+#: envelopes sum to unity power (the equal-power contract). hsin is
+#: the sin² S-curve, NOT equal-power — don't confuse them.
+_FADE_CURVE = {"linear": "0", "equal_power": "1"}
+
+
+def _q(v: Fraction) -> int:
+    """Round-half-up of an exact rational — the single documented
+    quantization rule for frame→sample conversions."""
+    return int(v + Fraction(1, 2))
+
+
+def _audible(track: dict, solo_set: set[str]) -> bool:
+    """N2-C precedence: hidden → silent; muted → silent; a non-empty
+    solo set silences everything outside it."""
+    if not track.get("visible", True):
+        return False
+    if track.get("muted"):
+        return False
+    return not solo_set or track["id"] in solo_set
+
 
 def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
     """Resolve an `ade-edl/2` document into render instructions.
 
-    Returns {"clips": [{clip_id, sha256, track_position, tl_start_s,
-    tl_end_s, in_s, dur_s, has_audio}], "program_frames": int,
-    "fps_num": int, "fps_den": int}.
-    `probes` maps clip_id -> probe metadata (for has_audio)."""
+    Returns {"clips": [video-composite entries],
+             "audio_clips": [mixed-audio entries],
+             "program_frames": Fraction, "fps_num": int, "fps_den": int}.
+    `probes` maps clip_id -> probe metadata (has_audio, sample rates)."""
     tb = edl.get("timebase") or {"num": 24, "den": 1}
     tl_fps = Fraction(int(tb["num"]), int(tb["den"]))
     tracks = {t["id"]: t for t in edl.get("tracks") or []}
+    solo_set = {t["id"] for t in tracks.values()
+                if t.get("solo") and t.get("kind") != "overlay"}
     out_clips: list[dict[str, Any]] = []
+    audio_clips: dict[str, dict[str, Any]] = {}
     end_frames = Fraction(0)
     for c in edl.get("clips") or []:
         t = tracks.get(c.get("track_id"))
         if t is None or not t.get("visible", True):
-            continue  # hidden lanes contribute nothing
-        if t.get("kind") == "audio":
-            # N2-A boundary — never silently discard a populated audio
-            # lane: refuse until N2-E renders audio lanes.
-            raise ValueError(
-                "visible audio lanes cannot be rendered yet — "
-                "hide the audio lane or remove its clips (audio-lane "
-                "mixing is scheduled for N2-E)")
+            continue  # hidden lanes contribute nothing at all
         src = c.get("source") or {}
         src_fps = Fraction(int(src.get("fps_num") or tb["num"]),
                            int(src.get("fps_den") or tb["den"]))
         in_f, out_f = int(c["in_frame"]), int(c["out_frame"])
-        in_s = Fraction(in_f) / src_fps
-        dur_s = Fraction(out_f - in_f) / src_fps
         extent = Fraction(c["timeline_frames"]["num"],
                           c["timeline_frames"]["den"])
         start = Fraction(int(c["start_frames"]))
         end_frames = max(end_frames, start + extent)
+        audible = _audible(t, solo_set)
+        if t.get("kind") == "audio":
+            probe = probes.get(c["clip_id"]) or {}
+            astreams = probe.get("audio") or []
+            # Fresh probe wins; validate-time falls back to the rate
+            # pinned in the document at EDL generation.
+            rate = int(probe.get("sample_rate") or 0) \
+                or (int(astreams[0].get("sample_rate") or 0)
+                    if astreams else 0) \
+                or int(src.get("sample_rate") or 0)
+            if audible:
+                if rate <= 0:
+                    raise ValueError(
+                        f"audio clip {c['clip_id']} has no measured "
+                        "sample rate — cannot place it sample-exactly")
+                audio_clips[c["clip_id"]] = _audio_entry(
+                    c, t, start, extent, rate)
+            continue
+        # video lane — picture composites; embedded audio joins the mix
+        in_s = Fraction(in_f) / src_fps
+        dur_s = Fraction(out_f - in_f) / src_fps
         occ_end = _ceil(start + extent)  # lane occupancy rule (ceil)
+        probe = probes.get(c["clip_id"]) or {}
+        has_audio = bool(probe.get("audio"))
         out_clips.append({
             "clip_id": c["clip_id"], "sha256": c["sha256"],
             "track_position": int(t["position"]),
@@ -238,14 +297,105 @@ def composite_plan(edl: dict, probes: dict[str, dict]) -> dict:
             "tl_start_s": start / tl_fps,
             "tl_end_s": (start + extent) / tl_fps,
             "in_s": in_s, "dur_s": dur_s,
-            "has_audio": bool((probes.get(c["clip_id"]) or {})
-                              .get("audio")),
+            "has_audio": has_audio,
         })
+        if has_audio and audible:
+            audio_clips[c["clip_id"]] = {
+                "clip_id": c["clip_id"], "sha256": c["sha256"],
+                "embedded": True,
+                "in_s": in_s, "dur_s": dur_s, "tl_start_s":
+                    start / tl_fps,
+                "track_db": float(t.get("gain_db") or 0.0),
+                "clip_db": 0.0, "automation": [], "xf": None,
+                "fade_in": None, "fade_out": None,
+            }
+    # Crossfades — only satisfied records on audible lanes extend the
+    # pair's streams; an unsatisfied record there fails closed.
+    for x in edl.get("crossfades") or []:
+        out_c = audio_clips.get(x.get("out_clip_id"))
+        in_c = audio_clips.get(x.get("in_clip_id"))
+        if out_c is None and in_c is None:
+            continue  # pair's lane is inaudible — nothing renders
+        if out_c is None or in_c is None or not x.get("satisfied"):
+            raise ValueError(
+                "crossfade on an audible lane is no longer satisfied "
+                "— undo the move or clear the record before export")
+        if out_c["embedded"] or in_c["embedded"]:
+            raise ValueError(
+                "crossfade references a video-lane clip — the "
+                "document is inconsistent")
+        _apply_xf(x, out_c, in_c, tl_fps)
     # Bottom lane (lowest position) first; same-lane ties by start.
     out_clips.sort(key=lambda c: (c["track_position"],
                                   c["tl_start_s"], c["clip_id"]))
-    return {"clips": out_clips, "program_frames": end_frames,
+    return {"clips": out_clips,
+            "audio_clips": list(audio_clips.values()),
+            "program_frames": end_frames,
             "fps_num": tl_fps.numerator, "fps_den": tl_fps.denominator}
+
+
+def _audio_entry(c: dict, t: dict, start: Fraction, extent: Fraction,
+                 rate: int) -> dict:
+    """One dedicated-lane audio input: source segment + timeline
+    placement + envelope params, all in exact units. `start`/`extent`
+    are the clip's occupancy in timeline frames (Fractions)."""
+    in_f, out_f = int(c["in_frame"]), int(c["out_frame"])
+    fades = c.get("fades") or {}
+    fin, fout = fades.get("in") or {}, fades.get("out") or {}
+    auto = [{
+        # keyframe offsets are clip-local occupancy tl-frames — the
+        # stream-local source offset is resolved at argv build time
+        # (after any xf head extension shifts the stream start).
+        "off_tl": Fraction(int(p["at_frames"])),
+        "gain_db": float(p["gain_db"])}
+        for p in (c.get("automation") or [])]
+    return {
+        "clip_id": c["clip_id"], "sha256": c["sha256"],
+        "embedded": False,
+        "rate": rate,
+        "seg_start_src": in_f, "seg_end_src": out_f,
+        "extent_src": out_f - in_f,  # occupancy in source units
+        "start_tl": start, "extent_tl": extent,  # occupancy (Fractions)
+        "head_tl": Fraction(0), "head_src": 0,
+        "tail_src": 0,  # xf handle extension mutates these
+        "clip_db": float(c.get("gain_db") or 0.0),
+        "track_db": float(t.get("gain_db") or 0.0),
+        "fade_in": {"n": int(fin.get("units") or 0),
+                    "curve": fin.get("curve") or "linear"},
+        "fade_out": {"n": int(fout.get("units") or 0),
+                     "curve": fout.get("curve") or "linear"},
+        "automation": auto,
+        "xf": None,
+    }
+
+
+def _apply_xf(x: dict, out_c: dict, in_c: dict, tl_fps: Fraction) -> None:
+    """Extend a satisfied pair's streams into their source handles and
+    anchor the complementary window envelopes (docs/n2d-fades.md)."""
+    S, E = Fraction(int(x["tl_start"])), Fraction(
+        int(x["tl_start"]) + int(x["tl_frames"]))
+    curve = _FADE_CURVE.get(x.get("curve")) or "0"
+    # Source-unit conversion: tl frames → this clip's native samples.
+    def src(tl_f: Fraction, rate: int) -> int:
+        return _q(tl_f * rate / tl_fps)
+    # out-clip: render end extends to E via tail handle; fade-out over
+    # the window — anchored in stream-local source units.
+    out_tail_tl = E - (out_c["start_tl"] + out_c["extent_tl"])
+    out_c["tail_src"] = src(out_tail_tl, out_c["rate"])
+    out_c["seg_end_src"] += out_c["tail_src"]
+    out_c["xf"] = {
+        "role": "out", "curve": curve,
+        "off": src(S - out_c["start_tl"], out_c["rate"]),
+        "n": src(E - S, out_c["rate"])}
+    # in-clip: render start pulls back to S via head handle; fade-in
+    # starts at stream offset 0 (the extended stream begins at S).
+    in_head_tl = in_c["start_tl"] - S
+    in_c["head_tl"] = in_head_tl
+    in_c["head_src"] = src(in_head_tl, in_c["rate"])
+    in_c["seg_start_src"] -= in_c["head_src"]
+    in_c["xf"] = {
+        "role": "in", "curve": curve,
+        "off": 0, "n": src(E - S, in_c["rate"])}
 
 
 def composite_canvas(plan: dict, profile: str,
@@ -264,6 +414,9 @@ def composite_canvas(plan: dict, profile: str,
             h = max(h, int(meta.get("height") or 0))
     else:
         w, h = PROFILES[profile]["width"], PROFILES[profile]["height"]
+    if not plan["clips"] and plan.get("audio_clips"):
+        w = w or 1280  # audio-only render: fixed black canvas
+        h = h or 720
     w -= w % 2
     h -= h % 2
     if w < 2 or h < 2:
@@ -315,52 +468,138 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             f"enable='gte(n,{c['start_frame']})"
             f"*lt(n,{c['occ_end_frame']})'[{nxt}]")
         cur = nxt
-    audio_inputs = [i for i, c in enumerate(clips)
-                    if c["has_audio"] and not c["muted"]]
-    if audio_inputs:
-        a_parts = [f"anullsrc=r=48000:cl=stereo,atrim=0:{dur_s}[abase]"]
+    # Audio — every audible stream (video-embedded + dedicated lanes)
+    # becomes a full-timeline stream via sample-exact leading silence,
+    # then amix duration=first against a full-length silent base.
+    a_inputs = plan.get("audio_clips") or []
+    tl_fps = Fraction(plan["fps_num"], plan["fps_den"])
+    di = 0
+    idx = {c["clip_id"]: i for i, c in enumerate(clips)}
+    for a in a_inputs:
+        if not a["embedded"]:
+            a["input_idx"] = len(clips) + di
+            di += 1
+            argv += ["-i", paths[a["clip_id"]]]
+        else:
+            a["input_idx"] = idx[a["clip_id"]]
+    if a_inputs:
+        a_parts = [f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
+                   f"atrim=0:{dur_s}[abase]"]
         mix_in = "[abase]"
-        for j, i in enumerate(audio_inputs):
-            c = clips[i]
-            in_s = float(c["in_s"])
-            end_s = float(c["in_s"] + c["dur_s"])
-            # Sample-exact timeline placement: prepend integer-sample
-            # silence via atrim=end_sample + concat — amix consumes
-            # inputs positionally from 0, so leading-silent concat is
-            # the only alignment that is both exact and reliable (no
-            # millisecond quantization, no PTS-alignment ambiguity).
-            # Remaining error is <1 sample for rates like 30000/1001
-            # (48000×1001/30000 = 1601.6 samples/frame) — ±0.4 sample,
-            # ~8µs, documented and unavoidable at the sample grid.
-            start_samples = round(c["tl_start_s"] * 48000)
-            if start_samples:
+        for j, a in enumerate(a_inputs):
+            if a["embedded"]:
+                proc = _embedded_chain(a["input_idx"], a)
+                lead = round(float(a["tl_start_s"]) * AUDIO_RATE)
+            else:
+                proc = _lane_chain(a["input_idx"], a, tl_fps)
+                lead = _q((a["start_tl"] - a["head_tl"])
+                          * AUDIO_RATE / tl_fps)
+            if lead:
                 a_parts.append(
-                    f"anullsrc=r=48000:cl=stereo,"
-                    f"atrim=end_sample={start_samples}[sil{j}]")
-                a_parts.append(
-                    f"[{i}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
-                    f"aresample=48000,aformat=channel_layouts=stereo,"
-                    f"asetpts=PTS-STARTPTS[as{j}]")
+                    f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
+                    f"atrim=end_sample={lead}[sil{j}]")
+                a_parts.append(f"{proc}[as{j}]")
                 a_parts.append(
                     f"[sil{j}][as{j}]concat=n=2:v=0:a=1[am{j}]")
             else:
-                a_parts.append(
-                    f"[{i}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
-                    f"aresample=48000,aformat=channel_layouts=stereo,"
-                    f"asetpts=PTS-STARTPTS[am{j}]")
+                a_parts.append(f"{proc}[am{j}]")
             mix_in += f"[am{j}]"
         a_parts.append(
-            f"{mix_in}amix=inputs={len(audio_inputs) + 1}:"
+            f"{mix_in}amix=inputs={len(a_inputs) + 1}:"
             f"duration=first:normalize=0,alimiter=limit=0.95[a]")
         parts += a_parts
     argv += ["-filter_complex", ";".join(parts)]
     argv += ["-map", f"[{cur}]"]
-    if audio_inputs:
-        argv += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
+    if a_inputs:
+        argv += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k",
+                 "-ar", str(AUDIO_RATE)]
     argv += ["-c:v", encoder, "-preset", "fast", "-crf", str(crf),
              "-pix_fmt", "yuv420p", "-movflags", "+faststart",
              "-t", dur_s, out_path]
     return argv
+
+
+def _lin(db: float) -> float:
+    return 10.0 ** (db / 20.0)
+
+
+def _embedded_chain(k: int, a: dict) -> str:
+    """Video-embedded audio: seconds-based trim (the clip's source
+    units are video frames), resample, stereo, track gain only —
+    fades/automation/crossfades are audio-lane-only by domain rule."""
+    in_s = float(a["in_s"])
+    end_s = float(a["in_s"] + a["dur_s"])
+    chain = (f"[{k}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
+             f"aresample={AUDIO_RATE},aformat=channel_layouts=stereo")
+    if a["track_db"]:
+        chain += f",volume={_flt(_lin(a['track_db']))}"
+    return chain + ",asetpts=PTS-STARTPTS"
+
+
+def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
+    """Dedicated-lane audio — the full N2-C/N2-D gain contract in one
+    deterministic order, all envelope anchors in stream-local source
+    units at the clip's native rate (resample LAST):
+
+      atrim source segment (incl. borrowed xf handles)
+      → aformat stereo (2-channel layout before aeval's val(c))
+      → gain envelope: aeval clip+track dB + automation interpolated
+        linearly in dB over stream-local sample offsets — or a plain
+        volume when no automation exists
+      → afade fade-in / fade-out (edge-anchored, source units)
+      → afade crossfade envelope (window-local)
+      → aresample 48000 → asetpts.
+
+    Everything multiplies the program signal exactly once; the dB sum
+    lives in a single pow(10,x/20) so nothing double-applies."""
+    rate = a["rate"]
+    chain = (f"[{k}:a]atrim=start_sample={a['seg_start_src']}"
+             f":end_sample={a['seg_end_src']},"
+             "aformat=channel_layouts=stereo")
+    db_sum = a["clip_db"] + a["track_db"]
+    if a["automation"]:
+        chain += f",aeval=exprs='{_auto_exprs(a, db_sum, tl_fps)}'"
+    elif db_sum:
+        chain += f",volume={_flt(_lin(db_sum))}"
+    fin, fout, xf = a["fade_in"], a["fade_out"], a["xf"]
+    if fin["n"] > 0:
+        chain += (f",afade=t=in:start_sample={a['head_src']}"
+                  f":nb_samples={fin['n']}"
+                  f":curve={_FADE_CURVE.get(fin['curve'], '0')}")
+    if fout["n"] > 0:
+        off = a["head_src"] + a["extent_src"] - fout["n"]
+        chain += (f",afade=t=out:start_sample={off}"
+                  f":nb_samples={fout['n']}"
+                  f":curve={_FADE_CURVE.get(fout['curve'], '0')}")
+    if xf is not None:
+        kind = "in" if xf["role"] == "in" else "out"
+        chain += (f",afade=t={kind}:start_sample={xf['off']}"
+                  f":nb_samples={xf['n']}:curve={xf['curve']}")
+    return chain + f",aresample={AUDIO_RATE},asetpts=PTS-STARTPTS"
+
+
+def _auto_exprs(a: dict, db_sum: float, tl_fps: Fraction) -> str:
+    """aeval `exprs` value: one interpolation per channel applying
+    (clip+track dB + automation) as pow(10,db/20) on the raw sample.
+    `n` is the stream-local sample index at native rate — keyframe
+    offsets land there via the single quantize point."""
+    pts = a["automation"]
+    offs = [_q((a["head_tl"] + p["off_tl"]) * a["rate"] / tl_fps)
+            for p in pts]
+    g = [p["gain_db"] for p in pts]
+    expr = _flt(g[-1] + db_sum)
+    for i in range(len(pts) - 1, 0, -1):
+        lo, hi, g_lo, g_hi = offs[i - 1], offs[i], g[i - 1], g[i]
+        if hi > lo:
+            seg = (f"{_flt(g_lo + db_sum)}+({_flt(g_hi - g_lo)})"
+                   f"*(n-{lo})/{hi - lo}")
+            cond = f"between(n,{lo},{hi - 1})"
+        else:  # same quantized sample — deterministic step
+            seg, cond = _flt(g_lo + db_sum), f"eq(n,{lo})"
+        expr = f"if({cond},{seg},{expr})"
+    expr = f"if(lt(n,{offs[0]}),{_flt(g[0] + db_sum)},{expr})"
+    env = f"pow(10,({expr})/20)"
+    return f"val(0)*({env})|val(1)*({env})"
 
 
 def build_copy_argv(ffmpeg: str, list_path: str, out_path: str) -> list[str]:

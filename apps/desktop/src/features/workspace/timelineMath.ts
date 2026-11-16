@@ -172,36 +172,62 @@ export function exportEligibility(detail: TimelineDetail): {
   return { ok: true, reason: null };
 }
 
-/** N1-D — what the exporter will actually do with this layout.
+/** N1-D/N2-E — what the exporter will actually do with this layout.
  * "sequential" → ade-edl/1 (copy/encode paths).
  * "composite"  → ade-edl/2 multitrack render: every VISIBLE lane with
- * clips composites (hidden/muted lanes contribute nothing; muted lanes
- * still show video but no audio).
- * "blocked"    → no visible lane holds clips — nothing to render. */
+ * clips composites (hidden lanes contribute nothing; muted lanes still
+ * show video but no audio). N2-E: audible audio lanes mix into the one
+ * output — `audio` reports what the mix contains.
+ * "blocked"    → nothing to render, or an unsatisfied crossfade sits
+ * on an audible lane (the exporter fails closed — fix it first). */
 export function exportMode(detail: TimelineDetail): {
   mode: "sequential" | "composite" | "blocked";
   lanes: number;
+  audio: "none" | "embedded" | "tracks";
   reason: string | null;
 } {
+  const none = { audio: "none" as const };
   if (detail.clips.length === 0) {
-    return { mode: "blocked", lanes: 0,
+    return { mode: "blocked", lanes: 0, ...none,
              reason: "the timeline holds no clips" };
   }
   if (exportEligibility(detail).ok) {
-    return { mode: "sequential", lanes: 1, reason: null };
+    return { mode: "sequential", lanes: 1, ...none, reason: null };
   }
   const visible = detail.tracks.filter(
     (t) => t.visible && laneClips(detail.clips, t.id).length > 0);
   if (visible.length === 0) {
-    return { mode: "blocked", lanes: 0,
+    return { mode: "blocked", lanes: 0, ...none,
              reason: "no visible lane holds clips — nothing to export" };
   }
-  if (visible.some((t) => t.kind === "audio")) {
-    return { mode: "blocked", lanes: 0,
-             reason: "visible audio lanes can't be rendered yet (N2-E) "
-               + "— hide the audio lane or remove its clips" };
+  // Audibility mirrors the backend: visible + unmuted + in the solo
+  // set when any lane is soloed.
+  const soloSet = new Set(
+    detail.tracks.filter((t) => t.solo && t.kind !== "overlay")
+      .map((t) => t.id));
+  const audible = (t: TimelineTrack) =>
+    t.visible && !t.muted && (soloSet.size === 0 || soloSet.has(t.id));
+  // A crossfade that detached from its pair fails the export closed —
+  // surface it here instead of letting the job red.
+  const badXf = (detail.crossfades ?? []).find((x) => {
+    if (x.satisfied) return false;
+    const tr = detail.tracks.find((t) => t.id === (
+      detail.clips.find((c) => c.id === x.out_clip_id)?.track_id));
+    return tr != null && audible(tr);
+  });
+  if (badXf) {
+    return { mode: "blocked", lanes: 0, ...none,
+             reason: "a crossfade is detached from its clips — undo "
+               + "the move or clear the crossfade before exporting" };
   }
-  return { mode: "composite", lanes: visible.length, reason: null };
+  const audibleAudio = visible.some(
+    (t) => t.kind === "audio" && audible(t));
+  const audibleVideo = visible.some(
+    (t) => t.kind !== "audio" && audible(t));
+  return {
+    mode: "composite", lanes: visible.length,
+    audio: audibleAudio ? "tracks" : audibleVideo ? "embedded" : "none",
+    reason: null };
 }
 
 /** Frame → "SS:FF" label using the timeline rate (seconds:frames). */
