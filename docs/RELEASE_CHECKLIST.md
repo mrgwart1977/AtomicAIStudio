@@ -21,8 +21,23 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 | 10 | Usability testing with target users | Medium | M9 | open | **yes** | #14 |
 | 11 | FAT32 >4 GiB guard — edge coverage | Low | v1.0 | open | **yes** (defensible as-is; margin improvement) | #15 |
 | 12 | Shot-level reference-ID picker UI | Low | M3+ | open | no (API+schema delivered M2.1; UI deferred) | — |
+| 13 | Timeline export argv overflow on very large timelines | Medium | v1.0 | open | **yes** (bounded export size; fix = filter_complex_script) | — |
 
 ---
+
+## 13. Timeline export argv overflow on very large timelines — (found in N3-D)
+
+- **What:** the multi-segment encode path builds one ffmpeg argv containing
+  every clip segment. At ~240 clips the spawn fails:
+  `supervised spawn failed: [WinError 206] The filename or extension is too
+  long` (Windows ~32k command-line limit). Timelines below the bound export
+  normally; the copy path is unaffected.
+- **Why open:** real bound discovered by the N3-D acceptance driver
+  (`docs/n3d-evidence/n3d-acceptance.txt` step 8). Fix requires moving the
+  segment/filter description into `-filter_complex_script` or a concat
+  file — deferred rather than risk the verified export path this milestone.
+- **Acceptance:** a ≥240-clip multitrack timeline exports successfully on
+  Windows; regression test in `test_c5b_export.py`.
 
 ## 12. Shot-level reference-ID picker UI — (no issue yet)
 

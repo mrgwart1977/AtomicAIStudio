@@ -1,0 +1,59 @@
+   OK — backend http://127.0.0.1:53026
+   OK — media: 2 embedded mp4 (220/280Hz) + 440/550 stereo 48k + 330 stereo 44.1k + 660 tiny + 500 mono48k + 700 mono44.1k
+   OK — 8 assets imported (jobs durable)
+[1] 1) scene — 2 video lanes + 3 audio lanes + all controls @30000/1001
+   OK — film scene: 2 video + 3 audio lanes, 6 clips, xf satisfied: OK
+[2] 2) D1 — trim/split/move/gain/mute/solo/fade/xf/automation + undo/redo
+   OK — split created 2 fragments sharing source: OK
+   OK — undo merged fragments back to 1 clip: OK
+   OK — redo re-split into 2 clips: OK
+   OK — explicit move retimed music to 0.5s: OK
+   OK — mute flag set on A3: OK
+   OK — xf duration bumped 24→28: OK
+   OK — undo restored xf 28→24: OK
+   OK — automation replace undone — original ramp restored: OK
+   OK — editing regression done — rev 37, xf 24f, A3 unmuted
+[3] 3) export FILM @30000/1001 — ffprobe metadata + PCM checks
+   OK — export dur 6.006s, video h264 30000/1001, audio aac 48000Hz 2ch
+   OK — fractional fps in container (≈29.97): OK
+   OK — dialogue present (clip −3 applied but audible): OK
+   OK — step duck ≈ −9: OK
+   OK — xf out-leg fades out: OK
+   OK — xf in-leg at full gain: OK
+   OK — music lane duck: OK
+   OK — embedded ramp on V1: OK
+   OK — V2 embedded audio present: OK
+   OK — tiny sfx audible at 1.55s: OK
+   OK — silence past program end: OK
+[4] 4) export with solo on dialogue lane — all other lanes silent
+   OK — solo: dialogue audible: OK
+   OK — solo: music silenced: OK
+   OK — solo: embedded silenced: OK
+[5] 5) navigate to FILM — engine load, waveform, continuous scrub
+   OK — engine ready — waveform canvas present: true
+   OK — continuous scrub: 12 delivered/0 coalesced, 13 auditions, sched 0.4ms
+[6] 6) preview/export parity — shared plan, decoded PCM windows
+   OK — render — 440 pre 0.223, duck 0.087, 550 xf-in 0.353, 330 duck 0.052, 220 emb 0.068
+   OK — parity: 440 pre-duck: OK
+   OK — parity: 440 step-duck: OK
+   OK — parity: 550 xf-in: OK
+   OK — parity: 330 music duck: OK
+   OK — seek-into-automation: rendering from tl 0.8s already carries the step-automation gain (automation evaluated at window start, not just at t=0)
+[7] 7) reliability — export cancel (no phantom/ffmpeg orphan/tmp), idempotent replay
+   OK — export job is a durable row: OK
+   OK — cancelled job ends cancelled (no phantom output): OK
+   OK — no orphan ffmpeg after cancel: OK
+   OK — cancelled job left no partial output + no registered asset: OK
+   OK — idempotent replay: original outcome, handler not re-run: OK
+   OK — durable rows: 12 jobs total (2 added this step)
+[8] 8) perf — 240-clip multi-track timeline, 400-pt automation, repeat exports
+   OK — 240 clips placed on 6 lanes in 7.1s
+   OK — 240-clip export → failed: supervised spawn failed: [WinError 206] The filename or extension is too long — known Win argv bound, recorded
+   OK — 3 repeated exports: 4.0s, 3.6s, 4.0s
+   OK — RSS app 27→27MB, backend 138→144MB
+[9] 9) restart persistence — relaunch, reopen FILM, verify state
+   OK — backend http://127.0.0.1:55455
+   OK — persisted after restart — clips/xf/automation/revision: OK
+   OK — restart OK — rev 39, 6 clips, xf 24f equal_power
+[10] 10) clean shutdown — no orphans
+   OK — no orphan processes after close: OK
