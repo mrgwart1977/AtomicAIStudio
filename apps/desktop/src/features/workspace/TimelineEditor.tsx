@@ -938,6 +938,14 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
 
   return (
     <div className="mt-4" data-testid="timeline-editor">
+      {/* C1 — inspector docks to the RIGHT of the timeline in a wrap
+       * row: at normal widths it never sits below the fold, so focusing
+       * its inputs cannot scroll the page column and displace the
+       * ruler. The timeline column keeps a 440px floor — below that the
+       * inspector wraps full-width underneath (document scroll, as
+       * before) rather than crushing the ruler to unusability. */}
+      <div className="flex flex-wrap items-start gap-4">
+      <div className="min-w-[min(440px,100%)] flex-1">
       {/* toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1" role="group" aria-label="Zoom">
@@ -1084,6 +1092,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
           });
         }}
         className="mt-2 max-h-[480px] overflow-auto rounded border border-line bg-panel"
+        style={{ containerType: "inline-size" }}
         data-testid="timeline-scroll"
       >
         <div style={{ width: HEADER_W + contentW, position: "relative" }}>
@@ -1091,8 +1100,8 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
            * ruler (scrub surface) visible and operable */}
           <div className="sticky top-0 z-30 flex" style={{ height: RULER_H }}>
             <div
-              className="sticky left-0 z-30 flex items-center border-b border-r border-line bg-panel px-2 text-[10px] text-faint"
-              style={{ width: HEADER_W }}
+              className="sticky left-0 z-30 flex items-center overflow-hidden whitespace-nowrap border-b border-r border-line bg-panel px-2 text-[10px] text-faint"
+              style={{ width: "min(176px, max(96px, 40cqw))" }}
             >
               {detail.name} · {detail.fps_num}/{detail.fps_den} fps
             </div>
@@ -1139,8 +1148,8 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                 data-testid={`lane-${t.id}`}>
                 {/* track header — sticky left */}
                 <div
-                  className={`sticky left-0 z-10 flex flex-col justify-center gap-0.5 border-b border-r border-line bg-card px-2 ${dimmed ? "opacity-60" : ""}`}
-                  style={{ width: HEADER_W }}
+                  className={`sticky left-0 z-10 flex flex-col justify-center gap-0.5 overflow-hidden border-b border-r border-line bg-card px-2 ${dimmed ? "opacity-60" : ""}`}
+                  style={{ width: "min(176px, max(96px, 40cqw))" }}
                 >
                   <div className="flex items-center gap-1">
                     <span className={`rounded px-1 text-[9px] font-semibold uppercase ${
@@ -1458,7 +1467,16 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
         </div>
       )}
 
-      {/* selected-clip inspector */}
+      {!selClip && detail.clips.length === 0 && (
+        <p className="mt-4 text-center text-xs text-muted"
+          data-testid="editor-empty">
+          This timeline is empty. Generate a video clip on the Storyboard,
+          then use “Send to timeline” — it'll land on the first video lane.
+        </p>
+      )}
+      </div>{/* /timeline column */}
+
+      {/* selected-clip inspector — docked right column */}
       {selClip && (
         <ClipInspector
           clip={selClip}
@@ -1473,13 +1491,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
           onRemove={() => onRemoveClip(selClip, ripple)}
         />
       )}
-      {!selClip && detail.clips.length === 0 && (
-        <p className="mt-4 text-center text-xs text-muted"
-          data-testid="editor-empty">
-          This timeline is empty. Generate a video clip on the Storyboard,
-          then use “Send to timeline” — it'll land on the first video lane.
-        </p>
-      )}
+      </div>{/* /dock row */}
     </div>
   );
 }
@@ -1761,7 +1773,8 @@ function ClipInspector({ clip, tl, track, lane, active, busy, ripple, onClose, o
   const dur = (clip.out_frame - clip.in_frame)
     * clip.src_fps_den / clip.src_fps_num;
   return (
-    <div className="mt-3 rounded border border-teal/40 bg-card p-3"
+    <div className="w-72 shrink-0 overflow-y-auto overscroll-contain
+      max-h-[calc(100vh-200px)] rounded border border-teal/40 bg-card p-3"
       data-testid="clip-inspector">
       <div className="flex items-center gap-2">
         <span className="text-xs font-semibold text-teal">Selected clip</span>
@@ -1985,6 +1998,17 @@ function FadeSection({ clip, tl, busy, onRun }: {
 
 const XF_CURVES = ["equal_power", "linear", "s_curve", "exponential"];
 
+/** C1 — while a commit-bound control holds focus, the busy flip from
+ * its own commit must not disable (and thus blur) it mid-edit. Other
+ * controls still disable normally during the commit. */
+function useFocusSafe<T extends HTMLElement>(disabled: boolean) {
+  const ref = useRef<T>(null);
+  return {
+    ref,
+    disabled: disabled && document.activeElement !== ref.current,
+  };
+}
+
 /** Whole-number frame input for crossfade boundaries — same commit-
  * on-Enter/blur pattern as the automation inputs. */
 function XfNum({ value, min, label, disabled, onCommit }: {
@@ -1993,6 +2017,7 @@ function XfNum({ value, min, label, disabled, onCommit }: {
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [err, setErr] = useState(false);
+  const fs = useFocusSafe<HTMLInputElement>(disabled);
   const apply = () => {
     if (draft === null) return;
     const n = Number(draft);
@@ -2003,7 +2028,7 @@ function XfNum({ value, min, label, disabled, onCommit }: {
   };
   return (
     <input type="number" step={1} min={min} value={draft ?? value}
-      disabled={disabled} aria-label={label}
+      ref={fs.ref} disabled={fs.disabled} aria-label={label}
       title={`${label} — whole frames, Enter commits`}
       onChange={(e) => setDraft(e.target.value)}
       onKeyDown={(e) => {
@@ -2029,6 +2054,7 @@ function CrossfadeSection({ clip, tl, lane, busy, locked, onRun }: {
   const label = (c: TimelineClip) => c.source_sha256.slice(0, 10);
   const [newCurve, setNewCurve] = useState("equal_power");
   const [newFrames, setNewFrames] = useState(12);
+  const curveFs = useFocusSafe<HTMLSelectElement>(busy);
   if (xf) {
     const outC = tl.clips.find((c) => c.id === xf.out_clip_id);
     const inC = tl.clips.find((c) => c.id === xf.in_clip_id);
@@ -2063,7 +2089,8 @@ function CrossfadeSection({ clip, tl, lane, busy, locked, onRun }: {
           <div className="flex flex-wrap items-center gap-1.5">
             <label className="text-faint">shape</label>
             <select aria-label="Crossfade curve"
-              value={xf.curve} disabled={busy}
+              ref={curveFs.ref}
+              value={xf.curve} disabled={curveFs.disabled}
               onChange={(e) => apply({ curve: e.target.value })}
               title="Blend shape — equal power keeps loudness steady; linear is a straight ramp"
               className="rounded border border-line bg-panel px-1 py-0.5">
@@ -2188,6 +2215,7 @@ function AutoPosInput({ value, min, max, occupied, disabled, label,
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const fs = useFocusSafe<HTMLInputElement>(disabled);
   const apply = () => {
     if (draft === null) return;
     const n = Number(draft);
@@ -2200,7 +2228,7 @@ function AutoPosInput({ value, min, max, occupied, disabled, label,
     <span className="flex flex-col">
       <input
         type="number" step={1} min={min} max={max}
-        value={draft ?? value} disabled={disabled}
+        value={draft ?? value} ref={fs.ref} disabled={fs.disabled}
         aria-label={label}
         title={`${label} — whole frame number, Enter commits`}
         onChange={(e) => setDraft(e.target.value)}
@@ -2224,6 +2252,7 @@ function AutoGainInput({ value, disabled, label, onCommit }: {
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const fs = useFocusSafe<HTMLInputElement>(disabled);
   const apply = () => {
     if (draft === null) return;
     const n = Number(draft);
@@ -2240,7 +2269,7 @@ function AutoGainInput({ value, disabled, label, onCommit }: {
     <span className="flex flex-col">
       <input
         type="number" step={0.5} min={GAIN_DB_MIN} max={GAIN_DB_MAX}
-        value={draft ?? value} disabled={disabled}
+        value={draft ?? value} ref={fs.ref} disabled={fs.disabled}
         aria-label={label}
         title={`${label} — decibels, ${GAIN_DB_MIN} to +${GAIN_DB_MAX}, Enter commits`}
         onChange={(e) => setDraft(e.target.value)}
@@ -2353,6 +2382,7 @@ function TrackAutomationSection({ track, tl, busy, playheadF, onRun }: {
       try { return JSON.parse(track.automation_json || "[]"); }
       catch { return []; }
     }, [track.automation_json]);
+  const interpFs = useFocusSafe<HTMLSelectElement>(busy);
   const commit = (next: AutoPt[], interp?: string) => void onRun(
     "timeline.track.automation", {
       timeline_id: tl.id, track_id: track.id,
@@ -2370,8 +2400,9 @@ function TrackAutomationSection({ track, tl, busy, playheadF, onRun }: {
         <span className="text-muted">Track automation
           {pts.length > 0 ? ` · ${pts.length} pts` : ""}</span>
         <select aria-label="Track automation interpolation"
+          ref={interpFs.ref}
           value={track.automation_interp ?? "linear"}
-          disabled={busy}
+          disabled={interpFs.disabled}
           onChange={(e) => commit(
             pts.map((p) => ({ ...p, at: p.at_tl_frames })),
             e.target.value)}
@@ -2402,6 +2433,7 @@ function AutomationSection({ clip, tl, busy, onRun }: {
       catch { return []; }
     }, [clip.automation_json]);
   const occ = Math.ceil(clipTlExtent(clip, tl));
+  const interpFs = useFocusSafe<HTMLSelectElement>(busy);
   const commit = (next: AutoPt[], interp?: string) => void onRun(
     "timeline.clip.automation", {
       timeline_id: tl.id, clip_id: clip.id,
@@ -2413,8 +2445,9 @@ function AutomationSection({ clip, tl, busy, onRun }: {
       <span className="text-muted">Gain automation
         {pts.length > 0 ? ` · ${pts.length} pts` : ""}</span>
       <select aria-label="Automation interpolation"
+        ref={interpFs.ref}
         value={clip.automation_interp ?? "linear"}
-        disabled={busy}
+        disabled={interpFs.disabled}
         onChange={(e) => commit(
           pts.map((p) => ({ ...p, at: p.at_frames })),
           e.target.value)}

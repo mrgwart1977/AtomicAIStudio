@@ -639,6 +639,60 @@ async function main() {
   pts = await laneAuto();
   if (pts.length !== 3) throw new Error("undo chain broken");
   ok("undo/redo through automation commits verified");
+  // C2/C4 — editor node + focus survive a successful commit (the old
+  // remount bug wiped both; regression-guarded, reopen NOT allowed)
+  await evalJs(`(() => {
+    const sec = document.querySelector('[data-testid="track-auto-${a2.id}"]');
+    const inp = sec.querySelector(
+      'input[aria-label="Keyframe 1 gain in dB"]');
+    window.__secNode = sec; window.__inpNode = inp;
+    inp.focus();
+    const set = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, "value").set;
+    set.call(inp, "-12");
+    inp.dispatchEvent(new Event("input", { bubbles: true }));
+    inp.dispatchEvent(new KeyboardEvent("keydown",
+      { key: "Enter", bubbles: true, cancelable: true }));
+    return true; })()`);
+  await sleep(900);
+  const surv = await evalJs(
+    `({ connected: window.__secNode.isConnected,
+        focused: document.activeElement === window.__inpNode })`);
+  if (!surv.connected)
+    throw new Error("editor remounted on commit — regression");
+  pts = await laneAuto();
+  if (Math.abs(pts[0].gain_db + 12) > 0.01)
+    throw new Error("gain edit did not land");
+  ok(`commit keeps editor mounted (no remount); focus survives=${surv.focused}`);
+  await setNum(GAIN1, "0", ensureAuto); await sleep(800);          // restore
+  // C2 — stale-revision protection: a commit pinned to an old
+  // project revision must be refused (409), automation unchanged
+  const staleProj = await api("GET", `/api/projects/${p.id}`);
+  const stalePts = JSON.stringify((await laneAuto()));
+  const stale = await api("POST",
+    `/api/projects/${p.id}/commands/commit`, {
+      command_type: "timeline.track.automation",
+      payload: { timeline_id: tl.id, track_id: a2.id,
+                 points: [], interp: "linear" },
+      scope: "project", origin: "audit",
+      expected_revision: staleProj.revision - 3,
+      idempotency_key: `n3c-stale-${Date.now()}` }, 409);
+  if (JSON.stringify(await laneAuto()) !== stalePts)
+    throw new Error("stale-revision commit mutated automation");
+  ok(`stale revision refused: "${(stale.detail || "").slice(0, 70)}"`);
+  // C2 — project isolation: committing against ANOTHER project with
+  // this timeline's id must not reach it (project-scoped lookup)
+  const p2 = await api("POST", "/api/projects",
+    { name: `N3C-ISO-${Date.now()}` }, 201);
+  const iso = await api("POST",
+    `/api/projects/${p2.id}/commands/commit`, {
+      command_type: "timeline.track.automation",
+      payload: { timeline_id: tl.id, track_id: a2.id,
+                 points: [], interp: "linear" },
+      scope: "project", origin: "audit",
+      expected_revision: (await api("GET", `/api/projects/${p2.id}`)).revision,
+      idempotency_key: `n3c-iso-${Date.now()}` }, 404);
+  ok(`cross-project commit refused (${iso.detail ? "404" : "no leak"})`);
   // interpolation switch — linear → step → linear (restore)
   const setSel = async (sel, val, reopen) => {
     for (let a = 0; a < 2; a++) {
@@ -724,12 +778,65 @@ async function main() {
   // precise duration edit: 24 → 40 → commit verified
   const XFLEN = '[data-testid="xf-section"] input[aria-label="Crossfade length in frames"]';
   await ensureInspector();
+  // C4 — inspector must survive the commit (no remount on refresh)
+  await evalJs(`(() => { window.__inspNode =
+    document.querySelector('[data-testid="clip-inspector"]');
+    return !!window.__inspNode; })()`);
   await setNum(XFLEN, "40", ensureInspector); await sleep(900);
   cd = await detail(p.id, tl.id);
   if (cd.crossfades[0].tl_frames !== 40 || !cd.crossfades[0].satisfied)
     throw new Error("xf length edit failed: " +
                     JSON.stringify(cd.crossfades[0]));
-  ok("xf duration edited via numeric entry — 24f→40f committed");
+  const inspAlive = await evalJs(
+    `window.__inspNode && window.__inspNode.isConnected === true`);
+  if (!inspAlive)
+    throw new Error("inspector remounted on xf commit — regression");
+  ok("xf duration edited via numeric entry — 24f→40f committed " +
+     "(inspector stayed mounted)");
+  // C3 — one xf edit = one undo step: undo → 24, redo → 40
+  await evalJs(`document.querySelector('[data-testid="undo-btn"]').click()`);
+  await sleep(900);
+  cd = await detail(p.id, tl.id);
+  if (cd.crossfades[0].tl_frames !== 24)
+    throw new Error("xf undo did not restore 24f: " +
+                    JSON.stringify(cd.crossfades[0]));
+  await evalJs(`document.querySelector('[data-testid="redo-btn"]').click()`);
+  await sleep(900);
+  cd = await detail(p.id, tl.id);
+  if (cd.crossfades[0].tl_frames !== 40)
+    throw new Error("xf redo did not re-apply 40f");
+  ok("xf edit is a single undo/redo step (24↔40)");
+  // C3 — preview parity: the edited xf must shape the preview render
+  // the same way the export path will (shared scheduleClip path).
+  // 550Hz in-leg ramps over the xf window — with xf=40f it is still
+  // ramping at 4.45–4.55s; with xf=24f restored it is at full gain.
+  const xfMag = async () => evalJs(`(async () => {
+    const h = window.__n2fPreview;
+    const detRes = await fetch("${API}/api/projects/" +
+      ${JSON.stringify(p.id)} + "/timelines/" + ${JSON.stringify(tl.id)},
+      {headers:{"X-Atomic-Token":${JSON.stringify(TOKEN)}}});
+    const det = await detRes.json();
+    const plan = h.buildPreviewPlan(det);
+    const off = new OfflineAudioContext(2, 9600, 48000);
+    const byAsset = new Map(); const buffers = new Map();
+    for (const c of plan.clips) {
+      if (!byAsset.has(c.assetId)) {
+        const res = await fetch("${API}/api/projects/" +
+          ${JSON.stringify(p.id)} + "/assets/" + c.assetId + "/file",
+          {headers:{"X-Atomic-Token":${JSON.stringify(TOKEN)}}});
+        byAsset.set(c.assetId,
+          await off.decodeAudioData(await res.arrayBuffer()));
+      }
+      buffers.set(c.clipId, byAsset.get(c.assetId));
+    }
+    const buf = await h.renderPlanOffline(
+      plan, buffers, 0.2, 48000, 4.4, 0.2);
+    const ch = buf.getChannelData(0);
+    let a = 0;
+    for (let i = 2400; i < 9600; i += 4)
+      a += ch[i] * Math.sin(2 * Math.PI * 550 * i / 48000);
+    return Math.abs(a); })()`);
+  const mag40 = await xfMag();
   // insufficient handles → backend rejects, error surfaces, xf unchanged
   await setNum(XFLEN, "4000", ensureInspector); await sleep(900);
   cd = await detail(p.id, tl.id);
@@ -756,6 +863,38 @@ async function main() {
       cd.crossfades[0].curve !== "equal_power")
     throw new Error("xf restore failed: " + JSON.stringify(cd.crossfades[0]));
   ok("xf curve select commits; restored to 24f equal_power for parity");
+  // preview parity: restored 24f ramp ended at 4.4s → in-leg at full
+  // gain in [4.45,4.55]; the 40f edit was still ramping → lower energy
+  const mag24 = await xfMag();
+  if (!(mag24 > mag40 * 1.15))
+    throw new Error(`xf preview parity off — ` +
+                    `24f render ${mag24|0} vs 40f ${mag40|0}`);
+  ok(`xf preview parity — in-leg energy tracks the curve ` +
+     `(40f=${mag40|0} → 24f=${mag24|0})`);
+  // C1 — focusing inspector numeric inputs must NOT displace the
+  // timeline: the inspector is docked right of the timeline, so no
+  // scrollport needs to move to reveal it (at this window size).
+  const displace = await evalJs(`(() => {
+    const sc = document.querySelector('[data-testid="timeline-scroll"]');
+    const main = (() => { let e = sc.parentElement;
+      while (e && getComputedStyle(e).overflowY === "visible")
+        e = e.parentElement; return e; })();
+    const st0 = main ? main.scrollTop : 0;
+    const inp = document.querySelector(
+      '[data-testid="clip-inspector"] input[aria-label="Trim in frame"]')
+      || document.querySelector('[data-testid="clip-inspector"] input');
+    inp.focus();
+    inp.dispatchEvent(new Event("focusin", { bubbles: true }));
+    const rr = document.querySelector('[data-testid="timeline-ruler"]')
+      .getBoundingClientRect();
+    return { mainTop: main ? main.scrollTop : 0, was: st0,
+             rulerTop: Math.round(rr.top),
+             rulerVisible: rr.top >= 0 && rr.bottom <= innerHeight }; })()`);
+  if (displace.mainTop !== displace.was || !displace.rulerVisible)
+    throw new Error("inspector focus displaced the timeline: " +
+                    JSON.stringify(displace));
+  ok(`inspector focus → no page scroll; ruler still in viewport ` +
+     `(top=${displace.rulerTop})`);
 
   /* ---------- 7. navigation — edge scroll, anchored zoom, keys ---- */
   step("7) navigation — edge auto-scroll, playhead-anchored zoom, keyboard pan");
@@ -812,6 +951,19 @@ async function main() {
   if (x0 === null || Math.abs(x1 - x0) > 8 || Math.abs(x2 - x0) > 8)
     throw new Error(`zoom anchor drifted: ${x0}→${x1}→${x2}`);
   ok(`anchored zoom — playhead screen-x ${x0|0}→${x1|0}→${x2|0} (±8px)`);
+  // C5 — preview transport: play → playing state → stop
+  await evalJs(`document.querySelector('[data-testid="preview-play"]').click()`);
+  await sleep(900);
+  const pv = await engStats();
+  if (pv.state !== "playing")
+    throw new Error("preview did not enter playing state: " +
+                    JSON.stringify(pv));
+  await evalJs(`document.querySelector('[data-testid="preview-stop"]').click()`);
+  await sleep(300);
+  const pv2 = await engStats();
+  if (pv2.state === "playing")
+    throw new Error("preview stop did not halt playback");
+  ok("preview transport — play→playing→stop verified");
   // PageDown/PageUp pan one visible span
   const scA = await scrollEl();
   await evalJs(`(() => {
@@ -871,19 +1023,23 @@ async function main() {
   if (foc.err || !foc.focused || !foc.tabbable)
     throw new Error("keyframe row not keyboard-focusable: " + JSON.stringify(foc));
   ok("keyframe rows are tabbable + focusable (no pointer-only controls)");
-  // narrow window: ruler still unobstructed
-  await send("Emulation.setDeviceMetricsOverride",
-    { width: 760, height: 640, deviceScaleFactor: 1.5, mobile: false });
-  await sleep(400);
-  await bringRulerIntoView();
-  const probes8 = await rulerClear();
-  const bad8 = probes8.filter(q => q.aside || !q.ruler);
+  // C1/C5 — ruler unobstructed at 100/125/150/200% display scaling,
+  // both normal and narrow widths
+  for (const [w, h, dsf] of [[1100, 800, 1.0], [900, 700, 1.25],
+                             [760, 640, 1.5], [700, 600, 2.0]]) {
+    await send("Emulation.setDeviceMetricsOverride",
+      { width: w, height: h, deviceScaleFactor: dsf, mobile: false });
+    await sleep(400);
+    await bringRulerIntoView();
+    const pr = await rulerClear();
+    const bad = pr.filter(q => q.aside || !q.ruler);
+    if (bad.length)
+      throw new Error(`ruler obstructed at ${w}px@${dsf}x: ` +
+                      JSON.stringify(bad.slice(0, 3)));
+    ok(`${w}px@${dsf}x — ruler probes clean`);
+  }
   await send("Emulation.clearDeviceMetricsOverride");
   await sleep(300);
-  if (bad8.length)
-    throw new Error("ruler obstructed at 760px@1.5x: " +
-                    JSON.stringify(bad8.slice(0, 3)));
-  ok("760px@1.5x — ruler probes clean (narrow-window + high-DPI)");
 
   /* ---------- 9. perf — dense automation, virtualization, WIDE ---- */
   step("9) perf — dense automation + 120-clip timeline, bounded DOM");
@@ -1039,6 +1195,77 @@ async function main() {
     throw new Error("backend orphaned after close");
   ok("clean close — no orphan app/backend processes");
 
+  /* ---------- 11. restart persistence + existing-project reopen --- */
+  step("11) restart persistence + pre-existing project reopen");
+  const env = { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
+    `--remote-debugging-port=${PORT}` };
+  const child = spawn(EXE, [], { env, detached: true, stdio: "ignore" });
+  child.unref();
+  ws = null;
+  await attachWsWait(60000);
+  await creds();
+  // the fresh backend may rebind — verify captured API answers
+  let apiUp = false;
+  for (let i = 0; i < 30 && !apiUp; i++) {
+    try {
+      const r = await fetch(`${API}/api/projects`,
+        { headers: { "X-Atomic-Token": TOKEN } });
+      if (r.status < 500) { apiUp = true; break; }
+    } catch { /* backend still starting */ }
+    API = null; TOKEN = null;
+    await creds();
+  }
+  if (!apiUp) throw new Error("backend unreachable after relaunch");
+  await navTo(p.name);
+  await sleep(800);
+  let persist = null;
+  for (let i = 0; i < 20; i++) {
+    try { persist = await detail(p.id, tl.id); break; }
+    catch { await sleep(1000); }
+  }
+  if (!persist) throw new Error("timeline detail unreachable post-restart");
+  const autoA = JSON.parse(
+    (persist.clips.find(c => c.source_asset_id === aD.id) || {})
+      .automation_json || "[]");
+  const autoT = persist.tracks.find(t => t.id === a2.id);
+  const xfOk = persist.crossfades.length === 1 &&
+    persist.crossfades[0].satisfied &&
+    persist.crossfades[0].tl_frames === 24 &&
+    persist.crossfades[0].curve === "equal_power";
+  if (persist.clips.length !== 5 || !xfOk || autoA.length !== 3)
+    throw new Error("restart persistence check failed: " +
+      `clips=${persist.clips.length} xf=${xfOk} auto=${autoA.length}`);
+  ok(`persisted — 5 clips, xf 24f equal_power satisfied, ` +
+     `clip auto ${autoA.length} pts, lane auto ` +
+     `${JSON.parse(autoT.automation_json || "[]").length} pts, ` +
+     `rev ${persist.revision}`);
+  // engine reloads the persisted detail cleanly
+  await evalJs(`(async () => {
+    const h = window.__n2fPreview;
+    await h.engineRef.current.load(
+      ${JSON.stringify(persist)}, ${JSON.stringify(p.id)});
+  })()`);
+  const rel = await engStats();
+  if (!rel || rel.state !== "ready")
+    throw new Error("engine not ready after restart");
+  ok("post-restart engine ready");
+  // C5 — a pre-existing project (e.g. the N2 fixture) still opens
+  const all = await api("GET", "/api/projects?limit=50");
+  const old = (all.items || []).find(x => !/^N3C-/.test(x.name));
+  if (old) {
+    const tls = await api("GET", `/api/projects/${old.id}/timelines`);
+    ok(`pre-existing project "${old.name}" opens — ` +
+       `${tls.length} timeline(s) intact`);
+  } else {
+    ok("no pre-existing project in DB (fresh install) — skip");
+  }
+  execFileSync("powershell", ["-NoProfile", "-Command",
+    `(Get-Process atomic-dream-engine -ErrorAction SilentlyContinue | ` +
+    `Select-Object -First 1).CloseMainWindow() | Out-Null`]);
+  await sleep(3500);
+  if (left("atomic-backend.exe"))
+    throw new Error("backend orphaned after restart close");
+  ok("clean close after relaunch — no orphans");
 
   fs.writeFileSync(`${OUT}\\n3c-acceptance.txt`, LOG.join("\n"));
   console.log(`\nN3-C ACCEPTANCE: PASS ${STEP}/${STEP} steps — ${OUT}`);
