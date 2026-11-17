@@ -452,7 +452,8 @@ def composite_canvas(plan: dict, profile: str,
 
 def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                          canvas: dict, crf: int, out_path: str,
-                         encoder: str = "libx264") -> list[str]:
+                         encoder: str = "libx264",
+                         script_path: str | None = None):
     """One-pass multitrack render. `paths` maps clip_id -> resolved
     source file (pinned-sha CAS path). Graph:
 
@@ -462,6 +463,17 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                 [o_{k-1}][c{k}]overlay=... [v]
       audio:    anullsrc base + per-clip atrim→adelay → amix
                 (duration=first, normalize=0) → alimiter [a]
+
+    N3-D argv bound: with ``script_path`` the graph is returned for the
+    caller to write to the job work dir and ``-/filter_complex`` —
+    FFmpeg ≥7 reads an option's argument from a file (the
+    ``-filter_complex_script`` option itself was removed in 8.0) —
+    is used instead of an inline graph (Windows' ~32k command-line
+    limit fails ~240-clip timelines otherwise). Inputs are deduplicated
+    by resolved path — N clips on one asset produce ONE ``-i`` plus
+    ``split``/``asplit`` fan-out in the graph — so input count is
+    bounded by unique sources, not clip count. Returns the argv list,
+    or ``(argv, script_text)`` when ``script_path`` is set.
     """
     W, H = canvas["width"], canvas["height"]
     fps = f"{canvas['fps_num']}/{canvas['fps_den']}"
@@ -469,17 +481,51 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                                             canvas["fps_den"])
     dur_s = _flt(float(dur))
     clips = plan["clips"]
-    argv = [ffmpeg, "-y", "-hide_banner", "-v", "error"]
+    a_inputs = plan.get("audio_clips") or []
+    # dedupe -i by resolved path; count stream consumers per input
+    need: dict[str, dict[str, int]] = {}
     for c in clips:
-        argv += ["-i", paths[c["clip_id"]]]
-    parts = [
-        f"color=c=black:s={W}x{H}:r={fps}:d={dur_s},format=yuv420p[base]"]
+        need.setdefault(paths[c["clip_id"]], {"v": 0, "a": 0})["v"] += 1
+    for a in a_inputs:
+        need.setdefault(paths[a["clip_id"]], {"v": 0, "a": 0})["a"] += 1
+    inputs = list(need)
+    uidx = {p: i for i, p in enumerate(inputs)}
+    argv = [ffmpeg, "-y", "-hide_banner", "-v", "error"]
+    for p in inputs:
+        argv += ["-i", p]
+    vc: dict[str, int] = {p: 0 for p in inputs}
+    ac: dict[str, int] = {p: 0 for p in inputs}
+    parts: list[str] = []
+    for p in inputs:
+        i, u = uidx[p], need[p]
+        if u["v"] > 1:
+            parts.append(f"[{i}:v]split={u['v']}" + "".join(
+                f"[sv{i}_{k}]" for k in range(u["v"])))
+        if u["a"] > 1:
+            parts.append(f"[{i}:a]asplit={u['a']}" + "".join(
+                f"[sa{i}_{k}]" for k in range(u["a"])))
+
+    def vspec(p: str) -> str:
+        if need[p]["v"] == 1:
+            return f"{uidx[p]}:v"
+        k = vc[p]; vc[p] += 1
+        return f"sv{uidx[p]}_{k}"
+
+    def aspec(p: str) -> str:
+        if need[p]["a"] == 1:
+            return f"{uidx[p]}:a"
+        k = ac[p]; ac[p] += 1
+        return f"sa{uidx[p]}_{k}"
+
+    parts.append(
+        f"color=c=black:s={W}x{H}:r={fps}:d={dur_s},format=yuv420p[base]")
     cur = "base"
     for i, c in enumerate(clips):
         in_s = float(c["in_s"])
         end_s = float(c["in_s"] + c["dur_s"])
         parts.append(
-            f"[{i}:v]trim=start={_flt(in_s)}:end={_flt(end_s)},"
+            f"[{vspec(paths[c['clip_id']])}]trim="
+            f"start={_flt(in_s)}:end={_flt(end_s)},"
             f"setpts=PTS-STARTPTS,"
             f"fps={fps},"
             f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease"
@@ -498,25 +544,18 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
     # then amix duration=first against a full-length silent base.
     a_inputs = plan.get("audio_clips") or []
     tl_fps = Fraction(plan["fps_num"], plan["fps_den"])
-    di = 0
-    idx = {c["clip_id"]: i for i, c in enumerate(clips)}
     for a in a_inputs:
-        if not a["embedded"]:
-            a["input_idx"] = len(clips) + di
-            di += 1
-            argv += ["-i", paths[a["clip_id"]]]
-        else:
-            a["input_idx"] = idx[a["clip_id"]]
+        a["stream"] = aspec(paths[a["clip_id"]])
     if a_inputs:
         a_parts = [f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
                    f"atrim=0:{dur_s}[abase]"]
         mix_in = "[abase]"
         for j, a in enumerate(a_inputs):
             if a["embedded"]:
-                proc = _embedded_chain(a["input_idx"], a, tl_fps)
+                proc = _embedded_chain(a["stream"], a, tl_fps)
                 lead = round(float(a["tl_start_s"]) * AUDIO_RATE)
             else:
-                proc = _lane_chain(a["input_idx"], a, tl_fps)
+                proc = _lane_chain(a["stream"], a, tl_fps)
                 lead = _q((a["start_tl"] - a["head_tl"])
                           * AUDIO_RATE / tl_fps)
             if lead:
@@ -540,7 +579,11 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             f"alimiter=limit=0.95:attack=5:release=50:"
             f"level=0:latency=1[a]")
         parts += a_parts
-    argv += ["-filter_complex", ";".join(parts)]
+    graph = ";".join(parts)
+    if script_path is not None:
+        argv += ["-/filter_complex", script_path]
+    else:
+        argv += ["-filter_complex", graph]
     argv += ["-map", f"[{cur}]"]
     if a_inputs:
         argv += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k",
@@ -548,6 +591,8 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
     argv += ["-c:v", encoder, "-preset", "fast", "-crf", str(crf),
              "-pix_fmt", "yuv420p", "-movflags", "+faststart",
              "-t", dur_s, out_path]
+    if script_path is not None:
+        return argv, graph
     return argv
 
 
@@ -555,7 +600,7 @@ def _lin(db: float) -> float:
     return 10.0 ** (db / 20.0)
 
 
-def _embedded_chain(k: int, a: dict, tl_fps: Fraction) -> str:
+def _embedded_chain(spec: str, a: dict, tl_fps: Fraction) -> str:
     """Video-embedded audio: seconds-based trim (the clip's source
     units are video frames), resample, stereo, track gain —
     fades/clip-automation/crossfades are audio-lane-only by domain
@@ -565,7 +610,7 @@ def _embedded_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     from stream start = the clip's timeline start."""
     in_s = float(a["in_s"])
     end_s = float(a["in_s"] + a["dur_s"])
-    chain = (f"[{k}:a]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
+    chain = (f"[{spec}]atrim=start={_flt(in_s)}:end={_flt(end_s)},"
              f"aresample={AUDIO_RATE},aformat=channel_layouts=stereo")
     tpts = a.get("track_auto") or []
     if tpts:
@@ -582,7 +627,7 @@ def _embedded_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     return chain + ",asetpts=PTS-STARTPTS"
 
 
-def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
+def _lane_chain(spec: str, a: dict, tl_fps: Fraction) -> str:
     """Dedicated-lane audio — the full N2-C/N2-D gain contract in one
     deterministic order, all envelope anchors in stream-local source
     units at the clip's native rate (resample LAST):
@@ -603,7 +648,7 @@ def _lane_chain(k: int, a: dict, tl_fps: Fraction) -> str:
     Everything multiplies the program signal exactly once; the dB sum
     lives in a single pow(10,x/20) so nothing double-applies."""
     rate = a["rate"]
-    chain = (f"[{k}:a]atrim=start_sample={a['seg_start_src']}"
+    chain = (f"[{spec}]atrim=start_sample={a['seg_start_src']}"
              f":end_sample={a['seg_end_src']},"
              "asetpts=PTS-STARTPTS,"
              "aformat=channel_layouts=stereo")
@@ -703,7 +748,8 @@ def concat_list(paths: list[str]) -> str:
 
 def build_encode_argv(ffmpeg: str, segments: list[dict],
                       target: dict, crf: int, out_path: str,
-                      encoder: str = "libx264") -> list[str]:
+                      encoder: str = "libx264",
+                      script_path: str | None = None):
     """One-pass filter_complex export. Each segment:
       [i:v] trim→setpts→scale(fit)→pad→setsar→fps  [i:a|anull] atrim→aformat
     then concat v=1 a=(0|1).
@@ -711,34 +757,75 @@ def build_encode_argv(ffmpeg: str, segments: list[dict],
     `segments` items: {path, in_s, dur_s, has_audio}. Trims arrive as
     SECONDS computed from exact source-frame rationals — trim filter
     takes start/end times so the cut is frame-precise.
+
+    N3-D argv bound: ``-i`` inputs are deduplicated by resolved path —
+    segments split from one source share ONE input and fan out via
+    split/asplit, so input count is bounded by unique sources. With
+    ``script_path`` the graph is returned for the caller to write to
+    the job work dir and ``-/filter_complex`` replaces the inline
+    graph (Windows' ~32k command-line limit fails large timelines
+    otherwise; ``-filter_complex_script`` was removed in FFmpeg 8.0).
+    Remaining bound: segments without audio still add one anullsrc
+    lavfi input each — bounded by the silent-segment count.
+    Returns the argv list, or ``(argv, script_text)`` when
+    ``script_path`` is set.
     """
     n = len(segments)
     any_audio = any(s["has_audio"] for s in segments)
-    argv = [ffmpeg, "-y", "-hide_banner", "-v", "error"]
+    need: dict[str, dict[str, int]] = {}
     for s in segments:
-        argv += ["-i", s["path"]]
-    silent_inputs: dict[int, int] = {}  # segment idx -> input idx
+        u = need.setdefault(s["path"], {"v": 0, "a": 0})
+        u["v"] += 1
+        if s["has_audio"]:
+            u["a"] += 1
+    inputs = list(need)
+    uidx = {p: i for i, p in enumerate(inputs)}
+    argv = [ffmpeg, "-y", "-hide_banner", "-v", "error"]
+    for p in inputs:
+        argv += ["-i", p]
+    silent_inputs: dict[int, int] = {}  # segment idx -> lavfi input idx
     if any_audio:
         for i, s in enumerate(segments):
             if not s["has_audio"]:
-                idx = n + len(silent_inputs)
+                idx = len(inputs) + len(silent_inputs)
                 silent_inputs[i] = idx
                 argv += ["-f", "lavfi", "-t", _flt(s["dur_s"]),
                          "-i", "anullsrc=r=48000:cl=stereo"]
-    parts = []
+    vc: dict[str, int] = {p: 0 for p in inputs}
+    ac: dict[str, int] = {p: 0 for p in inputs}
+    parts: list[str] = []
+    for p in inputs:
+        i, u = uidx[p], need[p]
+        if u["v"] > 1:
+            parts.append(f"[{i}:v]split={u['v']}" + "".join(
+                f"[sv{i}_{k}]" for k in range(u["v"])))
+        if u["a"] > 1:
+            parts.append(f"[{i}:a]asplit={u['a']}" + "".join(
+                f"[sa{i}_{k}]" for k in range(u["a"])))
     for i, s in enumerate(segments):
+        p = s["path"]
+        u = need[p]
+        if u["v"] == 1:
+            v_in = f"{uidx[p]}:v"
+        else:
+            v_in = f"sv{uidx[p]}_{vc[p]}"; vc[p] += 1
         end = s["in_s"] + s["dur_s"]
         parts.append(
-            f"[{i}:v]trim=start={_flt(s['in_s'])}:end={_flt(end)},"
+            f"[{v_in}]trim=start={_flt(s['in_s'])}:end={_flt(end)},"
             f"setpts=PTS-STARTPTS,"
             f"scale=w={target['width']}:h={target['height']}:"
             f"force_original_aspect_ratio=decrease,"
             f"pad={target['width']}:{target['height']}:(ow-iw)/2:(oh-ih)/2,"
             f"setsar=1,fps={target['fps_num']}/{target['fps_den']}[v{i}]")
         if any_audio:
-            a_in = silent_inputs.get(i, i)
+            if i in silent_inputs:
+                a_in = f"{silent_inputs[i]}:a"
+            elif u["a"] == 1:
+                a_in = f"{uidx[p]}:a"
+            else:
+                a_in = f"sa{uidx[p]}_{ac[p]}"; ac[p] += 1
             parts.append(
-                f"[{a_in}:a]atrim=0:{_flt(s['dur_s'])},asetpts=PTS-STARTPTS,"
+                f"[{a_in}]atrim=0:{_flt(s['dur_s'])},asetpts=PTS-STARTPTS,"
                 f"aformat=sample_rates=48000:channel_layouts=stereo[a{i}]")
     if any_audio:
         pair = "".join(f"[v{i}][a{i}]" for i in range(n))
@@ -746,7 +833,11 @@ def build_encode_argv(ffmpeg: str, segments: list[dict],
     else:
         vin = "".join(f"[v{i}]" for i in range(n))
         parts.append(f"{vin}concat=n={n}:v=1:a=0[v]")
-    argv += ["-filter_complex", ";".join(parts)]
+    graph = ";".join(parts)
+    if script_path is not None:
+        argv += ["-/filter_complex", script_path]
+    else:
+        argv += ["-filter_complex", graph]
     argv += ["-map", "[v]"]
     if any_audio:
         argv += ["-map", "[a]"]
@@ -755,4 +846,6 @@ def build_encode_argv(ffmpeg: str, segments: list[dict],
     if any_audio:
         argv += ["-c:a", "aac", "-b:a", "160k"]
     argv += [out_path]
+    if script_path is not None:
+        return argv, graph
     return argv

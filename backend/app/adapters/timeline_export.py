@@ -17,6 +17,7 @@ asset through the job engine's `_register_asset`.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from fractions import Fraction
 from pathlib import Path
@@ -184,41 +185,72 @@ class TimelineExportAdapter:
             raise ValueError("ffmpeg is not resolvable")
 
         yield {"progress": 0.3, "stage": "rendering"}
-        if is_v2:
-            if not plan["clips"] and not plan["audio_clips"]:
-                raise ValueError(
-                    "no visible lane holds clips — nothing to composite")
-            target = tx.composite_canvas(plan, profile_name,
-                                         probe_by_clip)
-            enc = await asyncio.to_thread(
-                tx.h264_encoder, ffmpeg["path"], supervise.run)
-            clip_paths = {c["clip_id"]: str(p)
-                          for c, p in zip(clips, paths)}
-            argv = tx.build_composite_argv(
-                ffmpeg["path"], plan, clip_paths, target, crf,
-                str(out_path), encoder=enc)
-        elif path_kind == "copy":
-            list_path = work / f"{handle.job_id}-concat.txt"
-            list_path.write_text(tx.concat_list([str(p) for p in paths]),
-                                 encoding="utf-8")
-            argv = tx.build_copy_argv(ffmpeg["path"], str(list_path),
-                                      str(out_path))
-        else:
-            target = tx.resolve_profile(edl, profile_name)
-            enc = await asyncio.to_thread(
-                tx.h264_encoder, ffmpeg["path"], supervise.run)
-            segments = []
-            for clip, meta, p in zip(clips, probes, paths):
-                in_s, dur_s = self._seg_times(clip)
-                segments.append({"path": str(p), "in_s": in_s,
-                                 "dur_s": dur_s,
-                                 "has_audio": bool(meta.get("audio"))})
-            argv = tx.build_encode_argv(ffmpeg["path"], segments, target,
-                                        crf, str(out_path), encoder=enc)
+        # The filter graph travels in a file under the job work dir —
+        # never on the command line (Windows' ~32k argv limit fails
+        # large timelines) and never in a shared temp location.
+        script_path = work / f"{handle.job_id}-filter.txt"
+        # Each UNIQUE source also enters argv once per -i; CAS paths
+        # are ~130 chars, so >~250 distinct sources on one timeline
+        # would still overflow argv. Sources are hardlinked into the
+        # job dir as short aliases (same volume ⇒ free, ~40 chars) —
+        # bound ≈ ~750 unique sources; beyond that a staged submix
+        # render would be required (not implemented). Fallback to the
+        # absolute path when linking isn't possible.
+        alias: dict[str, str] = {}
 
-        r = await asyncio.to_thread(
-            supervise.run, argv, timeout_s=timeout_s,
-            cancel=handle.cancel_event)
+        def short_src(p: str) -> str:
+            if p not in alias:
+                link = work / f"in{len(alias)}{Path(p).suffix}"
+                try:
+                    os.link(p, link)
+                    alias[p] = str(link)
+                except OSError:
+                    alias[p] = p
+            return alias[p]
+        try:
+            if is_v2:
+                if not plan["clips"] and not plan["audio_clips"]:
+                    raise ValueError(
+                        "no visible lane holds clips — nothing to composite")
+                target = tx.composite_canvas(plan, profile_name,
+                                             probe_by_clip)
+                enc = await asyncio.to_thread(
+                    tx.h264_encoder, ffmpeg["path"], supervise.run)
+                clip_paths = {c["clip_id"]: short_src(str(p))
+                              for c, p in zip(clips, paths)}
+                argv, graph = tx.build_composite_argv(
+                    ffmpeg["path"], plan, clip_paths, target, crf,
+                    str(out_path), encoder=enc,
+                    script_path=str(script_path))
+                script_path.write_text(graph, encoding="utf-8")
+            elif path_kind == "copy":
+                list_path = work / f"{handle.job_id}-concat.txt"
+                list_path.write_text(tx.concat_list([str(p) for p in paths]),
+                                     encoding="utf-8")
+                argv = tx.build_copy_argv(ffmpeg["path"], str(list_path),
+                                          str(out_path))
+            else:
+                target = tx.resolve_profile(edl, profile_name)
+                enc = await asyncio.to_thread(
+                    tx.h264_encoder, ffmpeg["path"], supervise.run)
+                segments = []
+                for clip, meta, p in zip(clips, probes, paths):
+                    in_s, dur_s = self._seg_times(clip)
+                    segments.append({"path": short_src(str(p)),
+                                     "in_s": in_s, "dur_s": dur_s,
+                                     "has_audio": bool(meta.get("audio"))})
+                argv, graph = tx.build_encode_argv(
+                    ffmpeg["path"], segments, target, crf, str(out_path),
+                    encoder=enc, script_path=str(script_path))
+                script_path.write_text(graph, encoding="utf-8")
+            r = await asyncio.to_thread(
+                supervise.run, argv, timeout_s=timeout_s,
+                cancel=handle.cancel_event)
+        finally:
+            script_path.unlink(missing_ok=True)
+            for orig, link in alias.items():
+                if link != orig:
+                    Path(link).unlink(missing_ok=True)
         if r["cancelled"]:
             out_path.unlink(missing_ok=True)
             raise JobCancelled()

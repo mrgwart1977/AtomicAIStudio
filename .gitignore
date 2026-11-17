@@ -56,3 +56,5 @@ validation-reports/
 backend/.venv-ci-*/
 docs/n3b-evidence/media/
 docs/n3c-evidence/media/
+docs/n3d-evidence/media/
+docs/n3d-evidence/pre-n3-data/

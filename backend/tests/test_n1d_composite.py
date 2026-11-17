@@ -580,3 +580,108 @@ class TestRealComposite:
         assert meta["ok"]
         assert abs(meta["duration_s"] - 2.0) < 0.05  # 24f gap + 24f clip
         assert meta["frames"] == 48
+
+
+# ---------------- N3-D — argv bound + filter-script ----------------
+
+def test_composite_script_mode_bounded_and_deduped():
+    """N3-D: 500 clips on 4 sources must fit the Windows ~32k argv
+    bound — the graph travels via -/filter_complex from a job-dir
+    file and -i inputs dedupe to unique sources with split/asplit
+    fan-out. The pre-fix argv for this plan exceeded 400 KiB."""
+    clips = [_v2clip(f"c{i}", start=i * 24, extent=(24, 1))
+             for i in range(500)]
+    probes = {c["clip_id"]: {"audio": [{}]} for c in clips}
+    plan = tx.composite_plan(_v2(clips), probes)
+    canvas = tx.composite_canvas(plan, "720p", {})
+    paths = {c["clip_id"]: "/cas/" + "ab" * 32 + f"-{i % 4}"
+             for i, c in enumerate(clips)}
+    argv, script = tx.build_composite_argv(
+        "ff", plan, paths, canvas, 23, "/o.mp4",
+        script_path="/work/job-filter.txt")
+    assert "-/filter_complex" in argv
+    assert "/work/job-filter.txt" in argv
+    assert "-filter_complex" not in argv
+    # argv is now O(unique sources), not O(clips) — well under the
+    # Windows CreateProcess command-line bound.
+    assert sum(len(a) + 3 for a in argv) < 32766
+    assert argv.count("-i") == 4
+    # every source feeds ~125 video + 125 audio consumers via fan-out
+    assert "split=125" in script and "asplit=125" in script
+    assert "amix=inputs=501" in script and "alimiter" in script
+    # legacy call (no script_path) still returns inline-graph argv —
+    # and the graph text is identical either way.
+    a2 = tx.build_composite_argv("ff", plan, paths, canvas, 23, "/o.mp4")
+    assert a2[a2.index("-filter_complex") + 1] == script
+
+
+def test_composite_unique_sources_no_split():
+    """Distinct sources keep the pre-N3-D graph shape: one -i each,
+    no split nodes."""
+    clips = [_v2clip("a"), _v2clip("b", start=72)]
+    plan = tx.composite_plan(_v2(clips), {"a": {"audio": [{}]},
+                                          "b": {"audio": [{}]}})
+    canvas = tx.composite_canvas(plan, "720p", {})
+    argv, script = tx.build_composite_argv(
+        "ff", plan, {"a": "/cas/a", "b": "/cas/b"}, canvas, 23,
+        "/o.mp4", script_path="/w/f.txt")
+    assert argv.count("-i") == 2
+    assert "split=" not in script
+    assert "[0:v]trim" in script and "[1:v]trim" in script
+
+
+def test_encode_script_mode_dedupes_segments():
+    """Split fragments of one source share a single -i and fan out
+    through split/asplit instead of one input per segment."""
+    segs = [{"path": "/cas/one", "in_s": float(i), "dur_s": 1.0,
+             "has_audio": True} for i in range(300)]
+    target = {"width": 1280, "height": 720,
+              "fps_num": 30, "fps_den": 1}
+    argv, script = tx.build_encode_argv(
+        "ff", segs, target, 21, "/o.mp4", script_path="/w/f.txt")
+    assert argv.count("-i") == 1
+    assert "split=300" in script and "asplit=300" in script
+    assert sum(len(a) + 3 for a in argv) < 32766
+    a2 = tx.build_encode_argv("ff", segs, target, 21, "/o.mp4")
+    assert a2[a2.index("-filter_complex") + 1] == script
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_real_shared_source_dedupes_and_cleans_script(
+        client, dev_ffmpeg, tmp_path):
+    """The same asset placed twice renders through one -i plus split
+    fan-out; the job-dir filter script is removed on success."""
+    pid = make_project(client)["id"]
+    tl = _tl(client, pid)
+    v1 = next(x for x in _detail(client, pid, tl["id"])["tracks"]
+              if x["kind"] == "video")["id"]
+    src = _synth(dev_ffmpeg, tmp_path / "s.mp4", dur=1.0,
+                 size="160x120", rate=24, audio=True)
+    for name, start in (("s1", 0), ("s2", 24)):
+        a = _cas_video(client, pid, src, name)
+        _commit(client, pid, "timeline.clip.place",
+                {"timeline_id": tl["id"], "track_id": v1,
+                 "asset_id": a["id"], "start_frames": start})
+    p = _preview(client, pid, "timeline.export",
+                 {"timeline_id": tl["id"], "profile": "720p"})
+    rt = p["resolved_timeline"]
+    r = _commit(client, pid, "timeline.export",
+                {"timeline_id": tl["id"], "profile": "720p",
+                 "expected_timeline": {"id": tl["id"],
+                                      "revision": rt["revision"]},
+                 "expected_edl_sha": rt["edl_sha256"]})
+    job = wait_for_job(client, pid, r["job_id"], timeout=120)
+    assert job["status"] == "succeeded", job.get("error")
+    items = client.get(f"/api/projects/{pid}/assets").json()["items"]
+    out = next(x for x in items if x["origin"] == "rendered")
+    meta = engine.probe(Path(client.app.state.settings.data_dir)
+                        / out["uri"])
+    assert meta["ok"] and meta["codec"] == "h264"
+    assert abs(meta["duration_s"] - 2.0) < 0.05
+    assert meta["audio"]
+    # no filter script or source alias left behind in the job dir
+    d = Path(client.app.state.settings.data_dir) / "jobs" / str(pid)
+    leftovers = [x.name for x in d.glob(f"{r['job_id']}*")
+                 if x.name != r["job_id"]] if d.exists() else []
+    assert not [x for x in leftovers if "filter" in x
+                or x.startswith("in")]
