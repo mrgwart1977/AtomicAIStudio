@@ -1,0 +1,16 @@
+PASS backend http://127.0.0.1:49330 via installed app
+PASS health: backend 0.1.0 (0021 proven by planning persistence below)
+PASS 1 populated A1 project (screenplay + 2 scaffolded shots)
+PASS 2 shot planning persisted (follow_behind + 2-char targets + 24000/1001)
+PASS 3 all 10 follow modes accepted; invalid mode 422'd
+PASS 4 CAS image pinned to shot — media section + provenance on card
+PASS 5 thumbnail bound; media.missing empty for ready assets
+PASS 5b missing media flagged + recovered via assets.verify
+PASS 6 reorder + duplicate — planning carried to the copy
+PASS 6b bulk archive + per-shot undo — others untouched
+PASS 7 shot.update undo restored previous planning
+PASS 8 screenplay re-sync preserved manual shot planning
+PASS 8b timeline.create works alongside planning state
+PASS backend http://127.0.0.1:52251 via installed app
+PASS 9 restart persistence — planning + media links intact
+PASS 10 clean shutdown — no orphan backend

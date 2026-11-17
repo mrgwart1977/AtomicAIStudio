@@ -364,6 +364,9 @@ class Shot(Base):
     reference_set_id: Mapped[str | None] = mapped_column(ForeignKey("reference_sets.id", ondelete="SET NULL"), nullable=True)
     source_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
     continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # A2 — shot planning (camera/framing/notes); outside the A1
+    # scaffold-managed set, so screenplay sync never overwrites it.
+    planning_json: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

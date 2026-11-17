@@ -501,9 +501,43 @@ export interface Shot {
   reference_set_id: string | null;
   source_asset_id: string | null;
   continuity_json: Record<string, unknown>;
+  /** A2 — shot planning document (camera/framing/notes); never touched
+   * by screenplay sync. Shape validated by the backend. */
+  planning_json?: ShotPlanning;
   revision: number;
   created_at: string;
   updated_at: string;
+}
+
+/** A2 — validated shot-planning document (planning_json). */
+export interface ShotPlanning {
+  camera?: {
+    angle?: string;
+    movement?: string;
+    follow_mode?: string;
+    follow_params?: Record<string, unknown>;
+    follow_targets?: ({ kind: "character"; id: string }
+      | { kind: "label"; name: string })[];
+  };
+  framing?: string;
+  subject_placement?: string;
+  fps?: { num: number; den: number; frames?: number };
+  continuity_refs?: { kind: string; id: string }[];
+  lighting?: string;
+  action_notes?: string;
+  notes?: string;
+}
+
+/** A2 — one shot-scoped CAS association on the storyboard card. */
+export interface ShotMediaLink {
+  link_id: string;
+  asset_id: string;
+  role: string;
+  label: string;
+  position: number;
+  asset_name: string;
+  asset_status: string;
+  missing: boolean;
 }
 
 export interface StoryboardShot {
@@ -512,6 +546,9 @@ export interface StoryboardShot {
   cast: CastMember[];
   /** Scene-cast members without an own row in this shot — inherited state. */
   inherited: CastMember[];
+  /** A2 — CAS links + missing-media flags (values are link_ids, or the
+   * tags "thumbnail"/"source" for direct bindings). */
+  media?: { assets: ShotMediaLink[]; missing: string[] };
   /** C4-C — durable per-shot generation state (backend-authoritative). */
   generation?: {
     output_count: number;

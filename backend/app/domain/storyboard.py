@@ -31,6 +31,7 @@ from app.db.models import (
     EntityRevision,
     GenerationJob,
     Location,
+    ReferenceSet,
     Scene,
     SceneCharacter,
     Shot,
@@ -45,7 +46,187 @@ SHOT_TYPES = (
     "over_shoulder", "pov", "aerial", "insert", "two_shot", "group", "other",
 )
 
-ENTITY_ASSET_TYPES = ("character", "world", "location")
+# ---------- A2 — shot planning ----------
+# Camera-follow vocabulary is the spec's ten modes verbatim
+# (docs/handoff/CAMERA_FOLLOW_AND_TRACKING.md) — never invent aliases.
+CAMERA_FOLLOW_MODES = (
+    "follow_behind", "follow_front", "follow_side", "follow_shoulder",
+    "orbit_follow", "drone_follow", "vehicle_chase", "lead_and_follow",
+    "group_follow", "target_switch",
+)
+CAMERA_ANGLES = ("eye_level", "low", "high", "top_down", "dutch")
+CAMERA_MOVEMENTS = (
+    "static", "pan", "tilt", "dolly_in", "dolly_out",
+    "truck_left", "truck_right", "crane_up", "crane_down",
+    "handheld", "zoom",
+)
+SHOT_FRAMINGS = (
+    "extreme_close_up", "close_up", "medium_close_up", "medium",
+    "medium_wide", "wide", "extreme_wide",
+)
+SUBJECT_PLACEMENTS = (
+    "center", "left_third", "right_third",
+    "upper_third", "lower_third",
+)
+FOLLOW_TARGET_KINDS = ("character", "label")
+CONTINUITY_REF_KINDS = ("asset", "refset", "character", "location")
+_PLANNING_STR_MAX = 2000
+_PLANNING_PARAMS_MAX_KEYS = 40
+
+
+def parse_shot_planning(session: Session, project_id: str,
+                        planning: dict | None) -> dict:
+    """Validate + normalize a shot-planning document.
+
+    Raises ValueError (→ 422 at the command boundary) on unknown enum
+    values or cross-project references. Unknown keys are dropped —
+    the schema is explicit, never freeform."""
+    if planning is None:
+        return {}
+    if not isinstance(planning, dict):
+        raise ValueError("planning must be an object")
+    out: dict[str, Any] = {}
+    # explicit null clears the key; absence leaves it untouched
+    for key in ("camera", "framing", "subject_placement", "fps",
+                "continuity_refs", "lighting", "action_notes", "notes"):
+        if key in planning and planning[key] is None:
+            out[key] = None
+
+    def _str(key: str) -> None:
+        if key not in planning:
+            return
+        v = planning[key]
+        if v is None:
+            return  # already recorded as a clear marker
+        if not isinstance(v, str):
+            raise ValueError(f"planning.{key} must be a string")
+        v = v.strip()
+        if len(v) > _PLANNING_STR_MAX:
+            raise ValueError(f"planning.{key} exceeds {_PLANNING_STR_MAX} chars")
+        if v:
+            out[key] = v
+        else:
+            out[key] = None  # empty string clears too
+
+    cam = planning.get("camera")
+    if cam is not None:
+        if not isinstance(cam, dict):
+            raise ValueError("planning.camera must be an object")
+        c_out: dict[str, Any] = {}
+        for key, vocab in (("angle", CAMERA_ANGLES),
+                           ("movement", CAMERA_MOVEMENTS),
+                           ("follow_mode", CAMERA_FOLLOW_MODES)):
+            if key not in cam:
+                continue
+            v = cam[key]
+            if v is None:
+                c_out[key] = None  # explicit clear
+                continue
+            if v not in vocab:
+                raise ValueError(f"planning.camera.{key} '{v}' is not a "
+                                 f"supported value")
+            c_out[key] = v
+        params = cam.get("follow_params")
+        if params is not None:
+            if not isinstance(params, dict):
+                raise ValueError("planning.camera.follow_params must be an object")
+            if len(params) > _PLANNING_PARAMS_MAX_KEYS:
+                raise ValueError("planning.camera.follow_params too large")
+            clean: dict[str, Any] = {}
+            for k, v in params.items():
+                if not isinstance(k, str) or not k:
+                    raise ValueError("follow_params keys must be strings")
+                if not isinstance(v, (str, int, float, bool, list)) \
+                        or (isinstance(v, float) and (v != v or v in (float("inf"), float("-inf")))):
+                    raise ValueError(f"follow_params.{k} has an unsupported value")
+                clean[k[:80]] = v
+            if clean:
+                c_out["follow_params"] = clean
+            else:
+                c_out["follow_params"] = None  # {} clears
+        targets = cam.get("follow_targets")
+        if targets is not None:
+            if not isinstance(targets, list) or len(targets) > 16:
+                raise ValueError("planning.camera.follow_targets must be a list of ≤16")
+            t_out = []
+            for t in targets:
+                if not isinstance(t, dict) or t.get("kind") not in FOLLOW_TARGET_KINDS:
+                    raise ValueError("follow_targets entries need a kind "
+                                     f"of {FOLLOW_TARGET_KINDS}")
+                if t["kind"] == "character":
+                    c = session.get(Character, t.get("id") or "")
+                    if c is None or c.project_id != project_id:
+                        raise ValueError("follow target character not found "
+                                         "in this project")
+                    t_out.append({"kind": "character", "id": c.id})
+                else:
+                    name = str(t.get("name") or "").strip()
+                    if not name:
+                        raise ValueError("label follow target needs a name")
+                    t_out.append({"kind": "label", "name": name[:200]})
+            c_out["follow_targets"] = t_out if t_out else None  # [] clears
+        if c_out:
+            out["camera"] = c_out
+        elif "camera" not in out:
+            out["camera"] = None  # present-but-empty clears too
+
+    for key, vocab in (("framing", SHOT_FRAMINGS),
+                       ("subject_placement", SUBJECT_PLACEMENTS)):
+        v = planning.get(key)
+        if v is None:
+            continue
+        if v not in vocab:
+            raise ValueError(f"planning.{key} '{v}' is not a supported value")
+        out[key] = v
+
+    fps = planning.get("fps")
+    if fps is not None:
+        if not isinstance(fps, dict):
+            raise ValueError("planning.fps must be an object")
+        num, den = fps.get("num"), fps.get("den")
+        if not isinstance(num, int) or not isinstance(den, int) \
+                or num <= 0 or den <= 0:
+            raise ValueError("planning.fps needs positive integer num/den")
+        frames = fps.get("frames")
+        if frames is not None and (not isinstance(frames, int) or frames < 0):
+            raise ValueError("planning.fps.frames must be a non-negative int")
+        out["fps"] = {"num": num, "den": den,
+                      **({"frames": frames} if frames is not None else {})}
+
+    refs = planning.get("continuity_refs")
+    if refs is not None:
+        if not isinstance(refs, list) or len(refs) > 32:
+            raise ValueError("planning.continuity_refs must be a list of ≤32")
+        r_out = []
+        for r in refs:
+            if not isinstance(r, dict) or r.get("kind") not in CONTINUITY_REF_KINDS:
+                raise ValueError("continuity_refs entries need a kind of "
+                                 f"{CONTINUITY_REF_KINDS}")
+            rid = r.get("id") or ""
+            model = {"asset": Asset, "character": Character,
+                     "location": Location}.get(r["kind"])
+            if model is not None:
+                ent = session.get(model, rid)
+                if ent is None or ent.project_id != project_id:
+                    raise ValueError(f"continuity ref {r['kind']} not found "
+                                     "in this project")
+                r_out.append({"kind": r["kind"], "id": ent.id})
+            else:
+                rs = session.execute(
+                    select(ReferenceSet).where(ReferenceSet.id == rid)
+                ).scalar_one_or_none()
+                if rs is None or rs.project_id != project_id:
+                    raise ValueError("continuity ref refset not found "
+                                     "in this project")
+                r_out.append({"kind": "refset", "id": rs.id})
+        out["continuity_refs"] = r_out if r_out else None  # [] clears
+
+    for key in ("lighting", "action_notes", "notes"):
+        _str(key)
+    return out
+
+
+ENTITY_ASSET_TYPES = ("character", "world", "location", "shot")
 ENTITY_ASSET_ROLES = ("reference", "identity", "wardrobe", "voice", "style")
 # C3-D1 — roles whose asset must be a safely decodable image.
 ENTITY_ASSET_IMAGE_ROLES = ("reference", "identity", "wardrobe", "style")
@@ -55,7 +236,8 @@ REFERENCE_WEIGHT_MIN = 0.0
 REFERENCE_WEIGHT_MAX = 2.0
 _UNSET = object()  # distinguishes "key absent" from "explicit null"
 
-ENTITY_MODELS = {"character": Character, "world": World, "location": Location}
+ENTITY_MODELS = {"character": Character, "world": World,
+                 "location": Location, "shot": Shot}
 
 
 # ---------- fetch (project-scoped; KeyError on cross-project access) ----------
@@ -245,7 +427,8 @@ def _copy_shot(session: Session, src: Shot, scene_id: str, project_id: str, posi
         thumbnail_asset_id=src.thumbnail_asset_id,
         reference_set_id=src.reference_set_id,
         source_asset_id=src.source_asset_id,
-        continuity_json=dict(src.continuity_json or {}), revision=1,
+        continuity_json=dict(src.continuity_json or {}),
+        planning_json=dict(src.planning_json or {}), revision=1,
     )
     session.add(shot)
     session.flush()
@@ -431,7 +614,7 @@ def create_shot(session: Session, scene: Scene, *, title: str = "", shot_type: s
 
 def update_shot(session: Session, shot: Shot, *, fields: dict, location_id=...,
                 thumbnail_asset_id=..., continuity=None, command_id: str | None,
-                reference_set_id=..., source_asset_id=...,
+                reference_set_id=..., source_asset_id=..., planning=None,
                 change_summary: str = "Updated shot") -> dict:
     from app.db.models import Asset
     before = shot_snapshot(session, shot)
@@ -468,6 +651,29 @@ def update_shot(session: Session, shot: Shot, *, fields: dict, location_id=...,
         shot.source_asset_id = source_asset_id
     if continuity is not None:
         shot.continuity_json = {**(shot.continuity_json or {}), **continuity}
+    if planning is not None:
+        # A2 — validated elsewhere too (preview); re-parse here so the
+        # commit path is self-defending. Replace-merge at top level
+        # keys, mirroring continuity semantics.
+        parsed = parse_shot_planning(session, shot.project_id, planning)
+        cur = dict(shot.planning_json or {})
+        for k, v in parsed.items():
+            if v is None:
+                cur.pop(k, None)
+            elif k == "camera" and isinstance(v, dict):
+                cam_cur = dict(cur.get("camera") or {})
+                for ck, cv in v.items():
+                    if cv is None:
+                        cam_cur.pop(ck, None)
+                    else:
+                        cam_cur[ck] = cv
+                if cam_cur:
+                    cur["camera"] = cam_cur
+                else:
+                    cur.pop("camera", None)
+            else:
+                cur[k] = v
+        shot.planning_json = cur
     shot.revision += 1
     shot.updated_at = utcnow()
     session.flush()
@@ -552,7 +758,7 @@ def revert_shot(session: Session, shot: Shot, to_revision: int, *, command_id: s
     snap = row.snapshot_json
     for f in SHOT_FIELDS + ("status", "scene_id", "location_id", "thumbnail_asset_id",
                             "reference_set_id", "source_asset_id",
-                            "continuity_json", "position"):
+                            "continuity_json", "planning_json", "position"):
         if f in snap:
             setattr(shot, f, snap[f])
     _restore_shot_cast(session, shot, snap.get("cast") or [])
@@ -971,6 +1177,50 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
         c = chars.get(cid)
         return {"id": cid, "name": c.name if c else "?", "status": c.status if c else "missing"}
 
+    # A2 — shot-scoped CAS associations (entity.assets.link, type "shot")
+    # + missing-media flags for every bound reference on the card.
+    shot_links: dict[str, list[EntityAssetLink]] = {}
+    if shot_ids:
+        for l in session.execute(
+                select(EntityAssetLink).where(
+                    EntityAssetLink.entity_type == "shot",
+                    EntityAssetLink.entity_id.in_(shot_ids))
+                .order_by(EntityAssetLink.position)).scalars():
+            shot_links.setdefault(l.entity_id, []).append(l)
+    bound_ids = set()
+    for links in shot_links.values():
+        bound_ids.update(l.asset_id for l in links)
+    for sh in shots:
+        for bid in (sh.thumbnail_asset_id, sh.source_asset_id):
+            if bid:
+                bound_ids.add(bid)
+    bound_assets = {
+        a.id: a for a in session.execute(
+            select(Asset).where(Asset.id.in_(bound_ids))).scalars().all()
+    } if bound_ids else {}
+
+    def _media(sh: Shot) -> dict:
+        missing: list[str] = []
+        for bid, tag in ((sh.thumbnail_asset_id, "thumbnail"),
+                         (sh.source_asset_id, "source")):
+            if bid and (bid not in bound_assets
+                        or bound_assets[bid].status != "ready"):
+                missing.append(tag)
+        linked = []
+        for l in shot_links.get(sh.id, []):
+            a = bound_assets.get(l.asset_id)
+            gone = a is None or a.status != "ready"
+            if gone:
+                missing.append(l.id)
+            linked.append({
+                "link_id": l.id, "asset_id": l.asset_id,
+                "role": l.role, "label": l.label,
+                "position": l.position,
+                "asset_name": a.name if a else "(missing asset)",
+                "asset_status": a.status if a else "gone",
+                "missing": gone})
+        return {"assets": linked, "missing": missing}
+
     out = []
     for s in scenes:
         scene_cast_rows = sc_by_scene.get(s.id, [])
@@ -993,6 +1243,7 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                     for c in own
                 ],
                 "inherited": inherited,
+                "media": _media(sh),
                 "generation": {
                     "output_count": 0, "latest_asset_id": None,
                     "latest_asset_at": None, "latest_job_id": None,
