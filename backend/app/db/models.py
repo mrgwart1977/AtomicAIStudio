@@ -401,6 +401,69 @@ class ShotCharacter(Base):
     __table_args__ = (UniqueConstraint("shot_id", "character_id", name="uq_shot_character"),)
 
 
+class Screenplay(Base):
+    """A1 — one screenplay document inside a project (multiple per
+    project supported; position is dense per project). Version history
+    rides entity_revisions (entity_type 'screenplay'); snapshots embed
+    every scene + element so revert restores the whole document."""
+
+    __tablename__ = "screenplays"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)  # author, genre, draft label, …
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | archived
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ScreenplayScene(Base):
+    """A1 — one screenplay scene: heading + optional action beat +
+    notes + ordered dialogue/action elements. `scene_id` links the
+    screenplay scene to the storyboard Scene whose shots it scaffolds
+    (SET NULL — unlinking never deletes storyboard work)."""
+
+    __tablename__ = "screenplay_scenes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    screenplay_id: Mapped[str] = mapped_column(ForeignKey("screenplays.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    heading: Mapped[str] = mapped_column(String(300), default="")   # e.g. INT. DOCK — NIGHT
+    action: Mapped[str] = mapped_column(Text, default="")           # scene-level action description
+    notes: Mapped[str] = mapped_column(Text, default="")
+    location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id", ondelete="SET NULL"), nullable=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ScreenplayElement(Base):
+    """A1 — one ordered element inside a screenplay scene.
+    kind: 'action' (interleaved action beat), 'dialogue' (character_id
+    speaker + text + optional parenthetical), 'note'. Speaker is a
+    reference to an existing project-scoped Character (SET NULL —
+    deleting a character keeps the text, speaker becomes unresolved)."""
+
+    __tablename__ = "screenplay_elements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    screenplay_scene_id: Mapped[str] = mapped_column(ForeignKey("screenplay_scenes.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(20), default="action")  # action | dialogue | note
+    character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id", ondelete="SET NULL"), nullable=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+    parenthetical: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ReferenceSet(Base):
     """C4-A — named grouping of a character's entity-asset reference
     links plus per-set identity guidance. Membership lives on

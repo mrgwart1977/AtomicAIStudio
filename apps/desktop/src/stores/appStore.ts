@@ -19,7 +19,7 @@ import type {
 
 export type Page = "home" | "projects" | "models" | "providers" | "project";
 export type WorkspaceTab =
-  | "first_film" | "overview" | "storyboard" | "timeline" | "cast" | "worlds" | "locations"
+  | "first_film" | "overview" | "screenplay" | "storyboard" | "timeline" | "cast" | "worlds" | "locations"
   | "generate" | "cloud" | "assets" | "backups" | "settings";
 export type WorkspaceMode = "guided" | "standard" | "advanced";
 
