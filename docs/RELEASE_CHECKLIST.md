@@ -49,8 +49,8 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
      clips on few sources; ceiling ≈ ~750 unique sources on one timeline
      (a staged submix render would be needed past that — documented, not
      implemented).
-- **Verified (installed N3-D candidate):** 240-clip export 84 s, 500-clip
-  196 s, 1000-clip 520 s — all succeed, correct program duration;
+- **Verified (installed N3-D candidate):** 240-clip export 73.8 s, 500-clip
+  189.2 s, 1000-clip 498.3 s — all succeed, correct program duration;
   pre/post-fix ffprobe + decoded PCM windows identical; cancel/no-orphan/
   cleanup unchanged; `tests/test_n1d_composite.py` covers argv bound +
   dedupe + script mode + shared-source real render.
