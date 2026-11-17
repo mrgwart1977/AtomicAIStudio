@@ -20,6 +20,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | C1.5 slice 3 | Bridge UI + desktop integration: Tauri Opener launch consumer (host-scoped `opener:allow-open-url`, 47 catalog hosts, sync-tested), Settings → Providers capability report + canonical T2 assisted workflow (prepare→copy→confirm→open→import), gesture-only clipboard — see docs/plans/C1_5_ACCESS_BRIDGE.md |
 | C1.5 slice 4 | ImportWatcher: `import_dir` designation (path-minimized audit), `bridge.watch.scan` (bounded non-recursive stat-only), `from_watch` import revalidation, Stage B opt-in polling — `ImportWatchService` single task + daemon worker, `bridge.watch.enable`/`.disable` audited opt-in, gen/fingerprint stale-result guard, degraded/paused states, `GET /api/providers/{k}/watch` |
 | Tooling | `scripts/validate.ps1` local validation, optimized CI (path-gating, caching, timeouts, concurrency) |
+| A1 (Phase A) | Integrated screenplay + deterministic shot-list scaffold — ordered scenes/elements with speaker/location refs, beat→shot sync (manual-edit preservation, approval-gated destructive apply), stale-safe linear undo/redo — merged `7464d61` |
 
 ## In progress / next
 
@@ -37,6 +38,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
+| A2–A8 (Phase A) | Shot planning + storyboard board (A2 next), keyframe gen, motion clips, dialogue/audio, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md |
 | Multi-model image/video backends | per spec |
 
 ## Explicit non-goals for now
