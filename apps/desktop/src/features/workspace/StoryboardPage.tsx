@@ -19,6 +19,10 @@ import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 import { compareShots } from "./continuity";
+import {
+  draftFromPlanning, planningFromDraft, PlanningSection,
+  ShotMediaSection, FOLLOW_SHORT,
+} from "./StoryboardPlanning";
 
 const SHOT_TYPES = [
   "establishing", "wide", "medium", "medium_close", "close", "extreme_close",
@@ -113,6 +117,9 @@ export function StoryboardPage() {
     if (newly > 0) void refresh();
   }, [jobs, refresh]);
   const [showArchived, setShowArchived] = useState(false);
+  // A2 — bulk selection: checkboxes on cards; bulk archive applies one
+  // undoable command per shot (same as single-shot archive).
+  const [sel, setSel] = useState<Set<string>>(new Set());
   const drag = useRef<{ shotId: string; sceneId: string } | null>(null);
   const [dropAt, setDropAt] = useState<{ sceneId: string; index: number } | null>(null);
 
@@ -185,6 +192,33 @@ export function StoryboardPage() {
       </div>
 
       {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+
+      {sel.size > 0 && (
+        <div className="mt-3 flex items-center gap-3 rounded-md border border-teal/50 bg-teal/10 px-3 py-1.5 text-sm">
+          <span className="font-medium">{sel.size} shot{sel.size === 1 ? "" : "s"} selected</span>
+          <button
+            onClick={() => setConfirm({
+              title: `Archive ${sel.size} shot${sel.size === 1 ? "" : "s"}?`,
+              body: "Hidden from the board but kept — unarchive anytime.",
+              run: () => {
+                const ids = [...sel];
+                setSel(new Set());
+                void (async () => {
+                  for (const id of ids) {
+                    if (!(await run("shot.archive", { shot_id: id }))) break;
+                  }
+                })();
+              },
+            })}
+            className="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-fg">
+            Archive selected
+          </button>
+          <button onClick={() => setSel(new Set())}
+            className="ml-auto rounded px-2 py-0.5 text-xs text-muted hover:text-fg">
+            Clear
+          </button>
+        </div>
+      )}
 
       <div className="mt-5 space-y-5">
         {shown.map((row, i) => (
@@ -278,6 +312,13 @@ export function StoryboardPage() {
                     onMoveLeft={() => void run("shot.move", { shot_id: entry.shot.id, to_index: j - 1 })}
                     onMoveRight={() => void run("shot.move", { shot_id: entry.shot.id, to_index: j + 1 })}
                     onCompare={() => setCompare({ prev: row.shots[j - 1], next: entry })}
+                    selected={sel.has(entry.shot.id)}
+                    onToggleSelect={() => setSel((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(entry.shot.id)) next.delete(entry.shot.id);
+                      else next.add(entry.shot.id);
+                      return next;
+                    })}
                   />
                 </div>
               ))}
@@ -365,13 +406,15 @@ function DropZone({ active, tail, onDragOver, onLeave, onDrop }: {
 }
 
 function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplicate, onGenerate,
-                   onMoveLeft, onMoveRight, onCompare, canLeft, canRight, hasPrev }: {
+                   onMoveLeft, onMoveRight, onCompare, canLeft, canRight, hasPrev,
+                   selected, onToggleSelect }: {
   entry: StoryboardScene["shots"][number];
   projectId: string;
   onDragStart: () => void; onDragEnd: () => void; onClick: () => void; onDuplicate: () => void;
   onGenerate: () => void;
   onMoveLeft: () => void; onMoveRight: () => void; onCompare: () => void;
   canLeft: boolean; canRight: boolean; hasPrev: boolean;
+  selected?: boolean; onToggleSelect?: () => void;
 }) {
   const s = entry.shot;
   const gen = entry.generation;
@@ -379,6 +422,11 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
   // thumbnail — it's the freshest visual state for this shot.
   const thumbId = gen?.latest_asset_id ?? s.thumbnail_asset_id;
   const jobStatus = gen?.latest_job_status;
+  // A2 — planning badges: the shot's camera intent at a glance, plus a
+  // warning when any bound/pinned media is no longer ready.
+  const plan = s.planning_json ?? {};
+  const cam = plan.camera ?? {};
+  const mediaMissing = entry.media?.missing?.length ?? 0;
   return (
     <div
       draggable
@@ -428,8 +476,32 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
         <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-white">
           {s.shot_type.replace("_", " ")}
         </span>
+        {onToggleSelect && (
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onClick={(e) => e.stopPropagation()}
+            onChange={onToggleSelect}
+            aria-label="Select shot"
+            title="Select shot"
+            className={`absolute right-1 top-1 h-3.5 w-3.5 accent-teal ${
+              selected ? "" : "hidden group-hover:block group-focus-within:block"}`}
+          />
+        )}
+        {cam.follow_mode && (
+          <span title={`Follow mode: ${cam.follow_mode.replace(/_/g, " ")}`}
+            className="absolute left-1 top-6 rounded bg-teal/80 px-1.5 py-0.5 text-[9px] font-semibold text-white">
+            ◈ {FOLLOW_SHORT[cam.follow_mode] ?? cam.follow_mode}
+          </span>
+        )}
+        {mediaMissing > 0 && (
+          <span title={`${mediaMissing} media reference(s) missing — open the shot to relink`}
+            className="absolute bottom-1 right-8 rounded bg-amber/90 px-1.5 py-0.5 text-[9px] font-semibold text-black">
+            ⚠ media
+          </span>
+        )}
         {s.duration_sec > 0 && (
-          <span className="absolute right-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
+          <span className="absolute right-1 top-6 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
             {s.duration_sec}s
           </span>
         )}
@@ -464,6 +536,14 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
           {s.title || <span className="text-muted">Untitled shot</span>}
         </div>
         {s.prompt && <div className="mt-0.5 line-clamp-2 text-[10px] text-muted">{s.prompt}</div>}
+        {(cam.angle || cam.movement || plan.framing || plan.fps) && (
+          <div className="mt-0.5 truncate text-[9px] text-teal/80"
+            title="Shot planning — camera / framing">
+            {[cam.angle, cam.movement, plan.framing,
+              plan.fps ? `${plan.fps.num}/${plan.fps.den}` : ""]
+              .filter(Boolean).join(" · ").replace(/_/g, " ")}
+          </div>
+        )}
         <div className="mt-1.5 flex items-center gap-1">
           {entry.cast.slice(0, 4).map((c) => (
             <span key={c.id} title={`${c.character.name}${c.expression ? ` · ${c.expression}` : ""} (shot)`}
@@ -838,6 +918,9 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
   const [removed, setRemoved] = useState<string[]>([]);
   const [pick, setPick] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  // A2 — shot-planning draft (camera/framing/timing); serialized to the
+  // validated planning doc on save via shot.update's merge semantics.
+  const [plan, setPlan] = useState(() => draftFromPlanning(shot?.planning_json));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [revs, setRevs] = useState<EntityRevision[]>([]);
@@ -889,6 +972,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         reference_set_id: form.reference_set_id || null,
         source_asset_id: form.source_asset_id || null,
         continuity: shotContinuity(form, shot?.continuity_json),
+        planning: planningFromDraft(plan, draftFromPlanning(shot?.planning_json)),
       }]);
     }
     for (const cid of removed) {
@@ -919,6 +1003,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
         reference_set_id: form.reference_set_id || null,
         source_asset_id: form.source_asset_id || null,
         continuity: shotContinuity(form),
+        planning: planningFromDraft(plan, draftFromPlanning(null)),
       });
     }
     setBusy(false);
@@ -1095,6 +1180,23 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                 />
               )}
             </div>
+
+            {/* ---- A2 shot planning + board media ---- */}
+            <PlanningSection
+              value={plan}
+              onChange={setPlan}
+              characters={characters}
+              locations={locations}
+              assets={imageAssets}
+              refSets={refSets}
+            />
+            {shot && entry && (
+              <ShotMediaSection
+                entry={entry}
+                imageAssets={imageAssets}
+                run={run}
+              />
+            )}
 
             {/* ---- cast ---- */}
             {shot && (

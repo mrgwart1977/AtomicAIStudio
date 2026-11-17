@@ -322,9 +322,9 @@ def test_migration_0019_preserves_existing_rows(tmp_path):
     con = sqlite3.connect(str(db))
     ver = con.execute(
         "SELECT version_num FROM alembic_version").fetchone()[0]
-    # head moved on to 0020_a1 — the preserved-row assertions below
+    # head moved on past 0020_a1 — the preserved-row assertions below
     # still exercise the 0018→0019 upgrade path this test exists for.
-    assert ver == "0020_a1"
+    assert ver >= "0020_a1"
     row = con.execute(
         "SELECT kind, name, position, visible, muted, gain_db, solo,"
         f" automation_json, automation_interp FROM timeline_tracks"

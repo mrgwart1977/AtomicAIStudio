@@ -557,7 +557,8 @@ def test_migration_head_includes_0020(client):
     with eng.connect() as conn:
         rows = conn.exec_driver_sql(
             "SELECT version_num FROM alembic_version").all()
-    assert any("0020" in r[0] for r in rows)
+    # head is at-or-past 0020_a1 (0021_a2 once A2 lands)
+    assert any(r[0] >= "0020" for r in rows), rows
 
 
 def test_n3_timeline_unaffected(client):

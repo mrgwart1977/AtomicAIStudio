@@ -1398,6 +1398,7 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _get_scene(session, project, payload)
         _check_storyboard_links(session, project, payload)
         _check_shot_fields(payload)
+        _check_shot_planning(session, project, payload)
         _check_shot_bindings(session, project, None, payload,
                              cast_known=False)
     if command_type in ("shot.update", "shot.archive", "shot.unarchive",
@@ -1406,6 +1407,7 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         if command_type == "shot.update":
             _check_storyboard_links(session, project, payload)
             _check_shot_fields(payload)
+            _check_shot_planning(session, project, payload)
             _check_shot_bindings(session, project, shot, payload,
                                  cast_known=True)
     if command_type == "shot.generate":
@@ -2173,6 +2175,19 @@ def _check_shot_fields(payload: dict) -> None:
         raise CommandError(422, "duration_sec cannot be negative")
 
 
+def _check_shot_planning(session: Session, project: Project,
+                         payload: dict) -> None:
+    """A2 — validate the optional shot-planning document at preview so
+    bad enums/refs fail before commit, not at write time."""
+    if "planning" not in payload:
+        return
+    from app.domain import storyboard as sb
+    try:
+        sb.parse_shot_planning(session, project.id, payload["planning"])
+    except ValueError as exc:
+        raise CommandError(422, str(exc)) from None
+
+
 def _diff_for(command_type: str, payload: dict) -> dict[str, Any]:
     """Small human-readable diff for previews."""
     return {"summary": _summary(command_type, payload)}
@@ -2623,12 +2638,14 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         # C4-B — creation-time generation bindings follow the same
         # validation as shot.update (validated in _check_shot_bindings).
         if payload.get("reference_set_id") is not None \
-                or payload.get("source_asset_id") is not None:
+                or payload.get("source_asset_id") is not None \
+                or payload.get("planning") is not None:
             try:
                 sb.update_shot(
                     session, sh, fields={},
-                    reference_set_id=payload.get("reference_set_id"),
-                    source_asset_id=payload.get("source_asset_id"),
+                    reference_set_id=payload.get("reference_set_id", ...),
+                    source_asset_id=payload.get("source_asset_id", ...),
+                    planning=payload.get("planning"),
                     command_id=command.id,
                     change_summary="Bound generation references",
                 )
@@ -2813,7 +2830,8 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
                 thumbnail_asset_id=payload.get("thumbnail_asset_id", ...),
                 reference_set_id=payload.get("reference_set_id", ...),
                 source_asset_id=payload.get("source_asset_id", ...),
-                continuity=payload.get("continuity"), command_id=command.id,
+                continuity=payload.get("continuity"),
+                planning=payload.get("planning"), command_id=command.id,
                 change_summary=payload.get("change_summary") or "Updated shot",
             )
         except KeyError as exc:
@@ -4716,7 +4734,9 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
         if "snapshot" in before:
             snap = before["snapshot"]
             for f in sb.SHOT_FIELDS + ("status", "scene_id", "location_id",
-                                       "thumbnail_asset_id", "continuity_json", "position"):
+                                       "thumbnail_asset_id", "reference_set_id",
+                                       "source_asset_id", "continuity_json",
+                                       "planning_json", "position"):
                 if f in snap:
                     setattr(sh, f, snap[f])
             sb._restore_shot_cast(session, sh, snap.get("cast") or [])

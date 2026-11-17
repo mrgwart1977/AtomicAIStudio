@@ -398,6 +398,9 @@ class ShotOut(BaseModel):
     reference_set_id: str | None = None
     source_asset_id: str | None = None
     continuity_json: dict[str, Any]
+    # A2 — shot planning (camera/framing/notes); outside the A1
+    # scaffold-managed set.
+    planning_json: dict[str, Any] = {}
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -408,6 +411,8 @@ class StoryboardShotOut(BaseModel):
     location_name: str
     cast: list[CastMemberOut]
     inherited: list[CastMemberOut] = []  # scene-cast members without an own row
+    # A2 — shot-scoped CAS associations + missing-media flags
+    media: dict[str, Any] = {}
     # C4-C — durable per-shot generation state (job status + latest
     # produced asset); {}-valued when nothing was generated yet.
     generation: dict[str, Any] | None = None
