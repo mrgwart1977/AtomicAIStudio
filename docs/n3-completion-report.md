@@ -18,7 +18,7 @@ plus the backend suite (1505 passed, 11 skipped).
 | N3-A track automation | #134 | `df58439` | 6/6 green |
 | N3-B continuous scrubbing | #136 | `9824526` | 6/6 green |
 | N3-C editing UX | #138 | `26face3` | 6/6 green |
-| N3-D hardening + acceptance | #139 | `d29714c` | pending at write-time |
+| N3-D hardening + acceptance | #139 | `d29714c` | 6/6 green (incl. package: frozen sidecar + FFmpeg staged/smoke + NSIS uploaded) |
 
 ## N3 architecture summary
 
