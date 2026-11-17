@@ -23,6 +23,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | A1 (Phase A) | Integrated screenplay + deterministic shot-list scaffold — ordered scenes/elements with speaker/location refs, beat→shot sync (manual-edit preservation, approval-gated destructive apply), stale-safe linear undo/redo — merged `7464d61` |
 | A2 (Phase A) | Shot planning + storyboard board — `planning_json` (all 10 spec follow modes, framing/placement/lighting, rational fps, continuity refs), shot-scoped CAS media links with missing-media flags, drag/drop + keyboard reorder, duplicate, bulk-select archive, screenplay-sync preservation — merged `30a16a8` |
 | A3 (Phase A) | Shot keyframes + mock image generation — durable `keyframe.generate` jobs (hold-barrier deterministic cancel), continuity-aware compose drafts with user-prompt ownership, stale-result pins (`expected_keyframe`/`expected_prompt`/`expected_result_revision`/`expected_planning_sha`), CAS result landing via audited `keyframe.result`, pin/archive/undo, mock provenance — merged `8fc1910` |
+| A4 (Phase A) | Motion clips — shot-bound keyframe→video beats via `mock.video` (real H.264 encode + real ffprobe metadata, deterministic hold barrier, source-keyframe + planning + revision stale pins), timeline clip placement with rational fps conversion, export integration, backup v5, installed acceptance 15/15 — merged `9a7c0723` |
 
 ## In progress / next
 
@@ -40,7 +41,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
-| A4–A8 (Phase A) | Motion clips (A4 in review, PR #146), dialogue/audio, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md |
+| A5–A8 (Phase A) | Dialogue/audio generation, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md (A3 + A4 merged above) |
 | Multi-model image/video backends | per spec |
 
 ## Explicit non-goals for now

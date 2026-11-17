@@ -1,10 +1,10 @@
-INFO backend http://127.0.0.1:63152 via installed app
+INFO backend http://127.0.0.1:58766 via installed app
 INFO health: backend 0.1.0 (0023 proven by clip persistence below)
 PASS 1 populated A3 project (scaffold + planned shot)
 PASS 2 shot + start/end keyframes bound to motion clip
 PASS 3 motion + camera configured; invalid follow mode refused
 PASS 4 generation preview — composed prompt + resolved_clip pin
-PASS 5 mock video job approved + enqueued (ebb6dab9)
+PASS 5 mock video job approved + enqueued (909364ce)
 PASS 6 held job released deterministically → result associated
 PASS 7 deterministic cancel — held job → cancelled, no result, 409 re-cancel
 PASS 8 held retry released → result associated on second clip
@@ -14,7 +14,7 @@ PASS 10 playback metadata verified (1.0s @ 24fps; labeled mock)
 PASS 11 clip placed on existing timeline (24f extent, rational fps)
 PASS 12 short film exported via timeline.export job
 PASS 13 export ffprobe verified — h264, ~1.00s film
-INFO backend http://127.0.0.1:62674 via installed app
+INFO backend http://127.0.0.1:49503 via installed app
 PASS 14 restart persistence — clips, results, placement, board intact
 PASS 15 clean shutdown — no orphan backend
 A4 ACCEPTANCE: PASS 15/15
