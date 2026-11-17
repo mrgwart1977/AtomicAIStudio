@@ -21,6 +21,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | C1.5 slice 4 | ImportWatcher: `import_dir` designation (path-minimized audit), `bridge.watch.scan` (bounded non-recursive stat-only), `from_watch` import revalidation, Stage B opt-in polling — `ImportWatchService` single task + daemon worker, `bridge.watch.enable`/`.disable` audited opt-in, gen/fingerprint stale-result guard, degraded/paused states, `GET /api/providers/{k}/watch` |
 | Tooling | `scripts/validate.ps1` local validation, optimized CI (path-gating, caching, timeouts, concurrency) |
 | A1 (Phase A) | Integrated screenplay + deterministic shot-list scaffold — ordered scenes/elements with speaker/location refs, beat→shot sync (manual-edit preservation, approval-gated destructive apply), stale-safe linear undo/redo — merged `7464d61` |
+| A2 (Phase A) | Shot planning + storyboard board — `planning_json` (all 10 spec follow modes, framing/placement/lighting, rational fps, continuity refs), shot-scoped CAS media links with missing-media flags, drag/drop + keyboard reorder, duplicate, bulk-select archive, screenplay-sync preservation — merged `30a16a8` |
 
 ## In progress / next
 
@@ -38,7 +39,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
-| A2–A8 (Phase A) | Shot planning + storyboard board (A2 next), keyframe gen, motion clips, dialogue/audio, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md |
+| A3–A8 (Phase A) | Keyframe gen (A3 in review, PR #144), motion clips, dialogue/audio, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md |
 | Multi-model image/video backends | per spec |
 
 ## Explicit non-goals for now
