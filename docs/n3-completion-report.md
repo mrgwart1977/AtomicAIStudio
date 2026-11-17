@@ -184,6 +184,10 @@ New from N3-D:
   arguments (each unique source needs one `-i`; ~40-char aliases).
   Timelines beyond that need a staged submix render — **not
   implemented, not claimed; requires separate authorization**.
+- **Intermittent test flake (tracked):**
+  `test_c15_watch_polling.py::test_process_exit_is_bounded_with_stalled_scan`
+  hung >30 s once on post-merge CI (backend 3.12, `d29714c`); passed on
+  rerun, on 3.14, and locally. Recorded as RELEASE_CHECKLIST #14.
 
 Carried (pre-existing, unchanged): Stage B2b ON HOLD; issue #96 mandatory
 before live artifact retrieval; no live providers/credentials/paid work;
