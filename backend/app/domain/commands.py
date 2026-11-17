@@ -100,6 +100,9 @@ SUPPORTED_COMMANDS = {
     "keyframe.create", "keyframe.update", "keyframe.archive",
     "keyframe.unarchive", "keyframe.revert", "keyframe.compose",
     "keyframe.generate", "keyframe.result", "keyframe.pin",
+    # A4 — motion clips: shot-scoped keyframe→video beats + mock video
+    "clip.create", "clip.update", "clip.archive", "clip.unarchive",
+    "clip.revert", "clip.compose", "clip.generate", "clip.result",
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
@@ -135,6 +138,8 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "shot.video",
                        # A3 — keyframe mock generation (durable job).
                        "keyframe.generate",
+                       # A4 — motion-clip mock video generation.
+                       "clip.generate",
                        # C5-B — timeline export launches a durable job.
                        "timeline.export"}
 
@@ -185,6 +190,8 @@ JOB_COMMANDS = {
     # A3 — deterministic mock only; no inference. The request carries
     # keyframe provenance; the adapter's apply_command lands the result.
     "keyframe.generate": "mock.image",
+    # A4 — deterministic mock video only; clip.result lands the asset.
+    "clip.generate": "mock.video",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -213,6 +220,10 @@ UNDOABLE = {
     # create/generate are not undoable (same rule as shots).
     "keyframe.update", "keyframe.archive", "keyframe.unarchive",
     "keyframe.compose", "keyframe.result", "keyframe.pin",
+    # A4 — motion-clip mutations reverse from before-snapshots;
+    # create/generate are not undoable (same rule as keyframes).
+    "clip.update", "clip.archive", "clip.unarchive",
+    "clip.compose", "clip.result",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
@@ -365,6 +376,15 @@ def _summary(command_type: str, payload: dict) -> str:
     if command_type.startswith("keyframe."):
         op = command_type.split(".", 1)[1]
         return f"{op.capitalize()} keyframe"
+    if command_type == "clip.compose":
+        return "Draft motion-aware clip prompt"
+    if command_type == "clip.generate":
+        return "Generate motion clip video (mock — no inference)"
+    if command_type == "clip.result":
+        return "Attach generated motion clip result"
+    if command_type.startswith("clip."):
+        op = command_type.split(".", 1)[1]
+        return f"{op.capitalize()} motion clip"
     if command_type.startswith("screenplay."):
         if command_type == "screenplay.create":
             return f"Create screenplay '{payload.get('title', '')}'"
@@ -819,6 +839,109 @@ def _compose_keyframe_generate(session: Session, project: Project,
         # keyframe.generate always routes to mock.image.
         req["hold"] = hold
     return kf, req
+
+
+def _clip_fingerprint(c) -> dict:
+    """A4 — generation-relevant motion-clip state the approval pins
+    via expected_clip: prompt/motion/camera/timing edits between
+    preview and commit are refused."""
+    return {
+        "clip_id": c.id,
+        "revision": c.revision,
+        "prompt": c.prompt,
+        "motion": c.motion_json or {},
+        "camera": c.camera_json or {},
+        "duration_frames": c.duration_frames,
+        "fps": {"num": c.fps_num, "den": c.fps_den},
+        "start_keyframe_id": c.start_keyframe_id,
+        "end_keyframe_id": c.end_keyframe_id,
+        "seed": c.seed,
+        "continuity": c.continuity_json or {},
+    }
+
+
+def _compose_clip_generate(session: Session, project: Project,
+                           payload: dict) -> tuple:
+    """A4 — resolve clip.generate into the mock-video request plus the
+    composed motion-aware prompt. Same pinning discipline as
+    keyframe.generate: expected_prompt fingerprints the composed
+    prompt, expected_clip fingerprints clip state, and the shot's
+    planning sha pins what the result may land against.
+    Returns (clip, request)."""
+    from app.domain import motion_clips as mc
+    from app.domain import prompt_compose
+    c = _get_clip(session, project, payload)
+    if c.status != "active":
+        raise CommandError(422, "cannot generate from an archived motion clip")
+    shot = session.get(Shot, c.shot_id)
+    if shot is None or shot.project_id != project.id \
+            or shot.status != "active":
+        raise CommandError(422, "motion clip's shot is archived or missing")
+    user_prompt = (payload.get("prompt") or c.prompt or "").strip()
+    if not user_prompt:
+        raise CommandError(
+            422, "motion clip has no prompt — write one or compose a draft")
+    # The composed prompt seeds from the clip's motion context
+    # (instructions + camera verbs) layered on the user prompt.
+    motion = c.motion_json or {}
+    camera = c.camera_json or {}
+    seed_ctx = " ".join(b for b in (
+        motion.get("instructions"),
+        f"camera {camera['movement']}" if camera.get("movement") else "",
+        (f"follow {camera['follow_mode']}"
+         if camera.get("follow_mode") else ""),
+        motion.get("temporal_consistency")) if b)
+    comp_prompt = f"{user_prompt} {seed_ctx}".strip()
+    comp = None
+    if payload.get("compose_prompt", True):
+        comp = prompt_compose.compose_shot_prompt(
+            session, project, shot, user_prompt=comp_prompt,
+            model_max_chars=_model_prompt_budget(payload))
+        expected_prompt = payload.get("expected_prompt")
+        if expected_prompt is not None and \
+                expected_prompt != comp["prompt_sha256"]:
+            raise CommandError(
+                422, "prompt context changed since preview — "
+                     "re-preview clip.generate")
+    expected_clip = payload.get("expected_clip")
+    if expected_clip is not None and expected_clip != _clip_fingerprint(c):
+        raise CommandError(
+            422, "motion clip changed since preview — "
+                 "re-preview clip.generate")
+    seed = payload.get("seed", c.seed or 0)
+    if seed is None:
+        seed = 0
+    frames = c.duration_frames or 24
+    req = {
+        "command_type": "clip.generate",
+        "prompt": comp["prompt"] if comp else comp_prompt,
+        "seed": seed,
+        "negative_prompt": payload.get("negative_prompt")
+            or c.negative_prompt or "",
+        "clip_id": c.id,
+        "shot_id": shot.id,
+        "scene_id": shot.scene_id,
+        "start_keyframe_id": c.start_keyframe_id,
+        "end_keyframe_id": c.end_keyframe_id,
+        "duration_frames": frames,
+        "fps": {"num": c.fps_num, "den": c.fps_den},
+        "width": c.width, "height": c.height,
+        "motion": motion, "camera": camera,
+        "model_key": payload.get("model_key") or c.model_key,
+        # A4 — the planning state this generation was approved
+        # against; clip.result refuses if it drifts mid-flight.
+        "expected_planning_sha": mc.planning_sha(shot),
+        "origin_command_type": "clip.generate",
+        "clip_generate": {
+            "clip_id": c.id, "shot_id": shot.id,
+            "user_prompt": user_prompt,
+            "prompt_context": comp,
+        },
+    }
+    hold = parse_mock_hold(payload.get("mock_hold"))
+    if hold:
+        req["hold"] = hold
+    return c, req
 
 
 def parse_mock_hold(value) -> dict:
@@ -1561,6 +1684,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         warnings += _validate(session, project, _vinner, _vcomposed)
     if command_type.startswith("keyframe."):
         _validate_keyframe(session, project, command_type, payload)
+    if command_type.startswith("clip."):
+        _validate_clip(session, project, command_type, payload)
     if command_type == "shot.move" and payload.get("to_scene_id"):
         _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -2121,6 +2246,92 @@ def kf_prompt(k) -> str:
     return k.prompt or ""
 
 
+def _get_clip(session: Session, project: Project, payload: dict):
+    from app.domain import motion_clips as mc
+    try:
+        return mc._get(session, project.id, payload.get("clip_id") or "")
+    except ValueError:
+        raise CommandError(404, "motion clip not found in this project") \
+            from None
+
+
+def _validate_clip(session: Session, project: Project,
+                   command_type: str, payload: dict) -> None:
+    """A4 — motion-clip validation. Field-level checks run the same
+    parse functions commit uses, so preview and commit can never
+    disagree."""
+    from app.domain import motion_clips as mc
+
+    def _fields() -> None:
+        try:
+            if "motion" in payload:
+                mc.parse_motion(payload.get("motion"))
+            if "camera" in payload:
+                mc.parse_camera(session, project.id,
+                                payload.get("camera"))
+            if any(k in payload for k in ("duration_frames", "fps")):
+                mc.parse_clip_timing({
+                    "duration_frames": payload.get("duration_frames"),
+                    "fps": payload.get("fps")})
+            for f in ("prompt", "negative_prompt"):
+                if f in payload \
+                        and len(payload.get(f) or "") > mc.PROMPT_MAX:
+                    raise ValueError(f"{f} exceeds {mc.PROMPT_MAX} chars")
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+
+    if command_type == "clip.create":
+        try:
+            mc._active_shot(session, project.id,
+                            payload.get("shot_id") or "")
+        except ValueError as exc:
+            msg = str(exc)
+            code = 404 if "not found" in msg else 422
+            raise CommandError(code, msg) from None
+        _fields()
+        for kf_f in ("start_keyframe_id", "end_keyframe_id"):
+            if payload.get(kf_f):
+                try:
+                    mc._kf(session, project.id, payload["shot_id"],
+                           payload[kf_f], kf_f)
+                except ValueError as exc:
+                    raise CommandError(422, str(exc)) from None
+        return
+    c = _get_clip(session, project, payload)
+    if command_type == "clip.update":
+        _fields()
+        return
+    if command_type == "clip.revert":
+        if not isinstance(payload.get("to_revision"), int) \
+                or isinstance(payload.get("to_revision"), bool):
+            raise CommandError(422, "to_revision must be an integer")
+        return
+    if command_type == "clip.generate":
+        if c.status != "active":
+            raise CommandError(422,
+                               "cannot generate from an archived motion clip")
+        shot = session.get(Shot, c.shot_id)
+        if shot is None or shot.status != "active":
+            raise CommandError(422, "motion clip's shot is archived")
+        if not ((payload.get("prompt") or c.prompt or "")).strip() \
+                and not (shot.prompt or "").strip():
+            raise CommandError(
+                422, "motion clip has no prompt — write one or compose a draft")
+        parse_mock_hold(payload.get("mock_hold"))
+        return
+    if command_type == "clip.result":
+        # Same freshness contract as commit — preview refuses what
+        # commit would refuse (stale/superseded/archived).
+        try:
+            mc.check_result_fresh(session, c, payload)
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+        return
+    # archive / unarchive / compose / revert: existence suffices —
+    # status checks happen at commit.
+    return
+
+
 def _get_screenplay(session: Session, project: Project, payload: dict):
     from app.domain import screenplay as spd
     try:
@@ -2605,6 +2816,58 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                     "prompt_sha256": comp["prompt_sha256"],
                     "prompt": _req["prompt"],
                     "user_prompt": _req["keyframe_generate"]["user_prompt"],
+                    "context_text": comp["context_text"],
+                    "sections": comp["sections"],
+                    "omitted": comp["omitted"],
+                    "conflicts": comp["conflicts"],
+                    "warnings": comp["warnings"],
+                    "budget": comp["budget"],
+                    "user_over_budget": comp["user_over_budget"],
+                }
+                out["warnings"] = out["warnings"] + comp["warnings"]
+        except CommandError:
+            pass
+    if command_type.startswith("clip.") \
+            and command_type != "clip.create":
+        # A4 — the approval pins clip state (revision + gen-relevant
+        # fields) via expected_clip at commit.
+        try:
+            _c = _get_clip(session, project, payload)
+            out["resolved_clip"] = _clip_fingerprint(_c)
+        except CommandError:
+            pass
+    if command_type == "clip.compose":
+        # A4.2 — the proposal IS the preview, before anything is written.
+        try:
+            _c = _get_clip(session, project, payload)
+            from app.domain import motion_clips as _mc
+            draft = _mc.compose_draft(session, project, _c.id)
+            out["resolved_draft"] = {
+                "prompt": draft["prompt"],
+                "prompt_sha256": draft["prompt_sha256"],
+                "user_prompt": draft["user_prompt"],
+                "context_text": draft["context_text"],
+                "sections": draft["sections"],
+                "omitted": draft["omitted"],
+                "conflicts": draft["conflicts"],
+                "warnings": draft["warnings"],
+                "budget": draft["budget"],
+            }
+            out["warnings"] = out["warnings"] + draft["warnings"]
+        except CommandError:
+            pass
+    if command_type == "clip.generate":
+        # A4 — the approval sees the composed prompt it pins via
+        # expected_prompt, plus the clip state pin.
+        try:
+            _c, _req = _compose_clip_generate(
+                session, project, payload)
+            comp = _req["clip_generate"]["prompt_context"]
+            if comp is not None:
+                out["resolved_prompt"] = {
+                    "prompt_sha256": comp["prompt_sha256"],
+                    "prompt": _req["prompt"],
+                    "user_prompt": _req["clip_generate"]["user_prompt"],
                     "context_text": comp["context_text"],
                     "sections": comp["sections"],
                     "omitted": comp["omitted"],
@@ -3255,6 +3518,73 @@ def _commit_keyframe(session: Session, project: Project,
                 command_id=command.id,
                 change_summary="Pinned keyframe result")
             audit["before"]["shot_snapshot"] = before
+        else:
+            raise CommandError(422, f"unsupported command_type '{command_type}'")
+    except ValueError as exc:
+        raise CommandError(422, str(exc)) from None
+    except KeyError as exc:
+        raise CommandError(404, str(exc).strip("'")) from None
+
+
+def _commit_clip(session: Session, project: Project, command,
+                 command_type: str, payload: dict, audit: dict) -> None:
+    """A4 — motion-clip mutations. Every op stores the before-snapshot
+    so undo restores fields exactly (same contract as keyframes)."""
+    from app.domain import motion_clips as mc
+
+    try:
+        if command_type == "clip.create":
+            row = mc.create_clip(
+                session, project.id, payload, command_id=command.id)
+            audit["after"]["clip_id"] = row.id
+            audit["after"]["shot_id"] = row.shot_id
+            return
+        c = _get_clip(session, project, payload)
+        audit["before"]["snapshot"] = mc.clip_snapshot(c)
+        audit["after"]["clip_id"] = c.id
+        audit["after"]["shot_id"] = c.shot_id
+        if command_type == "clip.update":
+            mc.update_clip(
+                session, project.id, payload, command_id=command.id)
+        elif command_type in ("clip.archive", "clip.unarchive"):
+            mc.archive_clip(
+                session, project.id, payload,
+                archive=(command_type == "clip.archive"),
+                command_id=command.id)
+        elif command_type == "clip.revert":
+            from app.db.models import EntityRevision
+            rev = session.execute(
+                select(EntityRevision).where(
+                    EntityRevision.entity_type == "motion_clip",
+                    EntityRevision.entity_id == c.id,
+                    EntityRevision.revision == int(payload["to_revision"]))
+            ).scalar_one_or_none()
+            if rev is None:
+                raise CommandError(404, "revision not found")
+            mc.revert_clip(
+                session, project.id, c.id, rev.snapshot_json)
+            mc.write_clip_revision(
+                session, c, command_id=command.id,
+                summary=f"Reverted to r{payload['to_revision']}")
+            audit["after"]["reverted_to"] = int(payload["to_revision"])
+        elif command_type == "clip.compose":
+            # Draft → apply: the proposal was exposed at preview
+            # (resolved_draft); commit recomputes so the applied text
+            # always reflects current state.
+            draft = mc.compose_draft(session, project, c.id)
+            upd = dict(payload)
+            upd["prompt"] = draft["prompt"]
+            upd["compose"] = True
+            mc.update_clip(
+                session, project.id, upd, command_id=command.id)
+            audit["after"]["draft"] = {
+                "prompt": draft["prompt"],
+                "prompt_sha256": draft["prompt_sha256"],
+                "sections": draft["sections"],
+            }
+        elif command_type == "clip.result":
+            mc.apply_result(
+                session, project.id, payload, command_id=command.id)
         else:
             raise CommandError(422, f"unsupported command_type '{command_type}'")
     except ValueError as exc:
@@ -4021,6 +4351,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _commit_keyframe(session, project, command, command_type, payload,
                          audit)
 
+    elif (command_type.startswith("clip.")
+          # A4 — clip.generate enqueues a durable job; the JOB_COMMANDS
+          # branch below must see it, not _commit_clip.
+          and command_type != "clip.generate"):
+        _commit_clip(session, project, command, command_type, payload,
+                     audit)
+
     elif (command_type.startswith("timeline.")
           # C5-B — export enqueues a durable job; the JOB_COMMANDS
           # branch below must see it, not _commit_timeline.
@@ -4063,6 +4400,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 resumable=command_type not in (
                     "generate.image", "generate.image.persistent",
                     "generate.video", "shot.video", "keyframe.generate",
+                    "clip.generate",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
@@ -4104,6 +4442,22 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 req["expected_result_revision"] = _k.revision
                 job.request_json = req
                 audit["after"]["keyframe_id"] = _k.id
+        if command_type == "clip.generate":
+            # A4 — same durable link + result pin as keyframes.
+            from app.db.models import MotionClip as _Mc
+            _c = session.get(_Mc, payload.get("clip_id") or "")
+            if _c is not None and _c.project_id == project.id:
+                from app.domain import motion_clips as _mc
+                _c.generate_job_id = job.id
+                _c.revision += 1
+                _c.updated_at = utcnow()
+                _mc.write_clip_revision(
+                    session, _c, command_id=command.id,
+                    summary="Generation enqueued")
+                req = dict(job.request_json or {})
+                req["expected_result_revision"] = _c.revision
+                job.request_json = req
+                audit["after"]["clip_id"] = _c.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",
                             "generate.image.img2img", "generate.image.edit"):
             # Minimized durable record — the prompt body lives in the job
@@ -4370,6 +4724,7 @@ def _job_kind(command_type: str) -> str:
         "shot.generate": "image",
         "shot.video": "video",
         "keyframe.generate": "image",
+        "clip.generate": "video",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -4493,6 +4848,11 @@ def _job_request(session: Session, project: Project, command_type: str,
         # exactly like shot.generate: the approval pins are re-checked
         # here against current state.
         _kf, req = _compose_keyframe_generate(session, project, payload)
+        return req
+    if command_type == "clip.generate":
+        # A4 — same build-time composition + pin re-check as
+        # keyframe.generate.
+        _c, req = _compose_clip_generate(session, project, payload)
         return req
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
@@ -5031,7 +5391,7 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
         if "settings" in before:
             project.settings_json = before["settings"]
     elif command.command_type.startswith(("scene.", "shot.", "entity.assets.",
-                                          "keyframe.")):
+                                          "keyframe.", "clip.")):
         _undo_storyboard(session, project, command, before, after)
     else:
         parts = _entity_parts(command.command_type)
@@ -5184,6 +5544,33 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
         session.flush()
         kd.write_keyframe_revision(
             session, kf, command_id=command.id, summary="Undo")
+        return
+
+    if ct.startswith("clip."):
+        from app.db.models import MotionClip
+        from app.domain import motion_clips as mc
+        c_id = after.get("clip_id") or before.get("clip_id")
+        c = session.get(MotionClip, c_id) if c_id else None
+        if c is None or c.project_id != project.id:
+            return
+        snap = before.get("snapshot")
+        if snap:
+            for f in ("position", "start_keyframe_id", "end_keyframe_id",
+                      "prompt", "negative_prompt", "motion_json",
+                      "camera_json", "duration_frames", "fps_num",
+                      "fps_den", "width", "height", "model_key", "seed",
+                      "settings_json", "continuity_json",
+                      "result_asset_id", "generate_job_id",
+                      "prompt_origin", "status"):
+                if f in snap:
+                    setattr(c, f, snap[f])
+        elif "status" in before:
+            c.status = before["status"]
+        c.revision += 1
+        c.updated_at = utcnow()
+        session.flush()
+        mc.write_clip_revision(
+            session, c, command_id=command.id, summary="Undo")
         return
 
     if ct == "shot.move":

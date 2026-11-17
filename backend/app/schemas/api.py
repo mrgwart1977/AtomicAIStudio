@@ -114,6 +114,8 @@ CommandType = Literal[
     "keyframe.create", "keyframe.update", "keyframe.archive",
     "keyframe.unarchive", "keyframe.revert", "keyframe.compose",
     "keyframe.generate", "keyframe.result", "keyframe.pin",
+    "clip.create", "clip.update", "clip.archive", "clip.unarchive",
+    "clip.revert", "clip.compose", "clip.generate", "clip.result",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -197,6 +199,9 @@ class CommandProposalOut(BaseModel):
     # proposal (prompt + source sections) shown before apply.
     resolved_keyframe: dict[str, Any] | None = None
     resolved_draft: dict[str, Any] | None = None
+    # A4 — clip.* only: motion-clip state fingerprint pinned via
+    # expected_clip (same contract as resolved_keyframe).
+    resolved_clip: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -424,6 +429,9 @@ class StoryboardShotOut(BaseModel):
     # A3 — compact keyframe summary {count, roles, with_result}; the
     # full list loads via /shots/{id}/keyframes.
     keyframes: dict[str, Any] = {}
+    # A4 — compact per-shot motion-clip summary for card badges; the
+    # full list loads via /shots/{id}/clips.
+    clips: dict[str, Any] = {}
     # C4-C — durable per-shot generation state (job status + latest
     # produced asset); {}-valued when nothing was generated yet.
     generation: dict[str, Any] | None = None

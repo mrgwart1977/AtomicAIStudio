@@ -1377,6 +1377,64 @@ def keyframe_draft(keyframe_id: str,
         raise HTTPException(404 if "not found" in msg else 422, msg) from None
 
 
+# ---------- motion clips (A4) ----------
+
+@api_router.get("/api/projects/{project_id}/shots/{shot_id}/clips")
+def list_motion_clips(shot_id: str, project: Project = Depends(get_project),
+                      db: Session = Depends(get_db),
+                      include_archived: bool = True):
+    """A shot's motion clips in position order — mutations are commands."""
+    from app.domain import motion_clips as mc
+    try:
+        rows = mc.list_clips(db, project.id, shot_id)
+    except ValueError:
+        raise HTTPException(404, "shot not found in this project") from None
+    if not include_archived:
+        rows = [r for r in rows if r.status == "active"]
+    return [mc.serialize_clip(db, r) for r in rows]
+
+
+@api_router.get("/api/projects/{project_id}/clips/{clip_id}")
+def get_motion_clip(clip_id: str, project: Project = Depends(get_project),
+                    db: Session = Depends(get_db)):
+    from app.domain import motion_clips as mc
+    try:
+        return mc.serialize_clip(
+            db, mc._get(db, project.id, clip_id))
+    except ValueError:
+        raise HTTPException(404, "motion clip not found in this project") \
+            from None
+
+
+@api_router.get("/api/projects/{project_id}/clips/{clip_id}/versions",
+                response_model=list[EntityRevisionOut])
+def motion_clip_versions(clip_id: str,
+                         project: Project = Depends(get_project),
+                         db: Session = Depends(get_db)):
+    from app.domain import motion_clips as mc
+    from app.domain import storyboard as sb
+    try:
+        mc._get(db, project.id, clip_id)
+    except ValueError:
+        raise HTTPException(404, "motion clip not found in this project") \
+            from None
+    return sb.revision_history(db, "motion_clip", clip_id)
+
+
+@api_router.get("/api/projects/{project_id}/clips/{clip_id}/draft")
+def motion_clip_draft(clip_id: str,
+                      project: Project = Depends(get_project),
+                      db: Session = Depends(get_db)):
+    """Read-only motion-prompt draft — same output the clip.compose
+    preview emits, for UI inspection without entering the command flow."""
+    from app.domain import motion_clips as mc
+    try:
+        return mc.compose_draft(db, project, clip_id)
+    except ValueError as exc:
+        msg = str(exc)
+        raise HTTPException(404 if "not found" in msg else 422, msg) from None
+
+
 # ---------- screenplay + shot-list (A1) ----------
 
 @api_router.get("/api/projects/{project_id}/screenplays")

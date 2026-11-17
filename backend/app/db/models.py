@@ -445,6 +445,49 @@ class Keyframe(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class MotionClip(Base):
+    """A4 — a shot-associated motion clip: keyframe-to-video beat
+    joining optional start/end keyframes, a motion-aware prompt,
+    camera movement/follow settings (same vocabulary as A2 planning),
+    rational duration + fps, resolution, generation settings, and a
+    mock-produced video result asset placeable on the timeline."""
+
+    __tablename__ = "motion_clips"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    start_keyframe_id: Mapped[str | None] = mapped_column(ForeignKey("keyframes.id", ondelete="SET NULL"), nullable=True)
+    end_keyframe_id: Mapped[str | None] = mapped_column(ForeignKey("keyframes.id", ondelete="SET NULL"), nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    negative_prompt: Mapped[str] = mapped_column(Text, default="")
+    # {instructions, intensity, temporal_consistency} — user-authored
+    # motion direction; never silently overwritten.
+    motion_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # {movement, follow_mode, follow_targets, follow_params, framing,
+    #  subject_placement} — same validated vocabulary as A2 planning.
+    camera_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Frame-accurate: duration in frames at fps_num/fps_den.
+    duration_frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fps_num: Mapped[int] = mapped_column(Integer, default=24)
+    fps_den: Mapped[int] = mapped_column(Integer, default=1)
+    width: Mapped[int] = mapped_column(Integer, default=512)
+    height: Mapped[int] = mapped_column(Integer, default=512)
+    model_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    generate_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    prompt_origin: Mapped[str] = mapped_column(String(20), default="user")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Screenplay(Base):
     """A1 — one screenplay document inside a project (multiple per
     project supported; position is dense per project). Version history
