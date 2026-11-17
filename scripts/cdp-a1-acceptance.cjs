@@ -1,6 +1,6 @@
 // A1 installed-candidate acceptance — drives the REAL installed app's
 // backend API (creds sniffed from the WebView2 CDP port like the N3
-// drivers). 15 steps per the A1.8 checklist.
+// drivers). 17 steps per the A1.8 + A1-F6 checklist.
 // Run: node scripts/cdp-a1-acceptance.cjs <cdpPort> <outDir> [exe]
 const fs = require("fs"), path = require("path");
 const { execFileSync, spawn } = require("child_process");
@@ -210,40 +210,59 @@ async function main() {
   if (!dlg2.some((c) => c.dialogue === "The boat is GONE.")) fail("approved sync dialogue wrong");
   ok("11 approved overwrite applied");
 
-  // step 12 — undo/redo
+  // step 12 — stale approval rejection: a commit pinned to an old
+  // project revision must 409 rather than replay a stale preview
+  await api("POST", `/api/projects/${p.id}/commands/commit`, {
+    command_type: "shotlist.sync",
+    payload: { screenplay_id: sp.id, approve_overwrite: [shots[1].id] },
+    scope: "project", expected_revision: _rev - 3,
+    idempotency_key: `a1-stale-${Date.now()}` }, 409);
+  ok("12 stale approval rejected with 409");
+
+  // step 13 — undo/redo
   await commit(p.id, "shotlist.undo", {});
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   if (board[0].shots[1].shot.title !== "MY EDIT") fail("undo did not restore pre-sync shot");
   await commit(p.id, "shotlist.redo", {});
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   if (board[0].shots[1].shot.title === "MY EDIT") fail("redo did not re-apply");
-  ok("12 undo/redo round-trip");
+  ok("13 undo/redo round-trip");
 
-  // step 13 — restart persistence
+  // step 14 — restart persistence
   killApp(); await sleep(4000);
   launch(); API = null; TOKEN = null; await creds();
   doc = await api("GET", `/api/projects/${p.id}/screenplays/${sp.id}`);
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   if (doc.scenes.length !== 2 || board.flatMap((s) => s.shots).length !== 4) fail("state lost across restart");
-  ok("13 restart persistence");
+  ok("14 restart persistence");
 
-  // step 14 — existing timeline functionality still works
+  // step 15 — backup compatibility: export succeeds and is recorded
+  _rev = 0;
+  const bex = await commit(p.id, "backup.export", { kind: "backup" });
+  const bj = await waitJob(p.id, bex.job_id);
+  if (bj.status !== "succeeded") fail(`backup job ${bj.status}: ${bj.error || ""}`);
+  const backups = await api("GET", `/api/projects/${p.id}/backups`);
+  if (!backups.some((b) => b.status === "succeeded")) fail("backup not recorded");
+  ok("15 backup.export succeeded on screenplay-bearing project");
+
+  // step 16 — existing timeline functionality still works
   await commit(p.id, "timeline.create", { name: "A1 Cut" });
   const tls = await api("GET", `/api/projects/${p.id}/timelines`);
   if (tls.length !== 1) fail("timeline subsystem broken");
-  ok("14 timeline.create works alongside screenplay state");
+  ok("16 timeline.create works alongside screenplay state");
 
-  // step 15 — clean shutdown
+  // step 17 — clean shutdown
   const r = await api("POST", `/api/projects/${p.id}/commands/commit`, {
     command_type: "screenplay.update",
     payload: { screenplay_id: sp.id, description: "final" },
-    scope: "project", expected_revision: _rev, idempotency_key: "a1-final-1" });
+    scope: "project", expected_revision: _rev,
+    idempotency_key: `a1-final-${Date.now()}` });
   killApp(); await sleep(6000);
   if (left("atomic-backend.exe")) fail("backend process leaked");
-  ok("15 clean shutdown — no orphan backend");
+  ok("17 clean shutdown — no orphan backend");
 
   fs.writeFileSync(path.join(OUT, "a1-acceptance.txt"), lines.join("\n") + "\n");
-  console.log(`\nA1 ACCEPTANCE: PASS ${lines.length}/15`);
+  console.log(`\nA1 ACCEPTANCE: PASS ${lines.length}/17`);
 }
 
 main().catch((e) => {

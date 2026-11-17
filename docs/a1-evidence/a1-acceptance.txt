@@ -1,6 +1,6 @@
-PASS backend http://127.0.0.1:55001 via installed app
+PASS backend http://127.0.0.1:54247 via installed app
 PASS health: backend 0.1.0 migrations ?
-PASS 1 project open (198fa2c8)
+PASS 1 project open (5525ce3e)
 PASS 4 characters+locations added
 PASS 2 screenplay 'Dock Scene' created
 PASS 3 scenes ordered: EXT. DOCK — NIGHT | INT. CABIN — NIGHT
@@ -11,8 +11,10 @@ PASS 8 screenplay modified
 PASS 9 preview: {"add":0,"update":0,"remove":0,"manual_edit":1,"unchanged":3} — manual edit flagged
 PASS 10 manual edit preserved without approval
 PASS 11 approved overwrite applied
-PASS 12 undo/redo round-trip
-PASS backend http://127.0.0.1:59622 via installed app
-PASS 13 restart persistence
-PASS 14 timeline.create works alongside screenplay state
-PASS 15 clean shutdown — no orphan backend
+PASS 12 stale approval rejected with 409
+PASS 13 undo/redo round-trip
+PASS backend http://127.0.0.1:52161 via installed app
+PASS 14 restart persistence
+PASS 15 backup.export succeeded on screenplay-bearing project
+PASS 16 timeline.create works alongside screenplay state
+PASS 17 clean shutdown — no orphan backend
