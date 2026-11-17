@@ -1,6 +1,6 @@
 // A5 installed-candidate acceptance — drives the REAL installed app's
 // backend API (creds sniffed from the WebView2 CDP port, same plumbing
-// as the A1/A2/A3/A4 drivers). 15 steps per the A5.9 checklist on a
+// as the A1/A2/A3/A4 drivers). 17 steps per the A5.9 checklist on a
 // populated A4 project (screenplay + scenes + scaffolded shot).
 // Run: node scripts/cdp-a5-acceptance.cjs <cdpPort> <outDir> [exe]
 const fs = require("fs"), path = require("path"), os = require("os");
@@ -10,7 +10,7 @@ const OUT = process.argv[3] || "docs/a5-evidence";
 const EXE = process.argv[4] ||
   `${process.env.LOCALAPPDATA}\\Atomic Dream Engine\\atomic-dream-engine.exe`;
 const INSTALL_DIR = path.dirname(EXE);
-const STEPS = 15;
+const STEPS = 17;
 let API = null, TOKEN = null, appProc = null;
 const lines = [];
 let steps = 0;
@@ -433,15 +433,67 @@ async function main() {
   }
   ok(`13 export + decoded PCM — audio stream present, ~${parseFloat(pr2.format.duration).toFixed(2)}s`);
 
-  // step 14 — restart persistence: relaunch, segments + results + placement intact
+  // step 14 — stale rejection: held generation + mid-flight text edit
+  //           → the produced artifact never publishes; the landed
+  //           result flags stale; regenerating clears it.
+  const relS = path.join(os.tmpdir(), `a5-rel-stale-${Date.now()}.flag`);
+  const genS = await commit(p.id, "dialogue.generate", {
+    segment_id: dAnna.id,
+    mock_hold: { at_stage: 2, release_file: relS, timeout_s: 120 } });
+  await waitHold(p.id, genS.job_id);
+  await commit(p.id, "dialogue.update",
+    { segment_id: dAnna.id, text: "The fog rolled in without warning." });
+  fs.writeFileSync(relS, "go");
+  const jS = await waitJob(p.id, genS.job_id);
+  if (jS.status !== "succeeded") fail(`held job wrong: ${jS.status}`);
+  let gS = (await segs(p.id, `sp_scene_id=${spsc.id}`))
+    .find((d) => d.id === dAnna.id);
+  if (gS.result_asset_id === jS.output_asset_id) {
+    fail("stale audio published over the edit");
+  }
+  if (gS.result_stale !== true) fail("drifted result not flagged stale");
+  const genR = await commit(p.id, "dialogue.generate",
+    { segment_id: dAnna.id });
+  const jR = await waitJob(p.id, genR.job_id);
+  if (jR.status !== "succeeded") fail(`regen failed: ${jR.status}`);
+  gS = (await segs(p.id, `sp_scene_id=${spsc.id}`))
+    .find((d) => d.id === dAnna.id);
+  if (gS.result_stale !== false
+      || gS.result_asset_id !== jR.output_asset_id) {
+    fail("regen did not clear the stale flag / attach the result");
+  }
+  ok("14 stale rejection — mid-flight edit refused publish, flagged, regen cleared");
+
+  // step 15 — backup/restore: the package round-trips segments,
+  //           remapped refs, and the result asset into a new project
+  const bex = await commit(p.id, "backup.export", { kind: "backup" });
+  const bexDone = await waitJob(p.id, bex.job_id, 120000);
+  if (bexDone.status !== "succeeded" || !bexDone.result_json?.package_path) {
+    fail(`backup export wrong: ${JSON.stringify(bexDone).slice(0, 200)}`);
+  }
+  const imp2 = await api("POST", "/api/packages/import",
+    { package_path: bexDone.result_json.package_path });
+  const newPid = imp2.project_id;
+  await waitJob(newPid, imp2.job_id, 120000);
+  const rsegs = await segs(newPid, "");
+  const rAnna = rsegs.find(
+    (d) => d.text === "The fog rolled in without warning.");
+  if (!rAnna || !rAnna.result_asset_id || !rAnna.character_id
+      || !rAnna.sp_scene_id || !rAnna.shot_id) {
+    fail(`restored segment wrong: ${JSON.stringify(rAnna).slice(0, 300)}`);
+  }
+  ok("15 backup/restore — segment + refs + result remapped into new project");
+
+  // step 16 — restart persistence: relaunch, segments + results + placement intact
   killApp(); await sleep(4000);
   launch(); API = null; TOKEN = null; await creds();
   dl = await segs(p.id, `sp_scene_id=${spsc.id}`);
   got = dl.find((d) => d.id === dAnna.id);
   gB = dl.find((d) => d.id === dBen.id);
-  if (got.result_asset_id !== wa.id
+  if (got.result_asset_id !== jR.output_asset_id
       || gB.result_asset_id !== j3.output_asset_id
-      || got.timing_json.start_frames !== 24) {
+      || got.timing_json.start_frames !== 24
+      || got.result_stale !== false) {
     fail("restart drifted segment state");
   }
   det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
@@ -450,12 +502,12 @@ async function main() {
   if (entryOf(board, shot.id).dialogue?.count !== 2) {
     fail("board dialogue summary degraded after restart");
   }
-  ok("14 restart persistence — segments, results, placement intact");
+  ok("16 restart persistence — segments, results, placement, flags intact");
 
-  // step 15 — clean shutdown
+  // step 17 — clean shutdown
   killApp(); await sleep(6000);
   if (left("atomic-backend.exe")) fail("backend process leaked");
-  ok("15 clean shutdown — no orphan backend");
+  ok("17 clean shutdown — no orphan backend");
 
   lines.push(`A5 ACCEPTANCE: PASS ${steps}/${STEPS}`);
   fs.writeFileSync(path.join(OUT, "a5-acceptance.txt"), lines.join("\n") + "\n");

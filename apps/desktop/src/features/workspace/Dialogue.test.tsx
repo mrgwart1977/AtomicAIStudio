@@ -144,6 +144,18 @@ describe("DialogueSection", () => {
         segment_id: "d1", timeline_id: "tl1", track_id: "tkA" }));
   });
 
+  it("flags a stale result when the source drifted", async () => {
+    apiFetch.mockImplementation((u: string) => Promise.resolve(
+      u.includes("/dialogue")
+        ? [{ ...SEG, result_asset_id: "a7", result_asset_name: "d.wav",
+             result_asset_status: "ready", result_stale: true }]
+        : route(u)));
+    render(<DialogueSection projectId="p1" spSceneId="spsc1" run={run} />);
+    fireEvent.click(await screen.findByRole("button",
+      { name: /Anna: “The tide/ }));
+    await screen.findByText(/stale — source changed/);
+  });
+
   it("archives via dialogue.archive", async () => {
     render(<DialogueSection projectId="p1" spSceneId="spsc1" run={run} />);
     fireEvent.click(await screen.findByLabelText(

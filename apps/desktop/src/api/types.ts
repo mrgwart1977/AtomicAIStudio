@@ -499,6 +499,10 @@ export interface DialogueSegment {
   /** Effective voice = character profile + segment overrides;
    * {missing: true} when the speaker has no usable voice. */
   resolved_voice?: Record<string, unknown> | null;
+  /** F2 — true when the speaker/voice/element/scene the result was
+   * generated against has since drifted; the audio is flagged, never
+   * silently replaced. */
+  result_stale?: boolean;
 }
 
 export interface Job {

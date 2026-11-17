@@ -351,6 +351,11 @@ export function DialogueSection({ projectId, spSceneId, shotId, sceneId,
                       ? "text-teal" : "text-amber"}`}>
                     {d.result_asset_status === "ready" ? "● " : "⚠ "}
                     {d.result_asset_name} (simulated)
+                    {d.result_stale && (
+                      <span className="text-amber" role="status">
+                        {" "}· stale — source changed
+                      </span>
+                    )}
                   </span>
                 )}
                 <span className="ml-auto flex items-center gap-1">

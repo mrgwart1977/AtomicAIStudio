@@ -998,16 +998,11 @@ def _dialogue_fingerprint(d) -> dict:
     """A5 — generation-relevant segment state the approval pins via
     expected_dialogue: any text/voice/speaker/timing/settings edit
     between preview and commit bumps revision and is refused."""
+    from app.domain import dialogue as _dlg
     return {
         "segment_id": d.id,
         "revision": d.revision,
-        "text": d.text,
-        "direction": d.direction,
-        "voice": d.voice_json or {},
-        "language": d.language,
-        "character_id": d.character_id,
-        "timing": d.timing_json or {},
-        "settings": d.settings_json or {},
+        **_dlg.segment_fingerprint(d),
     }
 
 
@@ -1822,7 +1817,7 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _get_screenplay(session, project, payload)
     if command_type in ("screenplay_scene.update", "screenplay_scene.delete",
                         "screenplay_scene.move"):
-        _get_sp_scene(session, project, payload)
+        sps_row = _get_sp_scene(session, project, payload)
         if command_type == "screenplay_scene.update":
             for k in ("location_id", "scene_id"):
                 if k in payload and payload[k] is not None:
@@ -1847,6 +1842,46 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                         except KeyError:
                             raise CommandError(
                                 404, "character not found in this project") from None
+                # A5-F2 — elements omitted from the submitted list are
+                # deleted, which unlinks any dialogue segment bound to
+                # them (FK SET NULL — the segment's own text survives).
+                # Surface that at preview AND commit so the unlink is
+                # never silent.
+                from app.db.models import (
+                    DialogueSegment, ScreenplayElement)
+                keep = {el.get("id") for el in payload["elements"]
+                        if el.get("id")}
+                linked = session.execute(
+                    select(DialogueSegment).where(
+                        DialogueSegment.project_id == project.id,
+                        DialogueSegment.element_id.isnot(None),
+                        DialogueSegment.element_id.in_(
+                            select(ScreenplayElement.id).where(
+                                ScreenplayElement.screenplay_scene_id
+                                == sps_row.id)),
+                        DialogueSegment.status == "active")
+                ).scalars().all()
+                unlinking = [d for d in linked
+                             if d.element_id not in keep]
+                if unlinking:
+                    warnings.append(
+                        f"{len(unlinking)} dialogue segment(s) lose "
+                        f"their screenplay-line link — segment text is "
+                        f"kept, generated audio flags stale")
+        if command_type == "screenplay_scene.delete":
+            # A5-F2 — deleting the scene unlinks its segments entirely.
+            from app.db.models import DialogueSegment
+            n_seg = session.execute(
+                select(func.count()).select_from(DialogueSegment).where(
+                    DialogueSegment.project_id == project.id,
+                    DialogueSegment.sp_scene_id == sps_row.id,
+                    DialogueSegment.status == "active")
+            ).scalar_one()
+            if n_seg:
+                warnings.append(
+                    f"Deleting this scene unlinks {n_seg} dialogue "
+                    f"segment(s) — segment text is kept, generated "
+                    f"audio flags stale")
     if command_type in ("shotlist.scaffold", "shotlist.sync"):
         _get_screenplay(session, project, payload)
     if command_type == "entity.assets.link":
@@ -4853,6 +4888,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 req["expected_result_revision"] = _d.revision
                 req["expected_sources"] = _dlg.sources_fingerprint(
                     session, _d)
+                req["expected_dialogue"] = _dialogue_fingerprint(_d)
                 job.request_json = req
                 audit["after"]["segment_id"] = _d.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",

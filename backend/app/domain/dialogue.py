@@ -388,6 +388,22 @@ def resolved_voice(s: Session, d: DialogueSegment) -> dict:
     return voice
 
 
+def segment_fingerprint(d: DialogueSegment) -> dict:
+    """Generation-relevant authored fields — identical key set to the
+    approval pin's fingerprint minus ``segment_id``/``revision``, so a
+    revision-only bump (result attach, enqueue bookkeeping) never
+    flags a result stale while a text/voice/timing/settings edit does."""
+    return {
+        "text": d.text,
+        "direction": d.direction,
+        "voice": d.voice_json or {},
+        "language": d.language,
+        "character_id": d.character_id,
+        "timing": d.timing_json or {},
+        "settings": d.settings_json or {},
+    }
+
+
 def sources_fingerprint(s: Session, d: DialogueSegment) -> dict:
     """A5 — publish-state pin for the segment's source refs: a
     mid-flight speaker/voice/element/scene change alters what this
@@ -503,6 +519,7 @@ def serialize_segment(s: Session, d: DialogueSegment) -> dict:
             out["result_asset_name"] = asset.name
             out["result_asset_status"] = asset.status
     out["job_status"] = None
+    out["result_stale"] = False
     if d.generate_job_id:
         job = s.get(GenerationJob, d.generate_job_id)
         if job is not None:
@@ -512,6 +529,26 @@ def serialize_segment(s: Session, d: DialogueSegment) -> dict:
                     and d.generate_job_id == job.id \
                     and d.result_asset_id != job.output_asset_id:
                 d.result_asset_id = job.output_asset_id
+            # F2 — the audio was approved against this exact source
+            # fingerprint + segment fingerprint; when the speaker/
+            # voice/element/scene or the authored fields drift
+            # afterwards the result is flagged stale, never silently
+            # replaced or deleted.
+            # The snapshot (out) still holds the STORED result id —
+            # check staleness against it, not the transient reconcile.
+            if out.get("result_asset_id"):
+                req = job.request_json or {}
+                pinned = req.get("expected_sources")
+                if pinned is not None:
+                    out["result_stale"] = \
+                        sources_fingerprint(s, d) != pinned
+                exp = req.get("expected_dialogue")
+                if not out["result_stale"] and \
+                        isinstance(exp, dict):
+                    live = {k: v for k, v in exp.items()
+                            if k not in ("segment_id", "revision")}
+                    out["result_stale"] = \
+                        live != segment_fingerprint(d)
     return out
 
 
