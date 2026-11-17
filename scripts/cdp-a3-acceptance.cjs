@@ -25,14 +25,13 @@ async function api(method, p, body, expect = 200) {
   if (r.status !== expect) fail(`${method} ${p} -> ${r.status}: ${(await r.text()).slice(0, 300)}`);
   return r.status === 204 ? null : r.json();
 }
-let _rev = 0;
 async function commit(pid, ct, payload, expect = 200, key) {
-  if (_rev === 0) _rev = (await api("GET", `/api/projects/${pid}`)).revision;
-  const r = await api("POST", `/api/projects/${pid}/commands/commit`, {
+  // Always fetch the current revision — generation jobs commit their own
+  // apply_commands (keyframe.result) which bump it independently.
+  const rev = (await api("GET", `/api/projects/${pid}`)).revision;
+  return api("POST", `/api/projects/${pid}/commands/commit`, {
     command_type: ct, payload, scope: "project", origin: "acceptance",
-    expected_revision: _rev, idempotency_key: key || `a3-${ct}-${Date.now()}-${Math.random()}` }, expect);
-  if (expect === 200) _rev = r.revision;
-  return r;
+    expected_revision: rev, idempotency_key: key || `a3-${ct}-${Date.now()}-${Math.random()}` }, expect);
 }
 async function preview(pid, ct, payload, expect = 200) {
   return api("POST", `/api/projects/${pid}/commands/preview`, {
@@ -161,7 +160,7 @@ async function main() {
     planning: { camera: { angle: "low", movement: "dolly_in",
                           follow_mode: "follow_behind" },
                 framing: "medium_wide" } });
-  await commit(p.id, "shot.cast.assign",
+  await commit(p.id, "shot.cast.update",
     { shot_id: shot.id, character_id: anna.id, state: { expression: "wary" } });
   await commit(p.id, "shot.update", { shot_id: shot.id, location_id: dock.id });
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
@@ -344,8 +343,9 @@ async function main() {
   if (left("atomic-backend.exe")) fail("backend process leaked");
   ok("15 clean shutdown — no orphan backend");
 
+  lines.push(`A3 ACCEPTANCE: PASS ${steps}/${STEPS}`);
   fs.writeFileSync(path.join(OUT, "a3-acceptance.txt"), lines.join("\n") + "\n");
-  console.log(`\nA3 ACCEPTANCE: PASS ${steps}/${STEPS}`);
+  console.log(`\n${lines[lines.length - 1]}`);
   if (steps !== STEPS) fail(`step count ${steps} != ${STEPS}`);
 }
 

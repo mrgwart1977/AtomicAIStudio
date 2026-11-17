@@ -1,0 +1,21 @@
+INFO backend http://127.0.0.1:52601 via installed app
+INFO health: backend 0.1.0 (0022 proven by keyframe persistence below)
+PASS 1 populated A2 project (screenplay + 2 scaffolded shots)
+PASS 2 planned shot selected (low angle + follow_behind + cast + location)
+PASS 3 start + end keyframes created; board summary shows 2
+PASS 4 continuity-aware draft proposed + applied (prompt_origin=compose)
+PASS 5 prompts edited; origin flipped to user; seed persisted
+INFO model pick: sd15.fp16 (unsupported)
+PASS 6 model compatibility consulted (verdict surfaces; mock runs)
+PASS 7 generation preview — composed prompt + resolved_keyframe pin
+PASS 8 mock job approved + enqueued (4f157058)
+PASS 9 progress observed; job succeeded via mock.image
+INFO first end-gen finished as succeeded
+PASS 10 cancel exercised (succeeded) + retry succeeded
+PASS 11 mock result asset associated (ready CAS image)
+PASS 12 pinned as thumbnail; undo restored; re-pinned
+INFO backend http://127.0.0.1:51026 via installed app
+PASS 13 restart persistence — prompt + result + job link intact
+PASS 14 storyboard + timeline + sync all healthy alongside keyframes
+PASS 15 clean shutdown — no orphan backend
+A3 ACCEPTANCE: PASS 15/15
