@@ -4456,6 +4456,12 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     summary="Generation enqueued")
                 req = dict(job.request_json or {})
                 req["expected_result_revision"] = _c.revision
+                # A4-F2 — pin the source keyframes' exact publish state.
+                # A mid-flight keyframe edit or a landing keyframe result
+                # changes the source imagery this generation was approved
+                # against; clip.result refuses without a fresh preview.
+                req["expected_sources"] = _mc.sources_fingerprint(
+                    session, _c)
                 job.request_json = req
                 audit["after"]["clip_id"] = _c.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",

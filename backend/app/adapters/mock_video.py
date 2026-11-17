@@ -206,6 +206,8 @@ class MockVideoAdapter:
                     "expected_clip_revision":
                         handle.request.get("expected_result_revision"),
                     "expected_planning_sha":
-                        handle.request.get("expected_planning_sha")},
+                        handle.request.get("expected_planning_sha"),
+                    "expected_sources":
+                        handle.request.get("expected_sources")},
             }
         yield out

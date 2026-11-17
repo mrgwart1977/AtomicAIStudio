@@ -336,10 +336,31 @@ def planning_sha(shot: Shot | None) -> str:
         sort_keys=True).encode()).hexdigest()
 
 
+def sources_fingerprint(s: Session, c: MotionClip) -> dict:
+    """A4-F2 — publish-state pin for the clip's source keyframes: a
+    mid-flight keyframe edit, archive, or newly-landed keyframe result
+    changes the imagery this generation was approved against, so the
+    produced video is stale. Keyed by keyframe id; absent refs are
+    still recorded so a mid-flight bind/unbind mismatches too."""
+    out: dict[str, dict] = {}
+    for field in ("start_keyframe_id", "end_keyframe_id"):
+        kid = getattr(c, field)
+        if not kid:
+            out[field] = None
+            continue
+        k = s.get(Keyframe, kid)
+        out[field] = (None if k is None else {
+            "revision": k.revision,
+            "result_asset_id": k.result_asset_id,
+            "status": k.status})
+    return out
+
+
 def check_result_fresh(s: Session, c: MotionClip, payload: dict) -> None:
     """A4 — same stale-result contract as keyframes: only the clip's
     current generation, on an unchanged clip, with unchanged shot
-    planning, may attach a result. Never a silent overwrite."""
+    planning AND unchanged source keyframes, may attach a result.
+    Never a silent overwrite."""
     if c.status != "active":
         _reject("motion clip is archived")
     jid = payload.get("job_id")
@@ -352,6 +373,10 @@ def check_result_fresh(s: Session, c: MotionClip, payload: dict) -> None:
     psha = payload.get("expected_planning_sha")
     if psha is not None and planning_sha(s.get(Shot, c.shot_id)) != psha:
         _reject("shot planning changed since generation — result is stale")
+    esrc = payload.get("expected_sources")
+    if esrc is not None and sources_fingerprint(s, c) != esrc:
+        _reject("source keyframes changed since generation"
+                " — result is stale")
 
 
 def apply_result(s: Session, project_id: str, payload: dict,
