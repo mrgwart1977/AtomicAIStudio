@@ -438,3 +438,349 @@ def test_restart_persistence(client, settings):
         assert got["result_asset_id"] == result_id
         assert got["job_status"] == "succeeded"
         assert len(_kfs(c2, pid, sh["shot"]["id"])) == 1
+
+
+# ---------- A3-F2 deterministic cancellation (mock hold barrier) ----------
+
+def _wait_hold(client, pid, job_id, timeout=30):
+    """Deterministic: job must reach the mock hold barrier (running +
+    hold message) — no timing guesses."""
+    import time
+    t0 = time.time()
+    j = None
+    while time.time() - t0 < timeout:
+        j = next(x for x in client.get(f"/api/projects/{pid}/jobs").json()
+                 if x["id"] == job_id)
+        if j["status"] == "running" and "hold" in (j["message"] or "").lower():
+            return j
+        if j["status"] in ("succeeded", "failed", "cancelled"):
+            raise AssertionError(f"job settled before hold: {j['status']}")
+        time.sleep(0.15)
+    raise AssertionError(f"job never reached hold barrier: {j}")
+
+
+def _gen_held(client, pid, kf_id, release=None):
+    hold = {"at_stage": 2, "timeout_s": 120}
+    if release is not None:
+        hold["release_file"] = str(release)
+    out = _commit(client, pid, "keyframe.generate",
+                  {"keyframe_id": kf_id, "mock_hold": hold})
+    _wait_hold(client, pid, out["job_id"])
+    return out["job_id"]
+
+
+def test_mock_hold_cancel_deterministic(client):
+    """F2 — job enters running, stays parked at the barrier until the
+    cancel event fires; cancel → cancelled; no result, no apply command,
+    no late publish; second cancel is a safe 409."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    job_id = _gen_held(client, pid, kf["id"])  # no release file → only cancel exits
+    r = client.post(f"/api/jobs/{job_id}/cancel")
+    assert r.status_code == 200, r.text
+    done = wait_for_job(client, pid, job_id, timeout=30)
+    assert done["status"] == "cancelled"
+    got = _kf(client, pid, kf["id"])
+    assert got["result_asset_id"] is None
+    assert got["job_status"] == "cancelled"
+    # No keyframe.result command ran for this job
+    results = [c for c in client.get(f"/api/projects/{pid}/commands").json()
+               if c["command_type"] == "keyframe.result"]
+    assert results == []
+    # Idempotent-cancel safety: second cancel is a clean refusal, no drift
+    r2 = client.post(f"/api/jobs/{job_id}/cancel")
+    assert r2.status_code == 409
+    assert _kf(client, pid, kf["id"])["result_asset_id"] is None
+
+
+def test_mock_hold_release_completes(client, tmp_path):
+    """F2 — the same barrier releases deterministically when the
+    release file appears; job then completes normally."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "release.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    rel.write_text("go")
+    done = wait_for_job(client, pid, job_id, timeout=30)
+    assert done["status"] == "succeeded"
+    assert _kf(client, pid, kf["id"])["result_asset_id"] == \
+        done["output_asset_id"]
+
+
+def test_cancelled_then_release_still_cancelled(client, tmp_path):
+    """F3 — job cancelled at the barrier must never publish late:
+    creating the release file afterwards changes nothing."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "release.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    client.post(f"/api/jobs/{job_id}/cancel")
+    done = wait_for_job(client, pid, job_id, timeout=30)
+    assert done["status"] == "cancelled"
+    rel.write_text("go")  # late release — task is already gone
+    import time
+    time.sleep(0.5)
+    got = _kf(client, pid, kf["id"])
+    assert got["result_asset_id"] is None
+    j = next(x for x in client.get(f"/api/projects/{pid}/jobs").json()
+             if x["id"] == job_id)
+    assert j["status"] == "cancelled"
+
+
+def test_mock_hold_validation(client):
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    _commit(client, pid, "keyframe.generate",
+            {"keyframe_id": kf["id"], "mock_hold": "x"}, expect=422)
+    _commit(client, pid, "keyframe.generate",
+            {"keyframe_id": kf["id"], "mock_hold": {"at_stage": 0}},
+            expect=422)
+    _commit(client, pid, "keyframe.generate",
+            {"keyframe_id": kf["id"], "mock_hold": {"at_stage": 99}},
+            expect=422)
+
+
+# ---------- A3-F3 stale-result protection ----------
+
+def _release_and_settle(client, pid, job_id, rel):
+    rel.write_text("go")
+    return wait_for_job(client, pid, job_id, timeout=30)
+
+
+def test_stale_result_prompt_edit_refused(client, tmp_path):
+    """Prompt edited mid-flight → the job's apply_command pins no
+    longer match; job still succeeds but the stale result is refused
+    and nothing is silently overwritten."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "r.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    _commit(client, pid, "keyframe.update",
+            {"keyframe_id": kf["id"], "prompt": "edited mid-flight"})
+    done = _release_and_settle(client, pid, job_id, rel)
+    assert done["status"] == "succeeded"  # artifact exists; apply refused
+    got = _kf(client, pid, kf["id"])
+    assert got["result_asset_id"] is None
+    assert got["prompt"] == "edited mid-flight"
+    results = [c for c in client.get(f"/api/projects/{pid}/commands").json()
+               if c["command_type"] == "keyframe.result"]
+    assert results == []  # refused — no result revision written
+
+
+def test_stale_result_planning_edit_refused(client, tmp_path):
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "r.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    _commit(client, pid, "shot.update",
+            {"shot_id": sh["shot"]["id"],
+             "planning": {"camera": {"follow_mode": "drone_follow"}}})
+    done = _release_and_settle(client, pid, job_id, rel)
+    assert done["status"] == "succeeded"
+    assert _kf(client, pid, kf["id"])["result_asset_id"] is None
+
+
+def test_stale_result_superseded_refused(client, tmp_path):
+    """A newer generate supersedes an older in-flight job — the older
+    job's result must never attach."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "r.flag"
+    job1 = _gen_held(client, pid, kf["id"], release=rel)
+    # Superseding generation queues behind the held job (one gen lane)
+    out2 = _commit(client, pid, "keyframe.generate",
+                   {"keyframe_id": kf["id"]})
+    assert _kf(client, pid, kf["id"])["generate_job_id"] == out2["job_id"]
+    # Release the stale job — it succeeds but its result is refused
+    done1 = _release_and_settle(client, pid, job1, rel)
+    assert done1["status"] == "succeeded"
+    assert _kf(client, pid, kf["id"])["result_asset_id"] is None
+    # Now the superseding job gets the lane and lands its own result
+    done2 = wait_for_job(client, pid, out2["job_id"], timeout=30)
+    assert done2["status"] == "succeeded"
+    got = _kf(client, pid, kf["id"])
+    assert got["result_asset_id"] == done2["output_asset_id"]
+    assert got["result_asset_id"] != done1["output_asset_id"]
+
+
+def test_stale_result_archived_refused(client, tmp_path):
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "r.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    _commit(client, pid, "keyframe.archive", {"keyframe_id": kf["id"]})
+    done = _release_and_settle(client, pid, job_id, rel)
+    assert done["status"] == "succeeded"
+    got = _kf(client, pid, kf["id"])
+    assert got["result_asset_id"] is None
+    assert got["status"] == "archived"
+
+
+def test_result_job_id_pin_blocks_cross_landing(client):
+    """A result carrying a foreign job_id can't attach — and a result
+    asset from another project is still refused outright."""
+    pid = make_project(client)["id"]
+    pid2 = make_project(client, "OtherProj")["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    out = _commit(client, pid, "keyframe.generate",
+                  {"keyframe_id": kf["id"]})
+    done = wait_for_job(client, pid, out["job_id"], timeout=30)
+    # Second project's keyframe + manual result carrying project A's job
+    sc2 = _scene2(client, pid2)
+    sh2 = _shot2(client, pid2, sc2["scene"]["id"], prompt="x")
+    kf2 = _mk_kf(client, pid2, sh2["shot"]["id"], "start", prompt="x")
+    _commit(client, pid2, "keyframe.result",
+            {"keyframe_id": kf2["id"], "job_id": out["job_id"],
+             "result_asset_id": done["output_asset_id"]},
+            expect=422)
+    # And project A's asset can't land on project B's keyframe directly
+    _commit(client, pid2, "keyframe.result",
+            {"keyframe_id": kf2["id"],
+             "result_asset_id": done["output_asset_id"]},
+            expect=422)
+    assert _kf(client, pid2, kf2["id"])["result_asset_id"] is None
+
+
+def test_held_job_restart_reconciles_terminal(client, settings, tmp_path):
+    """A job parked at the barrier when the process stops reconciles to
+    a terminal state on restart — never silently resumes and never
+    publishes a result afterwards."""
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    rel = tmp_path / "r.flag"
+    job_id = _gen_held(client, pid, kf["id"], release=rel)
+    # Simulate crash: row still 'running', process is gone
+    sf = client.app.state.session_factory
+    from app.db.models import GenerationJob
+    with sf() as s:
+        s.get(GenerationJob, job_id).status = "running"
+        s.commit()
+        n = client.app.state.job_engine.reconcile_interrupted(s)
+        s.commit()  # reconcile mutates in-session; caller commits
+    assert n == 0  # keyframe.generate is non-resumable → failed, not re-queued
+    j = next(x for x in client.get(f"/api/projects/{pid}/jobs").json()
+             if x["id"] == job_id)
+    assert j["status"] == "failed"
+    assert j["recovery_state"] == "interrupted"
+    assert _kf(client, pid, kf["id"])["result_asset_id"] is None
+
+
+# ---------- A3-F4 prompt ownership extras ----------
+
+def test_generate_request_hash_matches_and_sources_kept(client):
+    """The job request's composed prompt hashes to the preview's
+    prompt_sha256, and the request retains the structured continuity
+    sections it was composed from."""
+    import hashlib
+    pid = make_project(client)["id"]
+    hero = _character(client, pid, "Ada")
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": sh["shot"]["id"], "character_id": hero["id"],
+             "state": {"expression": "stern"}})
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    prop = _preview(client, pid, "keyframe.generate",
+                    {"keyframe_id": kf["id"]})
+    out = _commit(client, pid, "keyframe.generate",
+                  {"keyframe_id": kf["id"],
+                   "expected_prompt": prop["resolved_prompt"]["prompt_sha256"]})
+    done = wait_for_job(client, pid, out["job_id"], timeout=30)
+    assert done["status"] == "succeeded"
+    from app.db.models import GenerationJob
+    with client.app.state.session_factory() as s:
+        req = dict(s.get(GenerationJob, out["job_id"]).request_json)
+    assert hashlib.sha256(req["prompt"].encode()).hexdigest() == \
+        prop["resolved_prompt"]["prompt_sha256"]
+    # Composed-proposal provenance persists in the job request
+    ctx = (req.get("keyframe_generate") or {}).get("prompt_context") or {}
+    assert ctx.get("prompt_sha256") == prop["resolved_prompt"]["prompt_sha256"]
+    assert ctx.get("sections") is not None
+    assert req.get("negative_prompt") == kf["negative_prompt"]
+
+
+def test_negative_prompt_and_recompose_preserves_user_text(client):
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="mine",
+                negative_prompt="no blur")
+    # Re-composing drafts never touches the stored user prompt
+    prop = _preview(client, pid, "keyframe.compose",
+                    {"keyframe_id": kf["id"]})
+    assert prop["resolved_draft"]["prompt"]
+    assert _kf(client, pid, kf["id"])["prompt"] == "mine"
+    assert _kf(client, pid, kf["id"])["negative_prompt"] == "no blur"
+    got = _kf(client, pid, kf["id"])
+    assert got["prompt_origin"] == "user"
+
+
+# ---------- A3-F5 mock provenance ----------
+
+def test_mock_provenance_everywhere(client):
+    pid = make_project(client)["id"]
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s")
+    out = _commit(client, pid, "keyframe.generate",
+                  {"keyframe_id": kf["id"]})
+    done = wait_for_job(client, pid, out["job_id"], timeout=30)
+    # Job record: mock adapter, mock kind label
+    assert done["adapter_id"] == "mock.image"
+    # CAS asset version media_json keeps is_mock / generated=false
+    vers = client.get(
+        f"/api/projects/{pid}/assets/{done['output_asset_id']}/versions")
+    assert vers.status_code == 200
+    media = vers.json()[0].get("media_json") or {}
+    assert media.get("is_mock") is True
+    assert media.get("generated") is False
+    assert media.get("adapter_id") == "mock.image"
+
+
+# ---------- A3-F6 model catalog + authorization ----------
+
+def test_generate_uses_catalog_verdict_without_download(client):
+    """Generation consults the model catalog for the verdict but never
+    downloads, never touches credentials, never runs real inference —
+    the job records the mock adapter even when a real model_key is
+    supplied as user intent."""
+    pid = make_project(client)["id"]
+    models = client.get("/api/models")
+    assert models.status_code == 200
+    items = models.json() if isinstance(models.json(), list) \
+        else models.json().get("items", [])
+    real = next((m for m in items
+                 if (m.get("compatibility") or {}).get("status")
+                 not in (None, "planned")), None)
+    sc = _scene2(client, pid)
+    sh = _shot2(client, pid, sc["scene"]["id"], prompt="s")
+    mk = {"model_key": real["key"]} if real else {}
+    kf = _mk_kf(client, pid, sh["shot"]["id"], "start", prompt="s",
+                settings=mk)
+    out = _commit(client, pid, "keyframe.generate",
+                  {"keyframe_id": kf["id"]})
+    done = wait_for_job(client, pid, out["job_id"], timeout=30)
+    # Still routed to the mock — never the real model; no download job
+    assert done["adapter_id"] == "mock.image"
+    kinds = {j["kind"] for j in client.get("/api/jobs").json()}
+    assert not any("download" in (k or "") for k in kinds)

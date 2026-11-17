@@ -1,15 +1,15 @@
 // A3 installed-candidate acceptance — drives the REAL installed app's
 // backend API (creds sniffed from the WebView2 CDP port, same plumbing
-// as the A1/A2 drivers). 15 steps per the A3.8 checklist on a
-// populated A2 project (screenplay + scaffolded + planned shots).
+// as the A1/A2 drivers). 17 steps per the A3.8 + A3-F2/F3 checklist on
+// a populated A2 project (screenplay + scaffolded + planned shots).
 // Run: node scripts/cdp-a3-acceptance.cjs <cdpPort> <outDir> [exe]
-const fs = require("fs"), path = require("path");
+const fs = require("fs"), path = require("path"), os = require("os");
 const { execFileSync, spawn } = require("child_process");
 const PORT = process.argv[2] || "9229";
 const OUT = process.argv[3] || "docs/a3-evidence";
 const EXE = process.argv[4] ||
   `${process.env.LOCALAPPDATA}\\Atomic Dream Engine\\atomic-dream-engine.exe`;
-const STEPS = 15;
+const STEPS = 17;
 let API = null, TOKEN = null, appProc = null;
 const lines = [];
 let steps = 0;
@@ -44,6 +44,20 @@ async function waitJob(pid, jobId, timeout = 90000) {
     if (j && ["succeeded", "failed", "cancelled"].includes(j.status)) return j;
     if (Date.now() - t0 > timeout) fail(`job ${jobId} timeout`);
     await sleep(400);
+  }
+}
+// Deterministic: the job must reach the mock hold barrier (running +
+// "Mock hold" progress message) — no timing guesses.
+async function waitHold(pid, jobId, timeout = 60000) {
+  const t0 = Date.now();
+  for (;;) {
+    const j = (await api("GET", `/api/projects/${pid}/jobs`)).find((x) => x.id === jobId);
+    if (j && j.status === "running" && /hold/i.test(j.message || "")) return j;
+    if (j && ["succeeded", "failed", "cancelled"].includes(j.status)) {
+      fail(`job ${jobId} settled before the hold barrier (${j.status})`);
+    }
+    if (Date.now() - t0 > timeout) fail(`job ${jobId} never reached hold`);
+    await sleep(300);
   }
 }
 const _pend = new Map(), _events = new Map();
@@ -134,7 +148,6 @@ async function main() {
 
   // step 1 — populated A2 project: screenplay + scaffolded + planned shot
   const p = await api("POST", "/api/projects", { name: `A3-${Date.now()}` }, 201);
-  _rev = 0;
   await commit(p.id, "character.create", { name: "Anna" });
   await commit(p.id, "location.create", { name: "Night Dock" });
   const chars = await api("GET", `/api/projects/${p.id}/character`);
@@ -260,23 +273,60 @@ async function main() {
   }
   ok("9 progress observed; job succeeded via mock.image");
 
-  // step 10 — cancel + retry on the end keyframe
-  const gen2 = await commit(p.id, "keyframe.generate", { keyframe_id: kfEnd.id });
-  try {
-    await api("POST", `/api/jobs/${gen2.job_id}/cancel`, undefined, 200);
-  } catch { /* cancel may race a fast mock — handled below */ }
+  // step 10 — DETERMINISTIC cancel: held at the mock barrier until the
+  // cancel event fires (never a timing race). No release file → the only
+  // exit is cancellation.
+  const gen2 = await commit(p.id, "keyframe.generate", {
+    keyframe_id: kfEnd.id, mock_hold: { at_stage: 2, timeout_s: 120 } });
+  await waitHold(p.id, gen2.job_id);
+  await api("POST", `/api/jobs/${gen2.job_id}/cancel`, undefined, 200);
   const j2 = await waitJob(p.id, gen2.job_id);
-  note(`first end-gen finished as ${j2.status}`);
-  const retry = await commit(p.id, "keyframe.generate", { keyframe_id: kfEnd.id });
-  const j3 = await waitJob(p.id, retry.job_id);
-  if (j3.status !== "succeeded") fail(`retry failed: ${JSON.stringify(j3)}`);
-  if ((await kfs(p.id, shot.id)).find((k) => k.id === kfEnd.id).result_asset_id
-      !== j3.output_asset_id) {
-    fail("retry result not associated");
+  if (j2.status !== "cancelled") fail(`held job did not cancel: ${j2.status}`);
+  let kend = (await kfs(p.id, shot.id)).find((k) => k.id === kfEnd.id);
+  if (kend.result_asset_id !== null) fail("cancelled job left a result");
+  // Idempotent-cancel safety: second cancel is a clean 409, no drift
+  await api("POST", `/api/jobs/${gen2.job_id}/cancel`, undefined, 409);
+  if ((await kfs(p.id, shot.id)).find((k) => k.id === kfEnd.id).result_asset_id !== null) {
+    fail("second cancel drifted state");
   }
-  ok(`10 cancel exercised (${j2.status}) + retry succeeded`);
+  ok("10 deterministic cancel — held job → cancelled, no result, 409 re-cancel");
 
-  // step 11 — result asset association (durable, CAS-backed, mock-labeled)
+  // step 11 — retry with a release file → deterministic completion
+  const rel = path.join(os.tmpdir(), `a3-release-${Date.now()}.flag`);
+  const gen3 = await commit(p.id, "keyframe.generate", {
+    keyframe_id: kfEnd.id,
+    mock_hold: { at_stage: 2, release_file: rel, timeout_s: 120 } });
+  await waitHold(p.id, gen3.job_id);
+  fs.writeFileSync(rel, "go");
+  const j3 = await waitJob(p.id, gen3.job_id);
+  if (j3.status !== "succeeded") fail(`released job failed: ${JSON.stringify(j3)}`);
+  kend = (await kfs(p.id, shot.id)).find((k) => k.id === kfEnd.id);
+  if (kend.result_asset_id !== j3.output_asset_id) fail("retry result not associated");
+  ok("11 held retry released deterministically → result associated");
+
+  // step 12 — stale-result rejection: prompt edited mid-flight → the
+  // job still succeeds (artifact exists) but apply_command is refused
+  await commit(p.id, "keyframe.create", { shot_id: shot.id, role: "reference" });
+  const kfRef = (await kfs(p.id, shot.id)).find((k) => k.role === "reference");
+  await commit(p.id, "keyframe.update",
+    { keyframe_id: kfRef.id, prompt: "ref frame draft" });
+  const rel2 = path.join(os.tmpdir(), `a3-release2-${Date.now()}.flag`);
+  const gen4 = await commit(p.id, "keyframe.generate", {
+    keyframe_id: kfRef.id,
+    mock_hold: { at_stage: 2, release_file: rel2, timeout_s: 120 } });
+  await waitHold(p.id, gen4.job_id);
+  await commit(p.id, "keyframe.update",
+    { keyframe_id: kfRef.id, prompt: "edited while generating" });
+  fs.writeFileSync(rel2, "go");
+  const j4 = await waitJob(p.id, gen4.job_id);
+  if (j4.status !== "succeeded") fail(`stale job did not finish: ${j4.status}`);
+  const kref = (await kfs(p.id, shot.id)).find((k) => k.id === kfRef.id);
+  if (kref.result_asset_id !== null) {
+    fail(`STALE RESULT LANDED: ${JSON.stringify(kref).slice(0, 300)}`);
+  }
+  ok("12 stale result refused — mid-flight prompt edit kept the artifact out");
+
+  // step 13 — result association + mock provenance through CAS versions
   const start = (await kfs(p.id, shot.id)).find((k) => k.id === kfStart.id);
   if (start.result_asset_id !== done.output_asset_id || start.job_status !== "succeeded") {
     fail(`result not associated: ${JSON.stringify(start).slice(0, 300)}`);
@@ -286,9 +336,15 @@ async function main() {
   if (!out || out.kind !== "image" || out.status !== "ready") {
     fail(`result asset wrong: ${JSON.stringify(out).slice(0, 200)}`);
   }
-  ok("11 mock result asset associated (ready CAS image)");
+  const vers = await api("GET", `/api/projects/${p.id}/assets/${out.id}/versions`);
+  const media = vers[0]?.media_json || {};
+  if (media.is_mock !== true || media.generated !== false
+      || media.adapter_id !== "mock.image") {
+    fail(`mock provenance missing: ${JSON.stringify(media)}`);
+  }
+  ok("13 result associated + mock provenance intact (is_mock, generated=false)");
 
-  // step 12 — pin the selected keyframe → shot thumbnail; undo restores
+  // step 14 — pin → undo → re-pin
   await commit(p.id, "keyframe.pin", { keyframe_id: kfStart.id });
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   if (entryOf(board, shot.id).shot.thumbnail_asset_id !== start.result_asset_id) {
@@ -302,46 +358,64 @@ async function main() {
     fail("pin undo did not restore");
   }
   await commit(p.id, "keyframe.pin", { keyframe_id: kfStart.id });
-  ok("12 pinned as thumbnail; undo restored; re-pinned");
+  ok("14 pinned as thumbnail; undo restored; re-pinned");
 
-  // step 13 — restart persistence
+  // step 15 — restart reconciliation: kill the app with a job parked at
+  // the barrier → on relaunch the interrupted non-resumable job is
+  // failed, never resumed, never publishes.
+  const rel3 = path.join(os.tmpdir(), `a3-release3-${Date.now()}.flag`);
+  const gen5 = await commit(p.id, "keyframe.generate", {
+    keyframe_id: kfEnd.id,
+    mock_hold: { at_stage: 2, release_file: rel3, timeout_s: 600 } });
+  await waitHold(p.id, gen5.job_id);
   killApp(); await sleep(4000);
   launch(); API = null; TOKEN = null; await creds();
+  const j5 = (await api("GET", `/api/projects/${p.id}/jobs`))
+    .find((x) => x.id === gen5.job_id);
+  if (j5.status !== "failed" || j5.recovery_state !== "interrupted") {
+    fail(`in-flight job not reconciled: ${JSON.stringify(j5).slice(0, 300)}`);
+  }
+  kend = (await kfs(p.id, shot.id)).find((k) => k.id === kfEnd.id);
+  if (kend.result_asset_id !== j3.output_asset_id) {
+    fail("restart drifted the end result");
+  }
+  // cancelled job from step 10 keeps its terminal state through restart
+  const j2b = (await api("GET", `/api/projects/${p.id}/jobs`))
+    .find((x) => x.id === gen2.job_id);
+  if (j2b.status !== "cancelled") fail("cancelled state lost on restart");
+  ok("15 restart reconcile — in-flight → failed/interrupted; cancelled preserved");
+
+  // step 16 — persistence + storyboard/timeline/sync health
   const rk = (await kfs(p.id, shot.id)).find((k) => k.id === kfStart.id);
   if (rk.prompt !== "opening frame: Anna turns slowly"
       || rk.result_asset_id !== start.result_asset_id
       || rk.job_status !== "succeeded") {
     fail(`restart lost keyframe state: ${JSON.stringify(rk).slice(0, 300)}`);
   }
-  ok("13 restart persistence — prompt + result + job link intact");
-
-  // step 14 — storyboard + timeline still work alongside keyframes
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   const be = entryOf(board, shot.id);
-  if (be.keyframes?.count !== 2
+  if (be.keyframes?.count !== 3
       || be.shot.planning_json?.camera?.angle !== "low") {
     fail("board state degraded");
   }
   await commit(p.id, "timeline.create", { name: "A3 Cut" });
   const tls = await api("GET", `/api/projects/${p.id}/timelines`);
   if (tls.length !== 1) fail("timeline subsystem broken");
-  // screenplay sync still preserves everything
   const doc2 = await api("GET", `/api/projects/${p.id}/screenplays/${sp.id}`);
   const els = doc2.scenes[0].elements;
   await commit(p.id, "screenplay_scene.update", {
     sp_scene_id: doc2.scenes[0].id, elements: [
       { ...els[0], text: "The boat never came." }, els[1]] });
-  _rev = (await api("GET", `/api/projects/${p.id}`)).revision;
   await commit(p.id, "shotlist.sync", { screenplay_id: sp.id });
-  if ((await kfs(p.id, shot.id)).length !== 2) {
+  if ((await kfs(p.id, shot.id)).length !== 3) {
     fail("sync disturbed keyframes");
   }
-  ok("14 storyboard + timeline + sync all healthy alongside keyframes");
+  ok("16 persistence + storyboard + timeline + sync all healthy");
 
-  // step 15 — clean shutdown
+  // step 17 — clean shutdown
   killApp(); await sleep(6000);
   if (left("atomic-backend.exe")) fail("backend process leaked");
-  ok("15 clean shutdown — no orphan backend");
+  ok("17 clean shutdown — no orphan backend");
 
   lines.push(`A3 ACCEPTANCE: PASS ${steps}/${STEPS}`);
   fs.writeFileSync(path.join(OUT, "a3-acceptance.txt"), lines.join("\n") + "\n");

@@ -508,7 +508,8 @@ class JobEngine:
             project = s.get(Project, job.project_id)
             if project is None:
                 return
-            payload = {k: (asset.id if v == "__asset__" else v)
+            payload = {k: (asset.id if v == "__asset__"
+                           else job.id if v == "__job__" else v)
                        for k, v in (spec.get("payload") or {}).items()}
             cmd.commit(
                 s, project,

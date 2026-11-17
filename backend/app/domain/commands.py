@@ -802,6 +802,9 @@ def _compose_keyframe_generate(session: Session, project: Project,
         "scene_id": shot.scene_id,
         "keyframe_role": kf.role,
         "model_key": payload.get("model_key") or settings.get("model_key"),
+        # A3-F3 — the planning state this generation was approved
+        # against; keyframe.result refuses if it drifts mid-flight.
+        "expected_planning_sha": kd.planning_sha(shot),
         # Provenance: the request records exactly what the approval saw.
         "origin_command_type": "keyframe.generate",
         "keyframe_generate": {
@@ -810,7 +813,41 @@ def _compose_keyframe_generate(session: Session, project: Project,
             "prompt_context": comp,
         },
     }
+    hold = parse_mock_hold(payload.get("mock_hold"))
+    if hold:
+        # Deterministic test barrier for the mock adapter only —
+        # keyframe.generate always routes to mock.image.
+        req["hold"] = hold
     return kf, req
+
+
+def parse_mock_hold(value) -> dict:
+    """A3-F2 — validate a deterministic mock barrier spec. The mock
+    adapter parks at `at_stage` until `release_file` exists or the
+    cancel event fires; `timeout_s` is the failsafe bound."""
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise CommandError(422, "mock_hold must be an object")
+    out: dict = {}
+    at = value.get("at_stage")
+    if at is not None:
+        if not isinstance(at, int) or isinstance(at, bool) \
+                or at < 1 or at > 8:
+            raise CommandError(422, "mock_hold.at_stage must be 1..8")
+        out["at_stage"] = at
+    rel = value.get("release_file")
+    if rel is not None:
+        if not isinstance(rel, str) or not rel.strip():
+            raise CommandError(422, "mock_hold.release_file must be a path")
+        out["release_file"] = rel.strip()
+    ts = value.get("timeout_s")
+    if ts is not None:
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) \
+                or ts <= 0 or ts > 3600:
+            raise CommandError(422, "mock_hold.timeout_s must be 0<t<=3600")
+        out["timeout_s"] = ts
+    return out
 
 
 def _compose_shot_video(session: Session, project: Project,
@@ -2059,6 +2096,15 @@ def _validate_keyframe(session: Session, project: Project,
                 and not (shot.prompt or "").strip():
             raise CommandError(
                 422, "keyframe has no prompt — write one or compose a draft")
+        parse_mock_hold(payload.get("mock_hold"))
+        return
+    if command_type == "keyframe.result":
+        # Same freshness contract as commit — preview refuses what
+        # commit would refuse (stale/superseded/archived).
+        try:
+            kd.check_result_fresh(session, k, payload)
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
         return
     if command_type == "keyframe.pin":
         if k.status != "active":
@@ -4051,6 +4097,12 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 _kd.write_keyframe_revision(
                     session, _k, command_id=command.id,
                     summary="Generation enqueued")
+                # The result pin this job's apply_command must match:
+                # the revision AFTER this commit's bump. Any later edit,
+                # archive, or newer generate leaves it stale → refused.
+                req = dict(job.request_json or {})
+                req["expected_result_revision"] = _k.revision
+                job.request_json = req
                 audit["after"]["keyframe_id"] = _k.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",
                             "generate.image.img2img", "generate.image.edit"):

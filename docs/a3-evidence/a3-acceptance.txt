@@ -1,4 +1,4 @@
-INFO backend http://127.0.0.1:52601 via installed app
+INFO backend http://127.0.0.1:60561 via installed app
 INFO health: backend 0.1.0 (0022 proven by keyframe persistence below)
 PASS 1 populated A2 project (screenplay + 2 scaffolded shots)
 PASS 2 planned shot selected (low angle + follow_behind + cast + location)
@@ -8,14 +8,15 @@ PASS 5 prompts edited; origin flipped to user; seed persisted
 INFO model pick: sd15.fp16 (unsupported)
 PASS 6 model compatibility consulted (verdict surfaces; mock runs)
 PASS 7 generation preview — composed prompt + resolved_keyframe pin
-PASS 8 mock job approved + enqueued (4f157058)
+PASS 8 mock job approved + enqueued (2cae691f)
 PASS 9 progress observed; job succeeded via mock.image
-INFO first end-gen finished as succeeded
-PASS 10 cancel exercised (succeeded) + retry succeeded
-PASS 11 mock result asset associated (ready CAS image)
-PASS 12 pinned as thumbnail; undo restored; re-pinned
-INFO backend http://127.0.0.1:51026 via installed app
-PASS 13 restart persistence — prompt + result + job link intact
-PASS 14 storyboard + timeline + sync all healthy alongside keyframes
-PASS 15 clean shutdown — no orphan backend
-A3 ACCEPTANCE: PASS 15/15
+PASS 10 deterministic cancel — held job → cancelled, no result, 409 re-cancel
+PASS 11 held retry released deterministically → result associated
+PASS 12 stale result refused — mid-flight prompt edit kept the artifact out
+PASS 13 result associated + mock provenance intact (is_mock, generated=false)
+PASS 14 pinned as thumbnail; undo restored; re-pinned
+INFO backend http://127.0.0.1:61130 via installed app
+PASS 15 restart reconcile — in-flight → failed/interrupted; cancelled preserved
+PASS 16 persistence + storyboard + timeline + sync all healthy
+PASS 17 clean shutdown — no orphan backend
+A3 ACCEPTANCE: PASS 17/17

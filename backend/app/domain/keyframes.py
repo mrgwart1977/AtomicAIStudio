@@ -272,11 +272,42 @@ def archive_keyframe(s: Session, project_id: str, payload: dict,
     return kf
 
 
+def planning_sha(shot: Shot | None) -> str:
+    """Fingerprint of the shot planning a generation was approved
+    against — a planning edit mid-flight makes a pending result stale."""
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(
+        (shot.planning_json if shot else None) or {},
+        sort_keys=True).encode()).hexdigest()
+
+
+def check_result_fresh(s: Session, kf: Keyframe, payload: dict) -> None:
+    """A3-F3 — a job's apply_command may only land while it is still
+    the keyframe's current generation and nothing it was approved
+    against has moved. Any pin mismatch rejects — never a silent
+    overwrite. Pins are optional so a deliberate manual association
+    (user picks an existing asset) still works."""
+    if kf.status != "active":
+        _reject("keyframe is archived")
+    jid = payload.get("job_id")
+    if jid is not None and kf.generate_job_id != jid:
+        _reject("result job is not the keyframe's current generation"
+                " — superseded")
+    erev = payload.get("expected_keyframe_revision")
+    if erev is not None and erev != kf.revision:
+        _reject("keyframe changed since generation — result is stale")
+    psha = payload.get("expected_planning_sha")
+    if psha is not None and planning_sha(s.get(Shot, kf.shot_id)) != psha:
+        _reject("shot planning changed since generation — result is stale")
+
+
 def apply_result(s: Session, project_id: str, payload: dict,
                  command_id: str | None = None) -> Keyframe:
     """keyframe.result — the job's apply_command lands the produced
     asset as a normal audited, undoable command."""
     kf = _get(s, project_id, payload["keyframe_id"])
+    check_result_fresh(s, kf, payload)
     asset_id = payload.get("result_asset_id")
     if asset_id is not None:
         asset = s.get(Asset, asset_id)
@@ -349,9 +380,11 @@ def serialize_keyframe(s: Session, kf: Keyframe) -> dict:
             out["job_status"] = job.status
             out["job_progress"] = job.progress
             if job.status == "succeeded" and job.output_asset_id \
+                    and kf.generate_job_id == job.id \
                     and kf.result_asset_id != job.output_asset_id:
-                # Self-heal if the post-command failed (still audited —
-                # the apply_command wrote a revision when it ran).
+                # Self-heal if the post-command failed — ONLY for the
+                # keyframe's current generation. A superseded/stale job
+                # can never re-attach its output here.
                 kf.result_asset_id = job.output_asset_id
     return out
 
