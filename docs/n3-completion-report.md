@@ -9,7 +9,16 @@ artifact:
 packaged FFmpeg n9.0.2). Evidence: `docs/n3d-evidence/n3d-acceptance.txt`
 (11/11 steps),
 `docs/n3c-evidence/n3c-acceptance.txt` (11/11), `docs/n3b-evidence/`,
-plus the backend suite (1504 passed, 11 skipped).
+plus the backend suite (1505 passed, 11 skipped).
+
+## Milestone merges
+
+| Step | PR | Merge SHA | Post-merge CI |
+|---|---|---|---|
+| N3-A track automation | #134 | `df58439` | 6/6 green |
+| N3-B continuous scrubbing | #136 | `9824526` | 6/6 green |
+| N3-C editing UX | #138 | `26face3` | 6/6 green |
+| N3-D hardening + acceptance | #139 | `d29714c` | 6/6 green (incl. package: frozen sidecar + FFmpeg staged/smoke + NSIS uploaded) |
 
 ## N3 architecture summary
 
@@ -169,6 +178,16 @@ New from N3-D:
 - Resolved this milestone: the Windows export argv bound
   (WinError 206 @ ~240 segs) — see D3; and the pre-0019
   undo-across-migration leak — see D7.
+- **Remaining scalability bound:** FFmpeg argv stays under Windows'
+  limit via the script file + input dedupe + job-dir aliases, but
+  ~**750 unique sources on one timeline** would still overflow input
+  arguments (each unique source needs one `-i`; ~40-char aliases).
+  Timelines beyond that need a staged submix render — **not
+  implemented, not claimed; requires separate authorization**.
+- **Intermittent test flake (tracked):**
+  `test_c15_watch_polling.py::test_process_exit_is_bounded_with_stalled_scan`
+  hung >30 s once on post-merge CI (backend 3.12, `d29714c`); passed on
+  rerun, on 3.14, and locally. Recorded as RELEASE_CHECKLIST #14.
 
 Carried (pre-existing, unchanged): Stage B2b ON HOLD; issue #96 mandatory
 before live artifact retrieval; no live providers/credentials/paid work;
@@ -180,7 +199,7 @@ v1.0 blockers in RELEASE_CHECKLIST unchanged.
 |---|---|---|
 | D1 regression | automated+installed | PASS |
 | D2 parity | installed (+backend unit) | PASS (tolerance-based) |
-| D3 reliability | automated+installed | PASS — 1 new limitation |
+| D3 reliability | automated+installed | PASS — argv bound resolved |
 | D4 performance | installed | measured, within baseline |
-| D5 installed E2E | installed | PASS 10/10 |
+| D5 installed E2E | installed | PASS 11/11 |
 | D6 human acceptance | human-required | prepared, not run |

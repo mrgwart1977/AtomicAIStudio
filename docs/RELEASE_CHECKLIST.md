@@ -22,8 +22,24 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 | 11 | FAT32 >4 GiB guard — edge coverage | Low | v1.0 | open | **yes** (defensible as-is; margin improvement) | #15 |
 | 12 | Shot-level reference-ID picker UI | Low | M3+ | open | no (API+schema delivered M2.1; UI deferred) | — |
 | 13 | Timeline export argv overflow on very large timelines | Medium | v1.0 | **resolved** (N3-D hardening) | — | — |
+| 14 | Intermittent watch-service shutdown race — `test_process_exit_is_bounded_with_stalled_scan` hung >30 s once (post-merge CI backend 3.12 on `d29714c`; passed on rerun + on 3.14 + locally) | Low | v1.0 | open | no (timing flake; worker-thread abandonment at interpreter shutdown) | — |
 
 ---
+
+## 14. Intermittent watch-service shutdown race — TRACKED, LOW
+
+- **What:** `test_c15_watch_polling.py::TestDisableReenableRace::
+  test_process_exit_is_bounded_with_stalled_scan` failed once on
+  post-merge main CI (backend 3.12 job on `d29714c`) — "backend
+  process hung >30 s exiting with a stalled scan — worker thread is
+  not safely abandoned at interpreter shutdown". The same test passed
+  on the rerun, on the 3.14 job, on the PR-head run, and locally.
+- **Why open:** timing-sensitive shutdown race — a stalled scan worker
+  may not be abandoned cleanly at interpreter shutdown. No user-facing
+  failure has been observed; the app exits through a different path.
+- **Acceptance:** root-cause the abandoned-thread path in the watch
+  service and either join bounded or mark the thread abandon-safe; the
+  test then passes deterministically across repeated CI runs.
 
 ## 13. Timeline export argv overflow on very large timelines — RESOLVED in N3-D hardening
 
@@ -49,8 +65,8 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
      clips on few sources; ceiling ≈ ~750 unique sources on one timeline
      (a staged submix render would be needed past that — documented, not
      implemented).
-- **Verified (installed N3-D candidate):** 240-clip export 84 s, 500-clip
-  196 s, 1000-clip 520 s — all succeed, correct program duration;
+- **Verified (installed N3-D candidate):** 240-clip export 73.8 s, 500-clip
+  189.2 s, 1000-clip 498.3 s — all succeed, correct program duration;
   pre/post-fix ffprobe + decoded PCM windows identical; cancel/no-orphan/
   cleanup unchanged; `tests/test_n1d_composite.py` covers argv bound +
   dedupe + script mode + shared-source real render.
