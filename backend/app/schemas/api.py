@@ -100,6 +100,12 @@ CommandType = Literal[
     "shot.create", "shot.update", "shot.archive", "shot.unarchive",
     "shot.revert", "shot.duplicate", "shot.move",
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    "screenplay.create", "screenplay.update", "screenplay.archive",
+    "screenplay.unarchive", "screenplay.revert", "screenplay.move",
+    "screenplay_scene.create", "screenplay_scene.update",
+    "screenplay_scene.delete", "screenplay_scene.move",
+    "shotlist.scaffold", "shotlist.sync", "shotlist.undo",
+    "shotlist.redo",
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
@@ -174,6 +180,11 @@ class CommandProposalOut(BaseModel):
     # C5-A — timeline ops only: {id, revision, clip_count} the approval
     # pins via expected_timeline at commit.
     resolved_timeline: dict[str, Any] | None = None
+    # A1 — shotlist.scaffold/sync only: the full deterministic diff
+    # (adds/updates/archive-only removals/manual-edit conflicts) the
+    # approval surfaces; destructive entries apply only via explicit
+    # approve_overwrite/approve_remove id lists at commit.
+    shotlist_diff: dict[str, Any] | None = None
     # C5-C — shot.generate/shot.video only: the composed prompt
     # (sections, omissions, conflicts, budget) the approval pins via
     # expected_prompt at commit.

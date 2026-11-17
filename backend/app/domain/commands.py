@@ -37,6 +37,7 @@ from app.db.models import (
     utcnow,
 )
 from app.domain import bibles
+from app.domain import screenplay as spd
 from app.domain import storyboard as sb
 
 SUPPORTED_COMMANDS = {
@@ -79,6 +80,13 @@ SUPPORTED_COMMANDS = {
     "shot.create", "shot.update", "shot.archive", "shot.unarchive",
     "shot.revert", "shot.duplicate", "shot.move",
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    # A1 — screenplay + deterministic shot-list scaffold
+    "screenplay.create", "screenplay.update", "screenplay.archive",
+    "screenplay.unarchive", "screenplay.revert", "screenplay.move",
+    "screenplay_scene.create", "screenplay_scene.update",
+    "screenplay_scene.delete", "screenplay_scene.move",
+    "shotlist.scaffold", "shotlist.sync", "shotlist.undo",
+    "shotlist.redo",
     "character.duplicate",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
@@ -333,6 +341,28 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"{command_type.split('.', 1)[1].capitalize()} shot"
     if command_type == "shot.generate":
         return "Generate image for shot (simulated)"
+    if command_type.startswith("screenplay."):
+        if command_type == "screenplay.create":
+            return f"Create screenplay '{payload.get('title', '')}'"
+        if command_type == "screenplay.revert":
+            return f"Revert screenplay to revision {payload.get('to_revision')}"
+        if command_type == "screenplay.move":
+            return f"Move screenplay to position {(payload.get('to_index') or 0) + 1}"
+        return f"{command_type.split('.', 1)[1].capitalize()} screenplay"
+    if command_type.startswith("screenplay_scene."):
+        if command_type == "screenplay_scene.create":
+            return f"Add screenplay scene '{(payload.get('heading') or '')[:60]}'"
+        if command_type == "screenplay_scene.move":
+            return f"Move screenplay scene to position {(payload.get('to_index') or 0) + 1}"
+        return f"{command_type.split('.', 1)[1].capitalize()} screenplay scene"
+    if command_type == "shotlist.scaffold":
+        return "Generate deterministic shot-list scaffold"
+    if command_type == "shotlist.sync":
+        return "Synchronize shot list with screenplay"
+    if command_type == "shotlist.undo":
+        return "Undo shot-list apply"
+    if command_type == "shotlist.redo":
+        return "Redo shot-list apply"
     if command_type == "character.duplicate":
         return "Duplicate character (with its linked assets)"
     if command_type == "entity.assets.link":
@@ -1401,6 +1431,49 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             _require_shot_cast(session, project, payload)
     if command_type == "character.duplicate":
         _get_character(session, project, payload)
+    # ---- A1: screenplay + shot-list ----
+    if command_type == "screenplay.create":
+        if not (payload.get("title") or "").strip():
+            raise CommandError(422, "screenplay title is required")
+    if command_type in ("screenplay.update", "screenplay.archive",
+                        "screenplay.unarchive", "screenplay.revert",
+                        "screenplay.move"):
+        _get_screenplay(session, project, payload)
+        if command_type == "screenplay.update" \
+                and "title" in payload \
+                and not (payload.get("title") or "").strip():
+            raise CommandError(422, "screenplay title cannot be empty")
+    if command_type == "screenplay_scene.create":
+        _get_screenplay(session, project, payload)
+    if command_type in ("screenplay_scene.update", "screenplay_scene.delete",
+                        "screenplay_scene.move"):
+        _get_sp_scene(session, project, payload)
+        if command_type == "screenplay_scene.update":
+            for k in ("location_id", "scene_id"):
+                if k in payload and payload[k] is not None:
+                    model = sb.ENTITY_MODELS["location"] \
+                        if k == "location_id" else Scene
+                    row = session.get(model, payload[k])
+                    if row is None or row.project_id != project.id:
+                        label = "location" if k == "location_id" else "scene"
+                        raise CommandError(
+                            404, f"{label} not found in this project")
+            if "elements" in payload:
+                if not isinstance(payload["elements"], list):
+                    raise CommandError(422, "elements must be a list")
+                for el in payload["elements"]:
+                    if el.get("kind", "action") not in spd.ELEMENT_KINDS:
+                        raise CommandError(
+                            422, f"unknown element kind '{el.get('kind')}'")
+                    if el.get("character_id") is not None:
+                        try:
+                            sb.get_character(session, el["character_id"],
+                                             project.id)
+                        except KeyError:
+                            raise CommandError(
+                                404, "character not found in this project") from None
+    if command_type in ("shotlist.scaffold", "shotlist.sync"):
+        _get_screenplay(session, project, payload)
     if command_type == "entity.assets.link":
         for k in ("entity_type", "entity_id", "asset_id"):
             if not payload.get(k):
@@ -1822,6 +1895,24 @@ def _get_character(session: Session, project: Project, payload: dict):
         raise CommandError(404, "character not found in this project") from None
 
 
+def _get_screenplay(session: Session, project: Project, payload: dict):
+    from app.domain import screenplay as spd
+    try:
+        return spd.get_screenplay(
+            session, payload.get("screenplay_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "screenplay not found in this project") from None
+
+
+def _get_sp_scene(session: Session, project: Project, payload: dict):
+    from app.domain import screenplay as spd
+    try:
+        return spd.get_sp_scene(
+            session, payload.get("sp_scene_id") or "", project.id)
+    except KeyError:
+        raise CommandError(404, "screenplay scene not found in this project") from None
+
+
 def _require_scene_cast(session: Session, project: Project, payload: dict) -> None:
     from app.db.models import SceneCharacter
     row = session.execute(
@@ -2231,6 +2322,31 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                     # N1-A — honest unsupported-layout refusal at
                     # preview, not a misleading pin or a 500.
                     out["warnings"].append(str(exc))
+        except CommandError:
+            pass
+    if command_type in ("shotlist.scaffold", "shotlist.sync"):
+        # A1 — the approval shows the full deterministic diff: proposed
+        # adds, updates, archive-only removals, manual-edit conflicts
+        # (which require per-shot approve ids at commit) and unchanged.
+        try:
+            sp = _get_screenplay(session, project, payload)
+            out["shotlist_diff"] = spd.shotlist_plan(
+                session, project.id, sp.id)
+            c = out["shotlist_diff"]["counts"]
+            out["summary"] = (
+                f"{out['summary']} — {c['add']} new, {c['update']} updates, "
+                f"{c['remove']} removals, {c['manual_edit']} manual-edit "
+                f"conflicts, {c['unchanged']} unchanged")
+            if c["manual_edit"]:
+                out["warnings"].append(
+                    f"{c['manual_edit']} shot(s) have manual edits that a "
+                    "sync would overwrite — they apply only when listed "
+                    "in approve_overwrite")
+            if c["remove"]:
+                out["warnings"].append(
+                    f"{c['remove']} shot(s) no longer match screenplay "
+                    "content — they are archived (never deleted) only "
+                    "when listed in approve_remove")
         except CommandError:
             pass
     return out
@@ -2771,6 +2887,190 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         return
 
     raise CommandError(422, f"unsupported command_type '{command_type}'")
+
+
+def _commit_screenplay(session: Session, project: Project,
+                       command: CreativeCommand, command_type: str,
+                       payload: dict, audit: dict) -> None:
+    """A1 — screenplay CRUD + deterministic shot-list scaffold/sync.
+
+    Screenplay document state versions as one entity (entity_type
+    'screenplay'); scaffold/sync additionally write the touched
+    scenes' and shots' own revisions so existing storyboard
+    revert/history stays correct. Nothing destructive applies without
+    an explicit per-shot approval id list in the payload."""
+
+    def sp():
+        return _get_screenplay(session, project, payload)
+
+    def sps():
+        return _get_sp_scene(session, project, payload)
+
+    if command_type == "screenplay.create":
+        row = spd.create_screenplay(
+            session, project.id, title=payload["title"],
+            description=payload.get("description", ""),
+            metadata=payload.get("metadata"), command_id=command.id)
+        audit["after"]["screenplay_id"] = row.id
+        return
+
+    if command_type == "screenplay.update":
+        fields = {f: payload[f] for f in spd.SCREENPLAY_FIELDS if f in payload}
+        try:
+            spd.update_screenplay(
+                session, sp(), fields=fields,
+                metadata=payload.get("metadata"), command_id=command.id,
+                change_summary=payload.get("change_summary")
+                or "Updated screenplay")
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+        return
+
+    if command_type in ("screenplay.archive", "screenplay.unarchive"):
+        spd.set_screenplay_archived(
+            session, sp(),
+            archived=command_type == "screenplay.archive",
+            command_id=command.id)
+        return
+
+    if command_type == "screenplay.move":
+        spd.move_screenplay(session, sp(), int(payload.get("to_index") or 0),
+                            command_id=command.id)
+        return
+
+    if command_type == "screenplay.revert":
+        try:
+            spd.revert_screenplay(
+                session, sp(), int(payload["to_revision"]),
+                command_id=command.id)
+        except KeyError:
+            raise CommandError(404, "revision not found") from None
+        audit["after"]["reverted_to"] = int(payload["to_revision"])
+        return
+
+    if command_type == "screenplay_scene.create":
+        try:
+            row = spd.create_sp_scene(
+                session, sp(), heading=payload.get("heading", ""),
+                action=payload.get("action", ""),
+                notes=payload.get("notes", ""),
+                location_id=payload.get("location_id"),
+                scene_id=payload.get("scene_id"),
+                position=payload.get("position"),
+                command_id=command.id)
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+        audit["after"]["sp_scene_id"] = row.id
+        return
+
+    if command_type == "screenplay_scene.update":
+        parent = session.get(spd.Screenplay, sps().screenplay_id)
+        fields = {f: payload[f] for f in spd.SP_SCENE_FIELDS if f in payload}
+        try:
+            if "elements" in payload:
+                spd.set_sp_scene_elements(
+                    session, parent, sps(), payload["elements"],
+                    command_id=command.id,
+                    change_summary=payload.get("change_summary")
+                    or "Updated screenplay scene elements")
+            spd.update_sp_scene(
+                session, parent, sps(), fields=fields,
+                location_id=payload.get("location_id", ...),
+                scene_id=payload.get("scene_id", ...),
+                command_id=command.id,
+                change_summary=payload.get("change_summary")
+                or "Updated screenplay scene")
+        except KeyError as exc:
+            raise CommandError(404, str(exc).strip("'")) from None
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+        return
+
+    if command_type == "screenplay_scene.delete":
+        parent = session.get(spd.Screenplay, sps().screenplay_id)
+        audit["before"]["sp_scene_id"] = payload.get("sp_scene_id")
+        spd.delete_sp_scene(session, parent, sps(), command_id=command.id)
+        return
+
+    if command_type == "screenplay_scene.move":
+        spd.move_sp_scene(session, sps(), int(payload.get("to_index") or 0),
+                          command_id=command.id)
+        return
+
+    if command_type in ("shotlist.scaffold", "shotlist.sync"):
+        batch = spd.apply_shotlist(
+            session, project.id, sp().id,
+            approve_overwrite=payload.get("approve_overwrite") or [],
+            approve_remove=payload.get("approve_remove") or [],
+            command_id=command.id)
+        audit["after"]["batch"] = batch
+        audit["after"]["mode"] = command_type.split(".")[1]
+        return
+
+    if command_type in ("shotlist.undo", "shotlist.redo"):
+        cmds, undone, redone = _shotlist_history(session, project)
+        if command_type == "shotlist.undo":
+            for c in cmds:
+                if c.command_type in ("shotlist.scaffold", "shotlist.sync") \
+                        and c.id not in undone:
+                    batch = _shotlist_batch_of(session, c)
+                    result = spd.undo_shotlist(
+                        session, project.id, batch, command_id=command.id)
+                    audit["after"]["undone_command_id"] = c.id
+                    audit["after"]["batch"] = batch
+                    audit["after"]["undone"] = result
+                    return
+            raise CommandError(409, "nothing to undo — no shot-list "
+                                    "apply is outstanding")
+        for c in cmds:
+            if c.command_type == "shotlist.undo" and c.id not in redone:
+                batch = _shotlist_batch_of(session, c)
+                result = spd.redo_shotlist(
+                    session, project.id, batch, command_id=command.id)
+                audit["after"]["redone_undo_id"] = c.id
+                audit["after"]["batch"] = batch
+                audit["after"]["redone"] = result
+                return
+        raise CommandError(409, "nothing to redo — no shot-list undo "
+                                "is outstanding")
+
+
+def _shotlist_history(session: Session, project: Project):
+    """Committed shotlist.* commands newest-first, plus the sets of
+    scaffold/sync ids already undone and undo ids already redone."""
+    cmds = session.execute(
+        select(CreativeCommand).where(
+            CreativeCommand.project_id == project.id,
+            CreativeCommand.status == "committed",
+            CreativeCommand.command_type.in_(
+                ["shotlist.scaffold", "shotlist.sync",
+                 "shotlist.undo", "shotlist.redo"]),
+        ).order_by(CreativeCommand.created_at.desc())
+    ).scalars().all()
+    undone: set[str] = set()
+    redone: set[str] = set()
+    for c in cmds:
+        after = _shotlist_after(session, c)
+        if c.command_type == "shotlist.undo" and after.get("undone_command_id"):
+            undone.add(after["undone_command_id"])
+        if c.command_type == "shotlist.redo" and after.get("redone_undo_id"):
+            redone.add(after["redone_undo_id"])
+    return cmds, undone, redone
+
+
+def _shotlist_after(session: Session, cmd: CreativeCommand) -> dict:
+    txn = session.execute(
+        select(CommandTransaction).where(
+            CommandTransaction.command_id == cmd.id)
+    ).scalar_one_or_none()
+    return ((txn.audit_json or {}).get("after") or {}) if txn else {}
+
+
+def _shotlist_batch_of(session: Session, cmd: CreativeCommand) -> dict:
+    batch = _shotlist_after(session, cmd).get("batch")
+    if not batch:
+        raise CommandError(409, "shot-list command has no recorded batch")
+    return batch
 
 
 def _commit_timeline(session: Session, project: Project, command: CreativeCommand,
@@ -3334,6 +3634,11 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
               or command_type == "character.duplicate")):
         _commit_storyboard(session, project, command, command_type, payload,
                            audit, storage=storage)
+
+    elif command_type.startswith(("screenplay.", "screenplay_scene.",
+                                  "shotlist.")):
+        _commit_screenplay(session, project, command, command_type, payload,
+                           audit)
 
     elif (command_type.startswith("timeline.")
           # C5-B — export enqueues a durable job; the JOB_COMMANDS

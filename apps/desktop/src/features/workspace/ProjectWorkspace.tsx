@@ -7,6 +7,7 @@ import { FirstFilmPage } from "../firstfilm/FirstFilmPage";
 import { CloudPage } from "./CloudPage";
 import { GeneratePage } from "./GeneratePage";
 import { OverviewPage } from "./OverviewPage";
+import { ScreenplayPage } from "./ScreenplayPage";
 import { SettingsPage } from "./SettingsPage";
 import { StoryboardPage } from "./StoryboardPage";
 import { TimelinePage } from "./TimelinePage";
@@ -14,6 +15,7 @@ import { TimelinePage } from "./TimelinePage";
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: "first_film", label: "First Film" },
   { id: "overview", label: "Overview" },
+  { id: "screenplay", label: "Screenplay" },
   { id: "storyboard", label: "Storyboard" },
   { id: "timeline", label: "Timeline" },
   { id: "generate", label: "Generate" },
@@ -85,6 +87,7 @@ export function ProjectWorkspace() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "first_film" && <FirstFilmPage />}
         {tab === "overview" && <OverviewPage />}
+        {tab === "screenplay" && <ScreenplayPage />}
         {tab === "storyboard" && <StoryboardPage />}
         {tab === "timeline" && <TimelinePage />}
         {tab === "generate" && <GeneratePage />}

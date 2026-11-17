@@ -41,6 +41,9 @@ from app.db.models import (
     PromptDraft,
     Scene,
     SceneCharacter,
+    Screenplay,
+    ScreenplayElement,
+    ScreenplayScene,
     Shot,
     ShotCharacter,
     World,
@@ -49,9 +52,10 @@ from app.db.models import (
 )
 from app.domain.storage import iter_chunks
 
-# v2 adds scenes/shots/cast/entity-asset sections. v1 packages still import —
-# missing sections restore as empty.
-FORMAT_VERSION = 2
+# v2 adds scenes/shots/cast/entity-asset sections; v3 adds screenplay
+# sections (A1). Older packages still import — missing sections restore
+# as empty.
+FORMAT_VERSION = 3
 # Iteration order is the restore order — dependencies come first
 # (assets are restored separately BEFORE this loop because
 # shots.thumbnail_asset_id and entity_assets.asset_id point at them).
@@ -64,6 +68,11 @@ ENTITY_TABLES = {
     "shots": Shot,
     "shot_characters": ShotCharacter,
     "entity_assets": EntityAssetLink,
+    # A1 — screenplay documents reference scenes/locations/characters
+    # above, so they restore last.
+    "screenplays": Screenplay,
+    "screenplay_scenes": ScreenplayScene,
+    "screenplay_elements": ScreenplayElement,
 }
 
 

@@ -546,7 +546,8 @@ def test_backup_roundtrip_preserves_storyboard(client, tmp_path):
     pkg = Path(job["result_json"]["package_path"])
     with zipfile.ZipFile(pkg) as zf:
         manifest = json.loads(zf.read("manifest.json"))
-    assert manifest["format_version"] == 2
+    # A1 — v3 adds screenplay sections; v2 readers ignore them.
+    assert manifest["format_version"] == 3
     assert len(manifest["entities"]["scenes"]) == 1
     assert len(manifest["entities"]["shots"]) == 1
     assert len(manifest["entities"]["shot_characters"]) == 1

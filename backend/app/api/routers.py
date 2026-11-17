@@ -1321,6 +1321,60 @@ def shot_versions(shot_id: str, project: Project = Depends(get_project),
     return sb.revision_history(db, "shot", shot_id)
 
 
+# ---------- screenplay + shot-list (A1) ----------
+
+@api_router.get("/api/projects/{project_id}/screenplays")
+def list_screenplays(
+    project: Project = Depends(get_project), db: Session = Depends(get_db),
+    include_archived: bool = False,
+):
+    """Project's screenplays, ordered — scenes NOT embedded (use the
+    detail route); the list stays light for navigation."""
+    from app.domain import screenplay as spd
+    return spd.list_screenplays(db, project.id, include_archived=include_archived)
+
+
+@api_router.get("/api/projects/{project_id}/screenplays/{screenplay_id}")
+def get_screenplay(
+    screenplay_id: str, project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+):
+    """One screenplay with its ordered scenes and elements."""
+    from app.domain import screenplay as spd
+    try:
+        sp = spd.get_screenplay(db, screenplay_id, project.id)
+    except KeyError:
+        raise HTTPException(404, "screenplay not found in this project") from None
+    return spd.screenplay_payload(db, sp)
+
+
+@api_router.get("/api/projects/{project_id}/screenplays/{screenplay_id}/versions",
+                response_model=list[EntityRevisionOut])
+def screenplay_versions(screenplay_id: str,
+                        project: Project = Depends(get_project),
+                        db: Session = Depends(get_db)):
+    from app.domain import screenplay as spd
+    from app.domain import storyboard as sb
+    try:
+        spd.get_screenplay(db, screenplay_id, project.id)
+    except KeyError:
+        raise HTTPException(404, "screenplay not found in this project") from None
+    return sb.revision_history(db, "screenplay", screenplay_id)
+
+
+@api_router.get("/api/projects/{project_id}/screenplays/{screenplay_id}/shotlist-plan")
+def screenplay_shotlist_plan(screenplay_id: str,
+                             project: Project = Depends(get_project),
+                             db: Session = Depends(get_db)):
+    """The deterministic scaffold/sync diff without committing — same
+    plan a shotlist.* preview emits, for read-only inspection."""
+    from app.domain import screenplay as spd
+    try:
+        return spd.shotlist_plan(db, project.id, screenplay_id)
+    except KeyError:
+        raise HTTPException(404, "screenplay not found in this project") from None
+
+
 @api_router.get("/api/projects/{project_id}/entity-assets",
                 response_model=list[EntityAssetLinkOut])
 def list_entity_asset_links(
