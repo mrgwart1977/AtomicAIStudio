@@ -137,6 +137,7 @@ async function main() {
   const chars = await api("GET", `/api/projects/${p.id}/character`);
   const locs = await api("GET", `/api/projects/${p.id}/location`);
   const anna = chars.find((c) => c.name === "Anna");
+  const bob = chars.find((c) => c.name === "Bob");
   const dock = locs.find((l) => l.name === "Night Dock");
   await commit(p.id, "screenplay.create", { title: "Dock Scene" });
   const sp = (await api("GET", `/api/projects/${p.id}/screenplays`))[0];
@@ -157,7 +158,8 @@ async function main() {
     camera: { angle: "low", movement: "dolly_in",
               follow_mode: "follow_behind",
               follow_params: { distance_m: 3 },
-              follow_targets: [{ kind: "character", id: anna.id }] },
+              follow_targets: [{ kind: "character", id: anna.id },
+                               { kind: "character", id: bob.id }] },
     framing: "medium_wide", subject_placement: "left_third",
     lighting: "moon + practical", action_notes: "she turns",
     fps: { num: 24000, den: 1001, frames: 96 },
@@ -166,10 +168,11 @@ async function main() {
   board = await api("GET", `/api/projects/${p.id}/storyboard`);
   const pj = entryOf(board, shot.id).shot.planning_json;
   if (pj?.camera?.follow_mode !== "follow_behind" || pj.framing !== "medium_wide"
-      || pj.fps?.den !== 1001 || pj.notes !== "acceptance plan") {
+      || pj.fps?.den !== 1001 || pj.notes !== "acceptance plan"
+      || (pj.camera.follow_targets || []).length !== 2) {
     fail(`planning not persisted: ${JSON.stringify(pj)}`);
   }
-  ok("2 shot planning persisted (follow_behind + framing + 24000/1001)");
+  ok("2 shot planning persisted (follow_behind + 2-char targets + 24000/1001)");
 
   // step 3 — every spec follow mode accepted; bad value rejected
   for (const mode of ["follow_front", "follow_side", "follow_shoulder",
@@ -207,6 +210,28 @@ async function main() {
   if (media.missing.length) fail(`clean bindings flagged: ${media.missing}`);
   ok("5 thumbnail bound; media.missing empty for ready assets");
 
+  // step 5b — missing media: remove the CAS blob, verify → flags;
+  // restore, verify → clears. Both the pinned link and the thumbnail
+  // binding must surface.
+  const dataRoot = `${process.env.LOCALAPPDATA}\\AtomicAIStudio`;
+  const blobPath = `${dataRoot}\\blobs\\${asset.sha256.slice(0, 2)}\\${asset.sha256}`;
+  const saved = fs.readFileSync(blobPath);
+  fs.rmSync(blobPath);
+  let vres = await commit(p.id, "assets.verify", {});
+  if (vres.job_id) await waitJob(p.id, vres.job_id);
+  board = await api("GET", `/api/projects/${p.id}/storyboard`);
+  media = entryOf(board, shot.id).media;
+  if (media.missing.length < 2) {
+    fail(`missing blob not surfaced: ${JSON.stringify(media.missing)}`);
+  }
+  fs.writeFileSync(blobPath, saved);
+  vres = await commit(p.id, "assets.verify", {});
+  if (vres.job_id) await waitJob(p.id, vres.job_id);
+  board = await api("GET", `/api/projects/${p.id}/storyboard`);
+  media = entryOf(board, shot.id).media;
+  if (media.missing.length) fail(`missing flags did not clear: ${media.missing}`);
+  ok("5b missing media flagged + recovered via assets.verify");
+
   // step 6 — ordering + duplication (drag/drop backend primitive)
   const s2 = shots(board)[1].shot;
   await commit(p.id, "shot.move", { shot_id: s2.id, to_index: 0 });
@@ -219,6 +244,42 @@ async function main() {
     fail("duplicate lost planning");
   }
   ok("6 reorder + duplicate — planning carried to the copy");
+
+  // step 6b — bulk archive: two shots archived as sequential commands,
+  // each individually undoable; planning + media preserved throughout.
+  const scId = board[0].scene.id;
+  const extra = [];
+  for (const t of ["bulk-a", "bulk-b"]) {
+    await commit(p.id, "shot.create", { scene_id: scId, title: t });
+    board = await api("GET", `/api/projects/${p.id}/storyboard`);
+    extra.push(shots(board).find((e) => e.shot.title === t).shot.id);
+  }
+  for (const sid of extra) {
+    await commit(p.id, "shot.archive", { shot_id: sid });
+  }
+  board = await api("GET",
+    `/api/projects/${p.id}/storyboard?include_archived=true`);
+  for (const sid of extra) {
+    if (entryOf(board, sid).shot.status !== "archived") {
+      fail("bulk archive did not apply");
+    }
+  }
+  const cmds2 = await api("GET", `/api/projects/${p.id}/commands`);
+  const archCmd = cmds2.filter((c) => c.command_type === "shot.archive"
+      && c.payload_json && c.payload_json.shot_id === extra[0]).pop();
+  await api("POST", `/api/projects/${p.id}/commands/${archCmd.id}/undo`);
+  board = await api("GET",
+    `/api/projects/${p.id}/storyboard?include_archived=true`);
+  if (entryOf(board, extra[0]).shot.status !== "active"
+      || entryOf(board, extra[1]).shot.status !== "archived") {
+    fail("bulk undo did not restore exactly one shot");
+  }
+  if (entryOf(board, shot.id).media.missing.length
+      || entryOf(board, shot.id).shot.planning_json?.notes
+         !== "acceptance plan") {
+    fail("archive sequence disturbed other shots");
+  }
+  ok("6b bulk archive + per-shot undo — others untouched");
 
   // step 7 — generic command undo restores planning
   const cmds = await api("GET", `/api/projects/${p.id}/commands`);
@@ -246,6 +307,12 @@ async function main() {
   }
   ok("8 screenplay re-sync preserved manual shot planning");
 
+  // step 8b — N3 timeline still functional on the populated project
+  await commit(p.id, "timeline.create", { name: "A2 Cut" });
+  const tls = await api("GET", `/api/projects/${p.id}/timelines`);
+  if (tls.length !== 1) fail("timeline subsystem broken");
+  ok("8b timeline.create works alongside planning state");
+
   // step 9 — restart persistence
   killApp(); await sleep(4000);
   launch(); API = null; TOKEN = null; await creds();
@@ -262,7 +329,7 @@ async function main() {
   ok("10 clean shutdown — no orphan backend");
 
   fs.writeFileSync(path.join(OUT, "a2-acceptance.txt"), lines.join("\n") + "\n");
-  console.log(`\nA2 ACCEPTANCE: PASS ${lines.length}/10`);
+  console.log(`\nA2 ACCEPTANCE: PASS ${lines.length}/13`);
 }
 
 main().catch((e) => {
