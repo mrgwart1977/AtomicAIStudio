@@ -569,3 +569,283 @@ def test_n3_timeline_unaffected(client):
     _commit(client, pid, "timeline.create", {"name": "Cut"})
     tls = client.get(f"/api/projects/{pid}/timelines").json()
     assert len(tls) == 1
+
+
+# ---------- A1-F hardening ----------
+
+def test_sync_freshness_stale_preview_rejected(client):
+    """F2 — a commit after a post-preview edit either 409s on the
+    project pin or, freshly diffed, treats the edited shot as a
+    manual-edit conflict requiring approval — never silently
+    overwriting the newer work."""
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    sc = _detail(client, pid, f["spid"])["scenes"][0]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"],
+                  [{**els[0], "text": "new line"}, els[1], els[2]])
+    _preview(client, pid, "shotlist.sync", {"screenplay_id": f["spid"]})
+    shot = _flat_shots(_storyboard(client, pid))[1]
+    # edit the affected shot AFTER the preview
+    rev_before_edit = _rev(client, pid)
+    _commit(client, pid, "shot.update",
+            {"shot_id": shot["id"], "title": "POST-PREVIEW EDIT"})
+    # stale project pin → 409
+    r = client.post(f"/api/projects/{pid}/commands/commit", json={
+        "command_type": "shotlist.sync",
+        "payload": {"screenplay_id": f["spid"]}, "scope": "project",
+        "expected_revision": rev_before_edit,
+        "idempotency_key": "a1-stale-1"})
+    assert r.status_code == 409
+    # fresh commit — the diff is recomputed: edited shot is skipped
+    _sync(client, pid, f["spid"])
+    shots = _flat_shots(_storyboard(client, pid))
+    assert shots[1]["title"] == "POST-PREVIEW EDIT"
+    # fresh preview flags it; approval then applies correctly
+    plan = _plan(client, pid, f["spid"])
+    assert any(m["shot_id"] == shot["id"]
+               for m in plan["scenes"][0]["manual_edit"])
+    _sync(client, pid, f["spid"], approve_overwrite=[shot["id"]])
+    shots = _flat_shots(_storyboard(client, pid))
+    assert shots[1]["title"] != "POST-PREVIEW EDIT"
+
+
+def test_user_fields_preserved_on_approved_overwrite(client, tmp_path):
+    """F3 — approved overwrite of managed fields never touches
+    prompt/intent/duration/continuity/media refs or non-scaffold
+    cast rows/fields."""
+    from tests.conftest import wait_for_job
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    shot = _flat_shots(_storyboard(client, pid))[1]
+    # media reference: import an asset, bind it to the shot
+    png = tmp_path / "ref.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    _commit(client, pid, "asset.import",
+            {"source_path": str(png), "name": "ref", "kind": "image"})
+    asset = client.get(f"/api/projects/{pid}/assets").json()["items"][0]
+    _commit(client, pid, "shot.update",
+            {"shot_id": shot["id"],
+             "prompt": "user cinematic prompt",
+             "intent": "user intent",
+             "duration_sec": 7.5,
+             "source_asset_id": asset["id"],
+             "thumbnail_asset_id": asset["id"],
+             "continuity": {"user_note": "keep me",
+                            "negative_prompt": "blurry",
+                            "gen_params": {"seed": 7}}})
+    # user-authored cast field on a speaker row
+    _commit(client, pid, "shot.cast.update",
+            {"shot_id": shot["id"], "character_id": f["anna"]["id"],
+             "state": {"blocking": "stage left", "emotion": "tense"}})
+    # a NON-scaffold cast row — user added a character the beat
+    # doesn't speak for; sync must never remove it
+    carol = _character(client, pid, "Carol")
+    _commit(client, pid, "shot.cast.assign",
+            {"shot_id": shot["id"], "character_id": carol["id"],
+             "state": {"blocking": "background",
+                      "wardrobe_variant": "coat"}})
+    # user title edit → manual-edit flag
+    _commit(client, pid, "shot.update",
+            {"shot_id": shot["id"], "title": "USER TITLE"})
+    sc = _detail(client, pid, f["spid"])["scenes"][0]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"],
+                  [{**els[0], "text": "updated"}, els[1], els[2]])
+    _sync(client, pid, f["spid"], approve_overwrite=[shot["id"]])
+    shots = _flat_shots(_storyboard(client, pid))
+    s = next(x for x in shots if x["id"] == shot["id"])
+    assert s["prompt"] == "user cinematic prompt"
+    assert s["intent"] == "user intent"
+    assert s["duration_sec"] == 7.5
+    assert s["source_asset_id"] == asset["id"]
+    assert s["thumbnail_asset_id"] == asset["id"]
+    assert s["continuity_json"]["user_note"] == "keep me"
+    assert s["continuity_json"]["negative_prompt"] == "blurry"
+    assert s["continuity_json"]["gen_params"] == {"seed": 7}
+    cast = {c["character_id"]: c for c in s["cast"]}
+    assert cast[f["anna"]["id"]]["blocking"] == "stage left"
+    assert cast[f["anna"]["id"]]["emotion"] == "tense"
+    assert cast[carol["id"]]["blocking"] == "background"  # user row survived
+
+
+def test_archived_shot_not_recreated(client):
+    """F4 — a manually archived scaffolded shot is reported as skipped,
+    never silently recreated."""
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    victim = _flat_shots(_storyboard(client, pid))[1]
+    _commit(client, pid, "shot.archive", {"shot_id": victim["id"]})
+    plan = _plan(client, pid, f["spid"])
+    s0 = plan["scenes"][0]
+    assert s0["add"] == []  # no re-creation proposed
+    assert any(x["shot_id"] == victim["id"]
+               for x in s0["skipped_archived"])
+    _sync(client, pid, f["spid"])
+    shots = _flat_shots(_storyboard(client, pid))
+    mine = [s for s in shots if s["id"] == victim["id"]]
+    assert len(mine) == 1 and mine[0]["status"] == "archived"
+    assert len([s for s in shots if s["status"] == "active"]) == 3
+
+
+def test_scene_reorder_keeps_shot_identity(client):
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    before = {s["id"] for s in _flat_shots(_storyboard(client, pid))}
+    doc = _detail(client, pid, f["spid"])
+    _commit(client, pid, "screenplay_scene.move",
+            {"sp_scene_id": doc["scenes"][1]["id"], "to_index": 0})
+    plan = _plan(client, pid, f["spid"])
+    assert plan["counts"]["add"] == 0 and plan["counts"]["remove"] == 0
+    _sync(client, pid, f["spid"])
+    after = {s["id"] for s in _flat_shots(_storyboard(client, pid))}
+    assert before == after
+
+
+def test_element_reorder_keeps_shot_identity(client):
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    before = {s["id"] for s in _flat_shots(_storyboard(client, pid))}
+    sc = _detail(client, pid, f["spid"])["scenes"][0]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"], [els[1], els[0], els[2]])
+    plan = _plan(client, pid, f["spid"])
+    # same groups → same shots, content-signature may shift → update ok
+    assert plan["counts"]["add"] == 0 and plan["counts"]["remove"] == 0
+    _sync(client, pid, f["spid"])
+    assert {s["id"] for s in _flat_shots(_storyboard(client, pid))} == before
+
+
+def test_speaker_change_updates_cast(client):
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    sc = _detail(client, pid, f["spid"])["scenes"][0]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"],
+                  [{**els[0], "character_id": f["bob"]["id"]}, els[1], els[2]])
+    plan = _plan(client, pid, f["spid"])
+    assert plan["counts"]["update"] == 1
+    _sync(client, pid, f["spid"])
+    shots = _flat_shots(_storyboard(client, pid))
+    cast = {c["character_id"] for c in shots[1]["cast"]}
+    assert f["bob"]["id"] in cast and f["anna"]["id"] not in cast
+
+
+def test_deleted_character_resolution(client):
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    _commit(client, pid, "character.archive",
+            {"character_id": f["anna"]["id"]})
+    # archive ≠ delete — a real delete isn't a command; simulate FK SET NULL
+    from sqlalchemy import delete as _del
+    from app.db.models import Character
+    eng = client.app.state.engine
+    with eng.begin() as con:
+        con.execute(_del(Character).where(Character.id == f["anna"]["id"]))
+    doc = _detail(client, pid, f["spid"])
+    assert doc["scenes"][0]["elements"][0]["character_id"] is None
+    # sync still works — unresolved speakers don't crash the diff
+    plan = _plan(client, pid, f["spid"])
+    assert isinstance(plan["counts"], dict)
+
+
+def test_undo_skips_later_independent_edit(client):
+    """F5 — batch undo must not clobber a post-sync independent edit."""
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    sc = _detail(client, pid, f["spid"])["scenes"][1]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"],
+                  [{**els[0], "text": "synced text"}])
+    _sync(client, pid, f["spid"])
+    shot = _flat_shots(_storyboard(client, pid))[3]
+    _commit(client, pid, "shot.update",
+            {"shot_id": shot["id"], "title": "INDEPENDENT EDIT"})
+    _commit(client, pid, "shotlist.undo", {})
+    shots = _flat_shots(_storyboard(client, pid))
+    s = next(x for x in shots if x["id"] == shot["id"])
+    assert s["title"] == "INDEPENDENT EDIT"  # skipped, not clobbered
+
+
+def test_multiple_undos_walk_history(client):
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    sc = _detail(client, pid, f["spid"])["scenes"][1]
+    _set_elements(client, pid, sc["id"],
+                  [sc["elements"][0], _action("beat two")])
+    _sync(client, pid, f["spid"])
+    assert len(_flat_shots(_storyboard(client, pid))) == 5
+    _commit(client, pid, "shotlist.undo", {})  # undoes the +1 sync
+    assert sum(1 for s in _flat_shots(_storyboard(client, pid))
+               if s["status"] == "active") == 4
+    _commit(client, pid, "shotlist.undo", {})  # undoes the scaffold
+    assert sum(1 for s in _flat_shots(_storyboard(client, pid))
+               if s["status"] == "active") == 0
+    _commit(client, pid, "shotlist.undo", {}, expect=409)
+
+
+def test_restart_between_sync_and_undo(client, settings):
+    """F5 — the undo batch lives in durable command-audit rows, so a
+    fresh application instance over the same data dir can undo a sync
+    that happened before the 'restart'."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    from tests.conftest import TOKEN
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    sc = _detail(client, pid, f["spid"])["scenes"][1]
+    els = sc["elements"]
+    _set_elements(client, pid, sc["id"],
+                  [{**els[0], "text": "pre-restart sync"}])
+    _sync(client, pid, f["spid"])
+    n_before = len(_flat_shots(_storyboard(client, pid)))
+    shot_desc = _flat_shots(_storyboard(client, pid))[-1]["description"]
+    assert "pre-restart sync" in shot_desc
+    # restart: release the data-dir lock (backend exited) then boot a
+    # brand-new app instance over the same data dir
+    client.app.state.data_dir_lock.release()
+    with TestClient(create_app(settings)) as c2:
+        c2.headers["X-Atomic-Token"] = TOKEN
+        r = c2.post(f"/api/projects/{pid}/commands/commit", json={
+            "command_type": "shotlist.undo", "payload": {},
+            "scope": "project",
+            "expected_revision": _rev(c2, pid),
+            "idempotency_key": "a1-restart-undo-1"})
+        assert r.status_code == 200, r.text
+        board = c2.get(
+            f"/api/projects/{pid}/storyboard?include_archived=true").json()
+        shots = _flat_shots(board)
+        assert len(shots) == n_before  # update-only batch: same rows
+        assert "pre-restart sync" not in shots[-1]["description"]
+    assert "pre-restart sync" not in \
+        _flat_shots(_storyboard(client, pid))[-1]["description"]
+
+
+def test_deleted_location_resolution(client):
+    """F4 — deleting a referenced location (FK SET NULL) leaves the
+    screenplay scene + shot plan coherent rather than dangling."""
+    from sqlalchemy import delete as _del
+    from app.db.models import Location
+    pid = make_project(client)["id"]
+    f = _film(client, pid)
+    _scaffold(client, pid, f["spid"])
+    eng = client.app.state.engine
+    with eng.begin() as con:
+        con.execute(_del(Location).where(Location.id == f["loc"]["id"]))
+    doc = _detail(client, pid, f["spid"])
+    assert doc["scenes"][0]["location_id"] is None
+    plan = _plan(client, pid, f["spid"])
+    assert isinstance(plan["counts"], dict)
+    _sync(client, pid, f["spid"])
+    board = _storyboard(client, pid)
+    assert board[0]["scene"]["location_id"] is None

@@ -515,7 +515,11 @@ def _element_groups(elements: list[ScreenplayElement]) -> list[list[ScreenplayEl
 
 
 def _group_key(group: list[ScreenplayElement]) -> str:
-    return ",".join(e.id for e in group)
+    # sorted: shot identity is the SET of elements in the beat —
+    # reordering dialogue inside a run keeps the shot (content
+    # signature still shifts, producing a normal update, not a
+    # remove+add identity churn)
+    return ",".join(sorted(e.id for e in group))
 
 
 def _group_signature(group: list[ScreenplayElement]) -> str:
@@ -593,9 +597,22 @@ def _suggested_shot(session: Session, sp_scene: ScreenplayScene,
         title = f"{speakers}"[:240]
         description = " · ".join(
             (e.text or "").strip().split("\n", 1)[0][:80] for e in group[:4])
-        cast = [{"character_id": e.character_id, "dialogue": e.text,
-                 "parenthetical": e.parenthetical}
-                for e in group if e.character_id]
+        # merge repeated speakers: shot_characters is unique on
+        # (shot_id, character_id), so a character with several lines in
+        # one beat collapses to a single row with all their lines
+        merged: dict[str, dict] = {}
+        for e in group:
+            if not e.character_id:
+                continue
+            row = merged.get(e.character_id)
+            if row is None:
+                merged[e.character_id] = {
+                    "character_id": e.character_id,
+                    "dialogue": e.text or "",
+                    "parenthetical": e.parenthetical}
+            else:
+                row["dialogue"] = (row["dialogue"] + "\n" + (e.text or "")).strip()
+        cast = list(merged.values())
     else:
         title = (group[0].text or "Action beat").strip().split("\n", 1)[0][:80]
         description = "\n".join((e.text or "").strip() for e in group)[:2000]
@@ -656,16 +673,24 @@ def _diff_scene(session: Session, project_id: str,
         if scene is None or scene.project_id != project_id:
             scene_id = None  # stale link — treated as unlinked
         else:
-            # archived shots are excluded: undo/redo replays recorded
-            # batches — sync never resurrects or updates an archived row
-            managed = {k: v for k, v in _managed_shots(session, scene_id).items()
-                       if v.status == "active"}
+            managed = _managed_shots(session, scene_id)
+    archived_managed = {k: v for k, v in managed.items()
+                        if v.status != "active"}
+    managed = {k: v for k, v in managed.items() if v.status == "active"}
+    out["skipped_archived"] = []
     wanted_keys = set()
     for sug in scene_plan["suggestions"]:
         gk = sug["group_key"]
         wanted_keys.add(gk)
         shot = managed.get(gk)
         if shot is None:
+            if gk in archived_managed:
+                # user archived the scaffolded shot — report it, NEVER
+                # silently recreate a shot the user put away
+                out["skipped_archived"].append({
+                    "shot_id": archived_managed[gk].id, "group_key": gk,
+                    "shot_title": archived_managed[gk].title})
+                continue
             out["add"].append(sug)
             continue
         meta = (shot.continuity_json or {}).get("shotlist") or {}
@@ -720,11 +745,14 @@ def _apply_suggestion(session: Session, sp_scene: ScreenplayScene,
                       shot: Shot | None, command_id: str | None) -> Shot:
     """Write one suggested spec into a shot (create or update), then
     stamp the post-write fingerprint into its shotlist metadata."""
+    cast_spec = {c["character_id"]: c.get("dialogue") or ""
+                 for c in (sug.get("cast") or [])}
     continuity = {"shotlist": {
         "screenplay_scene_id": sp_scene.id,
         "group_key": sug["group_key"],
         "signature": sug["signature"],
         "fingerprint": _spec_fingerprint(sug),
+        "cast_spec": cast_spec,
         "camera": sug["camera"],
     }}
     created = shot is None
@@ -737,7 +765,9 @@ def _apply_suggestion(session: Session, sp_scene: ScreenplayScene,
             command_id=command_id)
     else:
         # cast rows first so the update's revision snapshot carries them
-        _apply_suggestion_cast(session, shot, sug["cast"],
+        old_spec = ((shot.continuity_json or {}).get("shotlist") or {}) \
+            .get("cast_spec") or {}
+        _apply_suggestion_cast(session, shot, sug["cast"], old_spec,
                                command_id=command_id)
         cont = dict(shot.continuity_json or {})
         cont["shotlist"] = {**(cont.get("shotlist") or {}), **continuity["shotlist"]}
@@ -749,7 +779,8 @@ def _apply_suggestion(session: Session, sp_scene: ScreenplayScene,
             command_id=command_id,
             change_summary="Shot-list sync update")
         return shot
-    _apply_suggestion_cast(session, shot, sug["cast"], command_id=command_id)
+    _apply_suggestion_cast(session, shot, sug["cast"], {},
+                           command_id=command_id)
     if created:
         # the create-path revision was written before the cast rows —
         # one more bump so the latest snapshot carries them faithfully
@@ -759,11 +790,18 @@ def _apply_suggestion(session: Session, sp_scene: ScreenplayScene,
 
 
 def _apply_suggestion_cast(session: Session, shot: Shot,
-                           cast_spec: list[dict], *,
+                           cast_spec: list[dict], old_spec: dict, *,
                            command_id: str | None) -> None:
     """Align the shot's dialogue-carrying cast rows to the suggestion.
-    Only scaffold-introduced cast fields are written; non-dialogue
-    per-character fields the user set are preserved."""
+
+    Removal rule: a cast row whose character left the spec is deleted
+    ONLY when it is provably scaffold-owned and untouched — its
+    dialogue equals what the last spec wrote (`old_spec`) — or carries
+    no content at all. Any row holding user-authored state (edited
+    dialogue, blocking, wardrobe, overrides, refs) is preserved; the
+    shot's fingerprint already flags content edits as manual_edit at
+    the diff level, so a preserved row survives even an approved
+    overwrite of the managed fields."""
     have = {c.character_id: c for c in session.execute(
         select(ShotCharacter).where(ShotCharacter.shot_id == shot.id)
     ).scalars()}
@@ -779,15 +817,16 @@ def _apply_suggestion_cast(session: Session, shot: Shot,
         row.dialogue = spec.get("dialogue") or ""
         row.position = pos
         pos += 1
-    # cast rows a previous scaffold added that the spec no longer wants
-    # are removed ONLY if they carry no user-authored fields
     for cid, row in have.items():
         if cid in want_ids:
             continue
-        if not any([row.blocking, row.expression, row.emotion,
-                    row.action_instructions, row.voice_override,
-                    row.model_ref, row.lora_json, row.reference_ids_json,
-                    row.dialogue]):
+        scaffold_owned = (row.dialogue == old_spec.get(cid, "\x00")
+                          and row.dialogue != "")
+        empty = not any([row.blocking, row.expression, row.emotion,
+                         row.action_instructions, row.voice_override,
+                         row.model_ref, row.lora_json,
+                         row.reference_ids_json, row.dialogue])
+        if scaffold_owned or empty:
             session.delete(row)
     session.flush()
 
@@ -886,7 +925,8 @@ def undo_shotlist(session: Session, project_id: str, batch: dict,
     """Reverse an apply batch: created shots/scenes archived (never
     deleted — recoverable), updated shots reverted to their
     pre-sync snapshots, archived shots restored."""
-    undone = {"archived": [], "reverted": [], "restored": []}
+    undone = {"archived": [], "reverted": [], "restored": [],
+              "skipped_stale": []}
     for shot_id in batch.get("created_shots") or []:
         shot = session.get(Shot, shot_id)
         if shot is None or shot.project_id != project_id:
@@ -912,10 +952,21 @@ def undo_shotlist(session: Session, project_id: str, batch: dict,
         shot = session.get(Shot, item["shot_id"])
         if shot is None or shot.project_id != project_id:
             continue
+        post = item.get("post_revision")
+        # fail-safe staleness: if the shot was edited after the batch
+        # applied, reverting would destroy the newer work — skip it.
+        if post is not None and shot.revision != post:
+            undone["skipped_stale"].append(item["shot_id"])
+            continue
         try:
             sb.revert_shot(session, shot, item["prev_revision"],
                            command_id=command_id)
             undone["reverted"].append(item["shot_id"])
+            # annotate the batch (this mutated copy is what the undo
+            # command's audit persists — redo reads it back): the exact
+            # revision the undo produced, so redo can verify the shot
+            # is still in the undone state before re-applying
+            item["undone_revision"] = shot.revision
         except KeyError:
             pass
     for item in batch.get("archived_shots") or []:
@@ -941,7 +992,8 @@ def redo_shotlist(session: Session, project_id: str, batch: dict,
                   *, command_id: str | None = None) -> dict[str, Any]:
     """Re-apply an undone batch: unarchive created rows, re-apply the
     forward revisions by re-running apply semantics on recorded ids."""
-    redone = {"restored": [], "archived": [], "reapplied": []}
+    redone = {"restored": [], "archived": [], "reapplied": [],
+              "skipped_stale": []}
     for shot_id in batch.get("created_shots") or []:
         shot = session.get(Shot, shot_id)
         if shot is not None and shot.project_id == project_id \
@@ -954,12 +1006,21 @@ def redo_shotlist(session: Session, project_id: str, batch: dict,
         if shot is None or shot.project_id != project_id:
             continue
         post = item.get("post_revision")
-        if post is not None and shot.revision != post:
+        # re-apply only while the shot still sits at the exact revision
+        # the undo produced (annotated on this batch by undo_shotlist);
+        # anything else means intervening work — never clobber it.
+        # Batches undone before this annotation existed have no marker
+        # and fail safe by skipping.
+        undone_rev = item.get("undone_revision")
+        if post is not None and undone_rev is not None \
+                and shot.revision == undone_rev:
             try:
                 sb.revert_shot(session, shot, post, command_id=command_id)
                 redone["reapplied"].append(item["shot_id"])
             except KeyError:
                 pass
+        else:
+            redone["skipped_stale"].append(item["shot_id"])
     for scene_id in batch.get("created_scenes") or []:
         scene = session.get(Scene, scene_id)
         if scene is not None and scene.project_id == project_id \
