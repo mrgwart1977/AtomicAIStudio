@@ -1021,13 +1021,17 @@ def _restore_snapshot(session: Session, tl: Timeline,
         else:
             # N1-E — restore mutable lane fields too, or undoing a
             # reorder/rename/visibility/lock/mute edit silently keeps
-            # the post-edit lane state.
+            # the post-edit lane state. Fields absent from an older
+            # snapshot restore to their column defaults (pre-0019
+            # snapshots carry no automation fields — keep-if-absent
+            # would leak post-edit automation across an undo).
             tr = have[st["id"]]
-            for f in ("position", "name", "visible", "locked",
-                      "muted", "gain_db", "solo", "automation_json",
-                      "automation_interp"):
-                if f in st:
-                    setattr(tr, f, st[f])
+            for f, d in (("position", 0), ("name", ""),
+                         ("visible", True), ("locked", False),
+                         ("muted", False), ("gain_db", 0.0),
+                         ("solo", False), ("automation_json", "[]"),
+                         ("automation_interp", "linear")):
+                setattr(tr, f, st.get(f, d))
     session.flush()
     # N1-E — restore clips by STABLE IDENTITY, not delete-all/recreate:
     # rows whose id is in the snapshot are updated in place, rows

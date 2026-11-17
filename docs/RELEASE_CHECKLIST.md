@@ -21,23 +21,41 @@ Status values: `open` · `in-progress` · `blocked` · `resolved`
 | 10 | Usability testing with target users | Medium | M9 | open | **yes** | #14 |
 | 11 | FAT32 >4 GiB guard — edge coverage | Low | v1.0 | open | **yes** (defensible as-is; margin improvement) | #15 |
 | 12 | Shot-level reference-ID picker UI | Low | M3+ | open | no (API+schema delivered M2.1; UI deferred) | — |
-| 13 | Timeline export argv overflow on very large timelines | Medium | v1.0 | open | **yes** (bounded export size; fix = filter_complex_script) | — |
+| 13 | Timeline export argv overflow on very large timelines | Medium | v1.0 | **resolved** (N3-D hardening) | — | — |
 
 ---
 
-## 13. Timeline export argv overflow on very large timelines — (found in N3-D)
+## 13. Timeline export argv overflow on very large timelines — RESOLVED in N3-D hardening
 
-- **What:** the multi-segment encode path builds one ffmpeg argv containing
-  every clip segment. At ~240 clips the spawn fails:
-  `supervised spawn failed: [WinError 206] The filename or extension is too
-  long` (Windows ~32k command-line limit). Timelines below the bound export
-  normally; the copy path is unaffected.
-- **Why open:** real bound discovered by the N3-D acceptance driver
-  (`docs/n3d-evidence/n3d-acceptance.txt` step 8). Fix requires moving the
-  segment/filter description into `-filter_complex_script` or a concat
-  file — deferred rather than risk the verified export path this milestone.
-- **Acceptance:** a ≥240-clip multitrack timeline exports successfully on
-  Windows; regression test in `test_c5b_export.py`.
+- **What:** the composite and encode paths built one ffmpeg argv carrying
+  the whole filter graph plus one `-i` per clip/segment. Measured at 240
+  clips: ~264 KiB argv — the filter graph alone was ~203 KiB (77%),
+  inputs ~26 KiB — vs Windows' 32,766-char process-launch limit →
+  `[WinError 206]`.
+- **Fix:** two bounded changes in `domain/timeline_export.py` +
+  `adapters/timeline_export.py`:
+  1. The graph is written to `<job-work>/<job_id>-filter.txt` and passed
+     via `-/filter_complex <file>` (FFmpeg ≥7 reads an option's argument
+     from a file; `-filter_complex_script` itself was removed in FFmpeg
+     8.0 — verified absent from the packaged n9.0.2 build's `-h long`).
+     The file is unlinked in a `finally` after `supervise.run` — removed
+     on success, cancel, timeout, ffmpeg failure, spawn failure, and any
+     pre-render exception; the job work dir is job-scoped, never shared.
+  2. `-i` inputs dedupe by resolved path; multi-use streams fan out via
+     `split`/`asplit` graph nodes, so input count is bounded by *unique
+     sources*, not clips. Additionally each unique source is hardlinked
+     into the job dir as a short alias (`in<N>.<ext>`, ~40 chars vs ~130
+     for CAS paths) with absolute-path fallback — argv ≈ 770 B at 500+
+     clips on few sources; ceiling ≈ ~750 unique sources on one timeline
+     (a staged submix render would be needed past that — documented, not
+     implemented).
+- **Verified (installed N3-D candidate):** 240-clip export 84 s, 500-clip
+  196 s, 1000-clip 520 s — all succeed, correct program duration;
+  pre/post-fix ffprobe + decoded PCM windows identical; cancel/no-orphan/
+  cleanup unchanged; `tests/test_n1d_composite.py` covers argv bound +
+  dedupe + script mode + shared-source real render.
+- **Acceptance:** met — ≥240-clip (in fact ≥1000-clip) multitrack
+  timelines export successfully on Windows.
 
 ## 12. Shot-level reference-ID picker UI — (no issue yet)
 

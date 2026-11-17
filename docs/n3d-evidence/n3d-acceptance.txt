@@ -1,6 +1,7 @@
-   OK — backend http://127.0.0.1:53026
+   OK — backend http://127.0.0.1:60148
    OK — media: 2 embedded mp4 (220/280Hz) + 440/550 stereo 48k + 330 stereo 44.1k + 660 tiny + 500 mono48k + 700 mono44.1k
    OK — 8 assets imported (jobs durable)
+   OK — candidate env — backend 0.1.0, migration head 0019_n3a_track_auto, packaged ffmpeg version n9.0.2-48-gd4070a14ce-20261109 Copyright (c) 2000-2026 the FFmpeg developers
 [1] 1) scene — 2 video lanes + 3 audio lanes + all controls @30000/1001
    OK — film scene: 2 video + 3 audio lanes, 6 clips, xf satisfied: OK
 [2] 2) D1 — trim/split/move/gain/mute/solo/fade/xf/automation + undo/redo
@@ -25,13 +26,21 @@
    OK — V2 embedded audio present: OK
    OK — tiny sfx audible at 1.55s: OK
    OK — silence past program end: OK
+   OK — pre/post: same video codec + rational fps: OK
+   OK — pre/post: same audio spec: OK
+   OK — pre/post: duration unchanged (Δ 0.000s): OK
+   OK — pre/post PCM window 440 pre-duck matches (0.211→0.211): OK
+   OK — pre/post PCM window 440 duck matches (0.087→0.087): OK
+   OK — pre/post PCM window 550 xf-in matches (0.353→0.353): OK
+   OK — pre/post PCM window 330 duck matches (0.051→0.051): OK
+   OK — pre/post PCM window 220 emb matches (0.051→0.051): OK
 [4] 4) export with solo on dialogue lane — all other lanes silent
    OK — solo: dialogue audible: OK
    OK — solo: music silenced: OK
    OK — solo: embedded silenced: OK
 [5] 5) navigate to FILM — engine load, waveform, continuous scrub
    OK — engine ready — waveform canvas present: true
-   OK — continuous scrub: 12 delivered/0 coalesced, 13 auditions, sched 0.4ms
+   OK — continuous scrub: 12 delivered/0 coalesced, 13 auditions, sched 0.6ms
 [6] 6) preview/export parity — shared plan, decoded PCM windows
    OK — render — 440 pre 0.223, duck 0.087, 550 xf-in 0.353, 330 duck 0.052, 220 emb 0.068
    OK — parity: 440 pre-duck: OK
@@ -46,14 +55,34 @@
    OK — cancelled job left no partial output + no registered asset: OK
    OK — idempotent replay: original outcome, handler not re-run: OK
    OK — durable rows: 12 jobs total (2 added this step)
-[8] 8) perf — 240-clip multi-track timeline, 400-pt automation, repeat exports
-   OK — 240 clips placed on 6 lanes in 7.1s
-   OK — 240-clip export → failed: supervised spawn failed: [WinError 206] The filename or extension is too long — known Win argv bound, recorded
-   OK — 3 repeated exports: 4.0s, 3.6s, 4.0s
-   OK — RSS app 27→27MB, backend 138→144MB
+[8] 8) perf — 240/500/1000-clip real exports (argv bound), dense auto, repeats
+   OK — LONG: 240 clips (60v+180a) placed 6.2s → export 73.8s, dur 119.500000s, 2.2MB — argv bound resolved (was WinError 206 at 240)
+   OK — WIDE: 500 clips (120v+380a) placed 15.4s → export 189.2s, dur 119.500000s, 2.3MB — argv bound resolved (was WinError 206 at 240)
+   OK — GIANT: 1000 clips (60v+940a) placed 42.6s → export 498.3s, dur 119.500000s, 2.3MB — argv bound resolved (was WinError 206 at 240)
+   OK — 3 repeated exports: 3.1s, 4.1s, 4.0s
+   OK — RSS app 27→18MB, backend 135→137MB
 [9] 9) restart persistence — relaunch, reopen FILM, verify state
-   OK — backend http://127.0.0.1:55455
+   OK — backend http://127.0.0.1:58362
    OK — persisted after restart — clips/xf/automation/revision: OK
    OK — restart OK — rev 39, 6 clips, xf 24f equal_power
 [10] 10) clean shutdown — no orphans
    OK — no orphan processes after close: OK
+[11] 11) D7 — pre-N3 populated project: migrate + verify + persist
+   OK — backend http://127.0.0.1:51612
+   OK — pre-N3 project opens after migration 0018→0019: OK
+   OK — counts survive — 1 char, 1 world, 1 loc, 4 assets: OK
+   OK — character 'Ada' survives (rev 3, profile intact): OK
+   OK — scene 'Dock Arrival' + 3 shots + cast 'Ada' survive: OK
+   OK — 3 tracks survive; V1 + A1(−3dB) + A2(−9dB) track gain intact: OK
+   OK — clip gain −3 + fades 4800/2400 + 2-pt STEP automation survive: OK
+   OK — 2nd clip's 2-pt LINEAR automation survives: OK
+   OK — 24f equal-power crossfade survives migration: OK
+   OK — timeline revision ≥12 preserved: OK
+   OK — N3 track automation works on migrated lane (0019 cols live): OK
+   OK — undo reverts the post-migration edit: OK
+   OK — redo reapplies it: OK
+   OK — backup/export succeeds on migrated project: OK
+   OK — backup package written under migrated data dir: OK
+   OK — backend http://127.0.0.1:63580
+   OK — restart persistence — migrated timeline + post-migration track automation + xf all survive: OK
+   OK — no orphan processes after fixture-instance close: OK

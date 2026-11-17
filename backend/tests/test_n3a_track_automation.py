@@ -493,3 +493,33 @@ def test_track_automation_audit_label(client):
     d = _detail(client, pid, tid)
     assert d["undo_label"] == "Set track automation"
     assert r.get("ok", True)
+
+
+def test_undo_across_pre0019_boundary_clears_automation(client):
+    """Snapshots written before 0019 carry no automation fields on the
+    track dict. Restoring one must reset the lane to the column
+    defaults — keep-if-absent would leak post-edit automation through
+    an undo that crossed the migration boundary."""
+    pid, tid, a1 = _setup(client)
+    _tauto(client, pid, tid, a1["id"],
+           [{"at_tl_frames": 5, "gain_db": -12}], interp="step")
+    engine = client.app.state.engine
+    from sqlalchemy.orm import Session
+    from app.db.models import EntityRevision, Timeline, new_id
+    from app.domain.timeline import timeline_snapshot
+    with Session(engine) as s:
+        tl = s.get(Timeline, tid)
+        snap = timeline_snapshot(s, tl)
+        for st in snap["tracks"]:
+            st.pop("automation_json", None)
+            st.pop("automation_interp", None)
+        s.add(EntityRevision(id=new_id(), project_id=pid,
+                             entity_type="timeline", entity_id=tid,
+                             revision=999, snapshot_json=snap,
+                             summary="pre-0019"))
+        tl.undo_stack_json = [{"rev": 999, "label": "pre-0019"}]
+        s.commit()
+    _commit(client, pid, "timeline.undo", {"timeline_id": tid})
+    tr = _track_of(_detail(client, pid, tid), a1["id"])
+    assert json.loads(tr["automation_json"]) == []
+    assert tr["automation_interp"] == "linear"

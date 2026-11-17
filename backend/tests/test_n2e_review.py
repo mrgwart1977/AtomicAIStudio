@@ -766,7 +766,7 @@ def test_render_v2_ffmpeg_nonzero_fails(client, tmp_path, monkeypatch):
     real_run = supervise.run
 
     def boom(argv, **kw):
-        if "-filter_complex" in argv:
+        if "-filter_complex" in argv or "-/filter_complex" in argv:
             return {"exit": 3, "output_tail": "synthetic failure",
                     "timed_out": False, "cancelled": False,
                     "elapsed_ms": 1}

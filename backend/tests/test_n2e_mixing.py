@@ -267,7 +267,7 @@ def test_lane_chain_deterministic_shape():
                        {"id": "p2", "at_frames": 24, "gain_db": -6.0}]})
     plan = tx.composite_plan(edl, {})
     a = plan["audio_clips"][0]
-    chain = tx._lane_chain(7, a, Fraction(24, 1))
+    chain = tx._lane_chain("7:a", a, Fraction(24, 1))
     assert chain.startswith("[7:a]atrim=start_sample=0:end_sample=48000")
     assert "aformat=channel_layouts=stereo" in chain
     assert "aeval=exprs='val(0)" in chain

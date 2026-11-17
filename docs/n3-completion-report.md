@@ -2,11 +2,14 @@
 
 Scope: N3-A track automation → N3-B continuous scrubbing → N3-C editing UX →
 N3-D hardening & acceptance (this report). Tested commit of the installed
-build: `26face3` (merge of PR #138). Installed artifact:
+build: the PR #139 head (`feat/n3d-hardening`, built post-fix). Installed
+artifact:
 `apps/desktop/src-tauri/target/release/bundle/nsis/Atomic Dream Engine_0.1.0_x64-setup.exe`
-(76.2 MiB). Evidence: `docs/n3d-evidence/n3d-acceptance.txt` (10/10 steps),
+(76.19 MiB; backend 0.1.0, migration head `0019_n3a_track_auto`,
+packaged FFmpeg n9.0.2). Evidence: `docs/n3d-evidence/n3d-acceptance.txt`
+(11/11 steps),
 `docs/n3c-evidence/n3c-acceptance.txt` (11/11), `docs/n3b-evidence/`,
-plus the backend suite (130/130 targeted tests below).
+plus the backend suite (1504 passed, 11 skipped).
 
 ## N3 architecture summary
 
@@ -70,11 +73,11 @@ magnitudes at the fixture frequencies, ±40% tolerance.
 | Crossfade handles | insufficient-handle refusal verified (n3c 6); 28f head bound found |
 | Seek into automation | PASS — render from tl 0.8 s already carries step-automation gain |
 | Timeline gaps | PASS — sfx gap + post-program silence measured |
-| Short/long programs | 6 s film + ~6 min LONG (240 clips) built; long export fails on argv bound (below) |
+| Short/long programs | PASS — 6 s film + ~2 min programs at 240/500/1000 clips all export (below) |
 
 **Not claimed:** sample-exact preview — tolerance-based parity only.
 
-## D3 — Reliability — **automated + installed: PASS (1 limitation)**
+## D3 — Reliability — **automated + installed: PASS**
 
 | Check | Result | Evidence |
 |---|---|---|
@@ -89,17 +92,20 @@ magnitudes at the fixture frequencies, ±40% tolerance.
 | No phantom output | PASS — no asset registered on cancel; output verified by ffprobe before registration | n3d step 7; adapter |
 | No orphan FFmpeg | PASS — supervise.run kills on cancel; `tasklist` clean | n3d step 7 |
 | Durable-job / auth behavior | PASS — durable rows, `idempotent_replay` verified, 404 cross-project | n3d step 7; suite |
-| **LIMITATION (new)** | **encode-path argv overflow**: at ~240 segments `supervised spawn failed: [WinError 206] The filename or extension is too long`. Windows cmdline bound — needs `-filter_complex_script` or chunked encode for very large timelines. Recorded as checklist item. | n3d step 8 |
+| Export argv bound | **RESOLVED (was WinError 206 @ ~240 segs)** — root cause was BOTH the filter graph (~203 KiB at 240 clips) and one `-i` per clip (~26 KiB). Fix: filter graph written to a temp script in the job work dir and passed via `-/filter_complex <file>` (the FFmpeg ≥7 option-argument mechanism — `-filter_complex_script` was removed in FFmpeg 8); `-i` inputs deduplicated by source path with `split`/`asplit` fan-out; unique sources get short hardlink aliases in the job dir (~770 B argv at 1000 clips on few sources). Remaining bound ≈ ~750 *unique* sources on one timeline — a staged submix render would be needed past that (documented, not hit). | n3d step 8; `test_n1d_composite` argv/dedupe tests |
 
-Backend suite evidence (D1/D2/D3): `test_c5b_export, test_jobs, test_m4,
+Backend suite evidence (D1/D2/D3/D9): full suite **1504 passed, 11
+skipped** (~20 min) — incl. `test_c5b_export, test_jobs, test_m4,
 test_n2f, test_n2f_parity, test_n1e_perf, test_n1e_undo,
-test_n3a_track_automation` — **130/130 passed** (73 s).
+test_n1d_composite` (argv-bound + input-dedupe + script-lifecycle
+tests), `test_n3a_track_automation`.
 
 ## D4 — Performance — **installed: measured**
 
 | Metric | Measured | Baseline |
 |---|---|---|
-| Clips on 6 lanes | 240 placed in ~7 s via commits | — |
+| Clips placed via commits | 240 in 6.2 s / 500 in 15.4 s / 1,000 in 42.6 s | — |
+| Large-timeline exports | 240-clip → 73.8 s; 500-clip → 189.2 s; 1,000-clip → 498.3 s; all produce 119.5 s h264/aac output (~2.3 MB) — argv bound resolved | — |
 | Virtualized DOM | 3–5 clip nodes mounted for 120–240-clip timelines | 5 (n3c) |
 | Dense automation | 200-pt + 200-pt lanes committed/rendered | 200 pts (n3c) |
 | Zoom settle | ~12–20 ms | 12–18 ms (n3c) |
@@ -111,16 +117,43 @@ test_n3a_track_automation` — **130/130 passed** (73 s).
 | Audio-node cleanup | auditions counted, no accumulation (13 auditions → engine steady) | — |
 | UI responsiveness | interactive during LONG ops (human feel in checklist) | — |
 
-## D5 — Installed Windows E2E — **installed: PASS 10/10**
+## D5 — Installed Windows E2E — **installed: PASS 11/11**
 
 Representative film `FILM` @30000/1001 (29.97): 2 video lanes (220 Hz +
 280 Hz embedded audio), A1 dialogue pair + equal_power xf, A2 music
 44.1 kHz w/ fades + lane duck, A3 sfx tiny clip + gap; clip gain, track
 gain, clip+track automation, mute/solo, split/move/undo edits. Editing
 ops, scrub, preview, export (ffprobe: h264 30000/1001, aac 48 k stereo,
-6.006 s), decoded PCM battery (10 checks), solo export (3 checks),
-parity (4 checks), cancel, restart persistence, clean close —
-**all green on the real NSIS/WebView2 app** (`docs/n3d-evidence/`).
+6.006 s), decoded PCM battery (10 checks) + **pre/post-fix ffprobe and
+PCM-window comparison (D5: codec, rational fps, audio spec, duration,
+all sampled windows identical)**, solo export (3 checks), parity (4
+checks), cancel, restart persistence, clean close, **large-timeline
+exports at 240/500/1,000 clips (D4)**, and **pre-N3 populated-project
+migration regression (D7)** — all green on the real NSIS/WebView2 app
+(`docs/n3d-evidence/`).
+
+### D7 — pre-N3 populated-project regression (step 11)
+
+Genuine fixture, not synthesized: `backend/tests/fixtures/
+pre_n3_release.db` was generated by the actual release code at merge
+`663cb5d` (post-N2-F, last pre-N3 build; alembic head `0018_n2f`) —
+project "Pre-N3 Feature" with character/world/location bibles, scene +
+3 shots + cast, a 30000/1001 timeline (rev 12) with clip gain/fades/
+step+linear automation, per-lane gain, a 24f equal-power crossfade, a
+two-entry undo stack backed by real `entity_revisions` snapshots, and
+four sha-pinned WAV sources staged into CAS blobs. The installed app
+migrates it `0018→0019` on open: **all entities, lanes, gains, fades,
+automation, crossfade, and revision history verified**; new N3 track
+automation commits on the migrated lane; undo/redo across the
+migration boundary verified; `backup.export` produces an `.atomicpkg`;
+a relaunched instance re-opens the migrated project intact.
+
+**Real defect found by this fixture and fixed:** `_restore_snapshot`
+restored only track fields *present* in an old snapshot
+(keep-if-absent), so undoing across the pre-0019 boundary leaked the
+post-edit `automation_json`/`automation_interp` — clips already
+defaulted missing keys, tracks now match (column defaults). Guarded by
+`test_undo_across_pre0019_boundary_clears_automation`.
 
 ## D6 — Human acceptance — **human-required: prepared, NOT evaluated**
 
@@ -131,11 +164,11 @@ responsiveness). **No human has run it — not marked passed.**
 ## D7 — Remaining limitations & blockers
 
 New from N3-D:
-- **Export argv bound (Windows):** ~240-segment encode fails WinError 206.
-  Fix: `-filter_complex_script`/concat-demuxer for large timelines.
-  → added to RELEASE_CHECKLIST.
 - The `filter:waveform` for very long programs and the 176 px sticky
   header (now responsive ≥96 px) remain documented quirks, not defects.
+- Resolved this milestone: the Windows export argv bound
+  (WinError 206 @ ~240 segs) — see D3; and the pre-0019
+  undo-across-migration leak — see D7.
 
 Carried (pre-existing, unchanged): Stage B2b ON HOLD; issue #96 mandatory
 before live artifact retrieval; no live providers/credentials/paid work;

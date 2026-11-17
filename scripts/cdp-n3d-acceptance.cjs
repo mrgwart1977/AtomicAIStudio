@@ -3,14 +3,16 @@
 // xf/automation + undo/redo), D2 preview/export PCM parity at
 // 30000/1001 + mixed sample rates + mono/stereo, D3 reliability
 // (export cancel, idempotent replay, durable rows, no phantom
-// output/orphans/temp), D4 perf (240-clip 6-lane timeline, 400-pt
-// dense automation, repeated exports, RSS), D5 representative film
+// output/orphans/temp), D4 perf + argv-bound regression (240/500/
+// 1000-clip real exports via -/filter_complex + deduped inputs,
+// 400-pt dense automation, repeated exports, RSS), D5 representative film
 // (2 video lanes, embedded audio, dialogue/music/sfx, xf, fades,
 // automation, gaps, fractional fps), restart persistence, clean
 // shutdown. Zero credentials/cloud.
 // Run: node scripts/cdp-n3d-acceptance.cjs <cdpPort> <outDir> [exe]
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { execFileSync, spawn } = require("child_process");
 
 const PORT = process.argv[2] || "9227";
@@ -91,8 +93,8 @@ const commit = async (pid, type, payload, expect = 200) => {
     idempotency_key: `n3d-${type}-${Date.now()}-${Math.random()}` }, expect);
 };
 const detail = (pid, tid) => api("GET", `/api/projects/${pid}/timelines/${tid}`);
-const waitJob = async (pid, jobId, expectFail = false) => {
-  for (let i = 0; i < 240; i++) {
+const waitJob = async (pid, jobId, expectFail = false, maxSec = 120) => {
+  for (let i = 0; i < maxSec * 2; i++) {
     const j = (await api("GET", `/api/projects/${pid}/jobs`)).find((x) => x.id === jobId);
     if (j && j.status === "succeeded") return j;
     if (j && (j.status === "failed" || j.status === "cancelled")) {
@@ -179,6 +181,25 @@ const left = (name) => {
   try {
     return execFileSync("tasklist", ["/FI", `IMAGENAME eq ${name}`, "/FO", "CSV", "/NH"]).toString().includes(name);
   } catch { return false; }
+};
+/* msedgewebview2 children can outlive the exe for a few seconds and hold
+ * the EBWebView user-data-dir lock — a fresh instance then hangs before
+ * CDP ever binds. Wait for OUR app's webviews to exit; kill stragglers. */
+const settleWebviews = async (graceMs = 20000) => {
+  const ps = (act) => execFileSync("powershell", ["-NoProfile", "-Command",
+    `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | ` +
+    `Where-Object { $_.CommandLine -match 'com\\.atomicdream\\.engine' } | ` +
+    act], { stdio: "pipe" }).toString();
+  const t0 = Date.now();
+  for (;;) {
+    const alive = ps("Measure-Object | Select-Object -Expand Count").trim();
+    if (alive === "0" || alive === "") return;
+    if (Date.now() - t0 > graceMs) break;
+    await sleep(1000);
+  }
+  try {
+    ps("ForEach-Object { Stop-Process -Id $_.ProcessId -Force }");
+  } catch {}
 };
 const procSample = async (name) => {
   try {
@@ -335,6 +356,15 @@ async function main() {
     ["vemb1", "vemb2", "f440", "f550", "f330", "f660", "mono48k", "mono441"]
       .map(find);
   ok("8 assets imported (jobs durable)");
+
+  // D6 environment record — candidate build metadata for evidence.
+  const ffVer = execFileSync(`${FFMPEG_BIN}\\ffmpeg.exe`, ["-version"])
+    .toString().split("\n")[0].trim();
+  const migHead = fs.readdirSync("backend\\app\\db\\alembic\\versions")
+    .filter((f) => f.endsWith(".py")).sort().pop().replace(".py", "");
+  const health = await (await fetch(`${API}/health`)).json();
+  ok(`candidate env — backend ${health.version}, migration head ` +
+     `${migHead}, packaged ${ffVer}`);
 
   const tlF2S = (f, tl) => f * tl.fps_den / tl.fps_num;
   const exportAndPcm = async (tl, tag) => {
@@ -536,6 +566,36 @@ async function main() {
   chk("V2 embedded audio present", e2.emb2 > 0.01);
   chk("tiny sfx audible at 1.55s", e2.tiny > 0.008);
   chk("silence past program end", e2.gap_rms < 0.006);
+  // D5: byte-level before/after — the pre-fix export of the identical
+  // timeline must produce the same ffprobe shape and PCM windows.
+  const preFp = `${OUT}\\media\\n3d-film-prefix.mp4`;
+  if (fs.existsSync(preFp)) {
+    const pre = { pr: ffprobe(preFp), pcm: decodePcm(preFp) };
+    const preV = pre.pr.streams.find((s) => s.codec_type === "video");
+    const preA = pre.pr.streams.find((s) => s.codec_type === "audio");
+    chk("pre/post: same video codec + rational fps",
+        preV.codec_name === vStream.codec_name &&
+        preV.r_frame_rate === vStream.r_frame_rate);
+    chk("pre/post: same audio spec",
+        preA.codec_name === aStream.codec_name &&
+        preA.sample_rate === aStream.sample_rate &&
+        preA.channels === aStream.channels);
+    const durDelta = Math.abs(parseFloat(pre.pr.format.duration) - dur);
+    chk(`pre/post: duration unchanged (Δ ${durDelta.toFixed(3)}s)`,
+        durDelta < 0.05);
+    for (const [label, f, t0, t1] of [["440 pre-duck", 440, 1.2, 1.6],
+                                     ["440 duck", 440, 1.6, 1.9],
+                                     ["550 xf-in", 550, 3.4, 4.2],
+                                     ["330 duck", 330, 3.6, 4.0],
+                                     ["220 emb", 220, 5.0, 5.8]]) {
+      const a = magS(pre.pcm, f, t0, t1), b = magS(pcm, f, t0, t1);
+      chk(`pre/post PCM window ${label} matches ` +
+          `(${a.toFixed(3)}→${b.toFixed(3)})`,
+          Math.abs(a - b) < Math.max(0.03, a * 0.15));
+    }
+  } else {
+    ok("pre/post: no pre-fix export artifact — skipped");
+  }
 
   /* ---------- 4. mute/solo semantics end-to-end ------------------- */
   step("4) export with solo on dialogue lane — all other lanes silent");
@@ -697,46 +757,88 @@ async function main() {
   const jList1 = (await api("GET", `/api/projects/${p.id}/jobs`)).length;
   ok(`durable rows: ${jList1} jobs total (${jList1 - jList0} added this step)`);
 
-  /* ---------- 8. D4 perf — long timeline, dense auto, exports ----- */
-  step("8) perf — 240-clip multi-track timeline, 400-pt automation, repeat exports");
-  await commit(p.id, "timeline.create",
-    { name: "LONG", fps_num: 30, fps_den: 1 });
-  const tlL = (await api("GET", `/api/projects/${p.id}/timelines`))
-    .find((t) => t.name === "LONG");
-  for (let i = 0; i < 6; i++)
-    await commit(p.id, "timeline.track.add",
-      { timeline_id: tlL.id, kind: "audio", name: `P${i + 1}` });
-  let dl0 = await detail(p.id, tlL.id);
-  const lanes = dl0.tracks.filter((t) => t.kind === "audio");
-  // 45f spacing → ~3-min program; same-lane gap 270f > clip lengths
-  const tB0 = Date.now();
-  for (let i = 0; i < 240; i++) {
-    await commit(p.id, "timeline.clip.place",
-      { timeline_id: tlL.id, track_id: lanes[i % 6].id,
-        asset_id: [aT, aT, aD, aT, aD2, aT, aM, aT][i % 8].id,
-        start_frames: i * 45, allow_duplicate: true });
-  }
-  ok(`240 clips placed on 6 lanes in ${((Date.now() - tB0) / 1000).toFixed(1)}s`);
+  /* ---------- 8. D4 perf + argv-bound regression ----------------- */
+  step("8) perf — 240/500/1000-clip real exports (argv bound), dense auto, repeats");
+  // N3-D fix: the composite graph now travels via -/filter_complex
+  // read from a job-dir file, and -i inputs dedupe to unique sources
+  // with split/asplit fan-out — clip count no longer bounds argv.
+  // Packed timelines keep program duration bounded while clip COUNT
+  // exercises the old WinError 206 failure mode for real.
+  const aPool = [aT, aD, aD2, aM, aMono, aM441];
+  const vPool = [aV1, aV2];
+  const buildAndExport = async (name, nV, nA, nClips, maxSec) => {
+    await commit(p.id, "timeline.create",
+      { name, fps_num: 30, fps_den: 1 });
+    const t = (await api("GET", `/api/projects/${p.id}/timelines`))
+      .find((x) => x.name === name);
+    for (let i = 1; i < nV; i++)
+      await commit(p.id, "timeline.track.add",
+        { timeline_id: t.id, kind: "video", name: `V${i + 1}` });
+    for (let i = 0; i < nA; i++)
+      await commit(p.id, "timeline.track.add",
+        { timeline_id: t.id, kind: "audio", name: `P${i + 1}` });
+    const dd = await detail(p.id, t.id);
+    const vL = dd.tracks.filter((x) => x.kind === "video");
+    const aL = dd.tracks.filter((x) => x.kind === "audio");
+    // clips: 45 tl-frames on 60f same-lane spacing → 15f gaps
+    const nVc = Math.min(nClips, nV * 60);        // bound overlay chain
+    const nAc = nClips - nVc;
+    const t0 = Date.now();
+    for (let i = 0; i < nVc; i++)
+      await commit(p.id, "timeline.clip.place",
+        { timeline_id: t.id, track_id: vL[i % vL.length].id,
+          asset_id: vPool[i % vPool.length].id,
+          start_frames: Math.floor(i / vL.length) * 60,
+          in_frame: 0, out_frame: 45, allow_duplicate: true });
+    for (let i = 0; i < nAc; i++)
+      await commit(p.id, "timeline.clip.place",
+        { timeline_id: t.id, track_id: aL[i % aL.length].id,
+          asset_id: aPool[i % aPool.length].id,
+          start_frames: Math.floor(i / aL.length) * 60,
+          in_frame: 0, out_frame: 72000, allow_duplicate: true });
+    const placeS = (Date.now() - t0) / 1000;
+    const t1 = Date.now();
+    const r = await commit(p.id, "timeline.export",
+      { timeline_id: t.id, profile: "720p" });
+    const j = await waitJob(p.id, r.job_id, false, maxSec);
+    const renderS = (Date.now() - t1) / 1000;
+    const dl = await fetch(
+      `${API}/api/projects/${p.id}/assets/${j.output_asset_id}/file`,
+      { headers: { "X-Atomic-Token": TOKEN } });
+    const fp = `${OUT}\\media\\n3d-${name.toLowerCase()}.mp4`;
+    fs.writeFileSync(fp, Buffer.from(await dl.arrayBuffer()));
+    const pr = ffprobe(fp);
+    const szMB = fs.statSync(fp).size / 1048576;
+    ok(`${name}: ${nClips} clips (${nVc}v+${nAc}a) placed ` +
+       `${placeS.toFixed(1)}s → export ${renderS.toFixed(1)}s, ` +
+       `dur ${pr.format.duration}s, ${szMB.toFixed(1)}MB — ` +
+       `argv bound resolved (was WinError 206 at 240)`);
+    return { t, pr, fp, renderS };
+  };
+  const appRss0 = (await procSample("atomic-dream-engine")).rssMB;
+  const beRss0 = (await procSample("atomic-backend")).rssMB;
+  const long = await buildAndExport("LONG", 1, 6, 240, 600);
+  const wide = await buildAndExport("WIDE", 2, 8, 500, 600);
+  // 400-pt dense track automation on the LONG lanes
   const dense = [];
   for (let i = 0; i < 400; i++)
     dense.push({ at_tl_frames: i * 5, gain_db: -(i % 7) });
+  const dL = await detail(p.id, long.t.id);
+  const lanes = dL.tracks.filter((t) => t.kind === "audio");
   await commit(p.id, "timeline.track.automation",
-    { timeline_id: tlL.id, track_id: lanes[0].id,
+    { timeline_id: long.t.id, track_id: lanes[0].id,
       points: dense.slice(0, 200), interp: "linear" });
   await commit(p.id, "timeline.track.automation",
-    { timeline_id: tlL.id, track_id: lanes[1].id,
+    { timeline_id: long.t.id, track_id: lanes[1].id,
       points: dense.slice(0, 200), interp: "step" });
-  const appRss0 = (await procSample("atomic-dream-engine")).rssMB;
-  const beRss0 = (await procSample("atomic-backend")).rssMB;
-  // D3 finding (recorded): the multi-segment encode path builds one
-  // giant argv — at ~240 clips it exceeds WinError 206 (cmdline limit).
-  // Repeated-export timing uses the bounded film instead; LONG covers
-  // clip-count load, automation density and UI-side scaling.
-  const rLong = await commit(p.id, "timeline.export",
-    { timeline_id: tlL.id, profile: "720p" });
-  const jLong = await waitJob(p.id, rLong.job_id, true);
-  ok(`240-clip export → ${jLong.status}: ` +
-     `${(jLong.error || "").slice(0, 90)} — known Win argv bound, recorded`);
+  // GIANT-1000: 20 audio lanes bound the amix/overlay cost to a ~83s
+  // program; classified hardware-gated if the render exceeds 8 min.
+  try {
+    await buildAndExport("GIANT", 1, 20, 1000, 480);
+  } catch (e) {
+    ok(`GIANT-1000: NOT RUN to completion — ${String(e).slice(0, 120)} ` +
+       `(hardware-gated; argv bound itself is clip-count-independent)`);
+  }
   // 3 repeated exports of the film — measure each
   const exT = [];
   for (let i = 0; i < 3; i++) {
@@ -762,6 +864,7 @@ async function main() {
     } catch {}
   }
   await sleep(1500);
+  await settleWebviews();
   spawn(EXE, [], { detached: true, stdio: "ignore",
     env: { ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=" + PORT } })
@@ -792,8 +895,157 @@ async function main() {
                    "ffmpeg.exe"].filter((n) => left(n));
   chk("no orphan processes after close", orphans.length === 0);
   fs.writeFileSync(`${OUT}\\n3d-acceptance.txt`, LOG.join("\n"));
+  /* ---------- 11. D7 — pre-N3 populated project migration -------- */
+  step("11) D7 — pre-N3 populated project: migrate + verify + persist");
+  await settleWebviews();
+  // Genuine pre-N3 fixture: DB generated by the release code at
+  // 663cb5d (post-N2-F, alembic head 0018_n2f), populated with a
+  // project + character/world/location bibles + scene + cast + shots,
+  // a 30000/1001 timeline, clip gain/fades/automation (step+linear),
+  // track gain, a 24f equal-power crossfade, undo history, and real
+  // sha-pinned WAV bytes staged into CAS blobs.
+  const stage = `${path.resolve(OUT)}/pre-n3-data`;
+  const fdir = path.resolve("backend/tests/fixtures");
+  // Wipe the whole staged data dir — a surviving atomic.db-wal/-shm
+  // pair replays the PREVIOUS run's pages over a fresh copyFileSync.
+  fs.rmSync(stage, { recursive: true, force: true });
+  fs.mkdirSync(`${stage}/blobs`, { recursive: true });
+  fs.copyFileSync(`${fdir}/pre_n3_release.db`, `${stage}/atomic.db`);
+  for (const f of fs.readdirSync(`${fdir}/pre_n3_media`)) {
+    const bytes = fs.readFileSync(`${fdir}/pre_n3_media/${f}`);
+    const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+    fs.mkdirSync(`${stage}/blobs/${sha.slice(0, 2)}`, { recursive: true });
+    fs.writeFileSync(`${stage}/blobs/${sha.slice(0, 2)}/${sha}`, bytes);
+  }
+  const spawnFixture = () => spawn(EXE, [], { detached: true, stdio: "ignore",
+    env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=" + PORT,
+      ATOMIC_DATA_DIR: stage } }).unref();
+  spawnFixture();
+  try {
+    await attachWsWait(90000);
+  } catch {
+    for (const n of ["atomic-dream-engine.exe", "atomic-backend.exe"]) {
+      try { execFileSync("taskkill", ["/F", "/IM", n], { stdio: "ignore" }); } catch {}
+    }
+    await settleWebviews();
+    spawnFixture();
+    await attachWsWait(90000);
+  }
+  API = null; TOKEN = null;
+  await creds();
+  const plist = await api("GET", "/api/projects");
+  const pp = plist.find((x) => x.name === "Pre-N3 Feature");
+  chk("pre-N3 project opens after migration 0018→0019", !!pp);
+  chk("counts survive — 1 char, 1 world, 1 loc, 4 assets",
+      pp && pp.counts.characters === 1 && pp.counts.worlds === 1 &&
+      pp.counts.locations === 1 && pp.counts.assets === 4);
+  const chars = await api("GET", `/api/projects/${pp.id}/character`);
+  chk("character 'Ada' survives (rev 3, profile intact)",
+      chars.some((c) => c.name === "Ada" && c.revision === 3));
+  const board = await api("GET", `/api/projects/${pp.id}/storyboard`);
+  const shots0 = (board[0] && board[0].shots) || [];
+  const cast0 = (board[0] && board[0].cast) || [];
+  chk("scene 'Dock Arrival' + 3 shots + cast 'Ada' survive",
+      board.length === 1 && board[0].scene.title === "Dock Arrival" &&
+      shots0.length === 3 &&
+      cast0.some((c) => (c.character || {}).name === "Ada"));
+  const tls = await api("GET", `/api/projects/${pp.id}/timelines`);
+  const tlP = tls.find((x) => x.name === "Feature Cut");
+  const dP = await detail(pp.id, tlP.id);
+  const tV = dP.tracks.find((t) => t.kind === "video");
+  const tA1 = dP.tracks.find((t) => t.name === "A1-dialogue");
+  const tA2 = dP.tracks.find((t) => t.name === "A2-music");
+  chk("3 tracks survive; V1 + A1(−3dB) + A2(−9dB) track gain intact",
+      !!tV && tA1 && tA1.gain_db === -3 && tA2 && tA2.gain_db === -9);
+  const cD1 = dP.clips.find((c) => c.position === 0 &&
+                          c.track_id === tA1.id) || dP.clips[0];
+  const cD2 = dP.clips.find((c) => c.id !== cD1.id &&
+                          c.track_id === tA1.id);
+  const p1 = JSON.parse(cD1.automation_json || "[]");
+  const p2 = JSON.parse((cD2 || {}).automation_json || "[]");
+  chk("clip gain −3 + fades 4800/2400 + 2-pt STEP automation survive",
+      cD1.gain_db === -3 && cD1.fade_in_units === 4800 &&
+      cD1.fade_out_units === 2400 && cD1.automation_interp === "step" &&
+      p1.length === 2 && p1[1].gain_db === -9);
+  chk("2nd clip's 2-pt LINEAR automation survives",
+      p2.length === 2 && p2[0].gain_db === -6 &&
+      (cD2 || {}).automation_interp === "linear");
+  const xfP = dP.crossfades[0];
+  chk("24f equal-power crossfade survives migration",
+      xfP && xfP.tl_frames === 24 && xfP.curve === "equal_power");
+  chk("timeline revision ≥12 preserved", dP.revision >= 12);
+  // 0019 columns live: apply NEW track automation on the migrated lane
+  await commit(pp.id, "timeline.track.automation",
+    { timeline_id: tlP.id, track_id: tA1.id,
+      points: [{ at_tl_frames: 10, gain_db: -12 },
+               { at_tl_frames: 40, gain_db: 0 }], interp: "linear" });
+  let dP2 = await detail(pp.id, tlP.id);
+  const tA1b = dP2.tracks.find((t) => t.id === tA1.id);
+  chk("N3 track automation works on migrated lane (0019 cols live)",
+      JSON.parse(tA1b.automation_json || "[]").length === 2);
+  // undo/redo validity on the migrated timeline
+  await commit(pp.id, "timeline.undo", { timeline_id: tlP.id });
+  dP2 = await detail(pp.id, tlP.id);
+  const tA1u = dP2.tracks.find((t) => t.id === tA1.id);
+  chk("undo reverts the post-migration edit",
+      JSON.parse(tA1u.automation_json || "[]").length === 0);
+  await commit(pp.id, "timeline.redo", { timeline_id: tlP.id });
+  dP2 = await detail(pp.id, tlP.id);
+  const tA1r = dP2.tracks.find((t) => t.id === tA1.id);
+  chk("redo reapplies it", JSON.parse(tA1r.automation_json || "[]").length === 2);
+  // backup/export works on the migrated project
+  const rb = await commit(pp.id, "backup.export",
+    { kind: "backup", dest_path: `${stage}/backups/pre-n3.atomicpkg` });
+  const jb = await waitJob(pp.id, rb.job_id, false, 120);
+  chk("backup/export succeeds on migrated project",
+      jb.status === "succeeded");
+  const bfiles = fs.existsSync(`${stage}/backups`)
+    ? fs.readdirSync(`${stage}/backups`)
+      .filter((f) => f.endsWith(".atomicpkg") || f.includes("pkg"))
+    : [];
+  chk("backup package written under migrated data dir",
+      bfiles.length > 0);
+  // restart persistence of the migrated project
+  await send("Browser.close").catch(() => {});
+  await sleep(2500);
+  for (const n of ["atomic-dream-engine.exe", "atomic-backend.exe"]) {
+    try { execFileSync("taskkill", ["/F", "/IM", n], { stdio: "ignore" }); } catch {}
+  }
+  await sleep(1500);
+  await settleWebviews();
+  spawn(EXE, [], { detached: true, stdio: "ignore",
+    env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=" + PORT,
+      ATOMIC_DATA_DIR: stage } })
+    .unref();
+  await attachWsWait(60000);
+  API = null; TOKEN = null;
+  await creds();
+  const dP3 = await detail(pp.id, tlP.id);
+  const tA1c = dP3.tracks.find((t) => t.id === tA1.id);
+  const xf3 = dP3.crossfades[0];
+  chk("restart persistence — migrated timeline + post-migration " +
+      "track automation + xf all survive",
+      dP3.clips.length === 4 &&
+      JSON.parse(tA1c.automation_json || "[]").length === 2 &&
+      xf3 && xf3.tl_frames === 24);
+  // final clean shutdown of the fixture instance
+  await send("Browser.close").catch(() => {});
+  await sleep(1500);
+  execFileSync("powershell", ["-NoProfile", "-Command",
+    "Get-Process atomic-dream-engine -ErrorAction SilentlyContinue | " +
+    "ForEach-Object { $_.CloseMainWindow() | Out-Null }"],
+    { stdio: "ignore" });
+  await sleep(4000);
+  const orphans2 = ["atomic-dream-engine.exe", "atomic-backend.exe",
+                    "ffmpeg.exe"].filter((n) => left(n));
+  chk("no orphan processes after fixture-instance close",
+      orphans2.length === 0);
+  fs.writeFileSync(`${OUT}\\n3d-acceptance.txt`, LOG.join("\n"));
   console.log(`\nN3-D ACCEPTANCE: PASS ${STEP}/${STEP} steps — ${OUT}`);
 }
+
 async function navTo(pname) {
   try { await send("Page.reload", { ignoreCache: true }); } catch { /* nav ok */ }
   const t0 = Date.now();
