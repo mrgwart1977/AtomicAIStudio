@@ -294,6 +294,9 @@ export interface CommandProposal {
    * state (id/revision/prompt/settings/continuity) the approval pins
    * as expected_keyframe at commit. */
   resolved_keyframe?: Record<string, unknown> | null;
+  /** A4 — clip.* commands: the motion clip's generation-relevant
+   * state the approval pins as expected_clip at commit. */
+  resolved_clip?: Record<string, unknown> | null;
   /** A3 — keyframe.compose only: the proposed continuity-aware draft
    * (prompt + source sections) shown before anything is written. */
   resolved_draft?: {
@@ -386,6 +389,50 @@ export interface Keyframe {
     sampler?: string | null;
   };
   continuity_json: { refs?: Array<{ kind: string; id: string; label?: string }>; notes?: string };
+  result_asset_id: string | null;
+  result_asset_name?: string | null;
+  result_asset_status?: string | null;
+  generate_job_id: string | null;
+  job_status?: string | null;
+  job_progress?: number | null;
+  prompt_origin: "user" | "compose";
+  status: string;
+  revision: number;
+}
+
+// ---------- A4: motion clips ----------
+
+export interface MotionClip {
+  id: string;
+  shot_id: string;
+  scene_id: string | null;
+  position: number;
+  start_keyframe_id: string | null;
+  end_keyframe_id: string | null;
+  prompt: string;
+  negative_prompt: string;
+  motion_json: {
+    instructions?: string | null;
+    intensity?: "subtle" | "moderate" | "strong" | null;
+    temporal_consistency?: string | null;
+  };
+  camera_json: {
+    movement?: string | null;
+    follow_mode?: string | null;
+    follow_targets?: Array<{ kind: string; id?: string; name?: string }> | null;
+    follow_params?: Record<string, unknown> | null;
+    framing?: string | null;
+    subject_placement?: string | null;
+    angle?: string | null;
+  };
+  duration_frames: number | null;
+  fps_num: number;
+  fps_den: number;
+  width: number;
+  height: number;
+  model_key: string | null;
+  seed: number | null;
+  continuity_json: { refs?: Array<{ kind: string; id: string; label?: string }> };
   result_asset_id: string | null;
   result_asset_name?: string | null;
   result_asset_status?: string | null;
@@ -603,6 +650,8 @@ export interface StoryboardShot {
   media?: { assets: ShotMediaLink[]; missing: string[] };
   /** A3 — compact keyframe summary for card badges. */
   keyframes?: { count: number; roles: string[]; with_result: number };
+  /** A4 — compact motion-clip summary for card badges. */
+  clips?: { count: number; with_result: number };
   /** C4-C — durable per-shot generation state (backend-authoritative). */
   generation?: {
     output_count: number;

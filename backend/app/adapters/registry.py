@@ -19,6 +19,7 @@ from app.adapters.inference import (
     SdCppVideoAdapter,
 )
 from app.adapters.mock import MockImageAdapter
+from app.adapters.mock_video import MockVideoAdapter
 from app.adapters.persistent_mock import PersistentMockAdapter
 from app.adapters.ops import (
     AssetImportAdapter,
@@ -37,6 +38,9 @@ class AdapterRegistry:
                  worker_pool=None) -> None:
         self._adapters: dict[str, ProviderAdapter] = {}
         self.register(MockImageAdapter())
+        # A4 — mock video: deterministic H.264 encode via bundled
+        # ffmpeg. Never inference; output marks is_mock/generated=False.
+        self.register(MockVideoAdapter())
         # C2.0a — mock cloud text: exercises the remote-job contract on
         # an in-memory provider. Zero egress, honest "mock" kind.
         from app.adapters.cloud_mock import MockCloudTextAdapter

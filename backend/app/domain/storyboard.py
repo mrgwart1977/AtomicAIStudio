@@ -1220,6 +1220,26 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 [r for r in rows if r.result_asset_id]),
         }
 
+    # A4 — compact per-shot motion-clip summary for card badges; the
+    # full list loads on demand via /shots/{id}/clips.
+    from app.db.models import MotionClip
+    mc_by_shot: dict[str, list[MotionClip]] = {}
+    if shot_ids:
+        for c in session.execute(
+                select(MotionClip).where(
+                    MotionClip.project_id == shots[0].project_id,
+                    MotionClip.shot_id.in_(shot_ids))
+                .order_by(MotionClip.position)).scalars():
+            mc_by_shot.setdefault(c.shot_id, []).append(c)
+
+    def _clips(sh: Shot) -> dict:
+        rows = mc_by_shot.get(sh.id, [])
+        return {
+            "count": len([r for r in rows if r.status == "active"]),
+            "with_result": len(
+                [r for r in rows if r.result_asset_id]),
+        }
+
     def _media(sh: Shot) -> dict:
         missing: list[str] = []
         for bid, tag in ((sh.thumbnail_asset_id, "thumbnail"),
@@ -1266,6 +1286,7 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 "inherited": inherited,
                 "media": _media(sh),
                 "keyframes": _keyframes(sh),
+                "clips": _clips(sh),
                 "generation": {
                     "output_count": 0, "latest_asset_id": None,
                     "latest_asset_at": None, "latest_job_id": None,
