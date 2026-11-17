@@ -1199,6 +1199,27 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
             select(Asset).where(Asset.id.in_(bound_ids))).scalars().all()
     } if bound_ids else {}
 
+    # A3 — compact per-shot keyframe summary for card badges; the full
+    # list loads on demand via /shots/{id}/keyframes.
+    from app.db.models import Keyframe
+    kf_by_shot: dict[str, list[Keyframe]] = {}
+    if shot_ids:
+        for kf in session.execute(
+                select(Keyframe).where(
+                    Keyframe.project_id == shots[0].project_id,
+                    Keyframe.shot_id.in_(shot_ids))
+                .order_by(Keyframe.position)).scalars():
+            kf_by_shot.setdefault(kf.shot_id, []).append(kf)
+
+    def _keyframes(sh: Shot) -> dict:
+        rows = kf_by_shot.get(sh.id, [])
+        return {
+            "count": len([r for r in rows if r.status == "active"]),
+            "roles": [r.role for r in rows if r.status == "active"],
+            "with_result": len(
+                [r for r in rows if r.result_asset_id]),
+        }
+
     def _media(sh: Shot) -> dict:
         missing: list[str] = []
         for bid, tag in ((sh.thumbnail_asset_id, "thumbnail"),
@@ -1244,6 +1265,7 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 ],
                 "inherited": inherited,
                 "media": _media(sh),
+                "keyframes": _keyframes(sh),
                 "generation": {
                     "output_count": 0, "latest_asset_id": None,
                     "latest_asset_at": None, "latest_job_id": None,

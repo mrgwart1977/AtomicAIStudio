@@ -23,6 +23,7 @@ import {
   draftFromPlanning, planningFromDraft, PlanningSection,
   ShotMediaSection, FOLLOW_SHORT,
 } from "./StoryboardPlanning";
+import { KeyframesSection } from "./StoryboardKeyframes";
 
 const SHOT_TYPES = [
   "establishing", "wide", "medium", "medium_close", "close", "extreme_close",
@@ -591,6 +592,15 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
               title={`${gen.video_count} generated clip(s)${
                 gen.latest_video_duration_s ? ` — latest ${gen.latest_video_duration_s}s` : ""}`}>
               ▶{gen.video_count}{gen.latest_video_duration_s ? ` ${gen.latest_video_duration_s}s` : ""}
+            </span>
+          )}
+          {(entry.keyframes?.count ?? 0) > 0 && (
+            <span
+              className="ml-0.5 text-[9px] text-teal/80"
+              title={`${entry.keyframes!.count} keyframe(s)${
+                entry.keyframes!.with_result
+                  ? ` — ${entry.keyframes!.with_result} with result` : ""}`}>
+              ◐{entry.keyframes!.count}
             </span>
           )}
           {hasPrev && (
@@ -1194,6 +1204,14 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
               <ShotMediaSection
                 entry={entry}
                 imageAssets={imageAssets}
+                run={run}
+              />
+            )}
+            {/* ---- A3 keyframes ---- */}
+            {shot && (
+              <KeyframesSection
+                projectId={projectId}
+                shotId={shot.id}
                 run={run}
               />
             )}

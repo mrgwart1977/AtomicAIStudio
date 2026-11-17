@@ -404,6 +404,47 @@ class ShotCharacter(Base):
     __table_args__ = (UniqueConstraint("shot_id", "character_id", name="uq_shot_character"),)
 
 
+class Keyframe(Base):
+    """A3 — a shot-associated keyframe: a planned still-image beat
+    (start/end/reference/intermediate) with its own prompt, generation
+    settings, continuity refs, and a mock-produced result asset.
+
+    prompt stays user-authored at all times — the continuity-aware
+    draft fills it only on explicit request (compose) and never
+    overwrites an edited prompt."""
+
+    __tablename__ = "keyframes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    role: Mapped[str] = mapped_column(String(20), default="start")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Rational timeline-frame position within the shot (e.g. 96 frames at
+    # 24000/1001 fps → frame 0..95); NULL when unpositioned.
+    frame_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_den: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    negative_prompt: Mapped[str] = mapped_column(Text, default="")
+    # {seed, model_key, steps, cfg, width, height, sampler} — all optional
+    settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # {refs:[{kind,id}], notes} — same project-scoped ref vocabulary as
+    # A2 planning.
+    continuity_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    # Durable job producing the current result; history comes from the
+    # jobs table (request_json.keyframe_id), not denormalized here.
+    generate_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    # Provenance for how the prompt was produced (compose draft vs
+    # user-authored) — the audit trail lives in entity_revisions.
+    prompt_origin: Mapped[str] = mapped_column(String(20), default="user")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Screenplay(Base):
     """A1 — one screenplay document inside a project (multiple per
     project supported; position is dense per project). Version history

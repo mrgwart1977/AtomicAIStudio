@@ -96,6 +96,10 @@ SUPPORTED_COMMANDS = {
     "shot.generate",
     # C4-D — shot-scoped video generation (composes generate.video)
     "shot.video",
+    # A3 — keyframes: shot-scoped still-image beats + mock generation
+    "keyframe.create", "keyframe.update", "keyframe.archive",
+    "keyframe.unarchive", "keyframe.revert", "keyframe.compose",
+    "keyframe.generate", "keyframe.result", "keyframe.pin",
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
@@ -129,6 +133,8 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        # C4-D — shot-scoped composition of generate.video
                        # (local installed video models, i2v optional).
                        "shot.video",
+                       # A3 — keyframe mock generation (durable job).
+                       "keyframe.generate",
                        # C5-B — timeline export launches a durable job.
                        "timeline.export"}
 
@@ -176,6 +182,9 @@ JOB_COMMANDS = {
     # C4-D — local installed video models; the composed request is
     # exactly generate.video's shape plus shot provenance.
     "shot.video": "gen.video.sdcpp",
+    # A3 — deterministic mock only; no inference. The request carries
+    # keyframe provenance; the adapter's apply_command lands the result.
+    "keyframe.generate": "mock.image",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -200,6 +209,10 @@ UNDOABLE = {
     "scene.cast.assign", "scene.cast.update", "scene.cast.remove",
     "shot.update", "shot.archive", "shot.unarchive", "shot.move",
     "shot.cast.assign", "shot.cast.update", "shot.cast.remove",
+    # A3 — keyframe mutations reverse from their before-snapshots;
+    # create/generate are not undoable (same rule as shots).
+    "keyframe.update", "keyframe.archive", "keyframe.unarchive",
+    "keyframe.compose", "keyframe.result", "keyframe.pin",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
@@ -341,6 +354,17 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"{command_type.split('.', 1)[1].capitalize()} shot"
     if command_type == "shot.generate":
         return "Generate image for shot (simulated)"
+    if command_type == "keyframe.compose":
+        return "Draft continuity-aware keyframe prompt"
+    if command_type == "keyframe.generate":
+        return "Generate keyframe image (mock — no inference)"
+    if command_type == "keyframe.result":
+        return "Attach generated keyframe result"
+    if command_type == "keyframe.pin":
+        return "Pin keyframe result as shot thumbnail"
+    if command_type.startswith("keyframe."):
+        op = command_type.split(".", 1)[1]
+        return f"{op.capitalize()} keyframe"
     if command_type.startswith("screenplay."):
         if command_type == "screenplay.create":
             return f"Create screenplay '{payload.get('title', '')}'"
@@ -712,6 +736,81 @@ def _model_prompt_budget(payload: dict) -> int | None:
         return v if isinstance(v, int) and v > 0 else None
     except Exception:
         return None
+
+
+def _keyframe_fingerprint(kf) -> dict:
+    """A3 — the generation-relevant keyframe state an approval pins
+    via expected_keyframe: any prompt/settings/continuity edit between
+    preview and commit bumps revision and is refused."""
+    return {
+        "keyframe_id": kf.id,
+        "revision": kf.revision,
+        "prompt": kf.prompt,
+        "settings": kf.settings_json or {},
+        "continuity": kf.continuity_json or {},
+    }
+
+
+def _compose_keyframe_generate(session: Session, project: Project,
+                               payload: dict) -> tuple:
+    """A3 — resolve keyframe.generate into the mock-image request plus
+    the composed continuity-aware prompt. Same pinning discipline as
+    shot.generate: expected_prompt fingerprints the composed prompt,
+    expected_keyframe fingerprints keyframe state. Returns
+    (keyframe, request)."""
+    from app.domain import keyframes as kd
+    from app.domain import prompt_compose
+    kf = _get_keyframe(session, project, payload)
+    if kf.status != "active":
+        raise CommandError(422, "cannot generate from an archived keyframe")
+    shot = session.get(Shot, kf.shot_id)
+    if shot is None or shot.project_id != project.id \
+            or shot.status != "active":
+        raise CommandError(422, "keyframe's shot is archived or missing")
+    user_prompt = (payload.get("prompt") or kf.prompt or "").strip()
+    if not user_prompt:
+        raise CommandError(
+            422, "keyframe has no prompt — write one or compose a draft")
+    comp = None
+    if payload.get("compose_prompt", True):
+        comp = prompt_compose.compose_shot_prompt(
+            session, project, shot, user_prompt=user_prompt,
+            model_max_chars=_model_prompt_budget(payload))
+        expected_prompt = payload.get("expected_prompt")
+        if expected_prompt is not None and \
+                expected_prompt != comp["prompt_sha256"]:
+            raise CommandError(
+                422, "prompt context changed since preview — "
+                     "re-preview keyframe.generate")
+    expected_kf = payload.get("expected_keyframe")
+    if expected_kf is not None and expected_kf != _keyframe_fingerprint(kf):
+        raise CommandError(
+            422, "keyframe changed since preview — "
+                 "re-preview keyframe.generate")
+    settings = kf.settings_json or {}
+    seed = payload.get("seed", settings.get("seed", 0))
+    if seed is None:
+        seed = 0
+    req = {
+        "command_type": "keyframe.generate",
+        "prompt": comp["prompt"] if comp else user_prompt,
+        "seed": seed,
+        "negative_prompt": payload.get("negative_prompt")
+            or kf.negative_prompt or "",
+        "keyframe_id": kf.id,
+        "shot_id": shot.id,
+        "scene_id": shot.scene_id,
+        "keyframe_role": kf.role,
+        "model_key": payload.get("model_key") or settings.get("model_key"),
+        # Provenance: the request records exactly what the approval saw.
+        "origin_command_type": "keyframe.generate",
+        "keyframe_generate": {
+            "keyframe_id": kf.id, "shot_id": shot.id, "role": kf.role,
+            "user_prompt": user_prompt,
+            "prompt_context": comp,
+        },
+    }
+    return kf, req
 
 
 def _compose_shot_video(session: Session, project: Project,
@@ -1423,6 +1522,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _vshot, _vinner, _vcomposed = _compose_shot_video(
             session, project, payload)
         warnings += _validate(session, project, _vinner, _vcomposed)
+    if command_type.startswith("keyframe."):
+        _validate_keyframe(session, project, command_type, payload)
     if command_type == "shot.move" and payload.get("to_scene_id"):
         _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -1897,6 +1998,83 @@ def _get_character(session: Session, project: Project, payload: dict):
         raise CommandError(404, "character not found in this project") from None
 
 
+def _get_keyframe(session: Session, project: Project, payload: dict):
+    from app.domain import keyframes as kd
+    try:
+        return kd._get(session, project.id, payload.get("keyframe_id") or "")
+    except ValueError:
+        raise CommandError(404, "keyframe not found in this project") from None
+
+
+def _validate_keyframe(session: Session, project: Project,
+                       command_type: str, payload: dict) -> None:
+    """A3 — keyframe command validation. Field-level checks run the
+    same parse functions commit uses, so preview and commit can never
+    disagree."""
+    from app.domain import keyframes as kd
+
+    def _fields() -> None:
+        try:
+            if "role" in payload and payload["role"] not in kd.KEYFRAME_ROLES:
+                raise ValueError(
+                    f"role must be one of {kd.KEYFRAME_ROLES}")
+            if "frame" in payload:
+                kd.parse_frame_position(payload.get("frame"))
+            if "settings" in payload:
+                kd.parse_settings(payload.get("settings"))
+            if "continuity" in payload:
+                kd.parse_continuity(session, project.id,
+                                    payload.get("continuity"))
+            for f in ("prompt", "negative_prompt"):
+                if f in payload and len(payload.get(f) or "") > kd.PROMPT_MAX:
+                    raise ValueError(f"{f} exceeds {kd.PROMPT_MAX} chars")
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+
+    if command_type == "keyframe.create":
+        try:
+            kd._active_shot(session, project.id, payload.get("shot_id") or "")
+        except ValueError as exc:
+            msg = str(exc)
+            code = 404 if "not found" in msg else 422
+            raise CommandError(code, msg) from None
+        _fields()
+        return
+    k = _get_keyframe(session, project, payload)
+    if command_type == "keyframe.update":
+        _fields()
+        return
+    if command_type == "keyframe.revert":
+        if not isinstance(payload.get("to_revision"), int) \
+                or isinstance(payload.get("to_revision"), bool):
+            raise CommandError(422, "to_revision must be an integer")
+        return
+    if command_type == "keyframe.generate":
+        if k.status != "active":
+            raise CommandError(422, "cannot generate from an archived keyframe")
+        shot = session.get(Shot, k.shot_id)
+        if shot is None or shot.status != "active":
+            raise CommandError(422, "keyframe's shot is archived")
+        if not ((payload.get("prompt") or kf_prompt(k) or "")).strip() \
+                and not (shot.prompt or "").strip():
+            raise CommandError(
+                422, "keyframe has no prompt — write one or compose a draft")
+        return
+    if command_type == "keyframe.pin":
+        if k.status != "active":
+            raise CommandError(422, "keyframe is archived")
+        if not k.result_asset_id:
+            raise CommandError(422, "keyframe has no result asset to pin")
+        return
+    # archive / unarchive / result / compose: existence suffices —
+    # status checks happen at commit.
+    return
+
+
+def kf_prompt(k) -> str:
+    return k.prompt or ""
+
+
 def _get_screenplay(session: Session, project: Project, payload: dict):
     from app.domain import screenplay as spd
     try:
@@ -2337,6 +2515,59 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                     # N1-A — honest unsupported-layout refusal at
                     # preview, not a misleading pin or a 500.
                     out["warnings"].append(str(exc))
+        except CommandError:
+            pass
+    if command_type.startswith("keyframe.") \
+            and command_type != "keyframe.create":
+        # A3 — the approval pins keyframe state (revision + gen-relevant
+        # fields) via expected_keyframe at commit.
+        try:
+            _kf = _get_keyframe(session, project, payload)
+            out["resolved_keyframe"] = _keyframe_fingerprint(_kf)
+        except CommandError:
+            pass
+    if command_type == "keyframe.compose":
+        # A3.2 — the proposal IS the preview: composed prompt + source
+        # sections + warnings, before anything is written.
+        try:
+            _kf = _get_keyframe(session, project, payload)
+            from app.domain import keyframes as _kd
+            draft = _kd.compose_draft(session, project, _kf.id)
+            out["resolved_draft"] = {
+                "prompt": draft["prompt"],
+                "prompt_sha256": draft["prompt_sha256"],
+                "user_prompt": draft["user_prompt"],
+                "context_text": draft["context_text"],
+                "sections": draft["sections"],
+                "omitted": draft["omitted"],
+                "conflicts": draft["conflicts"],
+                "warnings": draft["warnings"],
+                "budget": draft["budget"],
+            }
+            out["warnings"] = out["warnings"] + draft["warnings"]
+        except CommandError:
+            pass
+    if command_type == "keyframe.generate":
+        # A3 — the approval sees the composed prompt it pins via
+        # expected_prompt, plus the keyframe state pin.
+        try:
+            _kf, _req = _compose_keyframe_generate(
+                session, project, payload)
+            comp = _req["keyframe_generate"]["prompt_context"]
+            if comp is not None:
+                out["resolved_prompt"] = {
+                    "prompt_sha256": comp["prompt_sha256"],
+                    "prompt": _req["prompt"],
+                    "user_prompt": _req["keyframe_generate"]["user_prompt"],
+                    "context_text": comp["context_text"],
+                    "sections": comp["sections"],
+                    "omitted": comp["omitted"],
+                    "conflicts": comp["conflicts"],
+                    "warnings": comp["warnings"],
+                    "budget": comp["budget"],
+                    "user_over_budget": comp["user_over_budget"],
+                }
+                out["warnings"] = out["warnings"] + comp["warnings"]
         except CommandError:
             pass
     if command_type in ("shotlist.scaffold", "shotlist.sync"):
@@ -2905,6 +3136,85 @@ def _commit_storyboard(session: Session, project: Project, command: CreativeComm
         return
 
     raise CommandError(422, f"unsupported command_type '{command_type}'")
+
+
+def _commit_keyframe(session: Session, project: Project,
+                     command: CreativeCommand, command_type: str,
+                     payload: dict, audit: dict) -> None:
+    """A3 — keyframe mutations. Every op stores the before-snapshot so
+    undo restores fields exactly (same contract as shot ops)."""
+    from app.domain import keyframes as kd
+
+    try:
+        if command_type == "keyframe.create":
+            row = kd.create_keyframe(
+                session, project.id, payload, command_id=command.id)
+            audit["after"]["keyframe_id"] = row.id
+            audit["after"]["shot_id"] = row.shot_id
+            return
+        kf = _get_keyframe(session, project, payload)
+        audit["before"]["snapshot"] = kd.keyframe_snapshot(kf)
+        audit["after"]["keyframe_id"] = kf.id
+        audit["after"]["shot_id"] = kf.shot_id
+        if command_type == "keyframe.update":
+            kd.update_keyframe(
+                session, project.id, payload, command_id=command.id)
+        elif command_type in ("keyframe.archive", "keyframe.unarchive"):
+            kd.archive_keyframe(
+                session, project.id, payload,
+                archive=(command_type == "keyframe.archive"),
+                command_id=command.id)
+        elif command_type == "keyframe.revert":
+            from app.db.models import EntityRevision
+            rev = session.execute(
+                select(EntityRevision).where(
+                    EntityRevision.entity_type == "keyframe",
+                    EntityRevision.entity_id == kf.id,
+                    EntityRevision.revision == int(payload["to_revision"]))
+            ).scalar_one_or_none()
+            if rev is None:
+                raise CommandError(404, "revision not found")
+            kd.revert_keyframe(
+                session, project.id, kf.id, rev.snapshot_json)
+            kd.write_keyframe_revision(
+                session, kf, command_id=command.id,
+                summary=f"Reverted to r{payload['to_revision']}")
+            audit["after"]["reverted_to"] = int(payload["to_revision"])
+        elif command_type == "keyframe.compose":
+            # Draft → apply: the proposal was already exposed at
+            # preview (resolved_draft); commit recomputes so the
+            # applied text always reflects current state.
+            draft = kd.compose_draft(session, project, kf.id)
+            upd = dict(payload)
+            upd["prompt"] = draft["prompt"]
+            upd["compose"] = True
+            kd.update_keyframe(
+                session, project.id, upd, command_id=command.id)
+            audit["after"]["draft"] = {
+                "prompt": draft["prompt"],
+                "prompt_sha256": draft["prompt_sha256"],
+                "sections": draft["sections"],
+            }
+        elif command_type == "keyframe.result":
+            kd.apply_result(
+                session, project.id, payload, command_id=command.id)
+        elif command_type == "keyframe.pin":
+            shot = session.get(Shot, kf.shot_id)
+            if shot is None or shot.project_id != project.id:
+                raise CommandError(404, "shot not found")
+            from app.domain import storyboard as sb
+            before = sb.update_shot(
+                session, shot, fields={},
+                thumbnail_asset_id=kf.result_asset_id,
+                command_id=command.id,
+                change_summary="Pinned keyframe result")
+            audit["before"]["shot_snapshot"] = before
+        else:
+            raise CommandError(422, f"unsupported command_type '{command_type}'")
+    except ValueError as exc:
+        raise CommandError(422, str(exc)) from None
+    except KeyError as exc:
+        raise CommandError(404, str(exc).strip("'")) from None
 
 
 def _commit_screenplay(session: Session, project: Project,
@@ -3658,6 +3968,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _commit_screenplay(session, project, command, command_type, payload,
                            audit)
 
+    elif (command_type.startswith("keyframe.")
+          # keyframe.generate enqueues a durable job — the JOB_COMMANDS
+          # branch below must see it.
+          and command_type != "keyframe.generate"):
+        _commit_keyframe(session, project, command, command_type, payload,
+                         audit)
+
     elif (command_type.startswith("timeline.")
           # C5-B — export enqueues a durable job; the JOB_COMMANDS
           # branch below must see it, not _commit_timeline.
@@ -3699,7 +4016,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 # gen job restarts from scratch (bounded, user-initiated).
                 resumable=command_type not in (
                     "generate.image", "generate.image.persistent",
-                    "generate.video", "shot.video",
+                    "generate.video", "shot.video", "keyframe.generate",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
@@ -3721,6 +4038,20 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 raise CommandError(409, str(exc)) from exc
             raise
         audit["after"]["job_id"] = job.id
+        if command_type == "keyframe.generate":
+            # Durable link — the keyframe's current producing job;
+            # history stays in generation_jobs.
+            from app.db.models import Keyframe as _Kf
+            _k = session.get(_Kf, payload.get("keyframe_id") or "")
+            if _k is not None and _k.project_id == project.id:
+                from app.domain import keyframes as _kd
+                _k.generate_job_id = job.id
+                _k.revision += 1
+                _k.updated_at = utcnow()
+                _kd.write_keyframe_revision(
+                    session, _k, command_id=command.id,
+                    summary="Generation enqueued")
+                audit["after"]["keyframe_id"] = _k.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",
                             "generate.image.img2img", "generate.image.edit"):
             # Minimized durable record — the prompt body lives in the job
@@ -3986,6 +4317,7 @@ def _job_kind(command_type: str) -> str:
         "generate.image.edit": "image",
         "shot.generate": "image",
         "shot.video": "video",
+        "keyframe.generate": "image",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -4103,6 +4435,12 @@ def _job_request(session: Session, project: Project, command_type: str,
             "prompt_context": _composed.get("prompt_context"),
             "user_prompt": _composed.get("user_prompt"),
         }
+        return req
+    if command_type == "keyframe.generate":
+        # A3 — composed at request-build time (execution, not preview)
+        # exactly like shot.generate: the approval pins are re-checked
+        # here against current state.
+        _kf, req = _compose_keyframe_generate(session, project, payload)
         return req
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
@@ -4640,7 +4978,8 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
                 setattr(project, f, before[f])
         if "settings" in before:
             project.settings_json = before["settings"]
-    elif command.command_type.startswith(("scene.", "shot.", "entity.assets.")):
+    elif command.command_type.startswith(("scene.", "shot.", "entity.assets.",
+                                          "keyframe.")):
         _undo_storyboard(session, project, command, before, after)
     else:
         parts = _entity_parts(command.command_type)
@@ -4746,6 +5085,53 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
         sh.updated_at = utcnow()
         session.flush()
         sb.write_shot_revision(session, sh, command_id=command.id, summary="Undo")
+        return
+
+    if ct.startswith("keyframe."):
+        from app.db.models import Keyframe
+        from app.domain import keyframes as kd
+        if ct == "keyframe.pin":
+            # Pin mutates the shot's thumbnail — restore the shot's
+            # before-snapshot exactly like shot.update undo.
+            sh = get_shot()
+            if sh is not None and before.get("shot_snapshot"):
+                snap = before["shot_snapshot"]
+                for f in sb.SHOT_FIELDS + ("status", "scene_id",
+                                           "location_id",
+                                           "thumbnail_asset_id",
+                                           "reference_set_id",
+                                           "source_asset_id",
+                                           "continuity_json",
+                                           "planning_json", "position"):
+                    if f in snap:
+                        setattr(sh, f, snap[f])
+                sb._restore_shot_cast(session, sh, snap.get("cast") or [])
+                sh.revision += 1
+                sh.updated_at = utcnow()
+                session.flush()
+                sb.write_shot_revision(
+                    session, sh, command_id=command.id,
+                    summary="Undo pin")
+            return
+        kf_id = after.get("keyframe_id") or before.get("keyframe_id")
+        kf = session.get(Keyframe, kf_id) if kf_id else None
+        if kf is None or kf.project_id != project.id:
+            return
+        snap = before.get("snapshot")
+        if snap:
+            for f in ("role", "position", "frame_num", "frame_den",
+                      "prompt", "negative_prompt", "settings_json",
+                      "continuity_json", "result_asset_id",
+                      "generate_job_id", "prompt_origin", "status"):
+                if f in snap:
+                    setattr(kf, f, snap[f])
+        elif "status" in before:
+            kf.status = before["status"]
+        kf.revision += 1
+        kf.updated_at = utcnow()
+        session.flush()
+        kd.write_keyframe_revision(
+            session, kf, command_id=command.id, summary="Undo")
         return
 
     if ct == "shot.move":

@@ -77,7 +77,17 @@ class MockImageAdapter:
                 },
             },
         }
-        if handle.request.get("shot_id") and handle.request.get("set_thumbnail"):
+        if handle.request.get("keyframe_id"):
+            # A3 — land the produced asset on the keyframe as a normal
+            # audited, undoable command (never a silent write).
+            out["output"]["apply_command"] = {
+                "command_type": "keyframe.result",
+                "payload": {
+                    "keyframe_id": handle.request["keyframe_id"],
+                    "shot_id": handle.request.get("shot_id"),
+                    "result_asset_id": "__asset__"},
+            }
+        elif handle.request.get("shot_id") and handle.request.get("set_thumbnail"):
             out["output"]["apply_command"] = {
                 "command_type": "shot.update",
                 "payload": {"shot_id": handle.request["shot_id"],

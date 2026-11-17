@@ -111,6 +111,9 @@ CommandType = Literal[
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
     "shot.generate", "shot.video",
+    "keyframe.create", "keyframe.update", "keyframe.archive",
+    "keyframe.unarchive", "keyframe.revert", "keyframe.compose",
+    "keyframe.generate", "keyframe.result", "keyframe.pin",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -189,6 +192,11 @@ class CommandProposalOut(BaseModel):
     # (sections, omissions, conflicts, budget) the approval pins via
     # expected_prompt at commit.
     resolved_prompt: dict[str, Any] | None = None
+    # A3 — keyframe.* only: keyframe state fingerprint pinned via
+    # expected_keyframe; resolved_draft is the keyframe.compose
+    # proposal (prompt + source sections) shown before apply.
+    resolved_keyframe: dict[str, Any] | None = None
+    resolved_draft: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -413,6 +421,9 @@ class StoryboardShotOut(BaseModel):
     inherited: list[CastMemberOut] = []  # scene-cast members without an own row
     # A2 — shot-scoped CAS associations + missing-media flags
     media: dict[str, Any] = {}
+    # A3 — compact keyframe summary {count, roles, with_result}; the
+    # full list loads via /shots/{id}/keyframes.
+    keyframes: dict[str, Any] = {}
     # C4-C — durable per-shot generation state (job status + latest
     # produced asset); {}-valued when nothing was generated yet.
     generation: dict[str, Any] | None = None

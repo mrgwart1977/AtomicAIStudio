@@ -290,6 +290,23 @@ export interface CommandProposal {
     budget: { limit: number; used: number; user: number };
     user_over_budget: boolean;
   } | null;
+  /** A3 — keyframe.* commands: the keyframe's generation-relevant
+   * state (id/revision/prompt/settings/continuity) the approval pins
+   * as expected_keyframe at commit. */
+  resolved_keyframe?: Record<string, unknown> | null;
+  /** A3 — keyframe.compose only: the proposed continuity-aware draft
+   * (prompt + source sections) shown before anything is written. */
+  resolved_draft?: {
+    prompt: string;
+    prompt_sha256: string;
+    user_prompt: string;
+    context_text: string;
+    sections: Array<Record<string, unknown>>;
+    omitted: string[];
+    conflicts: string[];
+    warnings: string[];
+    budget: { limit: number; used: number; user: number };
+  } | null;
 }
 
 export interface CommitResult {
@@ -343,6 +360,41 @@ export interface BridgeResult {
   folder?: string;
   candidates?: WatchCandidate[];
   truncated?: boolean;
+}
+
+// ---------- A3: keyframes ----------
+
+export type KeyframeRole = "start" | "end" | "reference" | "intermediate";
+
+export interface Keyframe {
+  id: string;
+  shot_id: string;
+  scene_id: string | null;
+  role: KeyframeRole;
+  position: number;
+  frame_num: number | null;
+  frame_den: number | null;
+  prompt: string;
+  negative_prompt: string;
+  settings_json: {
+    seed?: number | null;
+    model_key?: string | null;
+    steps?: number | null;
+    cfg?: number | null;
+    width?: number | null;
+    height?: number | null;
+    sampler?: string | null;
+  };
+  continuity_json: { refs?: Array<{ kind: string; id: string; label?: string }>; notes?: string };
+  result_asset_id: string | null;
+  result_asset_name?: string | null;
+  result_asset_status?: string | null;
+  generate_job_id: string | null;
+  job_status?: string | null;
+  job_progress?: number | null;
+  prompt_origin: "user" | "compose";
+  status: string;
+  revision: number;
 }
 
 export interface Job {
@@ -549,6 +601,8 @@ export interface StoryboardShot {
   /** A2 — CAS links + missing-media flags (values are link_ids, or the
    * tags "thumbnail"/"source" for direct bindings). */
   media?: { assets: ShotMediaLink[]; missing: string[] };
+  /** A3 — compact keyframe summary for card badges. */
+  keyframes?: { count: number; roles: string[]; with_result: number };
   /** C4-C — durable per-shot generation state (backend-authoritative). */
   generation?: {
     output_count: number;
