@@ -1321,6 +1321,62 @@ def shot_versions(shot_id: str, project: Project = Depends(get_project),
     return sb.revision_history(db, "shot", shot_id)
 
 
+# ---------- keyframes (A3) ----------
+
+@api_router.get("/api/projects/{project_id}/shots/{shot_id}/keyframes")
+def list_keyframes(shot_id: str, project: Project = Depends(get_project),
+                   db: Session = Depends(get_db),
+                   include_archived: bool = True):
+    """A shot's keyframes in position order — mutations are commands."""
+    from app.domain import keyframes as kd
+    try:
+        rows = kd.list_keyframes(db, project.id, shot_id)
+    except ValueError:
+        raise HTTPException(404, "shot not found in this project") from None
+    if not include_archived:
+        rows = [r for r in rows if r.status == "active"]
+    return [kd.serialize_keyframe(db, r) for r in rows]
+
+
+@api_router.get("/api/projects/{project_id}/keyframes/{keyframe_id}")
+def get_keyframe(keyframe_id: str, project: Project = Depends(get_project),
+                 db: Session = Depends(get_db)):
+    from app.domain import keyframes as kd
+    try:
+        return kd.serialize_keyframe(
+            db, kd._get(db, project.id, keyframe_id))
+    except ValueError:
+        raise HTTPException(404, "keyframe not found in this project") from None
+
+
+@api_router.get("/api/projects/{project_id}/keyframes/{keyframe_id}/versions",
+                response_model=list[EntityRevisionOut])
+def keyframe_versions(keyframe_id: str,
+                      project: Project = Depends(get_project),
+                      db: Session = Depends(get_db)):
+    from app.domain import keyframes as kd
+    from app.domain import storyboard as sb
+    try:
+        kd._get(db, project.id, keyframe_id)
+    except ValueError:
+        raise HTTPException(404, "keyframe not found in this project") from None
+    return sb.revision_history(db, "keyframe", keyframe_id)
+
+
+@api_router.get("/api/projects/{project_id}/keyframes/{keyframe_id}/draft")
+def keyframe_draft(keyframe_id: str,
+                   project: Project = Depends(get_project),
+                   db: Session = Depends(get_db)):
+    """Read-only compose draft — same output the keyframe.compose
+    preview emits, for UI inspection without entering the command flow."""
+    from app.domain import keyframes as kd
+    try:
+        return kd.compose_draft(db, project, keyframe_id)
+    except ValueError as exc:
+        msg = str(exc)
+        raise HTTPException(404 if "not found" in msg else 422, msg) from None
+
+
 # ---------- screenplay + shot-list (A1) ----------
 
 @api_router.get("/api/projects/{project_id}/screenplays")
