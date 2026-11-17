@@ -103,6 +103,10 @@ SUPPORTED_COMMANDS = {
     # A4 — motion clips: shot-scoped keyframe→video beats + mock video
     "clip.create", "clip.update", "clip.archive", "clip.unarchive",
     "clip.revert", "clip.compose", "clip.generate", "clip.result",
+    # A5 — dialogue segments: scene/shot-bound speaker lines + mock audio
+    "dialogue.create", "dialogue.update", "dialogue.archive",
+    "dialogue.unarchive", "dialogue.revert", "dialogue.generate",
+    "dialogue.result", "dialogue.place",
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
@@ -140,6 +144,8 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "keyframe.generate",
                        # A4 — motion-clip mock video generation.
                        "clip.generate",
+                       # A5 — dialogue mock audio generation.
+                       "dialogue.generate",
                        # C5-B — timeline export launches a durable job.
                        "timeline.export"}
 
@@ -192,6 +198,8 @@ JOB_COMMANDS = {
     "keyframe.generate": "mock.image",
     # A4 — deterministic mock video only; clip.result lands the asset.
     "clip.generate": "mock.video",
+    # A5 — deterministic mock audio only; dialogue.result lands it.
+    "dialogue.generate": "mock.audio",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -224,6 +232,10 @@ UNDOABLE = {
     # create/generate are not undoable (same rule as keyframes).
     "clip.update", "clip.archive", "clip.unarchive",
     "clip.compose", "clip.result",
+    # A5 — dialogue mutations reverse from before-snapshots;
+    # create/generate are not undoable (same rule).
+    "dialogue.update", "dialogue.archive", "dialogue.unarchive",
+    "dialogue.result",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
@@ -385,6 +397,15 @@ def _summary(command_type: str, payload: dict) -> str:
     if command_type.startswith("clip."):
         op = command_type.split(".", 1)[1]
         return f"{op.capitalize()} motion clip"
+    if command_type == "dialogue.generate":
+        return "Generate dialogue audio (mock — simulated tones)"
+    if command_type == "dialogue.result":
+        return "Attach generated dialogue result"
+    if command_type == "dialogue.place":
+        return f"Place dialogue audio at frame {payload.get('start_frames', 0)}"
+    if command_type.startswith("dialogue."):
+        op = command_type.split(".", 1)[1]
+        return f"{op.capitalize()} dialogue segment"
     if command_type.startswith("screenplay."):
         if command_type == "screenplay.create":
             return f"Create screenplay '{payload.get('title', '')}'"
@@ -971,6 +992,93 @@ def parse_mock_hold(value) -> dict:
             raise CommandError(422, "mock_hold.timeout_s must be 0<t<=3600")
         out["timeout_s"] = ts
     return out
+
+
+def _dialogue_fingerprint(d) -> dict:
+    """A5 — generation-relevant segment state the approval pins via
+    expected_dialogue: any text/voice/speaker/timing/settings edit
+    between preview and commit bumps revision and is refused."""
+    return {
+        "segment_id": d.id,
+        "revision": d.revision,
+        "text": d.text,
+        "direction": d.direction,
+        "voice": d.voice_json or {},
+        "language": d.language,
+        "character_id": d.character_id,
+        "timing": d.timing_json or {},
+        "settings": d.settings_json or {},
+    }
+
+
+def _compose_dialogue_generate(session: Session, project: Project,
+                               payload: dict) -> dict:
+    """A5 — resolve dialogue.generate into the mock-audio request.
+    Same pinning discipline as the other generate commands: the
+    approval's expected_dialogue fingerprint + expected_sources pins
+    are re-checked at request build (execution, not preview).
+    Returns the request dict."""
+    import hashlib
+    from app.domain import dialogue as dlg
+    d = _get_segment(session, project, payload)
+    if d.status != "active":
+        raise CommandError(
+            422, "cannot generate from an archived dialogue segment")
+    text = (payload.get("text") or d.text or "").strip()
+    if not text:
+        raise CommandError(
+            422, "dialogue segment has no text — write the line first")
+    expected = payload.get("expected_dialogue")
+    if expected is not None and expected != _dialogue_fingerprint(d):
+        raise CommandError(
+            422, "dialogue segment changed since preview — "
+                 "re-preview dialogue.generate")
+    esrc = payload.get("expected_sources")
+    if esrc is not None \
+            and esrc != dlg.sources_fingerprint(session, d):
+        raise CommandError(
+            422, "dialogue sources changed since preview — "
+                 "re-preview dialogue.generate")
+    dur = payload.get("duration_s")
+    if dur is None:
+        dur = dlg.est_duration_s(text, d.direction)
+    else:
+        if not isinstance(dur, (int, float)) or isinstance(dur, bool) \
+                or dur <= 0 or dur > dlg.MAX_DURATION_S:
+            raise CommandError(
+                422, f"duration_s must be in (0, {dlg.MAX_DURATION_S}]")
+        dur = float(dur)
+    seed = payload.get("seed", d.seed if d.seed is not None else 0)
+    if seed is None:
+        seed = 0
+    req = {
+        "command_type": "dialogue.generate",
+        "segment_id": d.id,
+        "text": text,
+        "direction": payload.get("direction") or d.direction or "",
+        "voice": dlg.resolved_voice(session, d),
+        "character_id": d.character_id,
+        "language": payload.get("language") or d.language,
+        "pronunciation": d.pronunciation_json or {},
+        "duration_s": dur,
+        "sample_rate": int(payload.get("sample_rate") or 48000),
+        "seed": seed,
+        "model_key": payload.get("model_key") or d.model_key,
+        "origin_command_type": "dialogue.generate",
+        "dialogue_generate": {
+            "segment_id": d.id,
+            "sp_scene_id": d.sp_scene_id,
+            "scene_id": d.scene_id,
+            "shot_id": d.shot_id,
+            "element_id": d.element_id,
+            "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "simulated": True,   # deterministic tones — not speech
+        },
+    }
+    hold = parse_mock_hold(payload.get("mock_hold"))
+    if hold:
+        req["hold"] = hold
+    return req
 
 
 def _compose_shot_video(session: Session, project: Project,
@@ -1686,6 +1794,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _validate_keyframe(session, project, command_type, payload)
     if command_type.startswith("clip."):
         _validate_clip(session, project, command_type, payload)
+    if command_type.startswith("dialogue."):
+        _validate_dialogue(session, project, command_type, payload)
     if command_type == "shot.move" and payload.get("to_scene_id"):
         _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -2332,6 +2442,129 @@ def _validate_clip(session: Session, project: Project,
     return
 
 
+def _get_segment(session: Session, project: Project, payload: dict):
+    from app.domain import dialogue as dlg
+    try:
+        return dlg._get(session, project.id,
+                        payload.get("segment_id") or "")
+    except ValueError:
+        raise CommandError(404, "dialogue segment not found in this "
+                               "project") from None
+
+
+def _dialogue_lane(session: Session, project: Project, tl,
+                   track_id: str | None):
+    """Resolve the audio lane dialogue.place targets: an explicit
+    track_id (must be kind=audio on this timeline) or the first audio
+    lane. Refuses clearly — never silently lands on a video lane."""
+    from app.domain import timeline as tld
+    if track_id is not None:
+        try:
+            trk = tld.get_track(session, tl, track_id)
+        except KeyError:
+            raise CommandError(404, "track not found on this timeline") \
+                from None
+        if trk.kind != "audio":
+            raise CommandError(
+                422, f"track '{trk.name or trk.id}' is a {trk.kind} "
+                     "lane — dialogue needs an audio lane")
+        return trk
+    trk = next((t for t in tld.list_tracks(session, tl.id)
+                if t.kind == "audio"), None)
+    if trk is None:
+        raise CommandError(
+            422, "timeline has no audio lane — add one before "
+                 "placing dialogue")
+    return trk
+
+
+def _validate_dialogue(session: Session, project: Project,
+                       command_type: str, payload: dict) -> None:
+    """A5 — dialogue validation. Field-level checks run the same
+    parse functions commit uses, so preview and commit can never
+    disagree."""
+    from app.domain import dialogue as dlg
+
+    def _fields() -> None:
+        try:
+            if "text" in payload \
+                    and len(payload.get("text") or "") > dlg.TEXT_MAX:
+                raise ValueError(f"text exceeds {dlg.TEXT_MAX} chars")
+            if "direction" in payload and len(
+                    payload.get("direction") or "") > dlg.DIRECTION_MAX:
+                raise ValueError(
+                    f"direction exceeds {dlg.DIRECTION_MAX} chars")
+            if "voice" in payload:
+                dlg.parse_voice(payload.get("voice"))
+            if "language" in payload:
+                dlg.parse_language(payload.get("language"))
+            if "pronunciation" in payload:
+                dlg.parse_pronunciation(payload.get("pronunciation"))
+            if "timing" in payload:
+                dlg.parse_timing(session, project.id,
+                                 payload.get("timing"))
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+
+    if command_type == "dialogue.create":
+        _fields()
+        try:
+            dlg._validate_links(session, project.id, payload)
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+        return
+    d = _get_segment(session, project, payload)
+    if command_type == "dialogue.update":
+        _fields()
+        return
+    if command_type == "dialogue.revert":
+        if not isinstance(payload.get("to_revision"), int) \
+                or isinstance(payload.get("to_revision"), bool):
+            raise CommandError(422, "to_revision must be an integer")
+        return
+    if command_type == "dialogue.generate":
+        if d.status != "active":
+            raise CommandError(
+                422, "cannot generate from an archived dialogue segment")
+        if not ((payload.get("text") or d.text or "")).strip():
+            raise CommandError(
+                422, "dialogue segment has no text — write the line "
+                     "first")
+        parse_mock_hold(payload.get("mock_hold"))
+        return
+    if command_type == "dialogue.result":
+        try:
+            dlg.check_result_fresh(session, d, payload)
+        except ValueError as exc:
+            raise CommandError(422, str(exc)) from None
+        return
+    if command_type == "dialogue.place":
+        if d.status != "active":
+            raise CommandError(
+                422, "cannot place an archived dialogue segment")
+        if not d.result_asset_id:
+            raise CommandError(
+                422, "dialogue segment has no audio result — generate "
+                     "first")
+        try:
+            tl = _get_timeline(session, project, payload)
+        except CommandError:
+            raise
+        _dialogue_lane(session, project, tl,
+                       payload.get("track_id"))
+        if payload.get("start_frames") is not None:
+            from app.domain import timeline as tld
+            try:
+                tld._check_int(payload["start_frames"], "start_frames",
+                               0, 1 << 30)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from None
+        return
+    # archive / unarchive / revert: existence suffices — status
+    # checks happen at commit.
+    return
+
+
 def _get_screenplay(session: Session, project: Project, payload: dict):
     from app.domain import screenplay as spd
     try:
@@ -2877,6 +3110,45 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                     "user_over_budget": comp["user_over_budget"],
                 }
                 out["warnings"] = out["warnings"] + comp["warnings"]
+        except CommandError:
+            pass
+    if command_type.startswith("dialogue.") \
+            and command_type != "dialogue.create":
+        # A5 — the approval pins segment state (revision + gen-relevant
+        # fields) via expected_dialogue at commit.
+        try:
+            _d = _get_segment(session, project, payload)
+            out["resolved_dialogue"] = _dialogue_fingerprint(_d)
+        except CommandError:
+            pass
+    if command_type == "dialogue.generate":
+        # A5 — the approval sees the exact audio plan it commits to:
+        # the resolved voice + the deterministic duration estimate the
+        # mock will produce.
+        try:
+            from app.domain import dialogue as _dlg
+            _d = _get_segment(session, project, payload)
+            _req = _compose_dialogue_generate(session, project, payload)
+            out["resolved_audio"] = {
+                "text": _req["text"],
+                "text_sha256": _req["dialogue_generate"]["text_sha256"],
+                "duration_s": _req["duration_s"],
+                "sample_rate": _req["sample_rate"],
+                "voice": _req["voice"],
+                "simulated": True}
+        except CommandError:
+            pass
+    if command_type == "dialogue.place":
+        # A5 — the approval pins the resolved audio lane + source asset.
+        try:
+            _d = _get_segment(session, project, payload)
+            tl = _get_timeline(session, project, payload)
+            trk = _dialogue_lane(session, project, tl,
+                                 payload.get("track_id"))
+            out["resolved_audio_lane"] = {
+                "timeline_id": tl.id, "track_id": trk.id,
+                "track_name": trk.name,
+                "result_asset_id": _d.result_asset_id}
         except CommandError:
             pass
     if command_type in ("shotlist.scaffold", "shotlist.sync"):
@@ -3585,6 +3857,97 @@ def _commit_clip(session: Session, project: Project, command,
         elif command_type == "clip.result":
             mc.apply_result(
                 session, project.id, payload, command_id=command.id)
+        else:
+            raise CommandError(422, f"unsupported command_type '{command_type}'")
+    except ValueError as exc:
+        raise CommandError(422, str(exc)) from None
+    except KeyError as exc:
+        raise CommandError(404, str(exc).strip("'")) from None
+
+
+def _commit_dialogue(session: Session, project: Project, command,
+                     command_type: str, payload: dict,
+                     audit: dict) -> None:
+    """A5 — dialogue-segment mutations. Same before-snapshot undo
+    contract as keyframes/clips; `dialogue.place` delegates to the
+    timeline's own insert path so its undo rides the timeline undo
+    stack, not entity undo."""
+    from app.domain import dialogue as dlg
+
+    try:
+        if command_type == "dialogue.create":
+            row = dlg.create_segment(
+                session, project.id, payload, command_id=command.id)
+            audit["after"]["segment_id"] = row.id
+            audit["after"]["sp_scene_id"] = row.sp_scene_id
+            audit["after"]["shot_id"] = row.shot_id
+            return
+        d = _get_segment(session, project, payload)
+        audit["before"]["snapshot"] = dlg.segment_snapshot(d)
+        audit["after"]["segment_id"] = d.id
+        if command_type == "dialogue.update":
+            dlg.update_segment(
+                session, project.id, payload, command_id=command.id)
+        elif command_type in ("dialogue.archive", "dialogue.unarchive"):
+            dlg.archive_segment(
+                session, project.id, payload,
+                archive=(command_type == "dialogue.archive"),
+                command_id=command.id)
+        elif command_type == "dialogue.revert":
+            from app.db.models import EntityRevision
+            rev = session.execute(
+                select(EntityRevision).where(
+                    EntityRevision.entity_type == "dialogue_segment",
+                    EntityRevision.entity_id == d.id,
+                    EntityRevision.revision == int(payload["to_revision"]))
+            ).scalar_one_or_none()
+            if rev is None:
+                raise CommandError(404, "revision not found")
+            dlg.revert_segment(
+                session, project.id, d.id, rev.snapshot_json)
+            dlg.write_segment_revision(
+                session, d, command_id=command.id,
+                summary=f"Reverted to r{payload['to_revision']}")
+            audit["after"]["reverted_to"] = int(payload["to_revision"])
+        elif command_type == "dialogue.result":
+            dlg.apply_result(
+                session, project.id, payload, command_id=command.id)
+        elif command_type == "dialogue.place":
+            # Existing timeline insertion path — same lane/kind/trim/
+            # overlap validation timeline.clip.insert runs, on the
+            # resolved audio lane. Undo rides the timeline undo stack.
+            from app.domain import timeline as tld
+            if d.status != "active":
+                raise CommandError(
+                    422, "cannot place an archived dialogue segment")
+            if not d.result_asset_id:
+                raise CommandError(
+                    422, "dialogue segment has no audio result — "
+                         "generate first")
+            tl = _get_timeline(session, project, payload)
+            trk = _dialogue_lane(session, project, tl,
+                                 payload.get("track_id"))
+            try:
+                clip_row = tld.insert_clip(
+                    session, tl, project_id=project.id,
+                    asset_id=d.result_asset_id, version_id=None,
+                    in_frame=payload.get("in_frame"),
+                    out_frame=payload.get("out_frame"),
+                    position=None,
+                    shot_id=d.shot_id, scene_id=d.scene_id,
+                    allow_duplicate=bool(
+                        payload.get("allow_duplicate")),
+                    track_id=trk.id,
+                    start_frames=payload.get("start_frames"),
+                    ripple_scope=payload.get("ripple_scope"),
+                    command_id=command.id)
+            except tld.TimelineError as exc:
+                raise CommandError(422, str(exc)) from None
+            except KeyError as exc:
+                raise CommandError(404, str(exc).strip("'")) from None
+            audit["after"]["timeline_clip_id"] = clip_row.id
+            audit["after"]["timeline_id"] = tl.id
+            audit["after"]["track_id"] = trk.id
         else:
             raise CommandError(422, f"unsupported command_type '{command_type}'")
     except ValueError as exc:
@@ -4358,6 +4721,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _commit_clip(session, project, command, command_type, payload,
                      audit)
 
+    elif (command_type.startswith("dialogue.")
+          # A5 — dialogue.generate enqueues a durable job; the
+          # JOB_COMMANDS branch below must see it.
+          and command_type != "dialogue.generate"):
+        _commit_dialogue(session, project, command, command_type,
+                         payload, audit)
+
     elif (command_type.startswith("timeline.")
           # C5-B — export enqueues a durable job; the JOB_COMMANDS
           # branch below must see it, not _commit_timeline.
@@ -4400,7 +4770,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                 resumable=command_type not in (
                     "generate.image", "generate.image.persistent",
                     "generate.video", "shot.video", "keyframe.generate",
-                    "clip.generate",
+                    "clip.generate", "dialogue.generate",
                     # Remote-scoped jobs reconcile, never auto-resubmit —
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
@@ -4464,6 +4834,27 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     session, _c)
                 job.request_json = req
                 audit["after"]["clip_id"] = _c.id
+        if command_type == "dialogue.generate":
+            # A5 — same durable link + result pins as keyframes/clips:
+            # the revision AFTER this commit's bump plus the exact
+            # speaker/element/scene publish state the generation was
+            # approved against.
+            from app.db.models import DialogueSegment as _Ds
+            _d = session.get(_Ds, payload.get("segment_id") or "")
+            if _d is not None and _d.project_id == project.id:
+                from app.domain import dialogue as _dlg
+                _d.generate_job_id = job.id
+                _d.revision += 1
+                _d.updated_at = utcnow()
+                _dlg.write_segment_revision(
+                    session, _d, command_id=command.id,
+                    summary="Generation enqueued")
+                req = dict(job.request_json or {})
+                req["expected_result_revision"] = _d.revision
+                req["expected_sources"] = _dlg.sources_fingerprint(
+                    session, _d)
+                job.request_json = req
+                audit["after"]["segment_id"] = _d.id
         if command_type in ("generate.text.cloud", "generate.image.cloud",
                             "generate.image.img2img", "generate.image.edit"):
             # Minimized durable record — the prompt body lives in the job
@@ -4731,6 +5122,7 @@ def _job_kind(command_type: str) -> str:
         "shot.video": "video",
         "keyframe.generate": "image",
         "clip.generate": "video",
+        "dialogue.generate": "audio",
         "asset.import": "import",
         "bridge.import": "import",
         "asset.relink": "relink",
@@ -4859,6 +5251,11 @@ def _job_request(session: Session, project: Project, command_type: str,
         # A4 — same build-time composition + pin re-check as
         # keyframe.generate.
         _c, req = _compose_clip_generate(session, project, payload)
+        return req
+    if command_type == "dialogue.generate":
+        # A5 — same build-time composition + pin re-check; the
+        # resolved voice + deterministic duration are fixed here.
+        req = _compose_dialogue_generate(session, project, payload)
         return req
     if command_type == "generate.image.mock":
         req = {"prompt": payload["prompt"], "seed": payload.get("seed", 0)}
@@ -5397,7 +5794,8 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
         if "settings" in before:
             project.settings_json = before["settings"]
     elif command.command_type.startswith(("scene.", "shot.", "entity.assets.",
-                                          "keyframe.", "clip.")):
+                                          "keyframe.", "clip.",
+                                          "dialogue.")):
         _undo_storyboard(session, project, command, before, after)
     else:
         parts = _entity_parts(command.command_type)
@@ -5577,6 +5975,32 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
         session.flush()
         mc.write_clip_revision(
             session, c, command_id=command.id, summary="Undo")
+        return
+
+    if ct.startswith("dialogue."):
+        from app.db.models import DialogueSegment
+        from app.domain import dialogue as dlg
+        d_id = after.get("segment_id") or before.get("segment_id")
+        d = session.get(DialogueSegment, d_id) if d_id else None
+        if d is None or d.project_id != project.id:
+            return
+        snap = before.get("snapshot")
+        if snap:
+            for f in ("position", "sp_scene_id", "element_id",
+                      "scene_id", "shot_id", "character_id", "text",
+                      "direction", "voice_json", "language",
+                      "pronunciation_json", "timing_json", "seed",
+                      "model_key", "settings_json", "result_asset_id",
+                      "generate_job_id", "status"):
+                if f in snap:
+                    setattr(d, f, snap[f])
+        elif "status" in before:
+            d.status = before["status"]
+        d.revision += 1
+        d.updated_at = utcnow()
+        session.flush()
+        dlg.write_segment_revision(
+            session, d, command_id=command.id, summary="Undo")
         return
 
     if ct == "shot.move":

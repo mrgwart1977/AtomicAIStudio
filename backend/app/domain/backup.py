@@ -35,6 +35,7 @@ from app.db.models import (
     AssetFile,
     AssetVersion,
     Character,
+    DialogueSegment,
     EntityAssetLink,
     Keyframe,
     Location,
@@ -55,9 +56,10 @@ from app.db.models import (
 from app.domain.storage import iter_chunks
 
 # v2 adds scenes/shots/cast/entity-asset sections; v3 adds screenplay
-# sections (A1); v4 adds keyframes (A3); v5 adds motion clips (A4).
+# sections (A1); v4 adds keyframes (A3); v5 adds motion clips (A4);
+# v6 adds dialogue segments (A5).
 # Older packages still import — missing sections restore as empty.
-FORMAT_VERSION = 5
+FORMAT_VERSION = 6
 # Iteration order is the restore order — dependencies come first
 # (assets are restored separately BEFORE this loop because
 # shots.thumbnail_asset_id and entity_assets.asset_id point at them).
@@ -80,6 +82,10 @@ ENTITY_TABLES = {
     "screenplays": Screenplay,
     "screenplay_scenes": ScreenplayScene,
     "screenplay_elements": ScreenplayElement,
+    # A5 — dialogue segments reference screenplay elements/scenes,
+    # storyboard scenes/shots, characters, and result assets — all
+    # restored above.
+    "dialogue_segments": DialogueSegment,
 }
 
 
@@ -427,7 +433,8 @@ def import_package(
                     for col in ("created_at", "updated_at"):
                         row.pop(col, None)
                     row = _remap_ids(row, id_map)
-                    if key in ("keyframes", "motion_clips"):
+                    if key in ("keyframes", "motion_clips",
+                               "dialogue_segments"):
                         # Job rows are not packaged; the result asset
                         # link (remapped above) is the durable record.
                         row["generate_job_id"] = None

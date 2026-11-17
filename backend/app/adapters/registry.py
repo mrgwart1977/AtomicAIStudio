@@ -19,6 +19,7 @@ from app.adapters.inference import (
     SdCppVideoAdapter,
 )
 from app.adapters.mock import MockImageAdapter
+from app.adapters.mock_audio import MockAudioAdapter
 from app.adapters.mock_video import MockVideoAdapter
 from app.adapters.persistent_mock import PersistentMockAdapter
 from app.adapters.ops import (
@@ -41,6 +42,10 @@ class AdapterRegistry:
         # A4 — mock video: deterministic H.264 encode via bundled
         # ffmpeg. Never inference; output marks is_mock/generated=False.
         self.register(MockVideoAdapter())
+        # A5 — mock audio: deterministic PCM WAV of shaped tones.
+        # Never speech synthesis; output marks is_mock +
+        # simulated_speech.
+        self.register(MockAudioAdapter())
         # C2.0a — mock cloud text: exercises the remote-job contract on
         # an in-memory provider. Zero egress, honest "mock" kind.
         from app.adapters.cloud_mock import MockCloudTextAdapter

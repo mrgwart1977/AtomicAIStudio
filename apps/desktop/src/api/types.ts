@@ -297,6 +297,22 @@ export interface CommandProposal {
   /** A4 — clip.* commands: the motion clip's generation-relevant
    * state the approval pins as expected_clip at commit. */
   resolved_clip?: Record<string, unknown> | null;
+  /** A5 — dialogue.* commands: the segment's generation-relevant
+   * state (id/revision/text/voice/timing) the approval pins as
+   * expected_dialogue at commit. */
+  resolved_dialogue?: Record<string, unknown> | null;
+  /** A5 — dialogue.generate only: the deterministic mock-audio plan
+   * (text, voice resolution, estimated duration, sample rate) shown
+   * before anything is enqueued. */
+  resolved_audio?: {
+    simulated: boolean;
+    text: string;
+    direction?: string;
+    voice?: Record<string, unknown> | null;
+    sample_rate?: number;
+    duration_s?: number;
+    language?: string;
+  } | null;
   /** A3 — keyframe.compose only: the proposed continuity-aware draft
    * (prompt + source sections) shown before anything is written. */
   resolved_draft?: {
@@ -442,6 +458,47 @@ export interface MotionClip {
   prompt_origin: "user" | "compose";
   status: string;
   revision: number;
+}
+
+// ---------- A5: dialogue segments ----------
+
+export interface DialogueSegment {
+  id: string;
+  sp_scene_id: string | null;
+  element_id: string | null;
+  scene_id: string | null;
+  shot_id: string | null;
+  character_id: string | null;
+  position: number;
+  text: string;
+  /** Delivery direction (parenthetical) — 'whispered', 'urgent', … */
+  direction: string;
+  /** Voice overrides layered on the speaker's character profile —
+   * {profile_override, style, delivery, emotion}; never a second
+   * identity system. */
+  voice_json: Record<string, unknown>;
+  language: string;
+  pronunciation_json: { hints?: Array<{ word: string; say_as: string }> };
+  /** Planned rational timing — {start_frames, fps_num, fps_den,
+   * timeline_id, duration_s}; the TimelineClip row is the actual
+   * placement record. */
+  timing_json: Record<string, unknown>;
+  seed: number | null;
+  model_key: string | null;
+  settings_json: Record<string, unknown>;
+  result_asset_id: string | null;
+  result_asset_name?: string | null;
+  result_asset_status?: string | null;
+  generate_job_id: string | null;
+  job_status?: string | null;
+  job_progress?: number | null;
+  status: string;
+  revision: number;
+  // Serializer-resolved fields (not columns):
+  speaker_name?: string | null;
+  /** Effective voice = character profile + segment overrides;
+   * {missing: true} when the speaker has no usable voice. */
+  resolved_voice?: Record<string, unknown> | null;
 }
 
 export interface Job {
@@ -652,6 +709,8 @@ export interface StoryboardShot {
   keyframes?: { count: number; roles: string[]; with_result: number };
   /** A4 — compact motion-clip summary for card badges. */
   clips?: { count: number; with_result: number };
+  /** A5 — compact dialogue-segment summary for card badges. */
+  dialogue?: { count: number; with_result: number };
   /** C4-C — durable per-shot generation state (backend-authoritative). */
   generation?: {
     output_count: number;

@@ -1240,6 +1240,26 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 [r for r in rows if r.result_asset_id]),
         }
 
+    # A5 — compact per-shot dialogue summary for card badges; the
+    # full list loads on demand via /dialogue?shot_id=.
+    from app.db.models import DialogueSegment
+    dg_by_shot: dict[str, list[DialogueSegment]] = {}
+    if shot_ids:
+        for g in session.execute(
+                select(DialogueSegment).where(
+                    DialogueSegment.project_id == shots[0].project_id,
+                    DialogueSegment.shot_id.in_(shot_ids))
+                .order_by(DialogueSegment.position)).scalars():
+            dg_by_shot.setdefault(g.shot_id, []).append(g)
+
+    def _dialogue(sh: Shot) -> dict:
+        rows = dg_by_shot.get(sh.id, [])
+        return {
+            "count": len([r for r in rows if r.status == "active"]),
+            "with_result": len(
+                [r for r in rows if r.result_asset_id]),
+        }
+
     def _media(sh: Shot) -> dict:
         missing: list[str] = []
         for bid, tag in ((sh.thumbnail_asset_id, "thumbnail"),
@@ -1287,6 +1307,7 @@ def storyboard(session: Session, project_id: str, *, include_archived: bool = Tr
                 "media": _media(sh),
                 "keyframes": _keyframes(sh),
                 "clips": _clips(sh),
+                "dialogue": _dialogue(sh),
                 "generation": {
                     "output_count": 0, "latest_asset_id": None,
                     "latest_asset_at": None, "latest_job_id": None,

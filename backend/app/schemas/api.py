@@ -116,6 +116,9 @@ CommandType = Literal[
     "keyframe.generate", "keyframe.result", "keyframe.pin",
     "clip.create", "clip.update", "clip.archive", "clip.unarchive",
     "clip.revert", "clip.compose", "clip.generate", "clip.result",
+    "dialogue.create", "dialogue.update", "dialogue.archive",
+    "dialogue.unarchive", "dialogue.revert", "dialogue.generate",
+    "dialogue.result", "dialogue.place",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -202,6 +205,13 @@ class CommandProposalOut(BaseModel):
     # A4 — clip.* only: motion-clip state fingerprint pinned via
     # expected_clip (same contract as resolved_keyframe).
     resolved_clip: dict[str, Any] | None = None
+    # A5 — dialogue.* only: segment state fingerprint pinned via
+    # expected_dialogue; resolved_audio is the deterministic generate
+    # plan (text sha, duration, sample rate, resolved voice);
+    # resolved_audio_lane pins the audio track dialogue.place targets.
+    resolved_dialogue: dict[str, Any] | None = None
+    resolved_audio: dict[str, Any] | None = None
+    resolved_audio_lane: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -432,6 +442,9 @@ class StoryboardShotOut(BaseModel):
     # A4 — compact per-shot motion-clip summary for card badges; the
     # full list loads via /shots/{id}/clips.
     clips: dict[str, Any] = {}
+    # A5 — compact per-shot dialogue summary {count, with_result}; the
+    # full list loads via /dialogue?shot_id=.
+    dialogue: dict[str, Any] = {}
     # C4-C — durable per-shot generation state (job status + latest
     # produced asset); {}-valued when nothing was generated yet.
     generation: dict[str, Any] | None = None
