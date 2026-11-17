@@ -1,10 +1,10 @@
 # A5 acceptance evidence
 
 `a5-acceptance.txt` — `scripts/cdp-a5-acceptance.cjs` run against the
-installed `Atomic Dream Engine_0.1.0_x64-setup.exe` (76.33 MiB) built
-from the PR #149 head `3b8ba7d` on `feat/a5-dialogue-audio`.
+installed `Atomic Dream Engine_0.1.0_x64-setup.exe` (76.34 MiB) built
+from the PR #149 reviewed head `bec275b` on `feat/a5-dialogue-audio`.
 
-15/15 steps pass, including:
+17/17 steps pass, including:
 
 - populated A4 project (screenplay scene + scaffolded shot)
 - two dialogue segments with scene/element/shot/speaker refs
@@ -22,4 +22,10 @@ from the PR #149 head `3b8ba7d` on `feat/a5-dialogue-audio`.
 - `dialogue.place` on a DX audio lane (0f + 96f)
 - dialogue + user-imported music bed mixed on separate lanes
 - `timeline.export` — decoded PCM audio stream in the exported film
-- restart persistence; clean shutdown, no orphan backend
+- stale rejection — a mid-flight text edit refuses the held job's
+  publish; `result_stale` flags the drifted audio; regenerating
+  against the new text clears the flag and attaches fresh
+- backup/restore — segments, remapped refs, and result assets
+  round-trip into a new project (backup v6)
+- restart persistence — segments, results, placement, and the stale
+  flag survive relaunch; clean shutdown, no orphan backend
