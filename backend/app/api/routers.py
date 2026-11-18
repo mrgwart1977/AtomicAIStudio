@@ -1483,6 +1483,46 @@ def dialogue_segment_versions(segment_id: str,
     return sb.revision_history(db, "dialogue_segment", segment_id)
 
 
+# ---------- first-cut assembly (A6) ----------
+
+@api_router.get("/api/projects/{project_id}/assemblies")
+def list_assembly_plans(project: Project = Depends(get_project),
+                        db: Session = Depends(get_db),
+                        timeline_id: str | None = None):
+    """Assembly plans for the project (optionally per timeline) —
+    mutations are commands: assembly.plan/apply/review/revert."""
+    from app.domain import assembly as asm
+    return asm.list_plans(db, project.id, timeline_id=timeline_id)
+
+
+@api_router.get("/api/projects/{project_id}/assemblies/{plan_id}")
+def get_assembly_plan(plan_id: str,
+                      project: Project = Depends(get_project),
+                      db: Session = Depends(get_db)):
+    from app.domain import assembly as asm
+    try:
+        return asm.serialize_plan(
+            db, asm.get_plan(db, project.id, plan_id))
+    except ValueError:
+        raise HTTPException(
+            404, "assembly plan not found in this project") from None
+
+
+@api_router.get("/api/projects/{project_id}/assemblies/{plan_id}/versions",
+                response_model=list[EntityRevisionOut])
+def assembly_plan_versions(plan_id: str,
+                           project: Project = Depends(get_project),
+                           db: Session = Depends(get_db)):
+    from app.domain import assembly as asm
+    from app.domain import storyboard as sb
+    try:
+        asm.get_plan(db, project.id, plan_id)
+    except ValueError:
+        raise HTTPException(
+            404, "assembly plan not found in this project") from None
+    return sb.revision_history(db, "assembly_plan", plan_id)
+
+
 # ---------- screenplay + shot-list (A1) ----------
 
 @api_router.get("/api/projects/{project_id}/screenplays")

@@ -107,6 +107,9 @@ SUPPORTED_COMMANDS = {
     "dialogue.create", "dialogue.update", "dialogue.archive",
     "dialogue.unarchive", "dialogue.revert", "dialogue.generate",
     "dialogue.result", "dialogue.place",
+    # A6 — first-cut assembly: deterministic plan → review → apply
+    "assembly.plan", "assembly.apply", "assembly.review",
+    "assembly.revert",
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
@@ -236,6 +239,9 @@ UNDOABLE = {
     # create/generate are not undoable (same rule).
     "dialogue.update", "dialogue.archive", "dialogue.unarchive",
     "dialogue.result",
+    # A6 — plan/review reverse from before-snapshots; apply rides the
+    # timeline undo stack (one collapsed step), like dialogue.place.
+    "assembly.plan", "assembly.review",
     "entity.assets.link", "entity.assets.unlink",
     "entity.assets.reorder", "entity.assets.update",
     "refset.create", "refset.update", "refset.delete",
@@ -406,6 +412,16 @@ def _summary(command_type: str, payload: dict) -> str:
     if command_type.startswith("dialogue."):
         op = command_type.split(".", 1)[1]
         return f"{op.capitalize()} dialogue segment"
+    if command_type == "assembly.plan":
+        return f"Compute first-cut plan for '{payload.get('name') or 'First cut'}'"
+    if command_type == "assembly.apply":
+        return ("Apply first-cut assembly"
+                + (" (replace conflicting edits)"
+                   if payload.get("resolve_conflicts") == "replace" else ""))
+    if command_type == "assembly.review":
+        return f"Review assembly items ({payload.get('status', 'pending')})"
+    if command_type == "assembly.revert":
+        return f"Revert assembly plan to revision {payload.get('to_revision')}"
     if command_type.startswith("screenplay."):
         if command_type == "screenplay.create":
             return f"Create screenplay '{payload.get('title', '')}'"
@@ -1791,6 +1807,8 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _validate_clip(session, project, command_type, payload)
     if command_type.startswith("dialogue."):
         _validate_dialogue(session, project, command_type, payload)
+    if command_type.startswith("assembly."):
+        _validate_assembly(session, project, command_type, payload)
     if command_type == "shot.move" and payload.get("to_scene_id"):
         _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -2600,6 +2618,74 @@ def _validate_dialogue(session: Session, project: Project,
     return
 
 
+def _get_plan(session: Session, project: Project, payload: dict):
+    from app.domain import assembly as asm
+    plan_id = payload.get("plan_id")
+    if not plan_id and payload.get("timeline_id"):
+        tl = _get_timeline(session, project, payload)
+        plan = asm.plan_for_timeline(session, project.id, tl.id)
+        if plan is None:
+            raise CommandError(
+                404, "no assembly plan for this timeline — "
+                     "run assembly.plan first")
+        return plan
+    if not isinstance(plan_id, str) or not plan_id:
+        raise CommandError(422, "plan_id (or timeline_id) is required")
+    try:
+        return asm.get_plan(session, project.id, plan_id)
+    except ValueError as exc:
+        raise CommandError(404, str(exc)) from None
+
+
+def _validate_assembly(session: Session, project: Project,
+                       command_type: str, payload: dict) -> None:
+    """A6 — field-level checks on the same paths commit uses."""
+    from app.domain import assembly as asm
+    if command_type == "assembly.plan":
+        tl = _get_timeline(session, project, payload)
+        name = payload.get("name")
+        if name is not None and not isinstance(name, str):
+            raise CommandError(422, "name must be a string")
+        if name is not None and len(name) > asm.NAME_MAX:
+            raise CommandError(422, f"name exceeds {asm.NAME_MAX} chars")
+        return
+    plan = _get_plan(session, project, payload)
+    if command_type == "assembly.apply":
+        rc = payload.get("resolve_conflicts") or "skip"
+        if rc not in ("skip", "replace"):
+            raise CommandError(
+                422, "resolve_conflicts must be 'skip' or 'replace'")
+        if plan.status not in ("draft", "applied"):
+            raise CommandError(
+                422, f"plan status '{plan.status}' cannot be applied")
+        return
+    if command_type == "assembly.review":
+        status = payload.get("status")
+        if status not in asm.REVIEW_STATUSES:
+            raise CommandError(
+                422, f"status must be one of "
+                     f"{', '.join(asm.REVIEW_STATUSES)}")
+        if not any(payload.get(k) is not None for k in
+                   ("item_ids", "scene_id", "shot_id")):
+            raise CommandError(
+                422, "a review target is required — item_ids, "
+                     "scene_id, or shot_id")
+        ids = payload.get("item_ids")
+        if ids is not None and not (
+                isinstance(ids, list)
+                and all(isinstance(i, str) for i in ids)):
+            raise CommandError(422, "item_ids must be a list of ids")
+        note = payload.get("note")
+        if note is not None and not isinstance(note, str):
+            raise CommandError(422, "note must be a string")
+        return
+    if command_type == "assembly.revert":
+        if not isinstance(payload.get("to_revision"), int) \
+                or isinstance(payload.get("to_revision"), bool):
+            raise CommandError(422, "to_revision must be an integer")
+        return
+
+
 def _get_screenplay(session: Session, project: Project, payload: dict):
     from app.domain import screenplay as spd
     try:
@@ -3184,6 +3270,44 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                 "timeline_id": tl.id, "track_id": trk.id,
                 "track_name": trk.name,
                 "result_asset_id": _d.result_asset_id}
+        except CommandError:
+            pass
+    if command_type == "assembly.plan":
+        # A6 — the approval sees the exact deterministic proposal:
+        # ordered items, lane resolution, missing media, conflicts.
+        try:
+            from app.domain import assembly as _asm
+            tl = _get_timeline(session, project, payload)
+            plan = _asm.plan_for_timeline(session, project.id, tl.id)
+            out["resolved_assembly"] = _asm.compute_plan(
+                session, project.id, tl, plan=plan)
+            c = out["resolved_assembly"]["counts"]
+            out["summary"] = (
+                f"{out['summary']} — {c['items']} items, "
+                f"{c['missing']} missing, {c['conflicts']} conflicts")
+            if c["conflicts"]:
+                out["warnings"].append(
+                    f"{c['conflicts']} item(s) conflict with manual "
+                    "timeline edits — preserved unless replace is approved")
+            if c["missing"]:
+                out["warnings"].append(
+                    f"{c['missing']} item(s) have missing media — "
+                    "skipped at apply")
+        except CommandError:
+            pass
+    if command_type == "assembly.apply":
+        # A6 — the approval sees the apply decision walk before commit.
+        try:
+            from app.domain import assembly as _asm
+            plan = _get_plan(session, project, payload)
+            out["resolved_assembly"] = _asm.preview_apply(
+                session, plan,
+                resolve_conflicts=payload.get("resolve_conflicts")
+                or "skip")
+            if out["resolved_assembly"]["sources_stale"]:
+                out["warnings"].append(
+                    "sources changed since this plan was computed — "
+                    "commit will refuse; re-run assembly.plan")
         except CommandError:
             pass
     if command_type in ("shotlist.scaffold", "shotlist.sync"):
@@ -3991,6 +4115,97 @@ def _commit_dialogue(session: Session, project: Project, command,
         raise CommandError(404, str(exc).strip("'")) from None
 
 
+def _commit_assembly(session: Session, project: Project, command,
+                     command_type: str, payload: dict,
+                     audit: dict) -> None:
+    """A6 — first-cut assembly mutations. Plan rows version like other
+    entities; apply delegates to the timeline's own insert/remove path
+    so its undo rides the timeline undo stack as one collapsed step."""
+    from app.domain import assembly as asm
+
+    try:
+        if command_type == "assembly.plan":
+            tl = _get_timeline(session, project, payload)
+            existing = asm.plan_for_timeline(session, project.id, tl.id)
+            audit["before"]["snapshot"] = (
+                asm.plan_snapshot(session, existing)
+                if existing is not None else None)
+            plan = asm.persist_plan(
+                session, project.id, tl, name=payload.get("name"),
+                command_id=command.id)
+            asm.write_plan_revision(
+                session, plan, command_id=command.id,
+                summary="Computed first-cut plan")
+            audit["after"]["plan_id"] = plan.id
+            audit["after"]["items"] = (
+                plan.plan_json.get("counts") or {})
+            return
+        plan = _get_plan(session, project, payload)
+        if command_type == "assembly.apply":
+            audit["before"]["snapshot"] = asm.plan_snapshot(
+                session, plan)
+            stats = asm.apply_plan(
+                session, project.id, plan,
+                resolve_conflicts=payload.get("resolve_conflicts")
+                or "skip",
+                command_id=command.id)
+            if not stats.get("idempotent"):
+                asm.write_plan_revision(
+                    session, plan, command_id=command.id,
+                    summary="Applied first-cut assembly")
+            audit["after"]["plan_id"] = plan.id
+            audit["after"]["apply"] = stats
+            return
+        if command_type == "assembly.review":
+            rows = {it.id: it for it in asm.plan_items(session, plan.id)}
+            audit["before"]["snapshot"] = {
+                "items": {iid: {"review_status": it.review_status,
+                                "notes": it.notes}
+                          for iid, it in rows.items()}}
+            audit["before"]["plan_revision"] = plan.revision
+            touched = asm.review_items(
+                session, plan,
+                item_ids=payload.get("item_ids"),
+                scene_id=payload.get("scene_id"),
+                shot_id=payload.get("shot_id"),
+                status=payload["status"],
+                note=payload.get("note"),
+                command_id=command.id)
+            plan.revision += 1
+            asm.write_plan_revision(
+                session, plan, command_id=command.id,
+                summary=f"Reviewed {len(touched)} item(s) — "
+                        f"{payload['status']}")
+            audit["after"]["plan_id"] = plan.id
+            audit["after"]["touched"] = touched
+            return
+        if command_type == "assembly.revert":
+            from app.db.models import EntityRevision
+            rev = session.execute(
+                select(EntityRevision).where(
+                    EntityRevision.entity_type == "assembly_plan",
+                    EntityRevision.entity_id == plan.id,
+                    EntityRevision.revision == int(
+                        payload["to_revision"]))
+            ).scalar_one_or_none()
+            if rev is None:
+                raise CommandError(404, "revision not found")
+            audit["before"]["snapshot"] = asm.plan_snapshot(
+                session, plan)
+            asm.restore_plan(session, plan, rev.snapshot_json)
+            asm.write_plan_revision(
+                session, plan, command_id=command.id,
+                summary=f"Reverted to r{payload['to_revision']}")
+            audit["after"]["plan_id"] = plan.id
+            audit["after"]["reverted_to"] = int(payload["to_revision"])
+            return
+        raise CommandError(422, f"unsupported command_type '{command_type}'")
+    except ValueError as exc:
+        raise CommandError(422, str(exc)) from None
+    except KeyError as exc:
+        raise CommandError(404, str(exc).strip("'")) from None
+
+
 def _commit_screenplay(session: Session, project: Project,
                        command: CreativeCommand, command_type: str,
                        payload: dict, audit: dict) -> None:
@@ -4761,6 +4976,10 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
           # JOB_COMMANDS branch below must see it.
           and command_type != "dialogue.generate"):
         _commit_dialogue(session, project, command, command_type,
+                         payload, audit)
+
+    elif command_type.startswith("assembly."):
+        _commit_assembly(session, project, command, command_type,
                          payload, audit)
 
     elif (command_type.startswith("timeline.")
@@ -5831,7 +6050,7 @@ def undo(session: Session, project: Project, *, command_id: str) -> CreativeComm
             project.settings_json = before["settings"]
     elif command.command_type.startswith(("scene.", "shot.", "entity.assets.",
                                           "keyframe.", "clip.",
-                                          "dialogue.")):
+                                          "dialogue.", "assembly.")):
         _undo_storyboard(session, project, command, before, after)
     else:
         parts = _entity_parts(command.command_type)
@@ -6037,6 +6256,37 @@ def _undo_storyboard(session: Session, project: Project, command: CreativeComman
         session.flush()
         dlg.write_segment_revision(
             session, d, command_id=command.id, summary="Undo")
+        return
+
+    if ct.startswith("assembly."):
+        # A6 — plan rows reverse from their before-snapshot; a first
+        # plan (snapshot=None) undoes by removing the row entirely.
+        from app.db.models import AssemblyPlan
+        from app.domain import assembly as asm
+        p_id = after.get("plan_id") or command.target_id
+        plan = session.get(AssemblyPlan, p_id) if p_id else None
+        if plan is None or plan.project_id != project.id:
+            return
+        snap = before.get("snapshot")
+        if ct == "assembly.plan":
+            if snap is None:
+                session.delete(plan)
+                session.flush()
+                return
+            asm.restore_plan(session, plan, snap)
+            plan.status = snap.get("status") or plan.status
+        elif ct == "assembly.review":
+            for it in asm.plan_items(session, plan.id):
+                rec = (snap.get("items") or {}).get(it.id)
+                if rec is not None:
+                    it.review_status = rec["review_status"]
+                    it.notes = rec["notes"]
+                    it.revision += 1
+                    it.updated_at = utcnow()
+            plan.revision += 1
+        session.flush()
+        asm.write_plan_revision(
+            session, plan, command_id=command.id, summary="Undo")
         return
 
     if ct == "shot.move":

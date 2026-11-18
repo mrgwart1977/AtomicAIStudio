@@ -119,6 +119,9 @@ CommandType = Literal[
     "dialogue.create", "dialogue.update", "dialogue.archive",
     "dialogue.unarchive", "dialogue.revert", "dialogue.generate",
     "dialogue.result", "dialogue.place",
+    # A6 — first-cut assembly: deterministic plan → review → apply
+    "assembly.plan", "assembly.apply", "assembly.review",
+    "assembly.revert",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -212,6 +215,10 @@ class CommandProposalOut(BaseModel):
     resolved_dialogue: dict[str, Any] | None = None
     resolved_audio: dict[str, Any] | None = None
     resolved_audio_lane: dict[str, Any] | None = None
+    # A6 — assembly.plan only: the deterministic first-cut proposal
+    # (items, lanes, missing media, conflicts); assembly.apply shows
+    # the apply decision walk (per-item keep/insert/skip/replace).
+    resolved_assembly: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):

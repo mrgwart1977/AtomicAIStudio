@@ -424,9 +424,10 @@ def test_format_v1_compat_roundtrip(client, tmp_path):
     with zipfile.ZipFile(pkg) as zf:
         manifest = json.loads(zf.read("manifest.json"))
     # A1 — v3 adds screenplay sections; A3 — v4 adds keyframes; A4 —
-    # v5 adds motion clips; A5 — v6 adds dialogue segments; older
+    # v5 adds motion clips; A5 — v6 adds dialogue segments; A6 —
+    # v7 adds the timeline EDL + assembly plans; older
     # readers ignore unknown sections.
-    assert manifest["format_version"] == 6
+    assert manifest["format_version"] == 7
 
     # Synthesize a true v1 manifest: drop the M2 entity sections and stamp
     # version 1 — exactly what an M1.1 exporter produced.

@@ -31,6 +31,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    AssemblyItem,
+    AssemblyPlan,
     Asset,
     AssetFile,
     AssetVersion,
@@ -49,6 +51,10 @@ from app.db.models import (
     ScreenplayScene,
     Shot,
     ShotCharacter,
+    Timeline,
+    TimelineClip,
+    TimelineCrossfade,
+    TimelineTrack,
     World,
     new_id,
     utcnow,
@@ -57,9 +63,11 @@ from app.domain.storage import iter_chunks
 
 # v2 adds scenes/shots/cast/entity-asset sections; v3 adds screenplay
 # sections (A1); v4 adds keyframes (A3); v5 adds motion clips (A4);
-# v6 adds dialogue segments (A5).
+# v6 adds dialogue segments (A5); v7 adds the timeline EDL
+# (timelines/tracks/clips/crossfades) and A6 assembly plans/items —
+# an applied first cut round-trips with the project.
 # Older packages still import — missing sections restore as empty.
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 # Iteration order is the restore order — dependencies come first
 # (assets are restored separately BEFORE this loop because
 # shots.thumbnail_asset_id and entity_assets.asset_id point at them).
@@ -86,6 +94,18 @@ ENTITY_TABLES = {
     # storyboard scenes/shots, characters, and result assets — all
     # restored above.
     "dialogue_segments": DialogueSegment,
+    # N/A6 — the timeline EDL: timelines depend only on the project;
+    # tracks on their timeline; clips on tracks + restored assets/
+    # versions/shots/scenes; crossfades on their clips.
+    "timelines": Timeline,
+    "timeline_tracks": TimelineTrack,
+    "timeline_clips": TimelineClip,
+    "timeline_crossfades": TimelineCrossfade,
+    # A6 — assembly plans bind a timeline; items bind the plan plus
+    # shots/scenes/dialogue/motion clips/assets/tracks/clips — every
+    # dependency restores above.
+    "assembly_plans": AssemblyPlan,
+    "assembly_items": AssemblyItem,
 }
 
 
@@ -424,6 +444,7 @@ def import_package(
             # Entity rows — remap every id, then rewrite embedded refs.
             # ENTITY_TABLES order is FK-dependency order; flush per table
             # so parents exist before children insert.
+            item_key_remap: dict[str, str] = {}
             for key, model in ENTITY_TABLES.items():
                 for row in manifest["entities"].get(key, []):
                     row = dict(row)
@@ -438,7 +459,56 @@ def import_package(
                         # Job rows are not packaged; the result asset
                         # link (remapped above) is the durable record.
                         row["generate_job_id"] = None
+                    if key == "timelines":
+                        # Undo/redo stacks point at entity_revisions,
+                        # which are never packaged — reset them.
+                        row["undo_stack_json"] = []
+                        row["redo_stack_json"] = []
+                    if key == "timeline_clips":
+                        # provenance refs may dangle if the shot/scene
+                        # was archived after apply — SET NULL keeps the
+                        # clip usable in the restored project.
+                        pass
+                    if key == "assembly_items":
+                        # item_key is a composite 'kind:source_id' —
+                        # _remap_ids can't rewrite it, so rebuild from
+                        # the row's remapped refs. The source ref is
+                        # kind-specific: shot-bound dialogue rows also
+                        # carry shot_id, so order matters.
+                        src = row.get("source_json") or {}
+                        kind = row.get("kind")
+                        key_id = (
+                            row.get("shot_id") if kind == "shot"
+                            else row.get("dialogue_id")
+                            if kind == "dialogue"
+                            else src.get("link_id"))
+                        if key_id:
+                            new_key = f"{kind}:{key_id}"
+                            if row.get("item_key") != new_key:
+                                item_key_remap[row["item_key"]] = new_key
+                                row["item_key"] = new_key
                     session.add(model(**row))
+                session.flush()
+
+            if item_key_remap:
+                # Composite item keys inside plan_json/applied_json —
+                # rekey them to the remapped ids.
+                for plan in session.execute(
+                        select(AssemblyPlan).where(
+                            AssemblyPlan.project_id == new_project.id)
+                ).scalars().all():
+                    pj = dict(plan.plan_json or {})
+                    for section in ("items", "removed"):
+                        for it in pj.get(section) or []:
+                            if it.get("key") in item_key_remap:
+                                it["key"] = item_key_remap[it["key"]]
+                    plan.plan_json = pj
+                    aj = dict(plan.applied_json or {})
+                    aj["items"] = {
+                        item_key_remap.get(k, k): v
+                        for k, v in (aj.get("items") or {}).items()}
+                    plan.applied_json = aj
+                    session.add(plan)
                 session.flush()
 
             if manifest.get("prompt_draft") and not project_id_override:

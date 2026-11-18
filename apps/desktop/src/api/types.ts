@@ -326,6 +326,108 @@ export interface CommandProposal {
     warnings: string[];
     budget: { limit: number; used: number; user: number };
   } | null;
+  /** A6 — assembly.plan / assembly.apply previews: the deterministic
+   * first-cut proposal (lanes + items) or the apply decision walk
+   * (per-item insert/keep/skip/replace + stale flag) — discriminated
+   * by `"lanes" in` vs `"sources_stale" in`. */
+  resolved_assembly?: AssemblyProposal | AssemblyApplyPreview | null;
+}
+
+/** A6 — one row of a first-cut proposal (assembly.plan preview). */
+export interface AssemblyProposalItem {
+  key: string;
+  kind: string;                       // 'shot' | 'dialogue' | 'audio'
+  title?: string;
+  scene_id: string | null;
+  shot_id: string | null;
+  dialogue_id?: string | null;
+  motion_clip_id?: string | null;
+  asset_id: string | null;
+  lane: string;                       // 'video' | 'dialogue' | 'music'
+  lane_key?: string;                  // proposal lane key (dialogue2…)
+  track_id: string | null;
+  start_frames: number;
+  extent_frames: number;
+  review_status?: string;
+  notes?: string;
+  flags: {
+    missing?: string | null;
+    warnings?: string[];
+    conflicts?: Array<{ clip_id: string; reason: string }>;
+    removed?: string;
+  };
+  applied?: { clip_id: string | null; state: string } | null;
+}
+
+/** A6 — compute_plan output: the full deterministic proposal. */
+export interface AssemblyProposal {
+  timeline_id: string;
+  lanes: Record<string, {
+    track_id: string | null; track_name: string | null; kind: string;
+    create: { kind: string; name: string } | null;
+  }>;
+  items: AssemblyProposalItem[];
+  removed: Array<Record<string, unknown>>;
+  warnings: string[];
+  program_frames: number;
+  counts: { items: number; missing: number; conflicts: number;
+            removed: number };
+}
+
+/** A6 — preview_apply output: the apply decision walk. */
+export interface AssemblyApplyPreview {
+  plan_id: string;
+  timeline_id: string;
+  sources_stale: boolean;
+  resolve_conflicts: string;
+  items: Array<{ key: string; kind: string; title: string;
+                 action: string; reason: string }>;
+  counts: { insert: number; keep: number; skip: number; replace: number };
+}
+
+/** A6 — a persisted assembly item (serializer output). */
+export interface AssemblyItem {
+  id: string;
+  key: string;
+  kind: string;
+  position: number;
+  scene_id: string | null;
+  shot_id: string | null;
+  dialogue_id: string | null;
+  motion_clip_id: string | null;
+  asset_id: string | null;
+  track_id: string | null;
+  timeline_clip_id: string | null;
+  on_timeline: boolean;
+  start_frames: number;
+  extent_frames: number;
+  review_status: string;    // pending | approved | rejected | skipped
+  notes: string;
+  flags: {
+    missing?: string | null;
+    conflicts?: Array<Record<string, unknown>>;
+    removed?: string;
+    warnings?: string[];
+  };
+  stale: boolean;           // source signature drifted since plan
+  source_gone: boolean;
+}
+
+/** A6 — the persisted plan row (GET …/assemblies/{id}). */
+export interface AssemblyPlan {
+  id: string;
+  project_id: string;
+  timeline_id: string;
+  name: string;
+  status: string;           // draft | applied
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  sources_stale?: boolean;
+  proposal?: AssemblyProposal;
+  items?: AssemblyItem[];
+  counts?: { items: number; missing: number; conflicts: number;
+             stale: number };
 }
 
 export interface CommitResult {
