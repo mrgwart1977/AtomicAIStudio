@@ -1424,3 +1424,67 @@ export interface TimelineRevision {
   summary: string;
   created_at: string;
 }
+
+// ---------- A8 — filmmaking wizard (derived, read-only) ----------
+
+export type WizardStageStatus = "done" | "ready" | "attention" | "blocked";
+
+export interface WizardStage {
+  id: string;
+  index: number;
+  label: string;
+  required: boolean;
+  status: WizardStageStatus;
+  summary: string;
+  counts: Record<string, unknown>;
+  warnings: string[];
+}
+
+export interface WizardEntityRow {
+  id: string;
+  shot_id: string | null;
+  state: string;           // planned|draft|simulated|generated|missing|failed|cancelled|stale
+  has_result: boolean;
+  result_asset_id: string | null;
+  job_id: string | null;
+  job_status: string | null;
+  job_adapter: string | null;
+  revision: number;
+  status?: string;
+}
+
+export interface WizardPlanRow {
+  id: string;
+  timeline_id: string;
+  name: string;
+  status: string;
+  applied: boolean;
+  item_counts: Record<string, number>;
+  items_total: number;
+  revision: number;
+  created_at: string | null;
+}
+
+export interface WizardJobRow {
+  id: string;
+  kind: string;
+  adapter_id: string;
+  status: string;
+  message: string;
+  gpu_index: number | null;
+  reserved_vram_bytes: number | null;
+  output_asset_id: string | null;
+  created_at: string | null;
+}
+
+export interface WizardDerived {
+  stages: WizardStage[];
+  entities: { keyframes: WizardEntityRow[]; clips: WizardEntityRow[]; dialogue: WizardEntityRow[] };
+  plans: WizardPlanRow[];
+  jobs: WizardJobRow[];
+  progress: Record<string, unknown> | null;
+  legacy_first_film: boolean;
+  warnings: string[];
+  honesty: { all_simulated: boolean; counts: Record<string, number>; note: string };
+  revision: number;
+}

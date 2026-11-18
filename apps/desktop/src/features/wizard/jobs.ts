@@ -1,4 +1,4 @@
-/** C5-D — small job polling helper for the wizard's awaited commands. */
+/** A8 — small job polling helper for the wizard's awaited commands. */
 import { apiFetch } from "../../api/client";
 import type { Job } from "../../api/types";
 

@@ -494,3 +494,13 @@ Classification legend: **[auto]** verified automated test ·
 - Human audio-edit UX feel, drag on audio lanes — **[human]**; audible fade/crossfade/mix judgment vs reference — **[human]** (N2-E renders it; ears required); waveform accuracy vs a known-good editor — **[human]**
 - **A1 screenplay + shot-list scaffold:** structured screenplays (title/metadata, ordered scenes, action/dialogue/note elements with speaker + parenthetical + location refs), deterministic beat→shot scaffolding (action→wide, dialogue run→medium + speaker cast rows), previewable `shotlist.sync` (adds/updates/removals/manual-edit, approval-gated destructive apply, archive-only removals, never recreates manually archived shots), scaffold-managed-field fingerprinting preserving all user fields (prompt/intent/duration/continuity/gen-params/media refs/non-scaffold cast), stale-safe linear batch undo/redo (skips shots with later edits, survives restart) — **[auto]** (39 A1 backend tests; 1543+11 suite green on 3.12/3.14) + **[installed]** (17/17, `docs/a1-evidence/`; hardening notes `docs/a1-evidence/a1-hardening.md`)
 - All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD.
+
+### A8 milestone note (Phase A final — filmmaking wizard, in review)
+
+- 15-stage guided wizard (project → film settings → screenplay → scenes/dialogue → cast → scaffold → planning → keyframes → motion → dialogue → assembly → review/apply → edit → export config → export+verify) — pure orchestration over A1–A7 commands, zero parallel persistence — **[auto]** (16 backend tests) + **[installed]** (34/34, `docs/a8-evidence/`)
+- Derived `GET /wizard` read-only stage truth + nine-label generation honesty (planned/draft/simulated/generated/missing/failed/cancelled/stale/approved); mock adapters can only surface `simulated` — **[auto]** + **[installed]** (`all_simulated` verified at A11/B5)
+- Progress in `settings_json.wizard` via `project.update_settings`; legacy `first_film` blob seeds v2 + notice, never rewritten — **[auto]** + **[installed]** (A20/B6 restart persistence, B7 mode-switch isolation)
+- Beginner/Advanced = view flag on identical rows — **[auto]** + **[installed]** (B7 keyframe revision map byte-identical across switch)
+- Pre-existing `backup.import` settings_json drop fixed (wizard progress + provider settings now survive restore-into-new-project) — **[auto]** (regression test + 73 backup tests)
+- Human checklist: `docs/n3-human-checklist.md` — **19 checks** (spec said "24"; reconciled in doc header — nothing invented, all **NOT RUN**)
+- All previously tracked blockers remain open as recorded — incl. **#96**; Stage B2b remains ON HOLD. A8 is not a public-release claim.

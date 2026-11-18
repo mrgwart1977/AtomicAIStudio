@@ -1326,6 +1326,22 @@ def shot_versions(shot_id: str, project: Project = Depends(get_project),
     return sb.revision_history(db, "shot", shot_id)
 
 
+# ---------- wizard (A8) ----------
+
+@api_router.get("/api/projects/{project_id}/wizard")
+def get_wizard_state(project: Project = Depends(get_project),
+                     db: Session = Depends(get_db)):
+    """A8 — derived workflow state for the guided film wizard.
+
+    Read-only: reports what already exists (screenplay → export), the
+    persisted progress blob from project settings, generation-state
+    honesty labels, and missing-input warnings. Mutations stay in the
+    command system; progress writes ride `project.update_settings`.
+    """
+    from app.domain import wizard as wiz
+    return wiz.wizard_state(db, project)
+
+
 # ---------- keyframes (A3) ----------
 
 @api_router.get("/api/projects/{project_id}/shots/{shot_id}/keyframes")
