@@ -1,0 +1,22 @@
+INFO backend http://127.0.0.1:65397 via installed app
+INFO health: backend 0.1.0 (0025 proven by plan persistence below)
+PASS 1 populated A5 project — 2 scenes/2 shots, clip + 2 dialogue results
+PASS 2 multiple storyboard scenes — scene 1 + scene 2 in order
+PASS 3 first-cut preview — 4 items across lanes
+PASS 4 mapping — shot→V1, 2 lines→DX (created lanes named)
+PASS 5 missing assets detected — shot 2 flagged, warning shown
+PASS 6 plan approved — persisted draft with stable item keys
+PASS 7 apply approved — V1 clip + 2 DX clips with shot/scene provenance
+PASS 8 manual timeline edit — applied clip moved to 200f
+PASS 9 source revised — stale apply preview flagged + commit refused
+PASS 10 reassembly preview — conflict flagged, disposition preserved
+PASS 11 manual edits preserved — clip still at 200f after apply
+PASS 12 permitted changes approved — review vote + note persisted
+PASS 13 undo/redo — move reverted, whole apply reverted in one step, redone
+PASS 14 export — short film rendered via the timeline pipeline
+INFO ffprobe: C:\Users\gwart\AppData\Local\Atomic Dream Engine\backend\_internal\ffmpeg\bin\ffprobe.exe
+PASS 15 timing verified — h264 + aac, ~10.33s
+INFO backend http://127.0.0.1:52017 via installed app
+PASS 16 restart persistence — applied plan, clips, review intact
+PASS 17 clean shutdown — no orphan backend
+A6 ACCEPTANCE: PASS 17/17

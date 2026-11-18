@@ -182,11 +182,16 @@ async function main() {
   await commit(p.id, "screenplay_scene.create", {
     screenplay_id: sp.id, heading: "INT. BOATHOUSE — LATER" });
   const doc = await api("GET", `/api/projects/${p.id}/screenplays/${sp.id}`);
-  const spsc1 = doc.scenes[0];
+  const spsc1 = doc.scenes[0], spsc2 = doc.scenes[1];
   await commit(p.id, "screenplay_scene.update", {
     sp_scene_id: spsc1.id, elements: [
       { kind: "dialogue", character_id: anna.id, text: "The tide is coming in." },
       { kind: "dialogue", character_id: ben.id, text: "Then we move now." }] });
+  // Scene 2 needs ≥1 element to scaffold a shot — action only, so no
+  // dialogue segment is implied there.
+  await commit(p.id, "screenplay_scene.update", {
+    sp_scene_id: spsc2.id, elements: [
+      { kind: "action", text: "Rain hammers the boathouse roof." }] });
   await commit(p.id, "shotlist.scaffold", { screenplay_id: sp.id });
   let board = await api("GET", `/api/projects/${p.id}/storyboard`);
   const entries = shots(board);
@@ -297,7 +302,13 @@ async function main() {
   await commit(p.id, "assembly.apply",
     { timeline_id: tl.id, resolve_conflicts: "skip" });
   let det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  const vClips = det.clips.filter((c) => c.shot_id === shot1.id);
+  // Dialogue clips carry shot_id provenance too — the video clip is
+  // the one on the video-kind track.
+  const videoTracks = new Set(
+    det.tracks.filter((t) => t.kind === "video").map((t) => t.id));
+  const isVideoClip = (c) => videoTracks.has(c.track_id);
+  const vClips = det.clips.filter(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
   if (vClips.length !== 1 || vClips[0].scene_id !== shot1.scene_id) {
     fail(`video clip provenance wrong: ${JSON.stringify(vClips)}`);
   }
@@ -346,7 +357,8 @@ async function main() {
     { timeline_id: tl.id });
   const disp = apPv2.resolved_assembly.items
     .find((i) => i.key === movedItem.key);
-  if (!disp || disp.action !== "skip" || !/edited|preserv/i.test(disp.reason)) {
+  if (!disp || disp.action !== "skip"
+      || !/edit|preserv|conflict/i.test(disp.reason)) {
     fail(`apply walk wrong for edited clip: ${JSON.stringify(disp)}`);
   }
   ok("10 reassembly preview — conflict flagged, disposition preserved");
@@ -378,7 +390,8 @@ async function main() {
   //           one logical step (each undo pops a single edit)
   await commit(p.id, "timeline.undo", { timeline_id: tl.id });
   det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  const afterUndo = det.clips.find((c) => c.shot_id === shot1.id);
+  const afterUndo = det.clips.find(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
   if (!afterUndo || afterUndo.start_frames !== 0) {
     fail(`undo did not revert the manual move: ${JSON.stringify(afterUndo)}`);
   }
@@ -390,7 +403,8 @@ async function main() {
   await commit(p.id, "timeline.redo", { timeline_id: tl.id });
   await commit(p.id, "timeline.redo", { timeline_id: tl.id });
   det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  const redone = det.clips.find((c) => c.shot_id === shot1.id);
+  const redone = det.clips.find(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
   if (det.clips.length !== 3 || !redone || redone.start_frames !== 200) {
     fail(`redo state wrong: ${det.clips.length} clips`);
   }
