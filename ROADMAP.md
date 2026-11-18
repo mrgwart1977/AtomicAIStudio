@@ -42,7 +42,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
-| A6 (Phase A) | First-cut assembly — deterministic `assembly.plan` proposals from ordered scenes/shots + motion clips + dialogue + shot-linked audio (V1/DX/MX lanes with deterministic overflow), per-item review + notes, non-destructive `assembly.apply` riding `timeline.insert_clip` with collapsed undo + pinned source fingerprints (stale apply refuses; result-asset liveness fingerprinted), manual-edit preservation with per-item `replace_keys` approval (broad replace refused), backup v7 (timeline EDL + plans/items), `AssemblyPanel` UI — **in review** |
+| A6 (Phase A) | First-cut assembly — deterministic `assembly.plan` proposals from ordered scenes/shots + motion clips + dialogue + shot-linked audio (V1/DX/MX lanes with deterministic overflow), per-item review + notes, non-destructive `assembly.apply` riding `timeline.insert_clip` with collapsed undo + pinned source fingerprints (stale apply refuses; result-asset liveness fingerprinted), manual-edit preservation with per-item `replace_keys` approval (broad replace refused), backup v7 (timeline EDL + plans/items), `AssemblyPanel` UI, installed acceptance 19/19 — merged `fa23db9` |
 | A7–A8 (Phase A) | Multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md |
 | Multi-model image/video backends | per spec |
 
