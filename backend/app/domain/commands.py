@@ -5179,6 +5179,16 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                           "detail": "provider, capability, credential, or "
                                     "budget state changed since the plan "
                                     "was approved — re-run cloud.plan"})
+            # A matching fingerprint means the plan is unchanged — but a
+            # pinned fingerprint of a plan that never admitted (e.g.
+            # needs_key, over budget, unrouted) must still refuse here;
+            # approval of a non-admitting plan is not authorization.
+            if not _res.get("would_admit"):
+                raise CommandError(
+                    422, {"error": _res.get("availability") or "refused",
+                          "detail": _res.get("unavailable_reason")
+                                    or "the pinned plan would not admit "
+                                       "this submit — re-run cloud.plan"})
         try:
             job = job_engine.enqueue(
                 session,

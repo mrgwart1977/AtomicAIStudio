@@ -1233,6 +1233,9 @@ export interface GpuSchedulerState {
   /** A7 — indexes of devices that vanished while holding
    * reservations; surfaced, never silently freed. */
   lost_devices?: number[];
+  /** A7-F5 — true when the inventory came from ATOMIC_HW_JSON:
+   * simulated devices are never presented as measured hardware. */
+  simulated?: boolean;
   slots: Array<{
     index: number; name: string | null; vendor: string;
     vram_bytes: number | null;

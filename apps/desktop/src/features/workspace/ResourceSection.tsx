@@ -14,6 +14,9 @@ interface SystemResources {
     gpu_count: number; free: number;
     /** A7 — devices that vanished while holding reservations. */
     lost_devices?: number[];
+    /** A7-F5 — the inventory is simulated (ATOMIC_HW_JSON), never
+     * presented as measured hardware. */
+    simulated?: boolean;
     slots: Array<{ index: number; name: string | null;
       vram_bytes: number | null; vram_free_bytes: number | null;
       /** A7 — reservation accounting: usable is the admission bound;
@@ -134,6 +137,12 @@ export function ResourceSection({ setError }: { setError: (m: string | null) => 
             </div>
           </div>
 
+          {res.gpus.simulated === true && (
+            <p className="mt-3 rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn"
+              data-testid="gpu-simulated-badge">
+              Simulated devices (ATOMIC_HW_JSON) — not measured hardware.
+            </p>
+          )}
           {res.gpus.gpu_count > 0 || (res.gpus.slots?.length ?? 0) > 0 ? (
             <ul className="mt-3 space-y-1 text-xs text-muted">
               {res.gpus.slots.map((s) => {

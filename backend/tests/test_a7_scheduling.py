@@ -436,6 +436,15 @@ def test_submit_plan_fingerprint_pin(client):
     assert "plan" in r.text
 
 
+class _StubVault:
+    """Credential PRESENCE double — status() reports configured but
+    has no secret material to return (same shape as test_c2 stubs)."""
+    def status(self, key):
+        return {"configured": True, "fields": ["api_key"],
+                "set_at": "2026-01-01T00:00:00Z",
+                "readable": True, "unreadable_reason": None}
+
+
 def test_submit_matching_plan_fingerprint_passes_gate(client):
     """A submit pinning the CURRENT plan fingerprint clears the A7
     staleness gate — the approval is proven fresh at commit time,
@@ -443,6 +452,7 @@ def test_submit_matching_plan_fingerprint_passes_gate(client):
     adapter, zero egress)."""
     pid = make_project(client)["id"]
     _enable(client, "rytr")
+    client.app.state.provider_vault = _StubVault()
     pv = _preview(client, pid, "cloud.plan",
                   {"provider_key": "rytr", "task": "text",
                    "est_cost_usd": 0.01, "max_cost_usd": 0.05})
@@ -487,3 +497,315 @@ def test_sim_submit_records_no_live_activity(client):
         assert ev is not None
         blob = str(ev.payload_json)
         assert "api_key" not in blob and "secret" not in blob.lower()
+
+
+# ==================================================================
+# A7 final hardening (F2–F7)
+# ==================================================================
+
+# ------------------------------------------------ F2: admission atomicity
+
+def test_concurrent_admission_is_atomic_no_oversubscribe():
+    """Threads racing the same device: check-then-claim is atomic —
+    winners fit exactly inside usable VRAM, losers refuse, ownership
+    is per-job, and the accounting can never exceed the device."""
+    import threading
+    s = _sched(_hw([8]))
+    admitted, refused = [], []
+
+    def attempt(i):
+        r = s.acquire(f"j{i}", {}, est_vram=2 * GIB)
+        (admitted if r == 0 else refused).append(i)
+
+    threads = [threading.Thread(target=attempt, args=(i,))
+               for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(admitted) == 4            # 8 GiB / 2 GiB exactly
+    assert len(refused) == 12
+    jobs = s.slots()[0]["jobs"]
+    assert len(jobs) == 4
+    assert sum(jobs.values()) <= 8 * GIB
+    assert all(v == 2 * GIB for v in jobs.values())
+    # every admitted job owns exactly its claim
+    for i in admitted:
+        assert s.claimed_bytes(f"j{i}") == 2 * GIB
+
+
+def test_concurrent_exclusive_claims_single_winner():
+    """N simultaneous unknown-footprint claims on one device: exactly
+    one wins — exclusivity is atomic, never 'both thought it was free'."""
+    import threading
+    s = _sched(_hw([8]))
+    winners = []
+
+    def attempt(i):
+        if s.acquire(f"x{i}", {}, est_vram=None) == 0:
+            winners.append(i)
+
+    threads = [threading.Thread(target=attempt, args=(i,))
+               for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(winners) == 1
+    # The winner reserved the device's full usable bytes.
+    assert s.claimed_bytes(f"x{winners[0]}") == 8 * GIB
+
+
+def test_per_job_refusal_reasons_survive_concurrency():
+    """Queue reasons are owned per job — a later refusal never
+    rewrites why an earlier job is still waiting."""
+    s = _sched(_hw([4]))
+    s.acquire("holder", {}, est_vram=4 * GIB)
+    assert s.acquire("too-big", {}, est_vram=8 * GIB) is None
+    assert s.acquire("missing", {"device": 9}) is None
+    assert "fits" in s.reason_for("too-big")
+    assert "not present" in s.reason_for("missing")
+    # Another refusal does not clobber earlier jobs' reasons.
+    assert s.acquire("other", {}, est_vram=8 * GIB) is None
+    assert "not present" in s.reason_for("missing")
+    # A successful claim clears that job's stale reason.
+    s.release("holder")
+    assert s.acquire("too-big", {}, est_vram=4 * GIB) == 0
+    assert s.reason_for("too-big") is None
+
+
+def test_headroom_usable_boundary_exact():
+    """usable = vram - headroom; a request at exactly usable admits,
+    one byte over refuses — headroom is never silently borrowed."""
+    s = _sched(_hw([8]), prefs={"vram_headroom_bytes": 2 * GIB})
+    assert s.slots()[0]["usable_bytes"] == 6 * GIB
+    assert s.acquire("exact", {}, est_vram=6 * GIB) == 0
+    assert s.acquire("plus-one", {}, est_vram=1) is None
+    assert "free" in s.last_reason or "usable" in s.last_reason
+
+
+def test_explicit_device_overrides_preference():
+    """Request device beats the preferred_gpu default; the preference
+    only fills in when the request names no device."""
+    s = _sched(_hw([4, 8]), prefs={"preferred_gpu": 1})
+    assert s.acquire("pinned", {"device": 0}, est_vram=2 * GIB) == 0
+    assert s.acquire("defaulted", {}, est_vram=2 * GIB) == 1
+
+
+# ------------------------------------------------- F3: lifecycle
+
+def test_release_idempotent_and_unknown_safe():
+    """Duplicate completion callbacks and releases for jobs that never
+    held a reservation are both harmless no-ops."""
+    s = _sched(_hw([4]))
+    s.release("never-held")
+    s.acquire("j1", {}, est_vram=2 * GIB)
+    s.release("j1")
+    s.release("j1")
+    assert s.reservations() == {}
+    assert s.claimed_bytes("j1") is None
+    assert s.reason_for("j1") is None
+
+
+def test_exclusive_claim_records_actual_reserved_bytes(client):
+    """reserved_vram_bytes persists the ACTUAL claim — an exclusive
+    (unknown-footprint) job reserves the device's usable bytes, not
+    the request's missing estimate."""
+    _use_sim_gpus(client, [8])
+    pid = make_project(client)["id"]
+    r = _sim_job(client, pid, {"work_ms": 8000})  # no est → exclusive
+    jid = r["job_id"]
+    import time
+    for _ in range(100):
+        j = _job(client, pid, jid)
+        if j["status"] == "running":
+            break
+        time.sleep(0.05)
+    sched = client.app.state.job_engine._sched
+    assert sched.claimed_bytes(jid) == 8 * GIB
+    j = _job(client, pid, jid)
+    assert j["reserved_vram_bytes"] == 8 * GIB
+    client.post(f"/api/jobs/{jid}/cancel")
+    wait_for_job(client, pid, jid, timeout=30)
+
+
+def test_scheduler_state_reports_simulated_flag(client):
+    _use_sim_gpus(client, [8])
+    make_project(client)
+    st = client.get("/api/gpu/scheduler").json()
+    # dict probes aren't marked simulated — the field exists and is
+    # honest either way (real sim inventories come from ATOMIC_HW_JSON).
+    assert "simulated" in st and st["simulated"] is False
+
+
+# ------------------------------------------------- F4: multi-GPU behavior
+
+def test_device_return_admits_again():
+    """A vanished device whose job ended rejoins cleanly when the probe
+    reports it again — no stale accounting, no permanent loss."""
+    hw = _hw([8, 8])
+    s = _sched(hw)
+    assert s.acquire("j1", {"device": 1}, est_vram=4 * GIB) == 1
+    s._probe = _hw([8])           # device 1 disappears
+    assert s.lost_devices() == [1]
+    s.release("j1")               # the job's execution ended
+    s._probe = hw                 # device returns
+    assert s.lost_devices() == []
+    assert s.acquire("j2", {"device": 1}, est_vram=4 * GIB) == 1
+    assert s.slots()[1]["jobs"] == {"j2": 4 * GIB}
+
+
+def test_vram_never_pooled_across_devices():
+    """16 GiB spread over two 8 GiB devices still cannot host a 10 GiB
+    job — admission is per-device, always."""
+    s = _sched(_hw([8, 8]))
+    assert s.acquire("huge", {}, est_vram=10 * GIB) is None
+    assert "no device fits" in s.last_reason
+
+
+def test_heterogeneous_backend_requirements():
+    """cuda → NVIDIA-only; directml → vendor-neutral; vulkan → ICD +
+    any GPU. Ties deterministically prefer the lower index."""
+    hw = _hw([8, 8])
+    hw["gpus"][1]["vendor"] = "AMD"
+    s = _sched(hw)
+    assert s.acquire("c1", {}, est_vram=2 * GIB,
+                     requires=["cuda"]) == 0          # NVIDIA only
+    assert s.acquire("d1", {}, est_vram=2 * GIB,
+                     requires=["directml"]) == 1       # most free: 8 vs 6
+    # 6 GiB free on each → stable order picks device 0.
+    assert s.acquire("v1", {}, est_vram=2 * GIB,
+                     requires=["vulkan"]) == 0
+
+
+def test_fallback_cpu_when_no_gpu_and_allowed():
+    s = _sched(_hw([]))
+    assert s.acquire("j1", {"allow_cpu": True}) == -1
+    assert s.acquire("j2", {"allow_cpu": False}) is None
+    assert "no GPU" in s.last_reason
+
+
+# ------------------------------------------------- F5: sim isolation
+
+def test_simulated_inventory_marked_and_no_bypass(monkeypatch):
+    """ATOMIC_HW_JSON reports are always flagged simulated; simulated
+    devices pass through the SAME compat + admission gates — the hook
+    changes the inventory, never the rules."""
+    import json as _json
+    hw = _hw([4])
+    hw["gpus"][0]["vendor"] = "AMD"
+    monkeypatch.setenv("ATOMIC_HW_JSON", _json.dumps(hw))
+    from app.domain import hardware
+    rep = hardware.probe(force=True)
+    assert rep.get("simulated") is True
+    s = _sched(lambda: rep)
+    assert s.state()["simulated"] is True
+    # Vendor mismatch still refuses on the simulated inventory.
+    assert s.acquire("c", {}, requires=["cuda"]) is None
+    # Admission limits still bind.
+    assert s.acquire("big", {}, est_vram=9 * GIB,
+                     requires=["vulkan"]) is None
+    # Unset → real probe, unmarked.
+    monkeypatch.delenv("ATOMIC_HW_JSON")
+    assert not hardware.probe(force=True).get("simulated")
+
+
+def test_malformed_hw_json_falls_back_to_real_probe(monkeypatch):
+    """Unreadable/invalid ATOMIC_HW_JSON never wedges the probe — it
+    falls back to real hardware rather than reporting phantom devices."""
+    from app.domain import hardware
+    monkeypatch.setenv("ATOMIC_HW_JSON", "{not json")
+    assert not hardware.probe(force=True).get("simulated")
+    monkeypatch.setenv("ATOMIC_HW_JSON", "/nonexistent/sim-hw.json")
+    assert not hardware.probe(force=True).get("simulated")
+    monkeypatch.setenv("ATOMIC_HW_JSON", '["not", "an", "object"]')
+    assert not hardware.probe(force=True).get("simulated")
+
+
+def test_sim_adapter_is_in_process_and_mock_kind():
+    """mock.gpu.sim declares its truth: adapter_kind=mock, needs_gpu —
+    it exercises the scheduler, it is never inference."""
+    from app.adapters.gpu_sim import GpuSimAdapter
+    a = GpuSimAdapter()
+    assert a.profile.adapter_id == "mock.gpu.sim"
+    assert a.profile.adapter_kind == "mock"
+    assert a.profile.needs_gpu is True
+
+
+# ------------------------------------------------- F6: cloud authz
+
+def test_queued_cancel_releases_spend_reservation(client):
+    """A job cancelled before dispatch returns its spend hold — the
+    reservation must not strand 'open' forever on a queued cancel."""
+    _use_sim_gpus(client, [4])
+    pid = make_project(client)["id"]
+    _enable(client, "rytr")
+    # Park the gen lane so the cloud job stays queued.
+    park = _sim_job(client, pid, {"est_vram_bytes": 2 * GIB,
+                                  "work_ms": 30000})
+    import time
+    for _ in range(100):
+        if _job(client, pid, park["job_id"])["status"] == "running":
+            break
+        time.sleep(0.05)
+    r = _commit(client, pid, "generate.text.cloud",
+                {"provider_key": "rytr", "execution_target": "cloud",
+                 "prompt": "held", "est_cost_usd": 0.01,
+                 "max_cost_usd": 0.05})
+    jid = r["job_id"]
+    for _ in range(100):
+        if _job(client, pid, jid)["status"] == "queued":
+            break
+        time.sleep(0.05)
+    assert client.post(f"/api/jobs/{jid}/cancel").status_code == 200
+    assert _job(client, pid, jid)["status"] == "cancelled"
+    from app.db.models import SpendReservation
+    import sqlalchemy as sa
+    with client.app.state.session_factory() as s:
+        res = s.execute(sa.select(SpendReservation).where(
+            SpendReservation.job_id == jid)).scalar_one()
+        assert res.status == "released"
+    client.post(f"/api/jobs/{park['job_id']}/cancel")
+
+
+def test_pinned_submit_refuses_nonadmitting_plan(client):
+    """Pinning a fingerprint reproduces the plan — a plan that would
+    NOT admit (missing credential) refuses even when the fingerprint
+    matches. Approval of a non-admitting plan is not authorization."""
+    pid = make_project(client)["id"]
+    _enable(client, "rytr")   # enabled but NO credential configured
+    pv = _preview(client, pid, "cloud.plan",
+                  {"provider_key": "rytr", "task": "text",
+                   "est_cost_usd": 0.01, "max_cost_usd": 0.05})
+    rc = pv["resolved_cloud"]
+    assert rc["would_admit"] is False
+    fp = rc["plan_fingerprint"]
+    assert fp
+    r = _commit(client, pid, "generate.text.cloud",
+                {"provider_key": "rytr", "execution_target": "cloud",
+                 "prompt": "hello", "est_cost_usd": 0.01,
+                 "max_cost_usd": 0.05, "plan_fingerprint": fp},
+                expect=422)
+    assert rc["availability"] in r.text or "plan" in r.text
+
+
+def test_plan_is_read_only_and_touches_no_network(client, monkeypatch):
+    """resolved_plan writes nothing and opens no sockets — planning is
+    a pure read of catalog + vault presence + budget state."""
+    pid = make_project(client)["id"]
+    _enable(client, "rytr")
+    import socket
+    def _no_net(*a, **k):
+        raise AssertionError("network access during cloud.plan")
+    monkeypatch.setattr(socket.socket, "connect", _no_net)
+    monkeypatch.setattr(socket.socket, "connect_ex", _no_net)
+    from app.domain import cloudplan as _cp
+    from app.db.models import Project
+    with client.app.state.session_factory() as s:
+        project = s.get(Project, pid)
+        res = _cp.resolved_plan(
+            s, project, provider_key="rytr", task="text",
+            vault=client.app.state.provider_vault,
+            registry=client.app.state.adapter_registry)
+        assert res["plan_fingerprint"]
+        assert not s.new and not s.dirty

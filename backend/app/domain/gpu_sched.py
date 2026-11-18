@@ -43,6 +43,7 @@ chosen by the adapter for its runtime.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.domain import compatibility
@@ -64,6 +65,15 @@ class GpuScheduler:
         # footprint) claim reserves the device's full usable figure so no
         # other job can share it.
         self._reserved: dict[int, dict[str, int]] = {}
+        # Check-then-claim in acquire() must be uninterruptible: the
+        # engine calls it from the event loop, but any future caller off
+        # the loop gets the same atomicity guarantee from this lock.
+        self._lock = threading.RLock()
+        # Per-job refusal reasons — under concurrent claims a shared
+        # "last reason" could attribute another job's refusal to this
+        # one. last_reason stays as a convenience alias for the most
+        # recent refusal; reason_for(job_id) is the honest per-job read.
+        self._reasons: dict[str, str] = {}
         # Why the most recent acquire() refused — the engine surfaces this
         # on the queued job so a stuck job always explains itself.
         self.last_reason: str | None = None
@@ -125,6 +135,10 @@ class GpuScheduler:
     # ------------------------------------------------------------ slotting
 
     def slots(self) -> list[dict]:
+        with self._lock:
+            return self._slots_locked()
+
+    def _slots_locked(self) -> list[dict]:
         present = {g.get("index", i) for i, g in enumerate(self.gpus())}
         out = []
         for i, g in enumerate(self.gpus()):
@@ -163,20 +177,31 @@ class GpuScheduler:
         return out
 
     def busy(self) -> dict[int, str]:
-        return {s["index"]: s["busy_job_id"] for s in self.slots()
-                if s["busy_job_id"] is not None}
+        with self._lock:
+            return {s["index"]: s["busy_job_id"] for s in self._slots_locked()
+                    if s["busy_job_id"] is not None}
 
     def free_count(self) -> int:
-        return sum(1 for s in self.slots()
-                   if s["present"] and not s["jobs"])
+        with self._lock:
+            return sum(1 for s in self._slots_locked()
+                       if s["present"] and not s["jobs"])
 
     def lost_devices(self) -> list[int]:
-        present = {g.get("index", i) for i, g in enumerate(self.gpus())}
-        return sorted(idx for idx, jobs in self._reserved.items()
-                      if idx not in present and jobs)
+        with self._lock:
+            present = {g.get("index", i) for i, g in enumerate(self.gpus())}
+            return sorted(idx for idx, jobs in self._reserved.items()
+                          if idx not in present and jobs)
 
     def reservations(self) -> dict[int, dict[str, int]]:
-        return {idx: dict(jobs) for idx, jobs in self._reserved.items()}
+        """Devices currently HOLDING reservations — an index whose last
+        claim released disappears rather than reporting an empty set."""
+        with self._lock:
+            return {idx: dict(jobs) for idx, jobs in self._reserved.items()
+                    if jobs}
+
+    def _refuse(self, job_id: str, reason: str) -> None:
+        self.last_reason = reason
+        self._reasons[job_id] = reason
 
     def acquire(self, job_id: str, request: dict, *,
                 est_vram: int | None = None,
@@ -186,6 +211,14 @@ class GpuScheduler:
         the job right now. An unknown footprint (est_vram=None) claims
         the device exclusively; a known estimate reserves exactly that
         and may share the device with other known reservations."""
+        with self._lock:
+            return self._acquire_locked(job_id, request,
+                                        est_vram=est_vram,
+                                        requires=requires)
+
+    def _acquire_locked(self, job_id: str, request: dict, *,
+                        est_vram: int | None = None,
+                        requires: list[str] | None = None) -> int | None:
         prefs = self._prefs()
         device = request.get("device", prefs.get("preferred_gpu", "auto"))
         if device in (None, ""):
@@ -195,29 +228,33 @@ class GpuScheduler:
         gpus = self.gpus()
         est_gib = f"{est_vram / 2**30:.1f} GiB" if est_vram else None
         self.last_reason = None
+        self._reasons.pop(job_id, None)
 
         if isinstance(device, str) and device == "cpu":
             return -1
         if isinstance(device, int) and not isinstance(device, bool):
             g = next((x for x in gpus if x.get("index") == device), None)
             if g is None:
-                self.last_reason = f"requested GPU {device} is not present"
+                self._refuse(job_id,
+                             f"requested GPU {device} is not present")
                 return None
             unmet = self._fits_backend(g, requires)
             if unmet:
-                self.last_reason = unmet
+                self._refuse(job_id, unmet)
                 return None
             free = self._free_after(g)
             need = est_vram if est_vram else self._usable(g)
             if need > free:
                 if self._reserved.get(device):
-                    self.last_reason = (
+                    self._refuse(
+                        job_id,
                         f"requested GPU {device} cannot fit the job — "
                         f"needs ~{est_gib or 'exclusive'} VRAM, "
                         f"~{free / 2**30:.1f} GiB free after "
                         "reservations")
                 else:
-                    self.last_reason = (
+                    self._refuse(
+                        job_id,
                         f"requested GPU {device} cannot fit the job — "
                         f"needs ~{est_gib or 'exclusive'} VRAM, "
                         f"~{free / 2**30:.1f} GiB usable after headroom")
@@ -230,8 +267,8 @@ class GpuScheduler:
         if not gpus:
             if request.get("allow_cpu", True):
                 return -1
-            self.last_reason = ("no GPU detected and this model has no "
-                                "CPU path")
+            self._refuse(job_id, "no GPU detected and this model has no "
+                                 "CPU path")
             return None
         scored = []
         for g in gpus:
@@ -240,9 +277,9 @@ class GpuScheduler:
                 continue
             scored.append((self._free_after(g), g))
         if not scored:
-            self.last_reason = ("no compatible GPU — "
-                                + (self._fits_backend(gpus[0], requires)
-                                   or "devices unavailable"))
+            self._refuse(job_id, "no compatible GPU — "
+                                 + (self._fits_backend(gpus[0], requires)
+                                    or "devices unavailable"))
             return None
         if est_vram is None:
             # Exclusive claim — only a device with zero reservations
@@ -256,7 +293,8 @@ class GpuScheduler:
                                  for _, g in scored)
             if est_vram and all_measurable:
                 best = max((u for u, _ in scored), default=0) / 2**30
-                self.last_reason = (
+                self._refuse(
+                    job_id,
                     f"no device fits — job needs ~{est_gib} VRAM; "
                     f"best free device offers ~{best:.1f} GiB after "
                     "reservations")
@@ -266,36 +304,58 @@ class GpuScheduler:
                 # can't prove a fit — admit the best free device for
                 # an estimated job; exclusive claims still refuse.
                 if est_vram is None:
-                    self.last_reason = "all GPU slots are busy"
+                    self._refuse(job_id, "all GPU slots are busy")
                     return None
                 pool = scored
                 pool.sort(key=lambda t: t[0], reverse=True)
                 idx = pool[0][1].get("index")
                 self._reserved.setdefault(idx, {})[job_id] = est_vram
                 return idx
-            self.last_reason = "all GPU slots are busy"
+            self._refuse(job_id, "all GPU slots are busy")
             return None
         fits.sort(key=lambda t: t[0], reverse=True)
         idx = fits[0][1].get("index")
         if idx is None:
-            self.last_reason = "no usable GPU index found"
+            self._refuse(job_id, "no usable GPU index found")
             return None
         claim = est_vram if est_vram else self._usable(fits[0][1])
         self._reserved.setdefault(idx, {})[job_id] = claim
         return idx
 
     def release(self, job_id: str) -> None:
-        for jobs in self._reserved.values():
-            jobs.pop(job_id, None)
+        with self._lock:
+            for jobs in self._reserved.values():
+                jobs.pop(job_id, None)
+            self._reasons.pop(job_id, None)
+
+    def claimed_bytes(self, job_id: str) -> int | None:
+        """The reservation this job holds, if any — ownership lookup.
+        An exclusive claim returns the usable bytes it reserved."""
+        with self._lock:
+            for jobs in self._reserved.values():
+                if job_id in jobs:
+                    return jobs[job_id]
+            return None
+
+    def reason_for(self, job_id: str) -> str | None:
+        """Why this job's most recent acquire refused — per-job under
+        concurrent claims (unlike last_reason, which any refusal can
+        overwrite)."""
+        with self._lock:
+            return self._reasons.get(job_id)
 
     # -------------------------------------------------------------- status
 
     def state(self) -> dict:
-        slots = self.slots()
-        return {
-            "gpu_count": self.gpu_count(),
-            "free": self.free_count(),
-            "slots": slots,
-            "lost_devices": self.lost_devices(),
-            "prefs": self._prefs(),
-        }
+        with self._lock:
+            slots = self._slots_locked()
+            return {
+                "gpu_count": self.gpu_count(),
+                "free": self.free_count(),
+                "slots": slots,
+                "lost_devices": self.lost_devices(),
+                "prefs": self._prefs(),
+                # Simulated inventories are never mistaken for measured
+                # hardware — every scheduling surface carries the flag.
+                "simulated": bool(self._hw().get("simulated")),
+            }
