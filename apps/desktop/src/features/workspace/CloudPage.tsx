@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../../api/client";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
-  CommandProposal, Job, ProviderDetail, ProviderSummary,
+  CloudPlan, CommandProposal, Job, ProviderDetail, ProviderSummary,
   SpendReservation, SpendSummary,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
@@ -67,6 +67,9 @@ interface Pending {
   payload: Record<string, unknown>;
   proposal: CommandProposal;
   after: () => void;
+  /** A7 — the cloud plan approval this submit pins (fingerprint rides
+   * into the committed payload; drift since preview refuses). */
+  plan?: CloudPlan | null;
 }
 
 export function CloudPage() {
@@ -146,13 +149,48 @@ export function CloudPage() {
   );
 
   /** Stage a mutation: preview must succeed before the commit control
-   * appears — approval is never skipped. */
+   * appears — approval is never skipped.
+   *
+   * A7: cloud submits additionally preview a `cloud.plan` for the same
+   * provider/task/cost inputs. The plan's fingerprint is pinned into
+   * the commit payload, and a plan that would not admit (disabled,
+   * blocked, incompatible, unrouted, over budget) refuses up front —
+   * the approval the user gives is always for the resolved plan, not
+   * just the raw form. */
   const preview = (title: string, commandType: string,
                    payload: Record<string, unknown>, after: () => void) => {
     if (!pid) return;
     setBusy(true); setError(null); setNotice(null);
-    previewCommand(pid, commandType, payload)
-      .then((proposal) => setPending({ title, commandType, payload, proposal, after }))
+    const planPreview = commandType === "generate.text.cloud"
+      ? previewCommand(pid, "cloud.plan", {
+          provider_key: payload.provider_key,
+          task: "text",
+          model_id: payload.model_id,
+          est_cost_usd: payload.est_cost_usd,
+          max_cost_usd: payload.max_cost_usd,
+        }).then((p) => p.resolved_cloud ?? null)
+      : Promise.resolve(null);
+    Promise.all([previewCommand(pid, commandType, payload), planPreview])
+      .then(([proposal, plan]) => {
+        if (commandType === "generate.text.cloud") {
+          if (!plan?.ok) {
+            setError(`Plan refused: ${plan?.detail || plan?.error || "unknown"}`);
+            return;
+          }
+          if (!plan.would_admit) {
+            setError(`Plan would not be admitted: `
+              + (plan.unavailable_reason || plan.availability || "refused"));
+            return;
+          }
+          setPending({
+            title, commandType,
+            payload: { ...payload, plan_fingerprint: plan.plan_fingerprint },
+            proposal, after, plan,
+          });
+          return;
+        }
+        setPending({ title, commandType, payload, proposal, after, plan });
+      })
       .catch((e) => setError(`Preview failed: ${String(e)}`))
       .finally(() => setBusy(false));
   };
@@ -174,6 +212,9 @@ export function CloudPage() {
     model_id: modelId || undefined,
     prompt,
     execution_target: "cloud",
+    // A7 — the page's own estimate rides the payload so the pinned
+    // cloud.plan fingerprints the same numbers the approval showed.
+    est_cost_usd: est ? est.usd : undefined,
     max_cost_usd: maxCostNum,
   });
   const genReady = !!providerKey && !!prompt.trim() && cloudTarget
@@ -211,6 +252,13 @@ export function CloudPage() {
               <div className="flex justify-between"><dt className="text-faint">Max estimated cost</dt><dd className="text-fg">${String(pending.payload.max_cost_usd)}</dd></div>
               <div className="flex justify-between"><dt className="text-faint">Execution target</dt><dd className="text-fg">execution_target=&quot;{String(pending.payload.execution_target)}&quot;</dd></div>
               <div className="flex justify-between"><dt className="text-faint">Data out</dt><dd className="text-fg">prompt text (~{String(pending.payload.prompt ?? "").length} chars) — nothing else sent</dd></div>
+              {pending.plan && (
+                <>
+                  <div className="flex justify-between"><dt className="text-faint">Plan availability</dt><dd className="text-teal">{String(pending.plan.availability)}</dd></div>
+                  <div className="flex justify-between"><dt className="text-faint">Booking env</dt><dd className="text-fg">{String(pending.plan.environment)}</dd></div>
+                  <div className="col-span-2 flex justify-between"><dt className="text-faint">Plan fingerprint</dt><dd className="text-faint" data-testid="plan-fingerprint">{String(pending.plan.plan_fingerprint ?? "").slice(0, 20)}…</dd></div>
+                </>
+              )}
             </dl>
           )}
           <p className="mt-2 text-sm text-fg">{pending.proposal.summary}</p>

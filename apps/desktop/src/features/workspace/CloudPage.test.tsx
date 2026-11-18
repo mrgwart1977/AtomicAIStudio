@@ -231,11 +231,40 @@ beforeEach(() => {
   vi.clearAllMocks();
   store.jobs = { ...JOBS };
   apiFetch.mockImplementation(route);
-  previewCommand.mockResolvedValue({
-    summary: "Generate cloud text", warnings: ["SIMULATED transport", "prompt text (~12 chars) → OpenAI"],
-    affected: [], estimated_cost: { compute: "", currency_usd: 0.005, requires_approval: true },
-    current_revision: 7, launches_generation: true,
-  });
+  previewCommand.mockImplementation((_pid: string, ct: string) => Promise.resolve(
+    ct === "cloud.plan"
+      ? {
+          summary: "Approve cloud plan", warnings: [], affected: [],
+          current_revision: 7, launches_generation: false,
+          resolved_cloud: {
+            ok: true, provider_key: "openai", task: "text",
+            availability: "available", would_admit: true,
+            environment: "simulated", routed: true,
+            plan_fingerprint: "a1b2c3".padEnd(64, "0"),
+          },
+        }
+      : {
+          summary: "Generate cloud text", warnings: ["SIMULATED transport", "prompt text (~12 chars) → OpenAI"],
+          affected: [], estimated_cost: { compute: "", currency_usd: 0.005, requires_approval: true },
+          current_revision: 7, launches_generation: true,
+        }));
+  // Swap a refusing plan in for tests that need the gate.
+  (previewCommand as ReturnType<typeof vi.fn>)
+    .refusePlan = (reason: string) => previewCommand.mockImplementation(
+      (_pid: string, ct: string) => Promise.resolve(
+        ct === "cloud.plan"
+          ? {
+              summary: "Approve cloud plan", warnings: [], affected: [],
+              current_revision: 7, launches_generation: false,
+              resolved_cloud: {
+                ok: true, availability: "over_budget",
+                unavailable_reason: reason, would_admit: false,
+              },
+            }
+          : {
+              summary: "Generate cloud text", warnings: [], affected: [],
+              current_revision: 7, launches_generation: true,
+            }));
   commitCommand.mockResolvedValue({
     command_id: "cmd1", status: "committed", revision: 8,
     idempotent_replay: false, job_id: "job-new", warnings: [],
@@ -334,18 +363,39 @@ describe("CloudPage — generate flow", () => {
         provider_key: "openai", model_id: "gpt-5",
         prompt: "Write a beat.", execution_target: "cloud", max_cost_usd: 0.10,
       }));
+    // A7 — the same inputs were previewed as a cloud plan.
+    expect(previewCommand).toHaveBeenCalledWith("p1", "cloud.plan",
+      expect.objectContaining({ provider_key: "openai", task: "text",
+        model_id: "gpt-5", max_cost_usd: 0.10 }));
     // approval panel shows warnings + its own simulation banner
     const panel = screen.getByTestId("command-approval");
     expect(panel.textContent).toContain("SIMULATION — No external AI provider contacted.");
     expect(panel.textContent).toContain("SIMULATED transport");
     expect(panel.textContent).toContain("estimate only — not a charge");
+    // A7 — the approved plan is visible in the approval surface.
+    expect(panel.textContent).toContain("available");
+    expect(screen.getByTestId("plan-fingerprint").textContent)
+      .toContain("a1b2c3");
     expect(commitCommand).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Approve & commit"));
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "generate.text.cloud",
-      expect.objectContaining({ execution_target: "cloud" }),
+      // A7 — the plan fingerprint is pinned into the commit payload.
+      expect.objectContaining({ execution_target: "cloud",
+        plan_fingerprint: "a1b2c3".padEnd(64, "0") }),
     ));
     await waitFor(() => screen.getByText(/Committed generate\.text\.cloud/));
+  });
+
+  it("a plan that would not admit blocks the commit up front", async () => {
+    await fillForm();
+    (previewCommand as never as { refusePlan: (r: string) => void })
+      .refusePlan("estimated reservation exceeds the month budget");
+    fireEvent.click(screen.getByTestId("cloud-target"));
+    fireEvent.click(screen.getByText("Preview request"));
+    await waitFor(() => screen.getByText(/would not be admitted/));
+    expect(screen.queryByTestId("command-approval")).toBeNull();
+    expect(commitCommand).not.toHaveBeenCalled();
   });
 
   it("surfaces preview API errors instead of committing", async () => {

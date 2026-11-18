@@ -10,7 +10,7 @@ import { MaskEditor } from "./MaskEditor";
 import { computePad } from "./editorMath";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
-  CommandProposal, ImageContracts, Job,
+  CloudPlan, CommandProposal, ImageContracts, Job,
   ProviderDetail, ProviderSummary, ReferenceSet, SpendReservation, SpendSummary,
 } from "../../api/types";
 import { useApp } from "../../stores/appStore";
@@ -99,7 +99,16 @@ interface Pending {
   payload: Record<string, unknown>;
   proposal: CommandProposal;
   commandType: string;
+  /** A7 — the approved cloud plan (fingerprint pinned in payload). */
+  plan?: CloudPlan | null;
 }
+
+/** A7 — cloud submit command → the plan task the approval previews. */
+const PLAN_TASK: Record<string, string> = {
+  "generate.image.cloud": "image",
+  "generate.image.img2img": "image.img2img",
+  "generate.image.edit": "image.edit",
+};
 
 /** Authenticated thumbnail loader — shared implementation lives in
  * components/AuthImage (token in the request header, never a URL). */
@@ -388,18 +397,42 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
     inFlight.current = true;
     setBusy(true); setError(null); setNotice(null);
     const p = payload();
-    previewCommand(pid, commandType, p)
-      .then((proposal) => setPending({
-        fingerprint, commandType,
-        // C4-A — pin the resolved set contents into the committed
-        // payload: commit re-resolves and refuses if the set changed
-        // since this preview.
-        payload: proposal.resolved_references
-          ? { ...p, expected_references: proposal.resolved_references,
-              expected_set: proposal.resolved_set }
-          : p,
-        proposal,
-      }))
+    // A7 — approve against the resolved cloud plan: capability +
+    // credential presence + budget + availability, fingerprinted.
+    // Plan fields mirror payload fields so the commit-side recompute
+    // reproduces the same fingerprint.
+    const genPreview = previewCommand(pid, commandType, p);
+    const planPreview = previewCommand(pid, "cloud.plan", {
+      provider_key: p.provider_key,
+      task: PLAN_TASK[commandType],
+      model_id: p.model_id,
+      est_cost_usd: p.est_cost_usd,
+      max_cost_usd: p.max_cost_usd,
+    }).then((pp) => pp.resolved_cloud ?? null);
+    Promise.all([genPreview, planPreview])
+      .then(([proposal, plan]) => {
+        if (!plan?.ok) {
+          setError(`Plan refused: ${plan?.detail || plan?.error || "unknown"}`);
+          return;
+        }
+        if (!plan.would_admit) {
+          setError(`Plan would not be admitted: `
+            + (plan.unavailable_reason || plan.availability || "refused"));
+          return;
+        }
+        setPending({
+          fingerprint, commandType, plan,
+          // C4-A — pin the resolved set contents into the committed
+          // payload: commit re-resolves and refuses if the set changed
+          // since this preview.
+          payload: proposal.resolved_references
+            ? { ...p, expected_references: proposal.resolved_references,
+                expected_set: proposal.resolved_set,
+                plan_fingerprint: plan.plan_fingerprint }
+            : { ...p, plan_fingerprint: plan.plan_fingerprint },
+          proposal,
+        });
+      })
       .catch((e) => setError(`Preview failed: ${String(e)}`))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };

@@ -683,14 +683,19 @@ def read_prompt_draft(project: Project = Depends(get_project), db: Session = Dep
 @api_router.post("/api/projects/{project_id}/commands/preview", response_model=CommandProposalOut)
 def preview_command(
     body: CommandPreviewRequest,
+    request: Request,
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ):
     try:
+        st = request.app.state
         return cmd.preview(
             db, project,
             command_type=body.command_type, payload=body.payload, scope=body.scope,
             origin=body.origin, target_type=body.target_type, target_id=body.target_id,
+            vault=getattr(st, "provider_vault", None),
+            gpu_scheduler=getattr(st, "gpu_scheduler", None),
+            adapter_registry=getattr(st, "adapter_registry", None),
         )
     except cmd.CommandError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

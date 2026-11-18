@@ -18,6 +18,7 @@ import subprocess
 import time
 from functools import lru_cache
 from importlib.util import find_spec
+from pathlib import Path
 
 import psutil
 
@@ -238,6 +239,29 @@ def _cached_probe(_bucket: int) -> dict:
     }
 
 
+def _simulated_report() -> dict | None:
+    """A7 — deterministic simulated hardware for tests/acceptance.
+    ``ATOMIC_HW_JSON`` holds either an inline JSON object or a path to
+    a JSON file shaped like a probe report (or a partial report — its
+    keys override the real probe's). Clearly marked so simulated
+    devices are never mistaken for measured hardware."""
+    import os
+    raw = os.environ.get("ATOMIC_HW_JSON")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(Path(raw).read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+
 def probe(force: bool = False) -> dict:
     if force:
         _cached_probe.cache_clear()
@@ -245,4 +269,7 @@ def probe(force: bool = False) -> dict:
     if report.get("hardware_profile") is None:
         from app.domain import compatibility
         report = {**report, "hardware_profile": compatibility.classify_profile(report)["key"]}
+    sim = _simulated_report()
+    if sim:
+        report = {**report, **sim, "simulated": True}
     return report

@@ -131,6 +131,10 @@ class GenerationJob(Base):
     command_id: Mapped[str | None] = mapped_column(ForeignKey("creative_commands.id"), nullable=True)
     # M3: GPU the job was scheduled onto (None = CPU/not GPU-bound).
     gpu_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A7: VRAM bytes this job reserved on gpu_index at claim time
+    # (None = exclusive/unknown-footprint or non-GPU claim).
+    reserved_vram_bytes: Mapped[int | None] = mapped_column(
+        Integer, nullable=True)
     # M3: catalog key of the model this job used/downloaded (provenance).
     model_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)

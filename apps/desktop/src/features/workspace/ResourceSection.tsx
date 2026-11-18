@@ -12,8 +12,16 @@ interface SystemResources {
   };
   gpus: {
     gpu_count: number; free: number;
+    /** A7 — devices that vanished while holding reservations. */
+    lost_devices?: number[];
     slots: Array<{ index: number; name: string | null;
       vram_bytes: number | null; vram_free_bytes: number | null;
+      /** A7 — reservation accounting: usable is the admission bound;
+       * reserved is what running jobs hold; jobs maps job→bytes. */
+      usable_bytes?: number; reserved_bytes?: number;
+      free_after_reserve_bytes?: number;
+      jobs?: Record<string, number>;
+      present?: boolean;
       busy_job_id: string | null }>;
   };
   disk: {
@@ -126,17 +134,31 @@ export function ResourceSection({ setError }: { setError: (m: string | null) => 
             </div>
           </div>
 
-          {res.gpus.gpu_count > 0 ? (
+          {res.gpus.gpu_count > 0 || (res.gpus.slots?.length ?? 0) > 0 ? (
             <ul className="mt-3 space-y-1 text-xs text-muted">
-              {res.gpus.slots.map((s) => (
-                <li key={s.index} className="flex justify-between rounded border border-line px-2 py-1">
-                  <span>{"GPU " + s.index + ": " + (s.name ?? "?")}</span>
-                  <span>
-                    {fmtBytes(s.vram_free_bytes ?? s.vram_bytes ?? 0)}
-                    {s.busy_job_id ? " · in use" : " · free"}
-                  </span>
-                </li>
-              ))}
+              {res.gpus.slots.map((s) => {
+                const lost = s.present === false;
+                const jobN = Object.keys(s.jobs ?? {}).length;
+                return (
+                  <li key={s.index} className="flex justify-between rounded border border-line px-2 py-1">
+                    <span className={lost ? "text-danger" : undefined}>
+                      {"GPU " + s.index + ": " + (s.name ?? "?")}
+                      {lost ? " — lost (unplugged or driver reset)" : ""}
+                    </span>
+                    <span>
+                      {lost
+                        ? `${jobN} job(s) held reservation`
+                        : s.usable_bytes != null
+                          ? (fmtBytes(s.reserved_bytes ?? 0) + " reserved of "
+                              + fmtBytes(s.usable_bytes))
+                          : fmtBytes(s.vram_free_bytes ?? s.vram_bytes ?? 0)}
+                      {!lost && (jobN > 0
+                        ? ` · in use (${jobN} job${jobN > 1 ? "s" : ""})`
+                        : " · free")}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="mt-3 text-xs text-muted">

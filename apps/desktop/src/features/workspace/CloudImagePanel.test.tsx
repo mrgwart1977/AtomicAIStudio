@@ -244,16 +244,28 @@ beforeEach(() => {
   apiFetch.mockImplementation(route);
   fetchAssetObjectUrl.mockResolvedValue("blob:mock-thumb");
   listReferenceSets.mockResolvedValue([]);
-  previewCommand.mockResolvedValue({
-    summary: "Simulate cloud image job for openai-images",
-    warnings: ["Cost is an ESTIMATE only (~$0.1900, per_image)",
-      "Runs on a SIMULATED transport"],
-    affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
-    // The backend-authoritative estimate — what the approval MUST show.
-    cost_estimate: { est_cost_usd: 0.19, unit: "per_image", currency: "USD",
-      is_estimate: true, simulated: true, settlement: "usage-based" },
-    current_revision: 7, launches_generation: true,
-  });
+  previewCommand.mockImplementation((_pid: string, ct: string) => Promise.resolve(
+    ct === "cloud.plan"
+      ? {
+          summary: "Approve cloud plan", warnings: [], affected: [],
+          current_revision: 7, launches_generation: false,
+          resolved_cloud: {
+            ok: true, task: "image",
+            availability: "available", would_admit: true,
+            environment: "simulated", routed: true,
+            plan_fingerprint: "c1d2e3".padEnd(64, "0"),
+          },
+        }
+      : {
+          summary: "Simulate cloud image job for openai-images",
+          warnings: ["Cost is an ESTIMATE only (~$0.1900, per_image)",
+            "Runs on a SIMULATED transport"],
+          affected: [], estimated_cost: { compute: "local", currency_usd: 0, requires_approval: false },
+          // The backend-authoritative estimate — what the approval MUST show.
+          cost_estimate: { est_cost_usd: 0.19, unit: "per_image", currency: "USD",
+            is_estimate: true, simulated: true, settlement: "usage-based" },
+          current_revision: 7, launches_generation: true,
+        }));
   commitCommand.mockResolvedValue({
     command_id: "cmd1", status: "committed", revision: 8,
     idempotent_replay: false, job_id: "job-new", warnings: [],
@@ -488,7 +500,9 @@ describe("CloudImagePanel — preview → approve → commit", () => {
     fireEvent.click(btn);
     fireEvent.click(btn);
     fireEvent.click(btn);
-    await waitFor(() => expect(previewCommand).toHaveBeenCalledTimes(1));
+    // generate + cloud.plan previews — the in-flight guard still
+    // blocks every subsequent click.
+    await waitFor(() => expect(previewCommand).toHaveBeenCalledTimes(2));
     expect(btn.disabled).toBe(true);
     release({ summary: "s", warnings: [], affected: [], current_revision: 7,
       estimated_cost: null, launches_generation: true });

@@ -1,0 +1,18 @@
+A7 ACCEPTANCE 15/15 PASS — exe C:\Users\gwart\AppData\Local\Atomic Dream Engine\atomic-dream-engine.exe
+INFO backend http://127.0.0.1:62658 via installed app
+PASS 1. single-GPU scheduling — sim job ran on GPU 0 with a recorded + released 2 GiB reservation
+PASS 2. concurrent mock jobs — running job holds an accounted 2 GiB reservation
+INFO backend http://127.0.0.1:57749 via installed app
+PASS 3. multi-GPU scheduling — 6 GiB jobs landed on GPUs 0 and 1
+PASS 4. resource admission — pin honored (GPU 1), CPU lane clean, missing-device preview refused honestly
+PASS 5. oversubscription refused — "no device fits — job needs ~24.0 GiB VRAM; best free device offers ~8.0 GiB after reservations"
+PASS 6. cancellation — running job cancelled, reservation released
+PASS 7. worker failure — simulated crash failed the job, reservation released
+PASS 8. restart recovery — killed running job reconciled failed/interrupted, no stale reservation
+PASS 9. provider capability preview — blocked→available on credential presence, env=simulated, fingerprint pinned
+PASS 10. cost estimation — reserved 10000µ against 4 budget scopes
+PASS 11. budget refusal — over-budget plan refused at preview and commit
+PASS 12. explicit approval — plan committed, pinned submit dispatched (simulated), drifted pin refused
+PASS 13. retry protection — duplicate commit idempotent
+PASS 14. no real provider activity — 1 cloud job(s), all bookings simulated
+PASS 15. clean shutdown — app + backend exited

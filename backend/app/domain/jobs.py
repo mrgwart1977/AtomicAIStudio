@@ -271,14 +271,22 @@ class JobEngine:
                     continue
                 gpu_idx = None
                 if getattr(adapter.profile, "needs_gpu", False) and self._sched is not None:
-                    est = (job.request_json or {}).get("est_vram_bytes")
-                    gpu_idx = self._sched.acquire(job.id, dict(job.request_json or {}),
-                                                  est_vram=est)
+                    req0 = dict(job.request_json or {})
+                    est = req0.get("est_vram_bytes")
+                    requires = req0.get("requires") or getattr(
+                        adapter.profile, "requires_backend", None) or []
+                    if isinstance(requires, str):
+                        requires = [requires]
+                    gpu_idx = self._sched.acquire(job.id, req0,
+                                                  est_vram=est,
+                                                  requires=requires)
                     if gpu_idx is None:
                         job.message = f"waiting for GPU — {self._sched.last_reason or 'no slot free'}"
                         s.commit()
                         continue
                     job.gpu_index = gpu_idx if gpu_idx >= 0 else None
+                    job.reserved_vram_bytes = (
+                        est if gpu_idx >= 0 else None)
                     req = dict(job.request_json or {})
                     req["assigned_gpu"] = gpu_idx
                     job.request_json = req

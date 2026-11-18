@@ -110,6 +110,8 @@ SUPPORTED_COMMANDS = {
     # A6 — first-cut assembly: deterministic plan → review → apply
     "assembly.plan", "assembly.apply", "assembly.review",
     "assembly.revert",
+    # A7 — simulated GPU work + provider-neutral cloud planning
+    "sim.gpu.work", "cloud.plan",
     # C5-A — timeline assembly (edit decisions, not rendering)
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
@@ -149,6 +151,8 @@ GENERATION_COMMANDS = {"generate.image.mock", "generate.image",
                        "clip.generate",
                        # A5 — dialogue mock audio generation.
                        "dialogue.generate",
+                       # A7 — simulated GPU work (durable gen-lane job).
+                       "sim.gpu.work",
                        # C5-B — timeline export launches a durable job.
                        "timeline.export"}
 
@@ -165,6 +169,8 @@ SPEND_GUARDED_COMMANDS = {
     "cloud.live.disable_all", "cloud.live.resume",
     # B2a permit arm/run — check-then-act on permit + financial state
     "cloud.live.validate_arm", "cloud.live.validate_run",
+    # A7 — plan approval checks budget state before recording
+    "cloud.plan",
     # project.delete checks for unresolved spend holds — the check must
     # hold the write lock or a concurrent admission could slip an open
     # reservation between check and delete (unreconcilable hold left
@@ -203,6 +209,8 @@ JOB_COMMANDS = {
     "clip.generate": "mock.video",
     # A5 — deterministic mock audio only; dialogue.result lands it.
     "dialogue.generate": "mock.audio",
+    # A7 — deterministic simulated GPU work; scheduler test double.
+    "sim.gpu.work": "mock.gpu.sim",
     "asset.import": "ops.asset.import",
     "bridge.import": "ops.asset.import",
     "asset.relink": "ops.asset.relink",
@@ -422,6 +430,14 @@ def _summary(command_type: str, payload: dict) -> str:
         return f"Review assembly items ({payload.get('status', 'pending')})"
     if command_type == "assembly.revert":
         return f"Revert assembly plan to revision {payload.get('to_revision')}"
+    if command_type == "sim.gpu.work":
+        dev = payload.get("device", "auto")
+        return (f"Simulated GPU work on {dev}"
+                + (f" (~{int(payload['est_vram_bytes']) // 2**30} GiB)"
+                   if payload.get("est_vram_bytes") else ""))
+    if command_type == "cloud.plan":
+        return (f"Plan cloud job for {payload.get('provider_key', '?')} / "
+                f"{payload.get('task', '?')}")
     if command_type.startswith("screenplay."):
         if command_type == "screenplay.create":
             return f"Create screenplay '{payload.get('title', '')}'"
@@ -1809,6 +1825,39 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         _validate_dialogue(session, project, command_type, payload)
     if command_type.startswith("assembly."):
         _validate_assembly(session, project, command_type, payload)
+    if command_type == "sim.gpu.work":
+        # A7 — deterministic simulated GPU work. Validates the request
+        # shape; admission itself is the scheduler's claim-time call.
+        est = payload.get("est_vram_bytes")
+        if est is not None and (not isinstance(est, int)
+                                or isinstance(est, bool) or est <= 0):
+            raise CommandError(
+                422, "est_vram_bytes must be a positive integer")
+        dev = payload.get("device")
+        if dev is not None and not (
+                dev in ("auto", "cpu")
+                or (isinstance(dev, int) and not isinstance(dev, bool))):
+            raise CommandError(
+                422, "device must be 'auto', 'cpu', or a GPU index")
+        req = payload.get("requires") or []
+        if isinstance(req, str):
+            req = [req]
+        bad = [r for r in req if r not in ("cuda", "vulkan", "directml")]
+        if bad:
+            raise CommandError(
+                422, f"unknown backend requirement(s): {', '.join(bad)}")
+        warnings.append(
+            "Simulated GPU work — a scheduler test double, not inference")
+    if command_type == "cloud.plan":
+        # A7 — provider-neutral planning preview. Read-only resolver;
+        # commit records the approval (and its fingerprint) only.
+        if not payload.get("provider_key"):
+            raise CommandError(422, "provider_key is required")
+        if not (payload.get("task") or "").strip():
+            raise CommandError(422, "task is required")
+        from app.domain.providers import catalog as _pc
+        if _pc.get_provider(payload["provider_key"]) is None:
+            raise CommandError(404, "provider not found in catalog")
     if command_type == "shot.move" and payload.get("to_scene_id"):
         _get_scene(session, project, {"scene_id": payload["to_scene_id"]})
     if command_type.startswith("shot.cast."):
@@ -3033,7 +3082,8 @@ def _preview_cost_estimate(command_type: str, payload: dict) -> dict | None:
 
 
 def preview(session: Session, project: Project, *, command_type: str, payload: dict,
-            scope: str, origin: str, target_type: str | None, target_id: str | None) -> dict:
+            scope: str, origin: str, target_type: str | None, target_id: str | None,
+            vault=None, gpu_scheduler=None, adapter_registry=None) -> dict:
     if command_type not in SUPPORTED_COMMANDS:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
     warnings = _validate(session, project, command_type, payload)
@@ -3350,6 +3400,47 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
                     "when listed in approve_remove")
         except CommandError:
             pass
+    if command_type == "cloud.plan":
+        # A7 — provider-neutral planning preview: capability + model
+        # compatibility + cost estimate + budget headroom + credential
+        # presence + availability, with the fingerprint a submit pins.
+        from app.domain import cloudplan as _cp
+        out["resolved_cloud"] = _cp.resolved_plan(
+            session, project,
+            provider_key=payload["provider_key"],
+            task=payload["task"],
+            model_id=payload.get("model_id"),
+            est_cost_usd=payload.get("est_cost_usd"),
+            max_cost_usd=payload.get("max_cost_usd"),
+            vault=vault, registry=adapter_registry,
+            adapter_for_command=lambda ct: _cloud_route_adapter(
+                adapter_registry, ct, payload.get("provider_key")))
+        if not out["resolved_cloud"].get("would_admit"):
+            out["warnings"].append(
+                out["resolved_cloud"].get("unavailable_reason")
+                or "this plan would not be admitted as-is")
+    if command_type == "sim.gpu.work" and gpu_scheduler is not None:
+        # A7 — what the scheduler would do with this job RIGHT NOW:
+        # the device it would land on (or the queue reason), without
+        # taking the reservation. Dry-run via a scratch scheduler so
+        # the preview never perturbs real state.
+        from app.domain.gpu_sched import GpuScheduler
+        sim = GpuScheduler(hw_probe=gpu_scheduler._probe,
+                           prefs=gpu_scheduler._prefs())
+        req = payload.get("requires") or []
+        if isinstance(req, str):
+            req = [req]
+        idx = sim.acquire("__preview__", dict(payload),
+                          est_vram=payload.get("est_vram_bytes"),
+                          requires=req)
+        out["resolved_gpu"] = {
+            "would_schedule": idx is not None,
+            "device": ("cpu" if idx == -1 else idx),
+            "queue_reason": (None if idx is not None
+                             else (sim.last_reason or "no free device")),
+            "slots": gpu_scheduler.slots(),
+            "lost_devices": gpu_scheduler.lost_devices(),
+        }
     return out
 
 
@@ -4994,6 +5085,39 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _commit_dialogue(session, project, command, command_type,
                          payload, audit)
 
+    elif command_type == "cloud.plan":
+        # A7 — durable approval record for a provider-neutral plan:
+        # recomputes the plan and refuses when the pinned fingerprint
+        # no longer matches (provider disabled, credential removed,
+        # availability changed). Writes nothing else — the auditable
+        # approval IS the commit.
+        from app.domain import cloudplan as _cp
+        resolved = _cp.resolved_plan(
+            session, project,
+            provider_key=payload["provider_key"],
+            task=payload["task"],
+            model_id=payload.get("model_id"),
+            est_cost_usd=payload.get("est_cost_usd"),
+            max_cost_usd=payload.get("max_cost_usd"),
+            vault=vault, registry=getattr(
+                job_engine, "_registry", None),
+            adapter_for_command=lambda ct: _cloud_route_adapter(
+                getattr(job_engine, "_registry", None), ct,
+                payload.get("provider_key")))
+        pinned = payload.get("expected_plan_fingerprint")
+        if pinned is not None \
+                and pinned != resolved.get("plan_fingerprint"):
+            raise CommandError(
+                422, {"error": "plan_stale",
+                      "detail": "provider/capability/budget state changed "
+                                "since the plan was previewed — re-preview"})
+        if not resolved.get("would_admit"):
+            raise CommandError(
+                422, {"error": resolved.get("availability") or "refused",
+                      "detail": resolved.get("unavailable_reason")
+                      or "this plan would not be admitted"})
+        audit["after"]["cloud_plan"] = resolved
+
     elif command_type.startswith("assembly."):
         _commit_assembly(session, project, command, command_type,
                          payload, audit)
@@ -5025,6 +5149,36 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                              if command_type == "shot.generate"
                              and request.get("mode") == "img2img"
                              else JOB_COMMANDS[command_type]))
+        # A7 — a submit carrying plan_fingerprint pins the exact cloud
+        # plan it was approved against; provider/credential/budget
+        # drift since the preview refuses the submit.
+        if payload.get("plan_fingerprint") is not None:
+            from app.domain import cloudplan as _cp
+            # Same task namespace the approval used — invert
+            # TASK_ROUTES so a submit reproduces its plan's fingerprint.
+            _COMMAND_TASK = {v: k for k, v in _cp.TASK_ROUTES.items()}
+            _task = payload.get("task") or _COMMAND_TASK.get(
+                command_type) or command_type
+            _res = _cp.resolved_plan(
+                session, project,
+                provider_key=payload.get("provider_key"),
+                task=_task,
+                # Payload fields only — the approved plan fingerprints
+                # what the user previewed, not the enriched request.
+                model_id=payload.get("model_id"),
+                est_cost_usd=payload.get("est_cost_usd"),
+                max_cost_usd=payload.get("max_cost_usd"),
+                vault=vault, registry=job_engine._registry,
+                adapter_for_command=lambda ct: _cloud_route_adapter(
+                    job_engine._registry, ct,
+                    payload.get("provider_key")
+                    or request.get("provider_key")))
+            if _res.get("plan_fingerprint") != payload["plan_fingerprint"]:
+                raise CommandError(
+                    422, {"error": "plan_stale",
+                          "detail": "provider, capability, credential, or "
+                                    "budget state changed since the plan "
+                                    "was approved — re-run cloud.plan"})
         try:
             job = job_engine.enqueue(
                 session,
@@ -5045,6 +5199,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     # a resubmit could duplicate (simulated) billable work.
                     "generate.text.cloud", "generate.image.cloud",
                     "generate.image.img2img", "generate.image.edit",
+                    "sim.gpu.work",
                     # C5-B — an interrupted export restarts from
                     # scratch; never mid-file.
                     "timeline.export"),
@@ -5381,6 +5536,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
 
 def _job_kind(command_type: str) -> str:
     return {
+        "sim.gpu.work": "sim",
         "generate.image.mock": "image",
         "generate.image": "image",
         "generate.image.persistent": "image",
@@ -5415,6 +5571,20 @@ def _cloud_adapter_id(registry, provider_key: str) -> str:
                                    lambda k: False)(provider_key):
         return "cloud.text.rest"
     return JOB_COMMANDS["generate.text.cloud"]
+
+
+def _cloud_route_adapter(registry, command_type: str,
+                         provider_key: str | None):
+    """The adapter a cloud submit for (command, provider) would run —
+    mirrors the JOB_COMMANDS + _cloud_adapter_id resolution at commit
+    so cloud.plan reports the environment of the same adapter the
+    dispatch path would pick."""
+    if registry is None or not command_type:
+        return None
+    if command_type == "generate.text.cloud":
+        return registry.get(_cloud_adapter_id(registry,
+                                              provider_key or ""))
+    return registry.get(JOB_COMMANDS.get(command_type))
 
 
 def _export_edl(session: Session, tl) -> dict:
