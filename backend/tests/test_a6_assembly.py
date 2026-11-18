@@ -318,11 +318,19 @@ def test_conflict_replace_requires_approval(client):
     au = _audio(client, pid, name="manual.wav")
     dx = _track(client, pid, t["id"], kind="audio", name="DX")
     _place(client, pid, t["id"], au, dx["id"], at=0)
-    _plan(client, pid, t["id"])
+    plan = _plan(client, pid, t["id"])
+    conflicted = [i["key"] for i in plan["items"]
+                  if i["flags"]["conflicts"]]
+    assert conflicted
     r = _apply(client, pid, t["id"], resolve_conflicts="bogus",
                expect=422)
     assert "resolve_conflicts" in r.text
-    _apply(client, pid, t["id"], resolve_conflicts="replace")
+    # Bare 'replace' is refused — approval must name the items.
+    r = _apply(client, pid, t["id"], resolve_conflicts="replace",
+               expect=422)
+    assert "replace_keys" in r.text
+    _apply(client, pid, t["id"], resolve_conflicts="replace",
+           replace_keys=conflicted)
     det = _detail(client, pid, t["id"])
     assert not [c for c in det["clips"]
                 if c["source_asset_id"] == au["id"]]
@@ -641,3 +649,488 @@ def test_restart_persistence(client, tmp_path):
         assert p.applied_json["items"]
         n = s.query(AssemblyItem).filter_by(plan_id=p.id).count()
         assert n == len(plan["items"])
+
+
+# ---------- F2: atomic apply ----------
+
+def test_apply_failure_rolls_back_everything(client, monkeypatch):
+    """A catastrophic mid-apply failure commits nothing: no partial
+    clips, no applied records, no undo entry, plan stays draft — and a
+    clean retry applies fully + idempotently."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    from app.domain import timeline as tld
+    orig = tld.insert_clip
+    calls = {"n": 0}
+
+    def boom(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("injected mid-apply failure")
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(tld, "insert_clip", boom)
+    with pytest.raises(RuntimeError):
+        _apply(client, pid, t["id"])
+    monkeypatch.setattr(tld, "insert_clip", orig)
+
+    det = _detail(client, pid, t["id"])
+    assert det["clips"] == []
+    assert det["undo_label"] is None
+    with client.app.state.session_factory() as s:
+        from app.db.models import AssemblyPlan, Timeline
+        row = s.get(AssemblyPlan, plan["id"])
+        assert row.status == "draft"
+        assert not (row.applied_json or {}).get("items")
+        assert (s.get(Timeline, t["id"]).undo_stack_json or []) == []
+
+    # Clean retry: full apply, then an idempotent no-op replay.
+    _apply(client, pid, t["id"])
+    n = len(_detail(client, pid, t["id"])["clips"])
+    assert n >= 3
+    _apply(client, pid, t["id"])
+    assert len(_detail(client, pid, t["id"])["clips"]) == n
+
+
+def test_single_insert_failure_records_skip(client, monkeypatch):
+    """A per-item TimelineError is the designed graceful outcome: that
+    item is skipped with a recorded reason, the rest of the apply
+    still commits, and the plan records the partial result."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    from app.domain import timeline as tld
+    orig = tld.insert_clip
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise tld.TimelineError("injected placement failure")
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(tld, "insert_clip", flaky)
+    _apply(client, pid, t["id"])
+    got = _plan_detail(client, pid, plan["id"])
+    assert got["status"] == "applied"
+    with client.app.state.session_factory() as s:
+        from app.db.models import AssemblyPlan
+        row = s.get(AssemblyPlan, plan["id"])
+        skipped = (row.applied_json or {}).get("skipped") or []
+    assert any("placement failure" in (n.get("reason") or "")
+               for n in skipped)
+    det = _detail(client, pid, t["id"])
+    # One item skipped, the remaining items still placed.
+    assert len(det["clips"]) == len(
+        [i for i in plan["items"]
+         if not i["flags"].get("missing")]) - 1
+
+
+# ---------- F3: conflict approval scope ----------
+
+def test_replace_keys_scope_to_previewed_conflicts(client):
+    """Two flagged conflicts; approving only one replaces only that
+    item's clips — the unapproved manual edit is preserved."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    _apply(client, pid, t["id"])
+    items = {i["key"]: i for i in
+             _plan_detail(client, pid, plan["id"])["items"]}
+    shot_item = next(i for i in items.values() if i["kind"] == "shot")
+    dlg_item = next(i for i in items.values() if i["kind"] == "dialogue")
+    v_clip_id = shot_item["timeline_clip_id"]
+    d_clip_id = dlg_item["timeline_clip_id"]
+    # Two manual edits — one on video, one on dialogue audio.
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": t["id"], "clip_id": v_clip_id,
+             "start_frames": 300})
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": t["id"], "clip_id": d_clip_id,
+             "start_frames": 320})
+    plan2 = _plan(client, pid, t["id"])  # re-plan re-flags both
+    items2 = {i["key"]: i for i in plan2["items"]}
+    assert items2[shot_item["key"]]["flags"]["conflicts"]
+    assert items2[dlg_item["key"]]["flags"]["conflicts"]
+
+    # Preview the scoped replacement — approval sees exact scope.
+    pv = _preview(client, pid, "assembly.apply",
+                  {"timeline_id": t["id"],
+                   "resolve_conflicts": "replace",
+                   "replace_keys": [shot_item["key"]]})
+    disp = {d["key"]: d for d in pv["resolved_assembly"]["items"]}
+    assert disp[shot_item["key"]]["action"] == "replace"
+    assert disp[dlg_item["key"]]["action"] == "skip"
+
+    _apply(client, pid, t["id"], resolve_conflicts="replace",
+           replace_keys=[shot_item["key"]])
+    det = _detail(client, pid, t["id"])
+    # The approved conflict was replaced at planned geometry (the old
+    # moved clip is gone; the new clip sits at the planned start).
+    assert not [c for c in det["clips"] if c["id"] == v_clip_id]
+    v_new = next(c for c in det["clips"]
+                 if c["shot_id"] == shot_item["shot_id"]
+                 and det["tracks"] and any(
+                     tr["id"] == c["track_id"] and tr["kind"] == "video"
+                     for tr in det["tracks"]))
+    assert v_new["start_frames"] == shot_item["start_frames"]
+    # The unapproved manual edit is untouched.
+    d_still = next(c for c in det["clips"] if c["id"] == d_clip_id)
+    assert d_still["start_frames"] == 320
+
+
+def test_replace_keys_rejects_unflagged_key(client):
+    """Approval can't reach items the preview didn't flag — an
+    unflagged key (or a bogus key) refuses the whole apply."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    shot_key = next(i["key"] for i in plan["items"]
+                    if i["kind"] == "shot")
+    r = _apply(client, pid, t["id"], resolve_conflicts="replace",
+               replace_keys=[shot_key], expect=422)
+    assert "conflict" in r.text or "replace_keys" in r.text
+    _apply(client, pid, t["id"], resolve_conflicts="replace",
+           replace_keys=["shot:bogus"], expect=422)
+
+
+def test_post_plan_timeline_edit_refuses_apply(client):
+    """A manual timeline edit between plan and apply stales the plan —
+    even a validly-scoped replace approval refuses on drift."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    # Manual clip occupying the dialogue lane BEFORE the plan —
+    # previewed conflict is flagged on the dialogue item.
+    au = _audio(client, pid, name="manual.wav")
+    dx = _track(client, pid, t["id"], kind="audio", name="DX")
+    _place(client, pid, t["id"], au, dx["id"], at=0)
+    plan = _plan(client, pid, t["id"])
+    conflicted = [i["key"] for i in plan["items"]
+                  if i["flags"]["conflicts"]]
+    assert conflicted
+    # A second manual edit AFTER the plan was computed → stale.
+    _place(client, pid, t["id"], _audio(client, pid, name="m2.wav"),
+           dx["id"], at=4000)
+    _apply(client, pid, t["id"], expect=422)
+    _apply(client, pid, t["id"], resolve_conflicts="replace",
+           replace_keys=conflicted, expect=422)
+
+
+def test_duplicate_apply_is_clean_noop(client):
+    """Re-applying an unchanged plan/timeline is an audited no-op —
+    no duplicate clips, no extra undo frame, no revision bump."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    _apply(client, pid, t["id"])
+    p1 = _plan_detail(client, pid, plan["id"])
+    _apply(client, pid, t["id"])
+    p2 = _plan_detail(client, pid, plan["id"])
+    assert p2["revision"] == p1["revision"]
+    assert _detail(client, pid, t["id"])["undo_label"] == \
+        "Applied first-cut assembly"
+
+
+# ---------- F4: source freshness ----------
+
+def test_deleted_result_asset_stales_plan(client):
+    """Result-asset liveness is fingerprinted — archiving the take's
+    result asset stales the plan even with the clip row untouched."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    _plan(client, pid, t["id"])
+    with client.app.state.session_factory() as s:
+        from app.db.models import Asset, MotionClip
+        mc = s.get(MotionClip, su["clip1"]["id"])
+        a = s.get(Asset, mc.result_asset_id)
+        assert a is not None
+        a.status = "archived"
+        s.commit()
+    pv = _preview(client, pid, "assembly.apply",
+                  {"timeline_id": t["id"]})
+    assert pv["resolved_assembly"]["sources_stale"] is True
+    _apply(client, pid, t["id"], expect=422)
+
+
+def test_manual_edit_after_apply_stales_plan(client):
+    """The timeline_after exemption covers only the exact post-apply
+    state — a later manual edit stales the plan again."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    _apply(client, pid, t["id"])
+    shot_item = next(i for i in
+                     _plan_detail(client, pid, plan["id"])["items"]
+                     if i["kind"] == "shot")
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": t["id"],
+             "clip_id": shot_item["timeline_clip_id"],
+             "start_frames": 500})
+    pv = _preview(client, pid, "assembly.apply",
+                  {"timeline_id": t["id"]})
+    assert pv["resolved_assembly"]["sources_stale"] is True
+    _apply(client, pid, t["id"], expect=422)
+
+
+# ---------- F5: review + undo preservation ----------
+
+def test_review_votes_and_notes_survive_replan(client):
+    """Re-plan preserves review state on stable item keys — votes and
+    notes carry across recomputed proposals."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    item = plan["items"][0]
+    _review(client, pid, plan["id"], item_ids=[item["id"]],
+            status="approved", note="looks right")
+    # Force a re-plan that changes the proposal — archive shot 2.
+    _commit(client, pid, "shot.archive",
+            {"shot_id": su["s2"]["shot"]["shot"]["id"]})
+    plan2 = _plan(client, pid, t["id"])
+    kept = next(i for i in plan2["items"]
+                if i["key"] == item["key"])
+    assert kept["review_status"] == "approved"
+    assert kept["notes"] == "looks right"
+    # The removed source is a flagged row, not silently dropped.
+    removed = plan2["proposal"]["removed"]
+    assert any(r.get("kind") == "shot" for r in removed)
+
+
+def test_undo_restores_exact_pre_apply_state(client):
+    """Undo of the apply restores the EXACT previous timeline —
+    clip set, track set, positions — not an approximation."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    _plan(client, pid, t["id"])
+    before = _detail(client, pid, t["id"])
+    _apply(client, pid, t["id"])
+    _commit(client, pid, "timeline.undo", {"timeline_id": t["id"]})
+    after = _detail(client, pid, t["id"])
+    assert [dict(c, id=None, created_at=None)
+            for c in after["clips"]] == \
+           [dict(c, id=None, created_at=None)
+            for c in before["clips"]]
+    assert {tr["name"] for tr in after["tracks"]} == \
+        {tr["name"] for tr in before["tracks"]}
+
+
+# ---------- F6: export A/V integrity ----------
+
+@pytest.fixture()
+def media_tools():
+    from app.domain.media import binaries
+    if binaries.ffmpeg() is None or binaries.ffprobe() is None:
+        pytest.skip(
+            "ffmpeg/ffprobe not resolvable — run scripts/fetch-ffmpeg.ps1")
+
+
+@pytest.fixture()
+def dev_ffmpeg() -> str:
+    import shutil
+    from app.domain.media import binaries
+    if (which := shutil.which("ffmpeg")):
+        return which
+    tool = binaries.ffmpeg()
+    if tool is not None:
+        return tool["path"]
+    pytest.skip("no ffmpeg available to synthesize fixtures")
+
+def _pcm_windows(ffmpeg: str, media: Path, *, rate=48000,
+                 window_s=0.25) -> list[float]:
+    """Decode the audio stream to mono s16le PCM and return per-window
+    RMS (0..1) — placement/silence verified on real decoded samples."""
+    import subprocess, struct
+    r = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(media), "-map", "0:a:0",
+         "-f", "s16le", "-ac", "1", "-ar", str(rate), "-"],
+        capture_output=True, timeout=120)
+    assert r.returncode == 0 and r.stdout, r.stderr[:400]
+    n = len(r.stdout) // 2
+    smp = struct.unpack(f"<{n}h", r.stdout[: n * 2])
+    w = int(rate * window_s)
+    return [
+        (sum(x * x for x in smp[i:i + w]) / max(1, len(smp[i:i + w])))
+        ** 0.5 / 32768.0
+        for i in range(0, n - (n % w), w)]
+
+
+def _ffprobe_streams(ffprobe: str, media: Path) -> dict:
+    import json, subprocess
+    r = subprocess.run(
+        [ffprobe, "-v", "error", "-print_format", "json",
+         "-count_frames", "-show_streams", "-show_format",
+         str(media)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[:300]
+    return json.loads(r.stdout)
+
+
+def _cas_wav(client, pid, path: Path, name="sfx.wav"):
+    """Real audio bytes into CAS + asset/version rows (mirrors
+    test_c5b_export._cas_video for audio)."""
+    import hashlib, shutil
+    from pathlib import Path as _P
+    from app.domain.media import engine
+    from app.db.models import (Asset, AssetFile, AssetVersion,
+                               StorageLocation, new_id)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    data_dir = _P(client.app.state.settings.data_dir)
+    rel = _P("blobs") / sha[:2] / sha
+    dest = data_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, dest)
+    meta = engine.probe_audio(dest)
+    assert meta["ok"], meta.get("reason")
+    with client.app.state.session_factory() as s:
+        loc = s.query(StorageLocation).first()
+        if s.get(AssetFile, sha) is None:
+            s.add(AssetFile(
+                sha256=sha,
+                storage_location_id=loc.id if loc else None,
+                rel_path=str(rel).replace("\\", "/"),
+                byte_size=path.stat().st_size, status="ready"))
+        a = Asset(id=new_id(), project_id=pid, name=name, kind="audio",
+                  origin="imported", uri=str(rel).replace("\\", "/"),
+                  sha256=sha, byte_size=path.stat().st_size,
+                  status="ready")
+        s.add(a)
+        s.flush()
+        v = AssetVersion(id=new_id(), asset_id=a.id, version_no=1,
+                         sha256=sha, media_json={"probe": meta})
+        s.add(v)
+        s.flush()
+        a.current_version_id = v.id
+        s.commit()
+        return {"id": a.id, "version_id": v.id, "probe": meta}
+
+
+@pytest.mark.usefixtures("media_tools")
+def test_multiscene_export_av_integrity(client, dev_ffmpeg, tmp_path):
+    """F6 — a two-scene first cut exports through the real ffmpeg
+    pipeline: h264 + aac streams, expected frame count at the timeline
+    rate, shot-relative dialogue offsets, an overflow DX2 lane, a music
+    lane clip — and a decoded-PCM silence gap proving placement is
+    exact with no bleed or duplication."""
+    from app.domain.media import binaries
+    from app.db.models import AssetFile
+    from tests.test_c5b_export import _export, _out_asset
+
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)   # 2 scenes × shot + 48f take + line
+    # A second, overlapping line on shot 1 → deterministic DX2 lane.
+    _mk_line(client, pid, su["s1"], su["s1"]["shot"],
+             text="Overlapping whisper.",
+             timing={"start_frames": 0})
+    # A late line on shot 2 at 12 s — leaves a real silence gap after
+    # scene-1/scene-2 audio (≈0–4.3 s).
+    _mk_line(client, pid, su["s2"], su["s2"]["shot"],
+             text="Late answer.", timing={"start_frames": 240})
+    # Real music asset linked to shot 1 → MX lane.
+    import subprocess as _sp
+    wav = tmp_path / "mx.wav"
+    _sp.run([dev_ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+             "sine=frequency=330:duration=2.0", str(wav)],
+            check=True, capture_output=True)
+    mx = _cas_wav(client, pid, wav, name="score.wav")
+    _commit(client, pid, "entity.assets.link",
+            {"entity_type": "shot",
+             "entity_id": su["s1"]["shot"]["shot"]["id"],
+             "asset_id": mx["id"], "role": "voice",
+             "label": "score"})
+
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    lanes = plan["proposal"]["lanes"]
+    assert "dialogue2" in lanes, f"no DX2 lane: {list(lanes)}"
+    _apply(client, pid, t["id"])
+    det = _detail(client, pid, t["id"])
+    names = {tr["name"] for tr in det["tracks"]}
+    assert {"V1", "DX", "DX2", "MX"} <= names
+
+    job = _export(client, pid, t["id"], profile="720p")
+    assert job["status"] == "succeeded", job.get("error")
+    a, v, j = _out_asset(client, pid, job)
+    assert a and a.kind == "video"
+    with client.app.state.session_factory() as s:
+        af = s.get(AssetFile, v.sha256)
+        out = client.app.state.storage.file_path(s, af)
+
+    fp = binaries.ffprobe()
+    assert fp is not None
+    pr = _ffprobe_streams(fp["path"], out)
+    vs = next(s for s in pr["streams"] if s["codec_type"] == "video")
+    aud = next(s for s in pr["streams"] if s["codec_type"] == "audio")
+    assert vs["codec_name"] == "h264" and aud["codec_name"] == "aac"
+
+    # Program duration covers the last clip end; clip geometry is in
+    # SOURCE units — convert to timeline frames via each clip's src fps.
+    dur = float(pr["format"]["duration"])
+    tl_fps = 24.0
+
+    def end_s(c):
+        ext_tl = (c["out_frame"] - c["in_frame"]) \
+            * tl_fps * c["src_fps_den"] / c["src_fps_num"]
+        return (c["start_frames"] + ext_tl) / tl_fps
+
+    expected_end = max(end_s(c) for c in det["clips"])
+    assert abs(dur - expected_end) < 0.6, (dur, expected_end)
+    nframes = int(vs.get("nb_read_frames") or vs.get("nb_frames") or 0)
+    assert abs(nframes - round(dur * 24)) <= 4, (nframes, dur)
+
+    # Decoded-PCM placement: loud where dialogue/music sit, silent in
+    # the gap — no bleed, no duplication, no unintended clipping.
+    wins = _pcm_windows(dev_ffmpeg, out)
+
+    def rms(t0, t1):
+        lo, hi = int(t0 / 0.25), min(len(wins), int(t1 / 0.25))
+        return max(wins[lo:hi]) if hi > lo else 0.0
+
+    assert rms(0.3, 1.8) > 0.01, "scene-1 audio missing/quiet"
+    assert rms(5.0, 11.5) < 0.002, "audio bleed into the gap"
+    assert rms(12.2, 13.8) > 0.01, "late scene-2 line missing/misplaced"
+
+
+def test_skip_then_scoped_replace_apply_not_noop(client):
+    """Regression: a skip-apply must not poison the idempotent no-op.
+    After apply → manual edit → re-plan → skip-apply, a later apply
+    with different options (approved replace) re-walks the decisions
+    instead of no-op'ing on the stale kept-only applied_json."""
+    pid = make_project(client)["id"]
+    su = _full_setup(client, pid)
+    t = _tl(client, pid)
+    plan = _plan(client, pid, t["id"])
+    _apply(client, pid, t["id"])
+    items = {i["key"]: i for i in
+             _plan_detail(client, pid, plan["id"])["items"]}
+    shot_item = next(i for i in items.values() if i["kind"] == "shot")
+    v_clip_id = shot_item["timeline_clip_id"]
+    _commit(client, pid, "timeline.clip.move",
+            {"timeline_id": t["id"], "clip_id": v_clip_id,
+             "start_frames": 300})
+    _plan(client, pid, t["id"])  # re-plan flags the edited clip
+    # The poison step: a skip-apply records kept-only applied items.
+    _apply(client, pid, t["id"], resolve_conflicts="skip")
+    det = _detail(client, pid, t["id"])
+    assert next(c for c in det["clips"]
+                if c["id"] == v_clip_id)["start_frames"] == 300
+    # Now the approved replace must actually run.
+    _apply(client, pid, t["id"], resolve_conflicts="replace",
+           replace_keys=[shot_item["key"]])
+    det = _detail(client, pid, t["id"])
+    assert not [c for c in det["clips"] if c["id"] == v_clip_id]
+    v_new = next(c for c in det["clips"]
+                 if c["shot_id"] == shot_item["shot_id"]
+                 and any(tr["id"] == c["track_id"]
+                         and tr["kind"] == "video"
+                         for tr in det["tracks"]))
+    assert v_new["start_frames"] == shot_item["start_frames"]

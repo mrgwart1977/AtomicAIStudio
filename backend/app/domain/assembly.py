@@ -387,6 +387,12 @@ def sources_fingerprint(session: Session, project_id: str,
         shot_sigs = []
         for shot in shots:
             src = _shot_source(session, shot)
+
+            def _res_status(asset_id):
+                a = session.get(Asset, asset_id) if asset_id else None
+                return a.status if a is not None else (
+                    "missing" if asset_id else None)
+
             shot_sigs.append({
                 "shot_id": shot.id, "position": shot.position,
                 "revision": shot.revision,
@@ -395,6 +401,7 @@ def sources_fingerprint(session: Session, project_id: str,
                     "id": c.id, "position": c.position,
                     "revision": c.revision,
                     "result_asset_id": c.result_asset_id,
+                    "asset_status": _res_status(c.result_asset_id),
                     "duration_frames": c.duration_frames,
                     "fps": [c.fps_num, c.fps_den]}
                     for c in src["clips"]],
@@ -402,6 +409,7 @@ def sources_fingerprint(session: Session, project_id: str,
                     "id": d.id, "position": d.position,
                     "revision": d.revision,
                     "result_asset_id": d.result_asset_id,
+                    "asset_status": _res_status(d.result_asset_id),
                     "timing": d.timing_json or {}}
                     for d in src["segments"]],
                 "audio": [{
@@ -809,14 +817,16 @@ def _item_src_geometry(session: Session, it: dict) -> tuple[int, int] | None:
 
 def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
                resolve_conflicts: str = "skip",
+               replace_keys: list[str] | None = None,
                command_id: str | None = None) -> dict:
     """Apply the current proposal. Fail-closed: refuses when the live
     sources drifted from the fingerprint pinned at plan time —
     re-run assembly.plan for a fresh proposal. Idempotent: a re-apply
     whose recorded clips still match the recorded geometry is an
     audited no-op. Manual edits are preserved by default —
-    resolve_conflicts='replace' is the explicit approval to remove
-    them."""
+    resolve_conflicts='replace' with replace_keys is the explicit,
+    item-scoped approval to remove them: only the named previewed
+    conflict items (and orphaned managed clips) are replaced."""
     from app.domain import timeline as tld
 
     if resolve_conflicts not in ("skip", "replace"):
@@ -828,6 +838,24 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
     items = proposal.get("items") or []
     lane_spec = proposal.get("lanes") or {}
     prior_items = {it.item_key: it for it in plan_items(session, plan.id)}
+    approved = set(replace_keys or ())
+
+    # Approval scope check: every named key must be a previewed
+    # conflict (plan item flags) or a previewed orphan (managed clip
+    # whose item left the plan). Approving anything else is refused —
+    # replace can never reach an item the preview didn't flag.
+    if approved:
+        conflicted = {it["key"] for it in items
+                      if (it.get("flags") or {}).get("conflicts")}
+        managed_keys = set(_applied_map(plan))
+        current_keys = {it["key"] for it in items}
+        orphan_keys = managed_keys - current_keys
+        bad = sorted(k for k in approved
+                     if k not in conflicted and k not in orphan_keys)
+        if bad:
+            _reject(
+                "replace_keys must name previewed conflict items — "
+                f"unflagged: {', '.join(bad[:4])}")
 
     # Source drift refuses before anything else — the recorded
     # post-apply timeline state is exempted inside _is_stale so the
@@ -836,10 +864,25 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
         _reject("sources changed since this plan was computed — "
                 "re-run assembly.plan for a fresh proposal")
 
-    # Idempotent replay: the recorded plan fingerprint matches AND
-    # every recorded clip still sits at its recorded geometry.
+    # Idempotent replay: only when re-walking the decisions could not
+    # possibly change the outcome — the proposal fingerprint matches,
+    # the apply options + effective review statuses are identical to
+    # the recorded apply (replay_sig), no recorded skip was flagged
+    # retryable (transient insert failures re-attempt on re-apply),
+    # and every recorded clip still sits at its recorded geometry.
+    reviews_now = {}
+    for it in items:
+        row = prior_items.get(it["key"])
+        reviews_now[it["key"]] = (
+            (row.review_status if row else None)
+            or it.get("review_status") or "pending")
+    replay_sig = _sha({"rc": resolve_conflicts, "rk": sorted(approved),
+                       "rv": reviews_now})
     applied = plan.applied_json or {}
     if applied.get("fingerprint") == _sha(proposal) \
+            and applied.get("replay_sig") == replay_sig \
+            and not any(n.get("retry")
+                        for n in (applied.get("skipped") or [])) \
             and _applied_kept(session, plan):
         recs = applied.get("items") or {}
         return {"applied": False, "idempotent": True,
@@ -879,11 +922,13 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
             removals.append(clip)
 
     # Stale managed clips (item left the plan): clean ones yield only
-    # to explicit replace approval; edited ones are always preserved.
+    # to an explicit per-item replace approval; edited ones are always
+    # preserved.
     for key, rec in managed.items():
         if key in current_keys or rec["clip"] is None:
             continue
-        if rec["state"] == "clean" and resolve_conflicts == "replace":
+        if rec["state"] == "clean" and resolve_conflicts == "replace" \
+                and key in approved:
             _remove(rec["clip"])
             stats["removed_clips"] += 1
         else:
@@ -911,10 +956,11 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
             skip_notes.append({"key": key, "reason": "no lane"})
             continue
         if flags.get("conflicts"):
-            if resolve_conflicts == "skip":
+            if resolve_conflicts != "replace" or key not in approved:
                 stats["skipped"] += 1
                 skip_notes.append({"key": key,
-                                   "reason": "conflict with manual edits"})
+                                   "reason": "conflict with manual edits"
+                                             " — not approved"})
                 continue
             for conflict in flags["conflicts"]:
                 c = session.get(TimelineClip, conflict.get("clip_id"))
@@ -973,7 +1019,7 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
                 command_id=command_id)
         except (tld.TimelineError, KeyError) as exc:
             stats["skipped"] += 1
-            skip_notes.append({"key": key,
+            skip_notes.append({"key": key, "retry": True,
                                "reason": str(exc).strip("'")})
             continue
         stats["created_clips"] += 1
@@ -1000,10 +1046,18 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
             row.revision += 1
             row.updated_at = utcnow()
     session.flush()
+    # Carry forward managed records for items this walk skipped but
+    # whose applied clips still exist (unapproved conflicts, orphaned
+    # lanes) — keeps _managed_clips tracking intact across applies.
+    for key, rec in (applied.get("items") or {}).items():
+        if key not in applied_items and session.get(
+                TimelineClip, rec.get("timeline_clip_id")) is not None:
+            applied_items[key] = rec
     # Pin the exact post-apply timeline signature — _is_stale exempts
     # it so the apply's own inserts never read as drift.
     plan.applied_json = {
         "fingerprint": _sha(proposal),
+        "replay_sig": replay_sig,
         "created_track_ids": list(created_tracks.values()),
         "items": applied_items,
         "skipped": skip_notes,
@@ -1013,7 +1067,8 @@ def apply_plan(session: Session, project_id: str, plan: AssemblyPlan, *,
 
 
 def preview_apply(session: Session, plan: AssemblyPlan, *,
-                  resolve_conflicts: str = "skip") -> dict:
+                  resolve_conflicts: str = "skip",
+                  replace_keys: list[str] | None = None) -> dict:
     """Read-only walk of the apply decision table — what the approval
     sees before committing: per-item disposition (keep/insert/skip/
     replace) plus the stale-source refusal flag. Must stay in lockstep
@@ -1024,6 +1079,7 @@ def preview_apply(session: Session, plan: AssemblyPlan, *,
     managed = _managed_clips(session, plan)
     tl = session.get(Timeline, plan.timeline_id)
     stale = tl is not None and _is_stale(session, plan)
+    approved = set(replace_keys or ())
     dispositions: list[dict] = []
     for it in items:
         key = it["key"]
@@ -1038,10 +1094,10 @@ def preview_apply(session: Session, plan: AssemblyPlan, *,
         elif flags.get("missing"):
             action, reason = "skip", flags["missing"]
         elif flags.get("conflicts"):
-            if resolve_conflicts == "skip":
-                action, reason = "skip", "conflict with manual edits"
+            if resolve_conflicts == "replace" and key in approved:
+                action, reason = "replace", "approved — manual clips removed"
             else:
-                action, reason = "replace", "manual clips removed"
+                action, reason = "skip", "conflict with manual edits"
         elif clip_rec is not None:
             # 'clean' already proves track/in/out match the recorded
             # apply; proposal track_id is None for apply-created lanes
@@ -1061,6 +1117,7 @@ def preview_apply(session: Session, plan: AssemblyPlan, *,
     return {"plan_id": plan.id, "timeline_id": plan.timeline_id,
             "sources_stale": stale,
             "resolve_conflicts": resolve_conflicts,
+            "replace_keys": sorted(approved),
             "items": dispositions,
             "counts": {
                 "insert": sum(1 for d in dispositions

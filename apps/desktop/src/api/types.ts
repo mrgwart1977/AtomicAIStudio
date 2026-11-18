@@ -380,6 +380,7 @@ export interface AssemblyApplyPreview {
   timeline_id: string;
   sources_stale: boolean;
   resolve_conflicts: string;
+  replace_keys: string[];
   items: Array<{ key: string; kind: string; title: string;
                  action: string; reason: string }>;
   counts: { insert: number; keep: number; skip: number; replace: number };

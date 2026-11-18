@@ -77,7 +77,7 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
     useState<AssemblyProposal | null>(null);
   const [applyPreview, setApplyPreview] =
     useState<AssemblyApplyPreview | null>(null);
-  const [replaceApproved, setReplaceApproved] = useState(false);
+  const [approvedKeys, setApprovedKeys] = useState<Set<string>>(new Set());
   const [noteFor, setNoteFor] = useState<Record<string, string>>({});
   const [versions, setVersions] = useState<EntityRevision[] | null>(null);
   const [detail, setDetail] = useState(false);
@@ -135,25 +135,52 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
     await commit("assembly.plan", { timeline_id: timeline.id });
   }
 
-  async function previewApply(replace: boolean) {
+  function applyPayload() {
+    const keys = [...approvedKeys];
+    return keys.length
+      ? { timeline_id: timeline.id, resolve_conflicts: "replace",
+          replace_keys: keys }
+      : { timeline_id: timeline.id, resolve_conflicts: "skip" };
+  }
+
+  async function previewApply() {
     setErr(null); setBusy(true); setPlanPreview(null);
     try {
-      const p = await previewCommand(projectId, "assembly.apply", {
-        timeline_id: timeline.id,
-        resolve_conflicts: replace ? "replace" : "skip"});
+      const p = await previewCommand(projectId, "assembly.apply",
+                                     applyPayload());
       const ra = p.resolved_assembly;
       setApplyPreview(ra && "sources_stale" in ra ? ra : null);
-      setReplaceApproved(replace);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally { setBusy(false); }
   }
 
   async function commitApply() {
-    const rc = replaceApproved ? "replace" : "skip";
     setApplyPreview(null);
-    await commit("assembly.apply",
-                 { timeline_id: timeline.id, resolve_conflicts: rc });
+    await commit("assembly.apply", applyPayload());
+  }
+
+  async function toggleApproved(key: string) {
+    const next = new Set(approvedKeys);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    setApprovedKeys(next);
+    // Live-refresh an open apply preview so dispositions match the
+    // new approval selection.
+    if (applyPreview) {
+      setErr(null); setBusy(true);
+      try {
+        const keys = [...next];
+        const p = await previewCommand(projectId, "assembly.apply",
+          keys.length
+            ? { timeline_id: timeline.id,
+                resolve_conflicts: "replace", replace_keys: keys }
+            : { timeline_id: timeline.id, resolve_conflicts: "skip" });
+        const ra = p.resolved_assembly;
+        setApplyPreview(ra && "sources_stale" in ra ? ra : null);
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally { setBusy(false); }
+    }
   }
 
   async function review(it: AssemblyItem, status: string) {
@@ -351,17 +378,12 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
                 disabled={busy || plan.sources_stale === true}
                 title={plan.sources_stale
                   ? "Sources changed — re-plan before applying"
-                  : "Preview the apply decisions"}
-                onClick={() => void previewApply(false)}>
+                  : approvedKeys.size
+                    ? `Preview apply — ${approvedKeys.size} conflict(s) approved for replacement`
+                    : "Preview the apply decisions"}
+                onClick={() => void previewApply()}>
                 Apply…
               </button>
-              {(counts?.conflicts ?? 0) > 0 && (
-                <button type="button" className={BTN}
-                  disabled={busy}
-                  title="Preview apply with manual-clip replacement approved"
-                  onClick={() => void previewApply(true)}>
-                  Apply replacing manual clips…
-                </button>)}
             </span>
           </div>
 
@@ -407,6 +429,17 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
                       {badges.map((b, i) => (
                         <span key={i} className={`text-[10px] ${b.cls}`}
                           role="status">{b.text}</span>))}
+                      {(it.flags.conflicts ?? []).length > 0 && (
+                        <label
+                          className="flex items-center gap-1 text-[10px] text-amber"
+                          title="Approve replacing this item's conflicting manual clips">
+                          <input type="checkbox"
+                            aria-label="Approve replacement"
+                            checked={approvedKeys.has(it.key)}
+                            disabled={busy}
+                            onChange={() => void toggleApproved(it.key)} />
+                          replace
+                        </label>)}
                       {reviewChip(it.review_status)}
                       <span className="ml-auto flex gap-1">
                         {!gone && !it.flags.removed && (

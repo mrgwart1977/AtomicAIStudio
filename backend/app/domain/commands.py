@@ -2655,6 +2655,20 @@ def _validate_assembly(session: Session, project: Project,
         if rc not in ("skip", "replace"):
             raise CommandError(
                 422, "resolve_conflicts must be 'skip' or 'replace'")
+        keys = payload.get("replace_keys")
+        if keys is not None and not (
+                isinstance(keys, list)
+                and all(isinstance(k, str) for k in keys)):
+            raise CommandError(422, "replace_keys must be a list of "
+                                    "item keys")
+        if rc == "replace" and not keys:
+            raise CommandError(
+                422, "resolve_conflicts='replace' requires "
+                     "replace_keys naming the approved previewed "
+                     "conflict items — broad replace is not allowed")
+        if rc == "skip" and keys:
+            raise CommandError(
+                422, "replace_keys requires resolve_conflicts='replace'")
         if plan.status not in ("draft", "applied"):
             raise CommandError(
                 422, f"plan status '{plan.status}' cannot be applied")
@@ -3303,7 +3317,8 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
             out["resolved_assembly"] = _asm.preview_apply(
                 session, plan,
                 resolve_conflicts=payload.get("resolve_conflicts")
-                or "skip")
+                or "skip",
+                replace_keys=payload.get("replace_keys"))
             if out["resolved_assembly"]["sources_stale"]:
                 out["warnings"].append(
                     "sources changed since this plan was computed — "
@@ -4148,6 +4163,7 @@ def _commit_assembly(session: Session, project: Project, command,
                 session, project.id, plan,
                 resolve_conflicts=payload.get("resolve_conflicts")
                 or "skip",
+                replace_keys=payload.get("replace_keys"),
                 command_id=command.id)
             if not stats.get("idempotent"):
                 asm.write_plan_revision(

@@ -12,7 +12,7 @@ const OUT = process.argv[3] || "docs/a6-evidence";
 const EXE = process.argv[4] ||
   `${process.env.LOCALAPPDATA}\\Atomic Dream Engine\\atomic-dream-engine.exe`;
 const INSTALL_DIR = path.dirname(EXE);
-const STEPS = 17;
+const STEPS = 19;
 let API = null, TOKEN = null, appProc = null;
 const lines = [];
 let steps = 0;
@@ -142,6 +142,21 @@ function findFfprobe() {
         if (fs.existsSync(p)) return p;
       }
     }
+  } catch {}
+  return null;
+}
+
+function findFfmpeg() {
+  const p = findFfprobe();
+  if (p) {
+    const sib = path.join(path.dirname(p), "ffmpeg.exe");
+    if (fs.existsSync(sib)) return sib;
+  }
+  try {
+    const out = execFileSync("cmd", ["/c", "dir /s /b ffmpeg.exe"],
+      { cwd: INSTALL_DIR }).toString();
+    const first = out.split(/\r?\n/).filter(Boolean)[0];
+    if (first && fs.existsSync(first)) return first;
   } catch {}
   return null;
 }
@@ -321,15 +336,20 @@ async function main() {
   if (pl.status !== "applied") fail(`plan status wrong: ${pl.status}`);
   ok("7 apply approved — V1 clip + 2 DX clips with shot/scene provenance");
 
-  // step 8 — manual timeline edit: the user moves the applied shot clip
+  // step 8 — manual timeline edits: the user moves the applied shot
+  //          clip AND one dialogue clip (two separate conflicts)
   const movedId = vClips[0].id;
   await commit(p.id, "timeline.clip.move", {
     timeline_id: tl.id, clip_id: movedId, start_frames: 200 });
+  const dlgMovedId = placedAudio[0].id;
+  await commit(p.id, "timeline.clip.move", {
+    timeline_id: tl.id, clip_id: dlgMovedId, start_frames: 120 });
   det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  if (det.clips.find((c) => c.id === movedId).start_frames !== 200) {
-    fail("manual move did not land");
+  if (det.clips.find((c) => c.id === movedId).start_frames !== 200
+      || det.clips.find((c) => c.id === dlgMovedId).start_frames !== 120) {
+    fail("manual moves did not land");
   }
-  ok("8 manual timeline edit — applied clip moved to 200f");
+  ok("8 manual timeline edits — video clip at 200f, dialogue at 120f");
 
   // step 9 — revise a source: dialogue text changes after the plan
   await commit(p.id, "dialogue.update", {
@@ -344,35 +364,93 @@ async function main() {
     { timeline_id: tl.id, resolve_conflicts: "skip" }, 422);
   ok("9 source revised — stale apply preview flagged + commit refused");
 
-  // step 10 — reassembly preview: re-plan flags the manual edit as a
-  //           conflict; the apply walk marks it preserved
+  // step 10 — reassembly preview: re-plan flags BOTH manual edits as
+  //           conflicts; the apply walk marks them preserved
   await commit(p.id, "assembly.plan", { timeline_id: tl.id });
   det0 = await planDetail(p.id, pl.id);
-  const movedItem = det0.items.find((i) => i.timeline_clip_id === movedId);
-  if (!movedItem
-      || !(movedItem.flags.conflicts || []).some((c) => c.clip_id === movedId)) {
-    fail(`manual-edit conflict not flagged: ${JSON.stringify(movedItem)}`);
+  const conflictedItems = det0.items.filter(
+    (i) => (i.flags.conflicts || []).length > 0);
+  const conflictClipIds = new Set(conflictedItems.flatMap(
+    (i) => i.flags.conflicts.map((c) => c.clip_id)));
+  if (!conflictClipIds.has(movedId) || !conflictClipIds.has(dlgMovedId)) {
+    fail(`conflicts not flagged on both edits: ${JSON.stringify(
+      conflictedItems.map((i) => i.key))}`);
   }
   const apPv2 = await preview(p.id, "assembly.apply",
     { timeline_id: tl.id });
-  const disp = apPv2.resolved_assembly.items
-    .find((i) => i.key === movedItem.key);
-  if (!disp || disp.action !== "skip"
-      || !/edit|preserv|conflict/i.test(disp.reason)) {
-    fail(`apply walk wrong for edited clip: ${JSON.stringify(disp)}`);
+  const disps = Object.fromEntries(apPv2.resolved_assembly.items
+    .map((i) => [i.key, i]));
+  for (const ci of conflictedItems) {
+    if (disps[ci.key]?.action !== "skip") {
+      fail(`apply walk wrong for edited clip: ${JSON.stringify(disps[ci.key])}`);
+    }
   }
-  ok("10 reassembly preview — conflict flagged, disposition preserved");
+  ok("10 reassembly preview — both conflicts flagged, dispositions preserved");
 
-  // step 11 — apply preserves the manual edit by default
+  // step 11 — apply preserves the manual edits by default
   await commit(p.id, "assembly.apply",
     { timeline_id: tl.id, resolve_conflicts: "skip" });
   det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  if (det.clips.find((c) => c.id === movedId).start_frames !== 200) {
-    fail("manual edit was overwritten by apply");
+  if (det.clips.find((c) => c.id === movedId).start_frames !== 200
+      || det.clips.find((c) => c.id === dlgMovedId).start_frames !== 120) {
+    fail("manual edits were overwritten by apply");
   }
-  ok("11 manual edits preserved — clip still at 200f after apply");
+  ok("11 manual edits preserved — both clips still at edited positions");
 
-  // step 12 — approve permitted changes: review votes + a note persist
+  // step 12 — approve ONE specific replacement: broad replace refuses;
+  //           the approved item is replaced, the unapproved edit stays
+  await commit(p.id, "assembly.apply",
+    { timeline_id: tl.id, resolve_conflicts: "replace" }, 422);
+  const shotKey = conflictedItems.find((i) => i.kind === "shot").key;
+  await commit(p.id, "assembly.apply", {
+    timeline_id: tl.id, resolve_conflicts: "replace",
+    replace_keys: [shotKey] });
+  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
+  const vNow = det.clips.find(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
+  const dlgStill = det.clips.find((c) => c.id === dlgMovedId);
+  if (!vNow || vNow.start_frames !== 0
+      || det.clips.some((c) => c.id === movedId)) {
+    fail(`approved replacement wrong: ${JSON.stringify(vNow)}`);
+  }
+  if (!dlgStill || dlgStill.start_frames !== 120) {
+    fail("unapproved manual edit was overwritten");
+  }
+  ok("12 scoped replacement — shot clip replaced at 0f, dialogue edit kept");
+
+  // step 13 — undo/redo through the timeline's own stack: the replace
+  //           apply is one logical step; deep undo reaches the first
+  //           apply; redo restores the approved state
+  await commit(p.id, "timeline.undo", { timeline_id: tl.id });
+  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
+  const u1 = det.clips.find(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
+  const u1d = det.clips.find((c) => c.id === dlgMovedId);
+  if (!u1 || u1.start_frames !== 200 || !u1d || u1d.start_frames !== 120
+      || det.clips.length !== 3) {
+    fail(`undo of replace-apply wrong: ${JSON.stringify(u1)}`);
+  }
+  for (let i = 0; i < 3; i++) {
+    await commit(p.id, "timeline.undo", { timeline_id: tl.id });
+  }
+  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
+  if (det.clips.length !== 0) {
+    fail(`deep undo wrong: ${det.clips.length} clips remain`);
+  }
+  for (let i = 0; i < 4; i++) {
+    await commit(p.id, "timeline.redo", { timeline_id: tl.id });
+  }
+  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
+  const rV = det.clips.find(
+    (c) => c.shot_id === shot1.id && isVideoClip(c));
+  const rD = det.clips.find((c) => c.id === dlgMovedId);
+  if (det.clips.length !== 3 || !rV || rV.start_frames !== 0
+      || !rD || rD.start_frames !== 120) {
+    fail(`redo state wrong: ${det.clips.length} clips`);
+  }
+  ok("13 undo/redo — replace undone in one step, deep undo clean, redone");
+
+  // step 14 — review votes + a note persist on the plan
   det0 = await planDetail(p.id, pl.id);
   const shotItemId = det0.items.find((i) => i.kind === "shot").id;
   await commit(p.id, "assembly.review", {
@@ -384,43 +462,16 @@ async function main() {
       || voted.notes !== "keep the moved position") {
     fail(`review vote wrong: ${JSON.stringify(voted)}`);
   }
-  ok("12 permitted changes approved — review vote + note persisted");
+  ok("14 review — vote + note persisted");
 
-  // step 13 — undo/redo through the timeline's own stack: the apply is
-  //           one logical step (each undo pops a single edit)
-  await commit(p.id, "timeline.undo", { timeline_id: tl.id });
-  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  const afterUndo = det.clips.find(
-    (c) => c.shot_id === shot1.id && isVideoClip(c));
-  if (!afterUndo || afterUndo.start_frames !== 0) {
-    fail(`undo did not revert the manual move: ${JSON.stringify(afterUndo)}`);
-  }
-  await commit(p.id, "timeline.undo", { timeline_id: tl.id });
-  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  if (det.clips.length !== 0) {
-    fail(`apply not undone as one step: ${det.clips.length} clips remain`);
-  }
-  await commit(p.id, "timeline.redo", { timeline_id: tl.id });
-  await commit(p.id, "timeline.redo", { timeline_id: tl.id });
-  det = await api("GET", `/api/projects/${p.id}/timelines/${tl.id}`);
-  const redone = det.clips.find(
-    (c) => c.shot_id === shot1.id && isVideoClip(c));
-  if (det.clips.length !== 3 || !redone || redone.start_frames !== 200) {
-    fail(`redo state wrong: ${det.clips.length} clips`);
-  }
-  ok("13 undo/redo — move reverted, whole apply reverted in one step, redone");
-
-  // step 14 — export a short film through the existing pipeline
+  // step 15 — export H.264+AAC through the existing pipeline; duration
+  //           covers the moved dialogue clip (~7.3 s)
   const ex = await commit(p.id, "timeline.export",
     { timeline_id: tl.id, profile: "720p" });
   const exDone = await waitJob(p.id, ex.job_id);
   if (exDone.status !== "succeeded") {
     fail(`export failed: ${JSON.stringify(exDone).slice(0, 300)}`);
   }
-  ok("14 export — short film rendered via the timeline pipeline");
-
-  // step 15 — video/audio timing on the real output: video + audio
-  //           streams, duration covers the moved clip + dialogue
   const ffprobe = findFfprobe();
   if (!ffprobe) fail("ffprobe not found (bundled or machine)");
   note(`ffprobe: ${ffprobe}`);
@@ -434,14 +485,62 @@ async function main() {
   const vS = pr.streams.find((s) => s.codec_type === "video");
   const aS = pr.streams.find((s) => s.codec_type === "audio");
   const dur = parseFloat(pr.format.duration);
-  // moved clip ends ~200f+2s ≈ 10.3s at 24fps — duration must cover it
-  if (!vS || !aS || dur < 10.0 || dur > 14.0) {
+  // moved dialogue ends ~120f/24+2.3s ≈ 7.3s — duration must cover it
+  if (!vS || !aS || dur < 6.0 || dur > 9.5) {
     fail(`export streams wrong: ${JSON.stringify(
       { v: vS?.codec_name, a: aS?.codec_name, dur })}`);
   }
-  ok(`15 timing verified — ${vS.codec_name} + ${aS.codec_name}, ~${dur.toFixed(2)}s`);
+  ok(`15 export streams — ${vS.codec_name} + ${aS.codec_name}, ~${dur.toFixed(2)}s`);
 
-  // step 16 — restart persistence: plan, applied clips, review state
+  // step 16 — PCM placement check: decode the export's audio and prove
+  //           signal sits where the moved dialogue clip is and silence
+  //           holds before it — no bleed, no duplication
+  const ffmpeg = findFfmpeg();
+  if (!ffmpeg) fail("ffmpeg not found for PCM check");
+  const pcm = execFileSync(ffmpeg, [
+    "-v", "error", "-i", exBlob, "-map", "0:a:0",
+    "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+    { maxBuffer: 64 * 1024 * 1024 });
+  const samples = new Int16Array(
+    pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2));
+  const rmsAt = (t0, t1) => {
+    let s = 0, n = 0;
+    for (let i = Math.floor(t0 * 48000);
+         i < Math.min(samples.length, Math.floor(t1 * 48000)); i++) {
+      s += samples[i] * samples[i]; n++;
+    }
+    return n ? Math.sqrt(s / n) / 32768 : 0;
+  };
+  const early = rmsAt(2.6, 4.6);   // before the moved dialogue
+  const late = rmsAt(5.4, 6.8);    // inside the moved dialogue's span
+  if (late < 0.01) fail(`moved dialogue audio missing (rms ${late})`);
+  if (early > 0.005) fail(`audio bleeds before placement (rms ${early})`);
+  ok(`16 PCM parity — signal ${late.toFixed(3)} @5.4s, gap ${early.toFixed(4)}`);
+
+  // step 17 — backup/restore: package round-trips plan, clips, review
+  const bjob = await waitJob(p.id,
+    (await commit(p.id, "backup.export", { kind: "backup" })).job_id);
+  if (bjob.status !== "succeeded") fail(`backup export: ${bjob.status}`);
+  const pkg = (await api("GET", `/api/projects/${p.id}/jobs`))
+    .find((j) => j.id === bjob.id).result_json.package_path;
+  const imp = await api("POST", "/api/packages/import",
+    { package_path: pkg });
+  const ijob = await waitJob(imp.project_id, imp.job_id);
+  if (ijob.status !== "succeeded") {
+    fail(`import: ${ijob.status} ${ijob.error || ""}`);
+  }
+  const newPid = imp.project_id;
+  const nt = (await api("GET", `/api/projects/${newPid}/timelines`))[0];
+  const npl = (await plans(newPid, nt.id))[0];
+  const ndet = await api("GET", `/api/projects/${newPid}/timelines/${nt.id}`);
+  const nitems = (await planDetail(newPid, npl.id)).items;
+  const nvote = nitems.find((i) => i.notes === "keep the moved position");
+  if (!npl || npl.status !== "applied" || ndet.clips.length !== 3 || !nvote) {
+    fail(`restore wrong: plan=${!!npl} clips=${ndet.clips.length}`);
+  }
+  ok("17 backup/restore — plan, applied clips, review note round-trip");
+
+  // step 18 — restart persistence: plan, applied clips, review state
   killApp(); await sleep(4000);
   launch(); API = null; TOKEN = null; await creds();
   pl = (await plans(p.id, tl.id))[0];
@@ -453,12 +552,12 @@ async function main() {
       || revoted.notes !== "keep the moved position") {
     fail("restart drifted plan/clip/review state");
   }
-  ok("16 restart persistence — applied plan, clips, review intact");
+  ok("18 restart persistence — applied plan, clips, review intact");
 
-  // step 17 — clean shutdown
+  // step 19 — clean shutdown
   killApp(); await sleep(6000);
   if (left("atomic-backend.exe")) fail("backend process leaked");
-  ok("17 clean shutdown — no orphan backend");
+  ok("19 clean shutdown — no orphan backend");
 
   lines.push(`A6 ACCEPTANCE: PASS ${steps}/${STEPS}`);
   fs.writeFileSync(path.join(OUT, "a6-acceptance.txt"), lines.join("\n") + "\n");

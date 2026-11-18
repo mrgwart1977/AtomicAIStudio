@@ -152,6 +152,52 @@ describe("AssemblyPanel", () => {
         { timeline_id: "tl1", resolve_conflicts: "skip" }, "timeline"));
     });
 
+  it("approves a specific conflict via replace_keys", async () => {
+    // Plan with a conflict on the shot item.
+    apiFetch.mockImplementation((u: string) => Promise.resolve(
+      u.includes("/assemblies/pl1")
+        ? { ...PLAN,
+            items: PLAN.items.map((i) =>
+              i.id === "i1"
+                ? { ...i,
+                    flags: { missing: null,
+                             conflicts: [{ clip_id: "c9" }] } }
+                : i),
+            counts: { items: 2, missing: 1, conflicts: 1, stale: 0 } }
+        : route(u)));
+    previewCommand.mockResolvedValueOnce({
+      summary: "s", warnings: [],
+      resolved_assembly: {
+        plan_id: "pl1", timeline_id: "tl1", sources_stale: false,
+        resolve_conflicts: "replace", replace_keys: ["shot:s1"],
+        items: [
+          { key: "shot:s1", kind: "shot", title: "Shot 1",
+            action: "replace", reason: "approved" },
+          { key: "dialogue:d1", kind: "dialogue", title: "Line",
+            action: "skip", reason: "no audio result" },
+        ],
+        counts: { insert: 0, keep: 0, skip: 1, replace: 1 },
+      },
+    });
+    render(<AssemblyPanel projectId="p1"
+      timeline={{ id: "tl1", name: "Cut 1" }} />);
+    await screen.findByText("First cut");
+    fireEvent.click(screen.getByText("Details"));
+    // Approve the specific conflict via its checkbox.
+    fireEvent.click(await screen.findByLabelText("Approve replacement"));
+    fireEvent.click(screen.getByText("Apply…"));
+    await waitFor(() => expect(previewCommand).toHaveBeenCalledWith(
+      "p1", "assembly.apply",
+      { timeline_id: "tl1", resolve_conflicts: "replace",
+        replace_keys: ["shot:s1"] }));
+    expect(await screen.findByText(/1 replaced/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Apply to timeline"));
+    await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
+      "p1", 7, "assembly.apply",
+      { timeline_id: "tl1", resolve_conflicts: "replace",
+        replace_keys: ["shot:s1"] }, "timeline"));
+  });
+
   it("blocks apply approval when sources went stale", async () => {
     previewCommand.mockResolvedValueOnce({
       summary: "s",
