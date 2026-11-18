@@ -1,6 +1,7 @@
 """C4-E — resource preflight, admission thresholds, disk checks, and
 the unified status endpoint. Reuses gpu_sched, resources, and the
 durable job engine — no parallel scheduler is created."""
+import asyncio
 import dataclasses
 
 import pytest
@@ -146,7 +147,20 @@ def test_disk_preflight_blocks_video_job(client, tmp_path, monkeypatch):
                         lambda p: 1)   # one byte free — can't fit 8 GiB
     r = _commit(client, pid, "generate.video",
                 {"model_key": WAN, "prompt": "lantern drifts"})
-    job = wait_for_job(client, pid, r["job_id"])
+    # Deterministic drive (A6 flake: wait_for_job's 15s poll raced the
+    # background runner under suite saturation — the product property
+    # here is the admission failure, not scheduling latency). Publish is
+    # app-loop-bound, so stub it; the loop may also run the job first —
+    # same terminal state either way.
+    eng = client.app.state.job_engine
+
+    async def _noop(_job):
+        return None
+
+    monkeypatch.setattr(eng, "_publish", _noop)
+    asyncio.run(eng._execute(r["job_id"]))
+    job = next(j for j in client.get(f"/api/projects/{pid}/jobs").json()
+               if j["id"] == r["job_id"])
     assert job["status"] == "failed"
     assert "disk" in job["error"].lower()
     assert "preflight" in job["error"].lower()
