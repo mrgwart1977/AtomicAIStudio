@@ -24,6 +24,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | A2 (Phase A) | Shot planning + storyboard board — `planning_json` (all 10 spec follow modes, framing/placement/lighting, rational fps, continuity refs), shot-scoped CAS media links with missing-media flags, drag/drop + keyboard reorder, duplicate, bulk-select archive, screenplay-sync preservation — merged `30a16a8` |
 | A3 (Phase A) | Shot keyframes + mock image generation — durable `keyframe.generate` jobs (hold-barrier deterministic cancel), continuity-aware compose drafts with user-prompt ownership, stale-result pins (`expected_keyframe`/`expected_prompt`/`expected_result_revision`/`expected_planning_sha`), CAS result landing via audited `keyframe.result`, pin/archive/undo, mock provenance — merged `8fc1910` |
 | A4 (Phase A) | Motion clips — shot-bound keyframe→video beats via `mock.video` (real H.264 encode + real ffprobe metadata, deterministic hold barrier, source-keyframe + planning + revision stale pins), timeline clip placement with rational fps conversion, export integration, backup v5, installed acceptance 15/15 — merged `9a7c0723` |
+| A5 (Phase A) | Dialogue segments + mock audio — speaker-bound lines (screenplay scene/element + storyboard scene/shot refs, SET NULL unlink keeps text), character voice-profile resolution with missing-voice flags, deterministic `mock.audio` WAV (real PCM `pcm_s16le`, ffprobe + decode-check, hold-barrier cancel, no temp leaks), stale pins on segment authored fields + speaker/voice + element/parenthetical + scene/shot state (`result_stale` flag, screenplay unlink warnings), audio-lane placement via existing timeline geometry + PCM parity, backup v6, installed acceptance 17/17 — merged `ad1013a` |
 
 ## In progress / next
 
@@ -41,8 +42,7 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
-| A5 (Phase A) | Dialogue segments + mock audio — speaker-bound lines (screenplay scene/element + storyboard scene/shot refs), character voice-profile resolution with missing-voice flags, deterministic `mock.audio` WAV (real PCM, honest ffprobe/decode-check, hold-barrier cancel), stale pins on segment + speaker/voice + element + scene state, audio-lane placement via existing timeline geometry, backup v6 — **in review** |
-| A6–A8 (Phase A) | Assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md (A1–A4 merged above) |
+| A6–A8 (Phase A) | Assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md (A1–A5 merged above) |
 | Multi-model image/video backends | per spec |
 
 ## Explicit non-goals for now
