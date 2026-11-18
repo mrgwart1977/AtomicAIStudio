@@ -1,18 +1,24 @@
-A7 ACCEPTANCE 15/15 PASS — exe C:\Users\gwart\AppData\Local\Atomic Dream Engine\atomic-dream-engine.exe
-INFO backend http://127.0.0.1:62658 via installed app
-PASS 1. single-GPU scheduling — sim job ran on GPU 0 with a recorded + released 2 GiB reservation
-PASS 2. concurrent mock jobs — running job holds an accounted 2 GiB reservation
-INFO backend http://127.0.0.1:57749 via installed app
-PASS 3. multi-GPU scheduling — 6 GiB jobs landed on GPUs 0 and 1
-PASS 4. resource admission — pin honored (GPU 1), CPU lane clean, missing-device preview refused honestly
-PASS 5. oversubscription refused — "no device fits — job needs ~24.0 GiB VRAM; best free device offers ~8.0 GiB after reservations"
-PASS 6. cancellation — running job cancelled, reservation released
-PASS 7. worker failure — simulated crash failed the job, reservation released
-PASS 8. restart recovery — killed running job reconciled failed/interrupted, no stale reservation
-PASS 9. provider capability preview — blocked→available on credential presence, env=simulated, fingerprint pinned
-PASS 10. cost estimation — reserved 10000µ against 4 budget scopes
-PASS 11. budget refusal — over-budget plan refused at preview and commit
-PASS 12. explicit approval — plan committed, pinned submit dispatched (simulated), drifted pin refused
-PASS 13. retry protection — duplicate commit idempotent
-PASS 14. no real provider activity — 1 cloud job(s), all bookings simulated
-PASS 15. clean shutdown — app + backend exited
+A7 ACCEPTANCE 17/17 PASS - exe C:\Users\gwart\AppData\Local\Atomic Dream Engine\atomic-dream-engine.exe
+tested commit : 7df9625029b78a2376e5cfbd2750cd7c2c657787 (installed binary built from this tree)
+installer     : Atomic Dream Engine_0.1.0_x64-setup.exe (76.43 MiB, NSIS)
+tested commit : 7df9625029b78a2376e5cfbd2750cd7c2c657787 (installed binary built from this tree)
+installer     : atomic dream engine_0.1.0_x64-setup.exe (76.43 mib, nsis)
+INFO backend http://127.0.0.1:50687 via installed app
+PASS 1. populated project — world/location/character/scene/shot/timeline created and readable
+PASS 2. single-GPU simulation — ran on GPU 0, 2 GiB reservation recorded + released, state marked simulated
+INFO backend http://127.0.0.1:64237 via installed app
+PASS 3. restart reconciliation — killed running job reconciled failed/interrupted, zero stale reservations
+PASS 4. two-GPU simulation — 6 GiB jobs landed on GPUs 0 and 1
+PASS 5. heterogeneous VRAM — [4,8] inventory live-reloaded; 6 GiB job forced to the 8 GiB device, small jobs prefer most-free
+PASS 6. concurrent admission — two running jobs held accounted reservations on GPUs 0+1 simultaneously
+PASS 7. oversubscription rejected — "no device fits — job needs ~24.0 GiB VRAM; best free device offers ~8.0 GiB after reservations"
+PASS 8. unknown-footprint exclusive — claimed the device's full usable 8 GiB; known-estimate job routed to the other device
+PASS 9. cancellation — running job cancelled, reservation released
+PASS 10. worker crash — simulated crash failed the job, reservation released
+PASS 11. device disappearance — GPU 1 reported lost + refused while held; restored and re-admitted after release
+PASS 12. read-only cloud planning — blocked→available on credential presence, env=simulated, fingerprint + 4 budget scopes, zero dispatch
+PASS 13. cloud-plan pins — approval commits, pinned submit dispatches simulated, drifted + non-admitting pins refuse, retry idempotent
+PASS 14. budget refusal — over-budget plan refused at preview and commit
+PASS 15. credential isolation — presence-only metadata, 1 cloud job(s) all simulated, no secret material anywhere
+PASS 16. timeline/export regression — populated timeline intact, assembly.plan committed, export preview resolves
+PASS 17. clean shutdown — app + backend exited

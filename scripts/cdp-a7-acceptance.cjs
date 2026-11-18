@@ -166,12 +166,13 @@ async function main() {
     name: "Salt Quay", world_id: (await api("GET", `/api/projects/${pid}/world`))[0].id });
   await commit(pid, "character.create", { name: "Mara" });
   await commit(pid, "scene.create", { title: "Opening" });
-  const board = await api("GET", `/api/projects/${pid}/storyboard`);
-  const sceneId = board[0].scene.id;
+  const board0 = await api("GET", `/api/projects/${pid}/storyboard`);
+  const sceneId = board0[0].scene.id;
   await commit(pid, "shot.create", { scene_id: sceneId, title: "wide" });
   await commit(pid, "timeline.create", { name: "Cut A" });
   const timelines = await api("GET", `/api/projects/${pid}/timelines`);
-  if (!timelines.length || board[0].shots.length !== 1)
+  const board = await api("GET", `/api/projects/${pid}/storyboard`);
+  if (!timelines.length || !board.length || board[0].shots.length !== 1)
     fail("populated project missing scene/shot/timeline");
   const tid = timelines[0].id;
   ok("1. populated project — world/location/character/scene/shot/timeline created and readable");
@@ -247,12 +248,13 @@ async function main() {
       { est_vram_bytes: 6 * GIB, work_ms: 300 });
     const j = await waitJob(pid, r.job_id);
     if (j.gpu_index !== 1) fail(`6 GiB job on GPU ${j.gpu_index}, expected 1`);
-    // Most-free wins: a 2 GiB job picks the idle 4 GiB device.
+    // Most-free wins: a 2 GiB job prefers the 8 GiB device (8 free
+    // beats 4 free) — capacity, not index order, decides.
     const r2 = await commit(pid, "sim.gpu.work",
       { est_vram_bytes: 2 * GIB, work_ms: 300 });
     const j2 = await waitJob(pid, r2.job_id);
-    if (j2.gpu_index !== 0) fail(`2 GiB job on GPU ${j2.gpu_index}, expected 0`);
-    ok("5. heterogeneous VRAM — [4,8] inventory live-reloaded; 6 GiB job forced to the 8 GiB device, 2 GiB job to the 4 GiB");
+    if (j2.gpu_index !== 1) fail(`2 GiB job on GPU ${j2.gpu_index}, expected 1 (most free)`);
+    ok("5. heterogeneous VRAM — [4,8] inventory live-reloaded; 6 GiB job forced to the 8 GiB device, small jobs prefer most-free");
   }
 
   // 6. Concurrent admission — two jobs hold reservations on two
@@ -303,10 +305,12 @@ async function main() {
       fail(`exclusive claim recorded ${slot?.jobs?.[r.job_id]}, expected usable ${slot?.usable_bytes}`);
     if (j.reserved_vram_bytes !== slot.usable_bytes)
       fail(`reserved_vram_bytes ${j.reserved_vram_bytes} != usable ${slot.usable_bytes}`);
-    // A known-estimate job must NOT share the exclusive device.
+    // A known-estimate job must NOT share the exclusive device —
+    // it lands on whichever device the exclusive claim didn't take.
     const r2 = await commit(pid, "sim.gpu.work", { est_vram_bytes: GIB, work_ms: 400 });
     const j2 = await waitJob(pid, r2.job_id);
-    if (j2.gpu_index !== 0) fail(`known job landed on exclusive device ${j2.gpu_index}`);
+    if (j2.gpu_index === j.gpu_index)
+      fail(`known job shared the exclusive device ${j.gpu_index}`);
     await api("POST", `/api/jobs/${r.job_id}/cancel`, undefined, 200);
     await waitJob(pid, r.job_id);
     ok(`8. unknown-footprint exclusive — claimed the device's full usable ${(slot.usable_bytes / GIB).toFixed(0)} GiB; known-estimate job routed to the other device`);
