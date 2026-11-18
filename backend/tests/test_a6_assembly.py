@@ -8,6 +8,8 @@ replace approval, per-item review gating, collapsed timeline undo,
 dialogue overflow lanes, shot-linked audio, backup/restore (v7),
 revert + versions, project isolation.
 """
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import make_project, wait_for_job
