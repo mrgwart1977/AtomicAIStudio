@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { apiFetch } from "../../api/client";
 import { commitCommand, previewCommand } from "../../api/commands";
+import { DialogueSection } from "./Dialogue";
 import type { CommandProposal, Entity, StoryboardScene } from "../../api/types";
 import { useApp } from "../../stores/appStore";
 
@@ -329,6 +330,12 @@ export function ScreenplayPage() {
                     className="rounded bg-teal px-3 py-1 text-xs font-medium text-black disabled:opacity-50">
                     Save scene</button>
                 </div>
+                {/* ---- A5 dialogue segments for this screenplay scene ---- */}
+                <DialogueSection
+                  projectId={pid}
+                  spSceneId={sc.id}
+                  run={async (t, p) => { await commit(t, p); return true; }}
+                />
               </section>
             ))}
           </>

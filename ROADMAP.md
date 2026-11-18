@@ -41,7 +41,8 @@ active PR(s). "Planned" = designed or scoped, not implemented.
 | Audio workflows | generation + tracks |
 | Editing timeline | assembly of generated clips |
 | LTX integration | pending runtime maturity |
-| A5–A8 (Phase A) | Dialogue/audio generation, assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md (A3 + A4 merged above) |
+| A5 (Phase A) | Dialogue segments + mock audio — speaker-bound lines (screenplay scene/element + storyboard scene/shot refs), character voice-profile resolution with missing-voice flags, deterministic `mock.audio` WAV (real PCM, honest ffprobe/decode-check, hold-barrier cancel), stale pins on segment + speaker/voice + element + scene state, audio-lane placement via existing timeline geometry, backup v6 — **in review** |
+| A6–A8 (Phase A) | Assemble-cut, multi-GPU + cloud gates, beginner wizard — per docs/phase-a-proposal.md (A1–A4 merged above) |
 | Multi-model image/video backends | per spec |
 
 ## Explicit non-goals for now

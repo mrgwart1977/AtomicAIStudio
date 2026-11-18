@@ -1435,6 +1435,54 @@ def motion_clip_draft(clip_id: str,
         raise HTTPException(404 if "not found" in msg else 422, msg) from None
 
 
+# ---------- dialogue segments (A5) ----------
+
+@api_router.get("/api/projects/{project_id}/dialogue")
+def list_dialogue_segments(project: Project = Depends(get_project),
+                           db: Session = Depends(get_db),
+                           sp_scene_id: str | None = None,
+                           scene_id: str | None = None,
+                           shot_id: str | None = None,
+                           include_archived: bool = True):
+    """The project's dialogue segments in position order, filterable
+    by screenplay scene, storyboard scene, or shot — mutations are
+    commands."""
+    from app.domain import dialogue as dlg
+    rows = dlg.list_segments(db, project.id, sp_scene_id=sp_scene_id,
+                             scene_id=scene_id, shot_id=shot_id)
+    if not include_archived:
+        rows = [r for r in rows if r.status == "active"]
+    return [dlg.serialize_segment(db, r) for r in rows]
+
+
+@api_router.get("/api/projects/{project_id}/dialogue/{segment_id}")
+def get_dialogue_segment(segment_id: str,
+                         project: Project = Depends(get_project),
+                         db: Session = Depends(get_db)):
+    from app.domain import dialogue as dlg
+    try:
+        return dlg.serialize_segment(
+            db, dlg._get(db, project.id, segment_id))
+    except ValueError:
+        raise HTTPException(
+            404, "dialogue segment not found in this project") from None
+
+
+@api_router.get("/api/projects/{project_id}/dialogue/{segment_id}/versions",
+                response_model=list[EntityRevisionOut])
+def dialogue_segment_versions(segment_id: str,
+                              project: Project = Depends(get_project),
+                              db: Session = Depends(get_db)):
+    from app.domain import dialogue as dlg
+    from app.domain import storyboard as sb
+    try:
+        dlg._get(db, project.id, segment_id)
+    except ValueError:
+        raise HTTPException(
+            404, "dialogue segment not found in this project") from None
+    return sb.revision_history(db, "dialogue_segment", segment_id)
+
+
 # ---------- screenplay + shot-list (A1) ----------
 
 @api_router.get("/api/projects/{project_id}/screenplays")

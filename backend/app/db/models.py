@@ -551,6 +551,57 @@ class ScreenplayElement(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class DialogueSegment(Base):
+    """A5 — one speakable dialogue segment inside a project. Binds a
+    screenplay scene (+ optional dialogue element) and/or a storyboard
+    scene/shot to a Character speaker with text, delivery direction,
+    voice-profile resolution (the Character's profile_json['voice']
+    stays the identity-of-record — this row only references it plus
+    optional per-segment overrides), language/pronunciation metadata,
+    planned rational timing, generation settings, and the produced
+    audio result asset placeable on an audio timeline lane.
+
+    All FK links are SET NULL — unlinking a speaker/element/shot
+    keeps the segment text with an unresolved-ref flag, never a
+    silent delete."""
+
+    __tablename__ = "dialogue_segments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    sp_scene_id: Mapped[str | None] = mapped_column(ForeignKey("screenplay_scenes.id", ondelete="SET NULL"), nullable=True, index=True)
+    element_id: Mapped[str | None] = mapped_column(ForeignKey("screenplay_elements.id", ondelete="SET NULL"), nullable=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True, index=True)
+    character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id", ondelete="SET NULL"), nullable=True, index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text, default="")
+    # Delivery direction — the screenplay parenthetical's audio-side
+    # counterpart ('whispered', 'urgent', …); user-authored.
+    direction: Mapped[str] = mapped_column(Text, default="")
+    # {profile_override, style, delivery, emotion} — overrides layered
+    # on the speaker's character voice profile; never a duplicate
+    # identity system.
+    voice_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    language: Mapped[str] = mapped_column(String(20), default="en")
+    # {hints: [{word, say_as}]} — pronunciation metadata for later
+    # real-synthesis milestones; stored verbatim, never interpreted.
+    pronunciation_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # {start_frames, fps_num, fps_den, timeline_id, duration_s} —
+    # planned rational timing; the TimelineClip row is the actual
+    # placement record.
+    timing_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    generate_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ReferenceSet(Base):
     """C4-A — named grouping of a character's entity-asset reference
     links plus per-set identity guidance. Membership lives on

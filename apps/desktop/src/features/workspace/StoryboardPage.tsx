@@ -25,6 +25,7 @@ import {
 } from "./StoryboardPlanning";
 import { KeyframesSection } from "./StoryboardKeyframes";
 import { MotionClipsSection } from "./MotionClips";
+import { DialogueSection } from "./Dialogue";
 
 const SHOT_TYPES = [
   "establishing", "wide", "medium", "medium_close", "close", "extreme_close",
@@ -1231,6 +1232,16 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
               <MotionClipsSection
                 projectId={projectId}
                 shotId={shot.id}
+                run={run}
+              />
+            )}
+
+            {/* ---- A5 dialogue segments ---- */}
+            {shot && (
+              <DialogueSection
+                projectId={projectId}
+                shotId={shot.id}
+                createSceneId={shot.scene_id}
                 run={run}
               />
             )}
