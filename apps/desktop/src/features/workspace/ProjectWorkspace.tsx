@@ -3,7 +3,7 @@ import { useApp, type WorkspaceTab } from "../../stores/appStore";
 import { AssetsPage } from "./AssetsPage";
 import { BackupsPage } from "./BackupsPage";
 import { EntityPage } from "./EntityPage";
-import { FirstFilmPage } from "../firstfilm/FirstFilmPage";
+import { WizardPage } from "../wizard/WizardPage";
 import { CloudPage } from "./CloudPage";
 import { GeneratePage } from "./GeneratePage";
 import { OverviewPage } from "./OverviewPage";
@@ -13,7 +13,7 @@ import { StoryboardPage } from "./StoryboardPage";
 import { TimelinePage } from "./TimelinePage";
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
-  { id: "first_film", label: "First Film" },
+  { id: "first_film", label: "Wizard" },
   { id: "overview", label: "Overview" },
   { id: "screenplay", label: "Screenplay" },
   { id: "storyboard", label: "Storyboard" },
@@ -85,7 +85,7 @@ export function ProjectWorkspace() {
         </nav>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "first_film" && <FirstFilmPage />}
+        {tab === "first_film" && <WizardPage />}
         {tab === "overview" && <OverviewPage />}
         {tab === "screenplay" && <ScreenplayPage />}
         {tab === "storyboard" && <StoryboardPage />}

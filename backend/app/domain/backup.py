@@ -385,6 +385,14 @@ def import_package(
                 for f in ("name", "template", "kind", "aspect_ratio", "width",
                           "height", "fps_num", "fps_den", "style"):
                     setattr(new_project, f, src_project.get(f) or getattr(new_project, f))
+                # Restore packaged settings (provider overrides, wizard
+                # progress, …) without losing the stub's import_source
+                # provenance — settings are user data, never dropped.
+                new_project.settings_json = {
+                    **(src_project.get("settings_json") or {}),
+                    **(new_project.settings_json or {}),
+                    "imported_from": src_project.get("id"),
+                }
             else:
                 new_project = Project(
                     id=new_id(),

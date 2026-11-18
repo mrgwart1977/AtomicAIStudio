@@ -22,14 +22,27 @@ not finished features. See [ROADMAP.md](ROADMAP.md) for honest status.
 - **Provider Manager (foundation)** — catalog + DPAPI credential vault + settings UI; **no live cloud generation yet**
 - **Durable jobs & undo** — every mutation is an audited command; jobs survive restarts
 - **Windows installer** — NSIS via Tauri 2 + PyInstaller-frozen backend
+- **Film wizard (Phase A)** — a 15-stage guided path from project to
+  verified export (screenplay → scenes/cast → shot list → planning →
+  keyframes → motion → dialogue → first-cut assembly → edit → export),
+  orchestrating the same commands the workspace pages use — nothing is
+  stored twice. Beginner and Advanced modes share one data model;
+  progress saves per-project and resumes after restart or restore.
 
 ## What is NOT functional yet
 
 - **Cloud generation** — the 60-entry provider catalog is a management
   foundation only. Nothing calls a real provider API, runs a paid job, or
-  drives a browser. Mock connectivity tests are labeled mock.
-- **C1.5+ import/automation workflows**, LTX integration, audio, editing
-  timelines — planned, not implemented.
+  drives a browser. `cloud.plan` is a read-only approval preview; mock
+  connectivity tests are labeled mock.
+- **Phase A wizard generation is simulated** — keyframes, motion clips,
+  and dialogue produced through the wizard/mock adapters are labeled
+  placeholders (deterministic images, video, and speech-shaped tones —
+  **not** spoken dialogue, not real AI output). The UI marks them
+  *Simulated*; where real inference is unavailable the wizard says so
+  and offers the simulation path.
+- **C1.5+ import/automation workflows**, LTX integration, real provider
+  inference — planned, not implemented.
 
 ## Platform & hardware
 

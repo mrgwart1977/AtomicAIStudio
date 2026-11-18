@@ -4,6 +4,14 @@ Manual acceptance for the audio editing milestone. These are **human-required**
 checks — they are deliberately kept separate from automated acceptance and are
 **not** marked passed without a person running them.
 
+> **A8 note (count reconciliation):** the A8 specification asked for "the
+> existing 24 human audio/editing checks." This file is the only human
+> audio/editing checklist in the repo and contains **19** enumerated
+> checks (A1–A8, B1–B6, C1–C5); `docs/n3-completion-report.md` refers to
+> it loosely as a "24-check" matrix. A8 carries the real 19 checks
+> forward verbatim in `docs/a8-acceptance.md` — no checks were invented
+> to reach 24, and none are marked passed without a human run.
+
 Setup: build + install the app (`scripts\build-sidecar.ps1`, then
 `npm run tauri build`, run the NSIS installer). Any project works; for
 comparable results the N3-D driver (`scripts/cdp-n3d-acceptance.cjs`) leaves a
