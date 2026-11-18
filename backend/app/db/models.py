@@ -602,6 +602,76 @@ class DialogueSegment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AssemblyPlan(Base):
+    """A6 — a deterministic first-cut proposal for one timeline:
+    ordered scenes → shots → motion clips, dialogue, and shot-linked
+    audio mapped onto lanes. The plan is a proposal, never a silent
+    rewrite — `applied` only after an approved `assembly.apply`, and
+    every item keeps its stable source association."""
+
+    __tablename__ = "assembly_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="First cut")
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|applied
+    # The computed proposal — ordered item descriptors + warnings +
+    # conflicts + lane resolution, exactly as previewed.
+    plan_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Source fingerprint at last compute: scene/shot ordering,
+    # revisions, durations, motion-clip + dialogue results, linked
+    # audio. `assembly.apply` refuses when sources drifted —
+    # re-run assembly.plan for a fresh proposal.
+    sources_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # What the last apply created: {fingerprint, created_track_ids,
+    # items: {item_key: {timeline_clip_id}}}. Re-applying the same
+    # plan on an unchanged timeline is an audited no-op.
+    applied_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class AssemblyItem(Base):
+    """A6 — one ordered first-cut row: a shot's selected motion clip,
+    a dialogue line, or a shot-linked audio asset mapped onto a
+    timeline span. Source refs SET NULL so an unlinked source keeps
+    the review record — the item flags it instead of disappearing."""
+
+    __tablename__ = "assembly_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("assembly_plans.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Stable identity across re-plans: '{kind}:{source_id}' — review
+    # state and applied records survive plan recomputes.
+    item_key: Mapped[str] = mapped_column(String(80), default="", index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="shot")  # shot|dialogue|audio
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id", ondelete="SET NULL"), nullable=True, index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"), nullable=True, index=True)
+    dialogue_id: Mapped[str | None] = mapped_column(ForeignKey("dialogue_segments.id", ondelete="SET NULL"), nullable=True)
+    motion_clip_id: Mapped[str | None] = mapped_column(ForeignKey("motion_clips.id", ondelete="SET NULL"), nullable=True)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    track_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_tracks.id", ondelete="SET NULL"), nullable=True)
+    # The clip this item produced at apply — the stable shot→clip
+    # association revision-impact analysis matches on.
+    timeline_clip_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_clips.id", ondelete="SET NULL"), nullable=True)
+    start_frames: Mapped[int] = mapped_column(Integer, default=0)
+    extent_frames: Mapped[int] = mapped_column(Integer, default=0)
+    review_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|approved|rejected|skipped
+    notes: Mapped[str] = mapped_column(Text, default="")
+    # {missing, conflicts[], warnings[], reason} — surfaced verbatim.
+    flags_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The source signature this row was computed from — drift vs the
+    # live source marks the item stale on the next plan compute.
+    source_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ReferenceSet(Base):
     """C4-A — named grouping of a character's entity-asset reference
     links plus per-set identity guidance. Membership lives on

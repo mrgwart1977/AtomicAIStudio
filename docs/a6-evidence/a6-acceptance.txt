@@ -1,0 +1,7 @@
+A6 INSTALLED ACCEPTANCE — FINAL CANDIDATE
+tested commit : fdf19858abefeff372fdc4e58726e062e1cf0152 (working tree == commit)
+installer     : Atomic Dream Engine_0.1.0_x64-setup.exe (76.37 MiB, NSIS)
+backend suite : 1784 passed / 11 skipped (0 failures) on the same tree + fix
+focused A6    : 38/38 passed incl. test_skip_then_scoped_replace_apply_not_noop
+date          : 2026-11-18
+

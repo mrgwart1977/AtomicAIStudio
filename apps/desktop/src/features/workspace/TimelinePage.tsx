@@ -8,6 +8,7 @@ import type {
 import { useApp } from "../../stores/appStore";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { TimelineEditor } from "./TimelineEditor";
+import { AssemblyPanel } from "./AssemblyPanel";
 import { exportMode } from "./timelineMath";
 
 /** C5-A + N1-B — timeline assembly. Multitrack lane editor (ruler,
@@ -446,6 +447,16 @@ export function TimelinePage() {
                 )}
               </div>
             )}
+            {selTl.status === "active" && project && (
+              <AssemblyPanel
+                projectId={project.id}
+                timeline={{ id: selTl.id, name: selTl.name }}
+                onChanged={() => {
+                  refreshDetail().catch(() => {});
+                  refreshList().catch(() => {});
+                }}
+              />)}
+
             <TimelineEditor
               detail={detail}
               active={selTl.status === "active"}
