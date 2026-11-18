@@ -46,6 +46,11 @@ class AdapterRegistry:
         # Never speech synthesis; output marks is_mock +
         # simulated_speech.
         self.register(MockAudioAdapter())
+        # A7 — simulated GPU worker: deterministic in-process "work"
+        # that exercises scheduler admission/reservations/queueing for
+        # real, with zero inference. adapter_kind="mock" as always.
+        from app.adapters.gpu_sim import GpuSimAdapter
+        self.register(GpuSimAdapter())
         # C2.0a — mock cloud text: exercises the remote-job contract on
         # an in-memory provider. Zero egress, honest "mock" kind.
         from app.adapters.cloud_mock import MockCloudTextAdapter

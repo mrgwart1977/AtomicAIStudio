@@ -122,6 +122,8 @@ CommandType = Literal[
     # A6 — first-cut assembly: deterministic plan → review → apply
     "assembly.plan", "assembly.apply", "assembly.review",
     "assembly.revert",
+    # A7 — simulated GPU scheduling + provider-neutral cloud planning
+    "sim.gpu.work", "cloud.plan",
     "bridge.prepare", "bridge.launch", "bridge.import",
     "bridge.watch.scan", "bridge.watch.enable", "bridge.watch.disable",
     "bridge.cli.detect",
@@ -219,6 +221,11 @@ class CommandProposalOut(BaseModel):
     # (items, lanes, missing media, conflicts); assembly.apply shows
     # the apply decision walk (per-item keep/insert/skip/replace).
     resolved_assembly: dict[str, Any] | None = None
+    # A7 — cloud.plan: provider-neutral capability/cost/budget/
+    # credential-presence/availability preview + plan_fingerprint;
+    # sim.gpu.work: scheduler admission preview (device/queue/why).
+    resolved_cloud: dict[str, Any] | None = None
+    resolved_gpu: dict[str, Any] | None = None
 
 
 class CommandOut(BaseModel):
@@ -247,6 +254,7 @@ class JobOut(BaseModel):
     output_asset_id: str | None
     command_id: str | None
     gpu_index: int | None = None
+    reserved_vram_bytes: int | None = None
     model_key: str | None = None
     result_json: dict[str, Any] | None = None
     progress_json: dict[str, Any] | None = None

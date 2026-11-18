@@ -1,0 +1,1 @@
+{"gpus":[{"index":0,"name":"SIM-0 (8 GiB)","vendor":"NVIDIA","vram_bytes":8589934592,"vram_free_bytes":8589934592},{"index":1,"name":"SIM-1 (8 GiB)","vendor":"NVIDIA","vram_bytes":8589934592,"vram_free_bytes":8589934592}],"backends":{"cuda":{"available":true},"vulkan":{"available":true},"directml":{"available":true},"cpu":{"available":true}}}

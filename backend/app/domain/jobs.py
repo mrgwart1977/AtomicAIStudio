@@ -199,6 +199,13 @@ class JobEngine:
                 job.status = "cancelled"
                 job.message = "cancelled before it started"
                 job.completed_at = utcnow()
+                # A queued job never dispatched — return the spend hold
+                # booked at commit instead of stranding an open
+                # reservation on budget forever (adapter-side release
+                # markers only run once the job actually starts).
+                from app.domain import spend as _spend
+                _spend.release(s, job_id=job.id,
+                               reason="cancelled before dispatch")
                 s.commit()
                 return "cancelled"
             s.commit()
@@ -271,14 +278,30 @@ class JobEngine:
                     continue
                 gpu_idx = None
                 if getattr(adapter.profile, "needs_gpu", False) and self._sched is not None:
-                    est = (job.request_json or {}).get("est_vram_bytes")
-                    gpu_idx = self._sched.acquire(job.id, dict(job.request_json or {}),
-                                                  est_vram=est)
+                    req0 = dict(job.request_json or {})
+                    est = req0.get("est_vram_bytes")
+                    requires = req0.get("requires") or getattr(
+                        adapter.profile, "requires_backend", None) or []
+                    if isinstance(requires, str):
+                        requires = [requires]
+                    gpu_idx = self._sched.acquire(job.id, req0,
+                                                  est_vram=est,
+                                                  requires=requires)
                     if gpu_idx is None:
-                        job.message = f"waiting for GPU — {self._sched.last_reason or 'no slot free'}"
+                        job.message = (
+                            "waiting for GPU — "
+                            f"{self._sched.reason_for(job.id)
+                               or self._sched.last_reason
+                               or 'no slot free'}")
                         s.commit()
                         continue
                     job.gpu_index = gpu_idx if gpu_idx >= 0 else None
+                    # The actual claim, not the request's estimate: an
+                    # exclusive (unknown-footprint) claim reserves the
+                    # device's usable bytes and must be recorded as such.
+                    job.reserved_vram_bytes = (
+                        self._sched.claimed_bytes(job.id)
+                        if gpu_idx >= 0 else None)
                     req = dict(job.request_json or {})
                     req["assigned_gpu"] = gpu_idx
                     job.request_json = req

@@ -331,6 +331,52 @@ export interface CommandProposal {
    * (per-item insert/keep/skip/replace + stale flag) — discriminated
    * by `"lanes" in` vs `"sources_stale" in`. */
   resolved_assembly?: AssemblyProposal | AssemblyApplyPreview | null;
+  /** A7 — cloud.plan previews: capability + credential presence +
+   * cost + budget headroom + availability, with the fingerprint a
+   * submit pins as plan_fingerprint at commit. */
+  resolved_cloud?: CloudPlan | null;
+  /** A7 — sim.gpu.work previews: what the scheduler would do with
+   * this job right now (admitted device or queue reason). */
+  resolved_gpu?: {
+    would_schedule: boolean;
+    device: number | "cpu" | null;
+    queue_reason: string | null;
+    slots: GpuSchedulerState["slots"];
+    lost_devices: number[];
+  } | null;
+}
+
+/** A7 — provider-neutral cloud plan (preview + approval record). */
+export interface CloudPlan {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  provider_key?: string;
+  provider_label?: string;
+  access_class?: string;
+  task?: string;
+  model_id?: string | null;
+  task_supported?: boolean;
+  status?: string;
+  status_label?: string;
+  enabled?: boolean;
+  credential_required?: boolean;
+  credential?: { configured: boolean; fields: string[]; unreadable: boolean } | null;
+  environment?: string;             // 'simulated' | 'live' | 'unrouted'
+  route_command?: string | null;
+  routed?: boolean;
+  cost_model?: string;
+  est_cost_usd?: number | null;
+  max_cost_usd?: number | null;
+  reserved_micro?: number;
+  budgets?: Array<{ scope: string; limit_micro: number | null; consumed_micro: number; would_exceed: boolean }>;
+  over_budget?: string[];
+  availability?: string;            // available | disabled | blocked | incompatible | unrouted | over_budget
+  unavailable_reason?: string | null;
+  would_admit?: boolean;
+  simulated?: boolean;
+  plan_fingerprint?: string;
+  note?: string;
 }
 
 /** A6 — one row of a first-cut proposal (assembly.plan preview). */
@@ -1184,7 +1230,28 @@ export interface ModelsDir {
 export interface GpuSchedulerState {
   gpu_count: number;
   free: number;
-  slots: Array<{ index: number; name: string | null; vendor: string; vram_bytes: number | null; busy_job_id: string | null }>;
+  /** A7 — indexes of devices that vanished while holding
+   * reservations; surfaced, never silently freed. */
+  lost_devices?: number[];
+  /** A7-F5 — true when the inventory came from ATOMIC_HW_JSON:
+   * simulated devices are never presented as measured hardware. */
+  simulated?: boolean;
+  slots: Array<{
+    index: number; name: string | null; vendor: string;
+    vram_bytes: number | null;
+    vram_free_bytes?: number | null;
+    /** A7 — usable VRAM after headroom; the admission bound. */
+    usable_bytes?: number;
+    /** A7 — bytes reserved by running jobs on this device. */
+    reserved_bytes?: number;
+    free_after_reserve_bytes?: number;
+    /** A7 — job_id → reserved bytes held on this device. */
+    jobs?: Record<string, number>;
+    /** false when the device vanished from the probe while holding
+     * reservations — reported, never scheduled onto. */
+    present?: boolean;
+    busy_job_id: string | null
+  }>;
   prefs: { mode?: string; preferred_gpu?: number | null };
 }
 
