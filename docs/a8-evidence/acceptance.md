@@ -1,7 +1,8 @@
 # A8 installed Windows acceptance — evidence
 
-- **Tested commit:** `c1f4a8c` (feat/a8-wizard; installer built from
-  this tree — `docs/a8-evidence/` stamps are the only delta after it)
+- **Tested commit:** `4e6fda3` (feat/a8-wizard; final reviewed head —
+  rerun after the `backup.py` import-sanitizer hardening; an earlier
+  34/34 run covered `c1f4a8c`)
 - **Installer:** `apps/desktop/src-tauri/target/release/bundle/nsis/
   Atomic Dream Engine_0.1.0_x64-setup.exe` — 76.43 MiB (NSIS, silent
   `//S` install to `%LOCALAPPDATA%\Atomic Dream Engine\`)

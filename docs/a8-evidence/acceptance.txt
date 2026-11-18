@@ -1,4 +1,4 @@
-INFO backend http://127.0.0.1:64607 via installed app
+INFO backend http://127.0.0.1:56213 via installed app
 PASS A1. installed application launched — frozen backend serving API, no system Python
 PASS A2. launch without system Python — backend API responsive
 PASS A3. new project created
@@ -19,11 +19,11 @@ PASS A17. audio mixed — lane gain −2 dB on audio track
 PASS A18. film exported — 720p profile through the real FFmpeg pipeline
 INFO ffprobe: C:\Users\gwart\AppData\Local\Atomic Dream Engine\backend\_internal\ffmpeg\bin\ffprobe.exe
 PASS A19. ffprobe validates export — h264 video (+ audio stream), nonzero duration
-INFO backend http://127.0.0.1:57968 via installed app
+INFO backend http://127.0.0.1:54161 via installed app
 PASS A20. restart persistence — wizard progress + timeline intact
 PASS A21. backup/restore — package carries wizard progress + project rows
 PASS A22. clean shutdown — app + backend processes exited
-INFO backend http://127.0.0.1:56720 via installed app
+INFO backend http://127.0.0.1:58080 via installed app
 PASS B1. populated installation opened under the new build
 PASS B2. database migrated to A8 head — /wizard derives 15 stages
 PASS B3. existing populated project opened
@@ -35,6 +35,6 @@ PASS B8. manual edits intact — tail trim + shot planning preserved
 INFO no audio lane present — video-only film is acceptable
 PASS B9. timeline/audio regression — lanes + clips healthy
 PASS B10. existing project re-exports cleanly — ffprobe-valid output
-INFO backend http://127.0.0.1:59347 via installed app
+INFO backend http://127.0.0.1:50944 via installed app
 PASS B11. second restart — persistence holds
 PASS B12. clean shutdown
