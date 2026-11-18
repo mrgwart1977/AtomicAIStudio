@@ -175,3 +175,12 @@ admission is per-device.
 Device loss/return is driven by rewriting the `ATOMIC_HW_JSON` file
 mid-run — no restart needed except for the genuine restart-reconcile
 step.
+
+## Load-flake log (A7-F1)
+
+`tests/test_n1e_perf.py::test_edl_v2_serialization_scales` —
+`timeline_snapshot` measured 1.021 s against a 1.0 s bound under CI
+saturation on the `f622250` backend-3.14 job. Same flake class A6
+documented (pre-existing, unrelated code path — A7 touches no
+timeline/EDL code). The failed-job rerun passed; tracked, not
+suppressed.
