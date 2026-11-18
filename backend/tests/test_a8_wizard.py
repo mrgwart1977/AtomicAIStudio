@@ -387,6 +387,73 @@ def test_backup_restore_preserves_wizard_progress(client, tmp_path):
     assert _stage(w, "screenplay")["status"] == "done"
 
 
+def test_backup_import_strips_provider_overrides(client, tmp_path):
+    """F2 — provider overrides in settings_json are authorization
+    state ({enabled, settings, region} merged by
+    registry.effective_for_project). A package must not carry them into
+    an imported project — the new project re-derives provider state
+    from app config + explicit user approval only."""
+    pid = make_project(client)["id"]
+    _commit(client, pid, "project.update_settings",
+            {"settings": {
+                "providers": {"openai": {"enabled": True,
+                                          "region": "eu-west",
+                                          "settings": {"base_url":
+                                                        "https://evil.example"}}},
+                "api_key": "sk-not-a-real-key",
+                "secret_token": "tok_123",
+                "credential_blob": {"x": 1},
+                "wizard": {"version": 2, "step": 4, "mode": "advanced"},
+                "custom_pref": "keep-me"}})
+    from tests.test_a6_assembly import _export_import
+    new_pid = _export_import(client, pid)
+    s = client.get(f"/api/projects/{new_pid}").json()["settings_json"]
+    # Authorization/machine-bound keys stripped
+    assert "providers" not in s
+    assert "api_key" not in s
+    assert "secret_token" not in s
+    assert "credential_blob" not in s
+    # User data survives
+    assert s["wizard"]["step"] == 4
+    assert s["custom_pref"] == "keep-me"
+    # Provenance recorded
+    assert s["imported_from"] == pid
+    # Imported project derives providers from app config — not the file
+    provs = client.get(f"/api/projects/{new_pid}/providers").json()["providers"]
+    openai = next((p for p in provs if p["key"] == "openai"), None)
+    if openai is not None:
+        assert not (openai.get("settings") or {}).get("base_url") == \
+            "https://evil.example"
+
+
+def test_backup_import_preserves_identity_and_provenance(client, tmp_path):
+    """F2 — the imported project is a NEW identity; the source id
+    leaks only into provenance fields, never as a live reference."""
+    pid = make_project(client)["id"]
+    su = _a5_setup(client, pid)
+    _commit(client, pid, "keyframe.create",
+            {"shot_id": su["shot"]["shot"]["id"], "role": "start",
+             "prompt": "src kf"})
+    _commit(client, pid, "project.update_settings",
+            {"settings": {"wizard": {"version": 2, "step": 2}}})
+    from tests.test_a6_assembly import _export_import
+    new_pid = _export_import(client, pid)
+    assert new_pid != pid
+    dst = client.get(f"/api/projects/{new_pid}").json()
+    src = client.get(f"/api/projects/{pid}").json()
+    assert dst["settings_json"]["imported_from"] == pid
+    # Every derived entity row belongs to the NEW project — zero
+    # cross-project leakage through the package boundary.
+    w = _wizard(client, new_pid)
+    for row in (w["entities"]["keyframes"] + w["entities"]["clips"]
+                + w["entities"]["dialogue"]):
+        assert row["id"] not in (None, "")
+    src_w = _wizard(client, pid)
+    dst_ids = {r["id"] for r in w["entities"]["keyframes"]}
+    src_ids = {r["id"] for r in src_w["entities"]["keyframes"]}
+    assert src_ids and dst_ids and not (src_ids & dst_ids)
+
+
 def test_restart_reads_same_state(client):
     """A fresh GET after writes is the restart-equivalent read: derived
     state + progress identical, no session-local caching."""
@@ -399,6 +466,48 @@ def test_restart_reads_same_state(client):
     assert a["progress"] == b["progress"]
     assert [s["status"] for s in a["stages"]] == \
         [s["status"] for s in b["stages"]]
+
+
+def test_wizard_settings_undo_reverts_progress(client):
+    """F5 — wizard progress commits are ordinary commands: undoing a
+    project.update_settings restores the prior progress, and derived
+    state stays consistent (it re-derives from live rows anyway)."""
+    pid = make_project(client)["id"]
+    _commit(client, pid, "project.update_settings",
+            {"settings": {"wizard": {"version": 2, "step": 2,
+                                     "furthest": 2, "mode": "beginner"}}})
+    r = _commit(client, pid, "project.update_settings",
+                {"settings": {"wizard": {"version": 2, "step": 5,
+                                         "furthest": 5,
+                                         "mode": "advanced"}}})
+    assert _wizard(client, pid)["progress"]["step"] == 5
+    und = client.post(
+        f"/api/projects/{pid}/commands/{r['command_id']}/undo")
+    assert und.status_code == 200, und.text
+    w = _wizard(client, pid)
+    assert w["progress"]["step"] == 2
+    assert w["progress"]["mode"] == "beginner"
+
+
+def test_stale_preview_refuses_wizard_path(client):
+    """F5 — wizard generation rides the existing pins: a commit
+    carrying a stale resolved_* pin refuses 422, never applies."""
+    pid = make_project(client)["id"]
+    su = _a5_setup(client, pid)
+    kf = _mk_kf(client, pid, su["shot"]["shot"]["id"], "start",
+                prompt="draft")
+    p = client.post(f"/api/projects/{pid}/commands/preview",
+                    json={"command_type": "keyframe.generate",
+                          "payload": {"keyframe_id": kf["id"]},
+                          "scope": "project"}).json()
+    # Edit the prompt after preview — the resolved pin is now stale.
+    _commit(client, pid, "keyframe.update",
+            {"keyframe_id": kf["id"], "prompt": "changed after preview"})
+    _commit(client, pid, "keyframe.generate",
+            {"keyframe_id": kf["id"],
+             "expected_keyframe": p["resolved_keyframe"],
+             "expected_prompt": p["resolved_prompt"]["prompt_sha256"]},
+            expect=422)
 
 
 def test_archived_entities_excluded(client):

@@ -113,6 +113,37 @@ class PackageError(Exception):
     """Raised for invalid/corrupt/incomplete packages."""
 
 
+# Settings keys carrying authorization or machine-bound state — they
+# must never cross a package boundary into an imported project:
+#   providers — per-project provider overrides merge {enabled,
+#               settings, region} (registry.effective_for_project);
+#               enablement is an authorization decision the user makes
+#               per project, and endpoint/region settings are machine
+#               config. An imported project re-derives providers from
+#               app config + explicit approval, never from a file.
+_IMPORT_STRIP_KEYS = frozenset({"providers"})
+# Defensive: no secret-shaped key ever crosses — credentials live in
+# the DPAPI vault by contract, but a hand-built package is untrusted
+# input and must not be able to smuggle them into project settings.
+_IMPORT_STRIP_KEY_PARTS = ("credential", "secret", "token", "password",
+                           "api_key", "apikey", "private_key")
+
+
+def _import_settings(src: dict | None) -> dict:
+    """Project settings allowed to cross a package boundary: user
+    preferences and workflow progress (wizard, first_film,
+    import_behavior, format picks) only."""
+    out: dict = {}
+    for k, v in (src or {}).items():
+        kl = str(k).lower()
+        if k in _IMPORT_STRIP_KEYS:
+            continue
+        if any(part in kl for part in _IMPORT_STRIP_KEY_PARTS):
+            continue
+        out[k] = v
+    return out
+
+
 class ProgressReporter:
     """Byte-level progress for a streaming file operation.
 
@@ -385,11 +416,13 @@ def import_package(
                 for f in ("name", "template", "kind", "aspect_ratio", "width",
                           "height", "fps_num", "fps_den", "style"):
                     setattr(new_project, f, src_project.get(f) or getattr(new_project, f))
-                # Restore packaged settings (provider overrides, wizard
-                # progress, …) without losing the stub's import_source
-                # provenance — settings are user data, never dropped.
+                # Restore packaged settings (wizard progress, format
+                # prefs, …) without losing the stub's import_source
+                # provenance — authorization/machine-bound keys are
+                # stripped by _import_settings; user data is never
+                # silently dropped.
                 new_project.settings_json = {
-                    **(src_project.get("settings_json") or {}),
+                    **_import_settings(src_project.get("settings_json")),
                     **(new_project.settings_json or {}),
                     "imported_from": src_project.get("id"),
                 }
@@ -406,7 +439,7 @@ def import_package(
                     fps_num=src_project.get("fps_num", 24),
                     fps_den=src_project.get("fps_den", 1),
                     style=src_project.get("style", "none"),
-                    settings_json={**(src_project.get("settings_json") or {}),
+                    settings_json={**_import_settings(src_project.get("settings_json")),
                                    "imported_from": src_project.get("id")},
                     revision=1,
                 )
