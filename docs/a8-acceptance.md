@@ -54,19 +54,21 @@ planning (same validation as the storyboard page).
 
 ## Installed Windows acceptance (A8.13)
 
-Driver: `scripts/a8-acceptance.ps1` (dev-token HTTP against the installed
-frozen backend — same pattern as A6/A7).
+Driver: `scripts/cdp-a8-acceptance.cjs` (CDP-sniffed token against the
+installed frozen backend — same pattern as A1–A7).
 
-- **Scenario A — clean install:** see `docs/a8-evidence/acceptance-a.md`.
-- **Scenario B — upgrade over populated install:** `docs/a8-evidence/acceptance-b.md`.
+- **Scenario A — clean install: 22/22 PASS** — `docs/a8-evidence/acceptance.md`
+- **Scenario B — upgrade over populated install: 12/12 PASS** — same file.
+- **Tested commit `c1f4a8c`, installer `Atomic Dream Engine_0.1.0_x64-setup.exe` (76.43 MiB), bundled ffprobe at `_internal\ffmpeg\bin`.**
 
 ## Automated results
 
 | Suite | Result |
 |---|---|
 | `backend/tests/test_a8_wizard.py` | 16/16 PASS |
-| Full backend pytest | see evidence |
-| Frontend vitest (`features/wizard` + all) | 413 total, 23 wizard-specific |
+| Full backend pytest | **1847 passed**, 11 skipped, 0 failures |
+| Frontend vitest (`features/wizard` + all) | **411 passed** (29 files), 23 wizard-specific |
+| Installed acceptance (driver) | **34/34 PASS** on `c1f4a8c` |
 
 ## Human acceptance (A8.14)
 

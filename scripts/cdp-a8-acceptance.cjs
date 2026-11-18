@@ -276,6 +276,8 @@ async function main() {
 
   // A10 — keyframe drafts (start+end per shot) with prompts.
   const kfIds = [];
+  const kfsFor = async (shotId) => api("GET",
+    `/api/projects/${pid}/shots/${shotId}/keyframes`);
   {
     const board = await api("GET", `/api/projects/${pid}/storyboard`);
     for (const sc of board) for (const sh of sc.shots) {
@@ -283,7 +285,10 @@ async function main() {
         await commit(pid, "keyframe.create", { shot_id: sh.shot.id, role });
       }
     }
-    const kfs = await api("GET", `/api/projects/${pid}/keyframes`);
+    const kfs = [];
+    for (const sc of board) for (const sh of sc.shots) {
+      kfs.push(...await kfsFor(sh.shot.id));
+    }
     for (const k of kfs.filter((x) => x.status === "active")) {
       await commit(pid, "keyframe.update", {
         keyframe_id: k.id, prompt: `${k.role} frame — quayside, dawn light` });
@@ -312,7 +317,10 @@ async function main() {
   // A12 — mock video generation (motion clip per shot).
   {
     const board = await api("GET", `/api/projects/${pid}/storyboard`);
-    const kfs = await api("GET", `/api/projects/${pid}/keyframes`);
+    const kfs = [];
+    for (const sc of board) for (const sh of sc.shots) {
+      kfs.push(...await kfsFor(sh.shot.id));
+    }
     for (const sc of board) for (const sh of sc.shots) {
       const mine = kfs.filter((k) => k.shot_id === sh.shot.id && k.status === "active");
       const start = mine.find((k) => k.role === "start");
@@ -397,7 +405,7 @@ async function main() {
     if (!clip) fail("no trimmable clip");
     trimmedClip = clip.id; trimmedOut = clip.out_frame - 1;
     await commit(pid, "timeline.clip.trim",
-      { clip_id: clip.id, out_frame: trimmedOut });
+      { timeline_id: tid, clip_id: clip.id, out_frame: trimmedOut });
     const det2 = await api("GET", `/api/projects/${pid}/timelines/${tid}`);
     const c2 = det2.clips.find((c) => c.id === clip.id);
     if (c2.out_frame !== trimmedOut) fail("clip trim not applied");
@@ -582,7 +590,7 @@ async function main() {
     const plan = board[0].shots[0].shot.planning_json;
     if (plan?.camera?.follow_mode !== "follow_behind") fail("manual planning lost");
   }
-  ok("B8. manual edits intact — clip gain + shot planning preserved");
+  ok("B8. manual edits intact — tail trim + shot planning preserved");
 
   // B9 — timeline/audio regression: lanes + clip count unchanged.
   {
