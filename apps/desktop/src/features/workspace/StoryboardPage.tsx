@@ -187,7 +187,7 @@ export function StoryboardPage() {
           </label>
           <button
             onClick={() => setSceneDlg({ mode: "new" })}
-            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-white hover:bg-action-hi"
+            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-action-hi"
           >
             + New scene
           </button>
@@ -347,7 +347,7 @@ export function StoryboardPage() {
           <div className="rounded-lg border border-dashed border-line p-10 text-center">
             <p className="text-sm text-muted">Your story starts here.</p>
             <button onClick={() => setSceneDlg({ mode: "new" })}
-              className="mt-3 rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi">
+              className="mt-3 rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi">
               + Create the first scene
             </button>
           </div>
@@ -493,7 +493,7 @@ function ShotCard({ entry, projectId, onDragStart, onDragEnd, onClick, onDuplica
         )}
         {cam.follow_mode && (
           <span title={`Follow mode: ${cam.follow_mode.replace(/_/g, " ")}`}
-            className="absolute left-1 top-6 rounded bg-teal/80 px-1.5 py-0.5 text-[9px] font-semibold text-white">
+            className="absolute left-1 top-6 rounded bg-teal/80 px-1.5 py-0.5 text-[9px] font-semibold text-ink">
             ◈ {FOLLOW_SHORT[cam.follow_mode] ?? cam.follow_mode}
           </span>
         )}
@@ -729,7 +729,7 @@ function SceneDialog({ dlg, onClose, characters, locations, worlds, run }: {
             <div className="flex gap-2">
               <Dialog.Close className="rounded-md border border-line px-4 py-2 text-sm text-muted hover:text-fg">Cancel</Dialog.Close>
               <button onClick={() => void save()} disabled={busy || !form.title.trim()}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40">
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40">
                 {busy ? "Saving…" : editing ? "Save" : "Create scene"}
               </button>
             </div>
@@ -1400,7 +1400,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
             <div className="flex gap-2">
               <Dialog.Close className="rounded-md border border-line px-4 py-2 text-sm text-muted hover:text-fg">Cancel</Dialog.Close>
               <button onClick={() => void save()} disabled={busy}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40">
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40">
                 {busy ? "Saving…" : "Save shot"}
               </button>
             </div>
@@ -2034,7 +2034,7 @@ function SendToTimeline({ projectId, assetId, shotId, sceneId }: {
         <>
           <span className="text-[10px] text-muted">{pending.proposal.summary}</span>
           <button onClick={approve} disabled={busy}
-            className="rounded bg-action px-2 py-0.5 text-[11px] text-white disabled:opacity-40">
+            className="rounded bg-action px-2 py-0.5 text-[11px] text-ink disabled:opacity-40">
             Approve insert
           </button>
           <button onClick={() => setPending(null)}

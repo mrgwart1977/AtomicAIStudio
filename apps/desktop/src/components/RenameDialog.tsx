@@ -23,6 +23,7 @@ export function RenameDialog({
           <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
           <input
             autoFocus
+            aria-label={title}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
@@ -45,7 +46,7 @@ export function RenameDialog({
                 }
               }}
               disabled={!value.trim()}
-              className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+              className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
             >
               Rename
             </button>

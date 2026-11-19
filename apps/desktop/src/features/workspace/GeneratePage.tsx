@@ -58,7 +58,7 @@ function ModeTabs({ mode, onChange }: { mode: "image" | "video"; onChange: (m: "
       key={m}
       onClick={() => onChange(m)}
       className={`rounded-md px-3 py-1.5 text-sm ${
-        mode === m ? "bg-action text-white" : "border border-line text-muted"
+        mode === m ? "bg-action text-ink" : "border border-line text-muted"
       }`}
     >
       {label}
@@ -483,7 +483,7 @@ export function GeneratePage() {
           <button
             onClick={generate}
             disabled={submitting || !model || !form.prompt.trim() || !!runningJob}
-            className="rounded-md bg-action px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-md bg-action px-5 py-2 text-sm font-medium text-ink disabled:opacity-50"
           >
             Generate
           </button>

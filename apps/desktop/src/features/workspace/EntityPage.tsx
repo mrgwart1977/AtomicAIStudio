@@ -212,7 +212,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
               setSel(null);
               setForm({});
             }}
-            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-white hover:bg-action-hi"
+            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-action-hi"
           >
             + New
           </button>
@@ -358,12 +358,12 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                 </div>
               )}
 
-              {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+              {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
               <div className="mt-5 flex items-center gap-2">
                 <button
                   onClick={() => void save()}
                   disabled={busy || !form.name?.trim()}
-                  className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                  className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
                 >
                   {busy ? "Saving…" : creating ? "Create" : "Save new revision"}
                 </button>

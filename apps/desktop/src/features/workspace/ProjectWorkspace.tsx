@@ -39,7 +39,7 @@ export function ProjectWorkspace() {
     return (
       <div className="mx-auto max-w-3xl p-10 text-center text-muted">
         <p>No project selected.</p>
-        <button onClick={() => setPage("projects")} className="mt-4 rounded-md bg-action px-4 py-2 text-sm text-white">
+        <button onClick={() => setPage("projects")} className="mt-4 rounded-md bg-action px-4 py-2 text-sm text-ink">
           Choose a project
         </button>
       </div>

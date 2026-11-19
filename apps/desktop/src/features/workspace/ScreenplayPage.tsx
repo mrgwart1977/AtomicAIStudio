@@ -205,6 +205,7 @@ export function ScreenplayPage() {
             placeholder="New screenplay…" aria-label="New screenplay title"
             className="min-w-0 flex-1 rounded border border-line bg-card px-2 py-1 text-sm" />
           <button onClick={() => void createScreenplay()} disabled={busy}
+            aria-label="Create screenplay"
             className="rounded bg-teal px-2 py-1 text-sm text-black disabled:opacity-50">+</button>
         </div>
         <ul className="space-y-1">

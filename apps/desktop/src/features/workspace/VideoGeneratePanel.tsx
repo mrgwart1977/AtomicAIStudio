@@ -188,7 +188,7 @@ export function VideoGeneratePanel() {
           <button
             onClick={generate}
             disabled={submitting || !model || (!prompt.trim() && !imageAssetId) || !!runningJob}
-            className="rounded-md bg-action px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-md bg-action px-5 py-2 text-sm font-medium text-ink disabled:opacity-50"
           >
             Generate clip
           </button>

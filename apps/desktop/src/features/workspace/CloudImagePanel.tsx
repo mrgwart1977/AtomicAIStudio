@@ -21,7 +21,7 @@ const inputCls =
   "w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg placeholder:text-faint";
 const labelCls = "mb-1 block text-xs font-medium text-muted";
 const btnCls =
-  "rounded-md bg-action px-3 py-1.5 text-sm text-white hover:bg-action/80 disabled:opacity-40";
+  "rounded-md bg-action px-3 py-1.5 text-sm text-ink hover:bg-action/80 disabled:opacity-40";
 const ghostBtn =
   "rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:text-fg disabled:opacity-40";
 
@@ -537,7 +537,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       )}
 
       {loadErr && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{loadErr}</p>}
-      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
       {notice && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{notice}</p>}
 
       {/* ---------- approval card (fresh preview required on change) ---------- */}

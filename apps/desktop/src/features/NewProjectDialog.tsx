@@ -219,7 +219,7 @@ export function NewProjectDialog({
             </div>
           )}
 
-          {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+          {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
           <div className="mt-6 flex justify-between">
             <button
               onClick={() => (step === 0 ? onOpenChange(false) : setStep(step - 1))}
@@ -231,7 +231,7 @@ export function NewProjectDialog({
               <button
                 onClick={() => setStep(step + 1)}
                 disabled={!canNext}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
               >
                 Continue
               </button>
@@ -239,7 +239,7 @@ export function NewProjectDialog({
               <button
                 onClick={create}
                 disabled={busy}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
               >
                 {busy ? "Creating…" : "Create project"}
               </button>

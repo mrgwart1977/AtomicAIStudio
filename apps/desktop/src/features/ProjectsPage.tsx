@@ -164,7 +164,7 @@ export function ProjectsPage() {
         </div>
         <button
           onClick={() => setWizard(true)}
-          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi"
+          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi"
         >
           + New project
         </button>
@@ -201,7 +201,7 @@ export function ProjectsPage() {
         <span className="text-xs text-faint">{shown.length} project{shown.length === 1 ? "" : "s"}</span>
       </div>
 
-      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
 
       <div className="mt-6 grid grid-cols-3 gap-5">
         {shown.map((p) => (

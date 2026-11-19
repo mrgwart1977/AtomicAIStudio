@@ -113,12 +113,12 @@ export function PromptBar() {
         <button
           onClick={review}
           disabled={disabled || busy || !draft.trim()}
-          className="rounded-md bg-action px-4 py-2.5 text-sm font-medium text-white hover:bg-action-hi disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-md bg-action px-4 py-2.5 text-sm font-medium text-ink hover:bg-action-hi disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? "Working…" : "Review request"}
         </button>
       </div>
-      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
 
       <Dialog.Root open={proposal !== null} onOpenChange={(o) => !o && setProposal(null)}>
         <Dialog.Portal>
@@ -161,7 +161,7 @@ export function PromptBar() {
               <button
                 onClick={approve}
                 disabled={busy}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
               >
                 {busy ? "Submitting…" : "Approve & run"}
               </button>

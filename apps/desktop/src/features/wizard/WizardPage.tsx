@@ -297,13 +297,13 @@ export function WizardPage() {
           </button>
         )}
         {!lastStep && (
-          <button className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi"
+          <button className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi"
             onClick={() => void go(state.step + 1)}>
             Next →
           </button>
         )}
         {lastStep && derivedStage?.status === "done" && (
-          <button className="rounded-md bg-teal px-4 py-2 text-sm font-medium text-white"
+          <button className="rounded-md bg-teal px-4 py-2 text-sm font-medium text-ink"
             onClick={() => void save({ ...state, done: true })}>
             Mark film complete
           </button>

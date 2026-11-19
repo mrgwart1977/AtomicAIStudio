@@ -23,7 +23,7 @@ import {
 import { pollJob } from "./jobs";
 
 export const input = "rounded-md border border-line bg-panel px-3 py-1.5 text-sm";
-export const btn = "rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40";
+export const btn = "rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40";
 export const btnGhost = "rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:text-fg disabled:opacity-40";
 export const btnWarn = "rounded-md border border-amber/50 bg-amber/10 px-3 py-1.5 text-sm text-amber hover:bg-amber/20 disabled:opacity-40";
 
