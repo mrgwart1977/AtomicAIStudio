@@ -95,21 +95,26 @@ def test_stage_subplan_video_rebases_cut_clip():
     assert nc["tl_start_s"] == 0 and nc["tl_end_s"] == Fraction(3, 2)
 
 
-def test_stage_subplan_audio_stream_anchors_shift_by_skip():
+def test_stage_subplan_audio_keeps_stream_anchors_adds_posttrim():
     # stream covers [24, 120) tl (24f head borrow + 72f occupancy);
-    # window [60, 120): skip_tl = 36f → 72000 src samples @48k/24fps
+    # window [60, 120): skip_tl = 36f → 72000 src samples @48k/24fps.
+    # NEW contract: the full original segment + ALL stream-local
+    # anchors stay untouched (afade can't anchor negatively); the
+    # stage window is cut by a post-envelope atrim instead.
     a = _aclip("a0", start_tl=48, extent_tl=72, head_tl=24,
                head_src=48000, xf={"role": "in", "curve": "tri",
                                    "off": 0, "n": 96000},
                track_auto=[{"at_tl": Fraction(72), "gain_db": -6.0}])
     sub = tx.stage_subplan(_plan([], [a], frames=120), 60, 120)
     na = sub["audio_clips"][0]
-    assert na["seg_start_src"] == 72000
-    assert na["seg_end_src"] == 72000 + 120000  # take 60f = 120000 smp
-    assert na["head_src"] == 48000 - 72000
-    assert na["head_tl"] == Fraction(24) - 36
+    assert na["seg_start_src"] == a["seg_start_src"]
+    assert na["seg_end_src"] == a["seg_end_src"]
+    assert na["head_src"] == 48000
+    assert na["head_tl"] == Fraction(24)
     assert na["start_tl"] == Fraction(-12)
-    assert na["xf"]["off"] == -72000
+    assert na["xf"]["off"] == 0
+    assert na["stage_skip_src"] == 72000
+    assert na["stage_end_src"] == 72000 + 120000  # take 60f = 120000
     assert na["track_auto"][0]["at_tl"] == 12
 
 

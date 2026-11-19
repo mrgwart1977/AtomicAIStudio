@@ -528,7 +528,11 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
         parts.append(
             f"[{vspec(paths[c['clip_id']])}]trim="
             f"start={_flt(in_s)}:end={_flt(end_s)},"
-            f"setpts=PTS-STARTPTS,"
+            # PTS carries the clip's TIMELINE position — overlay draws
+            # the secondary while main pts is inside it; resetting to
+            # 0 would consume every clip at output frame 0 and drop
+            # everything not starting at the origin (eof_action=pass).
+            f"setpts=PTS-STARTPTS+{_flt(c['tl_start_s'])}/TB,"
             f"fps={fps},"
             f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease"
             f"[c{i}]")
@@ -561,8 +565,9 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                 lead = _q((a["start_tl"] - a["head_tl"])
                           * AUDIO_RATE / tl_fps)
             # C3 staged: a clip whose stream starts before the window
-            # reports a negative lead — it was already trimmed at the
-            # boundary, so it plays from stage position 0.
+            # reports a negative lead — the post-envelope atrim inside
+            # the chain already cuts it, so it plays from stage
+            # position 0.
             if lead > 0:
                 a_parts.append(
                     f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
@@ -687,6 +692,12 @@ def _lane_chain(spec: str, a: dict, tl_fps: Fraction) -> str:
         kind = "in" if xf["role"] == "in" else "out"
         chain += (f",afade=t={kind}:start_sample={xf['off']}"
                   f":nb_samples={xf['n']}:curve={xf['curve']}")
+    if "stage_skip_src" in a:
+        # Staged: the stream kept its full original segment + anchors
+        # so envelopes continue across the boundary exactly; cut the
+        # stage window out of the rendered stream here.
+        chain += (f",atrim=start_sample={a['stage_skip_src']}"
+                  f":end_sample={a['stage_end_src']},asetpts=PTS-STARTPTS")
     return chain + f",aresample={AUDIO_RATE},asetpts=PTS-STARTPTS"
 
 
@@ -795,8 +806,12 @@ def stage_windows(plan: dict, clip_paths: dict[str, str],
         events.append((s0, e0, clip_paths[a["clip_id"]]))
     if not events:
         return []
-    bounds = sorted({s for s, _, _ in events} |
-                    {e for _, e, _ in events})
+    # Fractional event edges (non-integer tl fps) snap UP: a clip
+    # starting at 119.88 first shows in frame 120 and one ending at
+    # 119.88 still contributes frame 119 — ceil keeps every stage
+    # boundary on a whole frame and tiles the program exactly.
+    bounds = sorted({_ceil(s) for s, _, _ in events} |
+                    {_ceil(e) for _, e, _ in events})
     by_start = sorted(events)  # (s, e, path)
     prog = bounds[-1]
     stages: list[tuple[int, int]] = []
@@ -883,15 +898,16 @@ def stage_subplan(plan: dict, F: int, M: int) -> dict:
         take_tl = min(e0, Mf) - max(Ff, s0)
         skip_src = _q(skip_tl * a["rate"] / tl_fps)
         take_src = _q(take_tl * a["rate"] / tl_fps)
-        na["seg_start_src"] = a["seg_start_src"] + skip_src
-        na["seg_end_src"] = a["seg_start_src"] + skip_src + take_src
-        na["head_src"] = a["head_src"] - skip_src
-        na["head_tl"] = a["head_tl"] - skip_tl
+        # Keep the FULL original stream segment and every stream-local
+        # anchor (head_src, extent_src, fades, xf.off, automation offs)
+        # untouched — afade/aeval anchors are stream positions and must
+        # never go negative when an envelope crosses the boundary.
+        # `_lane_chain` appends a post-envelope atrim that cuts the
+        # [skip_src, skip_src+take_src) window out of the rendered
+        # stream — bit-identical envelope state to the single pass.
+        na["stage_skip_src"] = skip_src
+        na["stage_end_src"] = skip_src + take_src
         na["start_tl"] = a["start_tl"] - Ff
-        # extent_src stays ORIGINAL — fade_out's anchor derives from it
-        # and must not migrate when the tail is cut off-stage.
-        if na.get("xf") is not None:
-            na["xf"] = {**a["xf"], "off": a["xf"]["off"] - skip_src}
         na["track_auto"] = [{**p, "at_tl": p["at_tl"] - Ff}
                             for p in a["track_auto"]]
         audio.append(na)

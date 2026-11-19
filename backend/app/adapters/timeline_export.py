@@ -137,19 +137,29 @@ class TimelineExportAdapter:
         yield {"progress": 0.12, "stage": "probing sources"}
         track_kind = {t["id"]: t.get("kind")
                       for t in edl.get("tracks") or []}
-        probes = []
-        for c, p in zip(clips, paths):
+        # Per-source ffprobe is a ~1s process spawn on Windows — serial
+        # probing dominated large-timeline exports (~25 min at 1000
+        # sources, measured). Bounded-concurrent probing keeps order
+        # deterministic (gather preserves input order) while cutting
+        # wall time ~8x; the cancel_event still aborts each probe.
+        sem = asyncio.Semaphore(8)
+
+        async def _probe_one(c, p):
             # Audio-lane sources are audio-kind files — engine.probe
             # requires a video stream, so they take the audio prober.
             prober = (engine.probe_audio
                       if track_kind.get(c.get("track_id")) == "audio"
                       else engine.probe)
-            meta = await asyncio.to_thread(
-                prober, p, cancel=handle.cancel_event)
+            async with sem:
+                return await asyncio.to_thread(
+                    prober, p, cancel=handle.cancel_event)
+
+        probes = await asyncio.gather(
+            *[_probe_one(c, p) for c, p in zip(clips, paths)])
+        for c, p, meta in zip(clips, paths, probes):
             if not meta.get("ok"):
                 raise ValueError(
                     f"probe failed for {p.name}: {meta.get('reason')}")
-            probes.append(meta)
         handle.check_cancel()
 
         if is_v2:
@@ -189,13 +199,14 @@ class TimelineExportAdapter:
         # never on the command line (Windows' ~32k argv limit fails
         # large timelines) and never in a shared temp location.
         script_path = work / f"{handle.job_id}-filter.txt"
-        # Each UNIQUE source also enters argv once per -i; CAS paths
-        # are ~130 chars, so >~250 distinct sources on one timeline
-        # would still overflow argv. Sources are hardlinked into the
-        # job dir as short aliases (same volume ⇒ free, ~40 chars) —
-        # bound ≈ ~750 unique sources; beyond that a staged submix
-        # render would be required (not implemented). Fallback to the
-        # absolute path when linking isn't possible.
+        # Each UNIQUE source also enters argv once per -i; the
+        # single-pass paths hardlink sources into the job dir as short
+        # aliases (~40 chars) so the argv bound sits around ~600-750
+        # sources — ade-edl/2 timelines beyond STAGE_MAX_INPUTS route
+        # to the staged submix instead (bounded argv at ANY count).
+        # The legacy single-lane encode path keeps its own argv bound
+        # and refuses preflight with an actionable error (below).
+        # Fallback to the absolute path when linking isn't possible.
         alias: dict[str, str] = {}
 
         def short_src(p: str) -> str:
@@ -219,12 +230,24 @@ class TimelineExportAdapter:
                     tx.h264_encoder, ffmpeg["path"], supervise.run)
                 clip_paths = {c["clip_id"]: short_src(str(p))
                               for c, p in zip(clips, paths)}
-                stages = tx.stage_windows(plan, clip_paths)
+                stages = tx.stage_windows(
+                    plan, clip_paths,
+                    int(os.environ.get("ADE_STAGE_MAX_INPUTS") or 0)
+                    or None)
                 if len(stages) <= 1:
                     argv, graph = tx.build_composite_argv(
                         ffmpeg["path"], plan, clip_paths, target, crf,
                         str(out_path), encoder=enc,
                         script_path=str(script_path))
+                    argv_len = sum(len(a) + 1 for a in argv)
+                    if argv_len > 30000:
+                        raise ValueError(
+                            f"export argv is {argv_len} chars — "
+                            "exceeds the single-pass composite bound "
+                            "(~30,000 chars on Windows). Long source "
+                            "paths defeated alias shortening; lower "
+                            "ADE_STAGE_MAX_INPUTS to force the staged "
+                            "path or shorten CAS paths.")
                     script_path.write_text(graph, encoding="utf-8")
                 else:
                     # C3 staged submix: per-window lossless intermediates,
@@ -299,6 +322,21 @@ class TimelineExportAdapter:
                 argv, graph = tx.build_encode_argv(
                     ffmpeg["path"], segments, target, crf, str(out_path),
                     encoder=enc, script_path=str(script_path))
+                # F6 preflight: the single-pass encode emits one -i per
+                # clip — refuse BEFORE rendering when argv would
+                # overflow CreateProcess (~32,767 chars; keep margin).
+                # Actionable: a multitrack (ade-edl/2) timeline routes
+                # to the staged path instead.
+                argv_len = sum(len(a) + 1 for a in argv)
+                if argv_len > 30000:
+                    raise ValueError(
+                        f"export argv is {argv_len} chars with "
+                        f"{len(segments)} input(s) — exceeds the "
+                        "single-pass encode bound (~30,000 chars on "
+                        "Windows). Split the export into smaller "
+                        "timeline ranges, or rebuild the program on "
+                        "multiple tracks so the staged export path "
+                        "applies.")
                 script_path.write_text(graph, encoding="utf-8")
             if r is None:
                 r = await asyncio.to_thread(
