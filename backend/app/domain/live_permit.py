@@ -145,6 +145,50 @@ def permit_fingerprint(permit: dict[str, Any]) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
+def canonical_request(*, provider_key: str, model_id: str,
+                      project_id: str, credential_ref: str,
+                      prompt: str, max_output_tokens: int,
+                      max_cost_usd: Any) -> dict[str, Any]:
+    """The canonical wire request + authorization context the owner is
+    being asked to approve. Spec-pinned fields (endpoint, stream,
+    thinking) are taken from the live spec so a contract change
+    produces a different fingerprint — an approval can never carry
+    across a spec edit. No secret material is ever included."""
+    from app.domain.workers.rest_providers import SPECS
+    spec = SPECS[provider_key]
+    body = {"model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": int(max_output_tokens),
+            **(spec.submit_extra or {})}
+    return {
+        "provider_key": provider_key,
+        "model_id": model_id,
+        "endpoint": f"{spec.base_url}{spec.submit_path}",
+        "method": "POST",
+        "request_body": body,
+        "retry_policy": "none — single request, no resubmission",
+        "max_cost_usd": str(max_cost_usd),
+        "authorization": {
+            "project_id": project_id,
+            "credential_ref": credential_ref,
+            "scope": "single_request — one completion, non-streaming",
+        },
+    }
+
+
+def request_fingerprint(**kwargs) -> str:
+    """sha256 over canonical_request() — the immutable identity of the
+    exact request an approval authorizes. Both approval stages bind to
+    it: the arm approval must name it directly; the exec approval's
+    permit_fingerprint covers it transitively (the armed record stores
+    it). Any prompt/model/endpoint/thinking/stream/cost change yields
+    a different value → approvals become invalid."""
+    canon = json.dumps(canonical_request(**kwargs),
+                       sort_keys=True, separators=(",", ":"),
+                       default=str)
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+
 def approval_path(data_dir: Any, kind: str) -> Path:
     return Path(data_dir) / OWNER_DIR / f"{kind}-approval.json"
 
@@ -263,6 +307,8 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
         raise PermitRefused(code, f"live admission refused at arm: {code}")
     # Independent owner authorization — checked AFTER every app-level
     # check so the approval is the final gate, not a substitute for it.
+    # The approval must name the request fingerprint: it authorizes
+    # THIS exact frozen request, not a class of requests.
     doc = load_approval(data_dir, "arm")
     for f, want in (("provider_key", PERMIT_PROVIDER),
                     ("model_id", PERMIT_MODEL),
@@ -271,6 +317,17 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
             raise PermitRefused(
                 f"owner_approval:{f}",
                 f"owner arm-approval {f} does not match this request")
+    req_fp = request_fingerprint(
+        provider_key=PERMIT_PROVIDER, model_id=PERMIT_MODEL,
+        project_id=project_id, credential_ref=ref, prompt=prompt,
+        max_output_tokens=tokens, max_cost_usd=cost)
+    if doc.get("request_fingerprint") != req_fp:
+        raise PermitRefused(
+            "owner_approval:request_fingerprint",
+            "arm approval does not name this exact request — "
+            "the fingerprint covers endpoint, body, thinking, "
+            "stream, cost cap and authorization scope. Expected "
+            f"request_fingerprint: {req_fp}")
     st = _state(session)
     permit = {
         "permit_id": new_id(),
@@ -281,6 +338,7 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
         "prompt": prompt,
         "max_output_tokens": tokens,
         "max_cost_usd": str(cost),
+        "request_fingerprint": req_fp,
         "armed_at": _now(),
         "armed_command_id": command_id,
     }

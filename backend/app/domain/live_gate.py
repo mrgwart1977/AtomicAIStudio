@@ -431,6 +431,11 @@ def status_report(session: Session, vault: Any) -> dict[str, Any]:
                 "armed_at": pa["armed_at"],
                 "max_cost_usd": pa["max_cost_usd"],
                 "max_output_tokens": pa["max_output_tokens"],
+                # Hashes only — the owner needs permit_fingerprint to
+                # write the exec approval, request_fingerprint to write
+                # the arm approval. Neither carries request content.
+                "request_fingerprint": pa.get("request_fingerprint"),
+                "permit_fingerprint": _lp.permit_fingerprint(pa),
             }
         permit_consumed = len(_lp.consumed_history(session))
     except Exception:

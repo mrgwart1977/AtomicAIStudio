@@ -5435,6 +5435,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     "max_output_tokens": permit["max_output_tokens"],
                     "max_cost_usd": permit["max_cost_usd"],
                     "prompt_len": len(permit["prompt"]),
+                    "request_fingerprint": permit.get(
+                        "request_fingerprint"),
                     "stage": "B2a",
                 }
             else:  # cloud.live.validate_run
