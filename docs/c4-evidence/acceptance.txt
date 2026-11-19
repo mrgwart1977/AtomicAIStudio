@@ -1,0 +1,23 @@
+INFO backend http://127.0.0.1:51652 via installed app
+PASS 1. unauthorized loopback requests rejected
+PASS 2. authorized local operations work
+INFO scaffold 20 shots in 242ms
+PASS 3. large storyboard — 20 shots scaffolded across 10 scenes
+INFO 24 simulated jobs completed
+PASS 4. high-volume simulated queue — 24 jobs, all succeeded
+INFO timeline detail 8 clips in 7ms
+INFO v2 forced: overlay clip on track 114c9727-fdfa-494f-98ce-a94ebe5bb93d
+PASS 5. large timeline — 8 clips + overlay, detail read
+INFO assets page 24 items in 46ms
+PASS 6. CAS asset browsing — 24 assets listed
+PASS 7. sim-only surface — all cloud adapters mock; live dispatch refused 422
+PASS 8. backup/restore — package roundtrip at project scale
+INFO export 8.000000s validated — staged path exercised (3 stage argv seen)
+PASS 9. timeline export + bundled ffprobe — h264 output validated
+INFO cancelled job terminal=succeeded
+PASS 10. cancellation — job reaches terminal state, engine responsive
+INFO backend http://127.0.0.1:55273 via installed app
+PASS 11. restart persistence — project + timeline intact
+INFO bounded shutdown 1.7s
+PASS 12. clean shutdown — no orphan processes
+C3 ACCEPTANCE: 12/12 PASS
