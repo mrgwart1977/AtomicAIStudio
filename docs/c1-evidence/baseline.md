@@ -89,6 +89,33 @@ re-upgrade · newer-stamped DB refusal.
   separately justified (none found so far — all three flakes were
   test-side).
 
+## Results on the C1 build
+
+- **Full backend suite:** `1860 passed, 11 skipped` in 1792s —
+  baseline +9, zero failures; all three fixed flakes green in-suite.
+- **Frontend suite:** `411 passed` (29 files) — unchanged.
+- **Installed acceptance `scripts/cdp-c1-acceptance.cjs`:**
+  **14/14 PASS** on `feat/c1-reliability` head, NSIS
+  `Atomic Dream Engine_0.1.0_x64-setup.exe` (76.40 MiB), frozen
+  sidecar. Checks: clean install + no system Python · multi-project
+  isolation · screenplay→scaffold→keyframes · durable job
+  interruption (kill mid-hold → relaunch reconcile, attempt closed)
+  · cancel + retry (no late result) · simulated GPU reservation
+  recovery (no stale reservation) · backup/restore · timeline edit +
+  audio mix · h264 export + bundled ffprobe · restart persistence ·
+  bounded shutdown ~1.2s · zero orphan processes · uninstall
+  preserving `atomic.db` + assets · reinstall over preserved data.
+  Evidence: `docs/c1-evidence/acceptance.txt`.
+- **Driver root cause found while validating:** NSIS `/S` must be
+  passed literally — `execFileSync`/`spawn` bypass Git Bash's MSYS
+  `//S`→`/S` conversion, so `//S` ran the installer/uninstaller
+  *interactively* (hidden dialog → apparent "trampoline hang" +
+  installer stall). Not a product defect; fixed to `"/S"`, plus
+  uninstall now waits on `uninstall.exe` self-delete (real
+  completion signal) and reaps stray `~nsu*` trampolines.
+  Product-side uninstaller is correct — silent run sweeps fully and
+  preserves `AtomicAIStudio` data.
+
 ## Remaining risks / non-goals
 
 - Windows logoff behavior is not automatable in CI — noted for the

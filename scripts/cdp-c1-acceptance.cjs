@@ -138,6 +138,23 @@ const procs = () => {
       { stdio: "pipe" }).toString();
   } catch { return ""; }
 };
+// NSIS uninstaller second stage: %TEMP%\~nsuN.tmp\Un.exe
+const unPids = () => {
+  try {
+    const out = execFileSync("powershell", ["-NoProfile", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='Un.exe'\" | " +
+      "Where-Object {$_.ExecutablePath -like '*~nsu*'} | " +
+      "ForEach-Object {$_.ProcessId}"],
+      { stdio: "pipe" }).toString();
+    return out.split(/\s+/).filter(Boolean).map(Number).filter(Boolean);
+  } catch { return []; }
+};
+const strayUninstallers = () => unPids().length;
+const killStrayUninstallers = () => {
+  for (const pid of unPids())
+    try { execFileSync("taskkill", ["/F", "/PID", String(pid)],
+      { stdio: "ignore" }); } catch {}
+};
 async function waitProcsGone(timeout = 15) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeout * 1000) {
@@ -187,11 +204,22 @@ async function main() {
   ok("2. multi-project reopening — two projects, isolated job lists");
 
   // ---- minimal film for later steps ----
+  await commit(p1, "character.create", { name: "Rae" });
+  const ch = (await api("GET", `/api/projects/${p1}/character`))[0];
   await commit(p1, "screenplay.create", { title: "C1" });
   const sp = (await api("GET", `/api/projects/${p1}/screenplays`))[0];
   await commit(p1, "screenplay_scene.create", { screenplay_id: sp.id, heading: "INT. X — DAY" });
+  const scRow = (await api("GET", `/api/projects/${p1}/screenplays/${sp.id}`))
+    .scenes[0];
+  await commit(p1, "screenplay_scene.update", { sp_scene_id: scRow.id,
+    elements: [
+      { kind: "action", text: "Rae crosses the room." },
+      { kind: "dialogue", character_id: ch.id, text: "Not again.",
+        parenthetical: "" }] });
   await commit(p1, "shotlist.scaffold", { screenplay_id: sp.id });
   const board = await api("GET", `/api/projects/${p1}/storyboard`);
+  if (!board.length || !board[0].shots.length)
+    fail("scaffold produced no shots");
   const shotId = board[0].shots[0].shot.id;
   for (const role of ["start", "end"]) {
     await commit(p1, "keyframe.create",
@@ -292,6 +320,36 @@ async function main() {
   }
   ok("7. backup/restore — package round-trips into a new project identity");
 
+  // ---- footage: keyframes + clips for every shot so assembly has media ----
+  for (const sc of board) for (const sh of sc.shots) {
+    const klist = await api("GET",
+      `/api/projects/${p1}/shots/${sh.shot.id}/keyframes`);
+    for (const k of klist) {
+      if (k.result_asset_id) continue;
+      const rg = await commit(p1, "keyframe.generate", { keyframe_id: k.id });
+      const jg = await waitJob(p1, rg.job_id);
+      if (jg.status !== "succeeded") fail(`keyframe.generate ${jg.status}`);
+    }
+    const fresh = await api("GET",
+      `/api/projects/${p1}/shots/${sh.shot.id}/keyframes`);
+    const active = fresh.filter((k) => k.status === "active");
+    const start = active.find((k) => k.role === "start");
+    const end = active.find((k) => k.role === "end");
+    await commit(p1, "clip.create", {
+      shot_id: sh.shot.id, start_keyframe_id: start?.id,
+      end_keyframe_id: end?.id, prompt: `${sh.shot.title} motion`,
+      duration_frames: 24 });
+    const clips = (await api("GET",
+      `/api/projects/${p1}/shots/${sh.shot.id}/clips`))
+      .filter((c) => c.status === "active");
+    const pg = await preview(p1, "clip.generate", { clip_id: clips[0].id });
+    const rg = await commit(p1, "clip.generate", {
+      clip_id: clips[0].id, expected_clip: pg.resolved_clip,
+      expected_prompt: pg.resolved_prompt?.prompt_sha256 });
+    const jg = await waitJob(p1, rg.job_id);
+    if (jg.status !== "succeeded") fail(`clip.generate ${jg.status}`);
+  }
+
   // ---- 9+10: timeline edit + audio mix ----
   await commit(p1, "timeline.create", { name: "C1 cut" });
   const tid = (await api("GET", `/api/projects/${p1}/timelines`))[0].id;
@@ -308,9 +366,11 @@ async function main() {
     if (ids.length)
       await commit(p1, "assembly.review",
         { plan_id: planId, item_ids: ids, status: "approved" });
-    await commit(p1, "assembly.apply", { timeline_id: tid });
+    const ar = await commit(p1, "assembly.apply", { timeline_id: tid });
     const det = await api("GET", `/api/projects/${p1}/timelines/${tid}`);
-    if (!det.clips.length) fail("assembly placed no clips");
+    if (!det.clips.length)
+      fail(`assembly placed no clips — apply=${JSON.stringify(ar).slice(0, 400)}`
+        + ` flags=${JSON.stringify((plan.items || []).map((i) => i.flags)).slice(0, 400)}`);
     const clip = det.clips.find((c) => (c.out_frame - c.in_frame) > 1);
     if (!clip) fail("no trimmable clip");
     await commit(p1, "timeline.clip.trim",
@@ -366,10 +426,31 @@ async function main() {
   const uninst = path.join(INSTALL_DIR, "uninstall.exe");
   if (!fs.existsSync(uninst)) fail("uninstaller not found");
   const dbBefore = fs.existsSync(path.join(DATA_DIR, "atomic.db"));
-  execFileSync(uninst, ["//S"], { stdio: "ignore" });
+  execFileSync(uninst, ["/S"], { stdio: "ignore" });
   await sleep(8000);
   if (fs.existsSync(EXE)) note("exe still present post-uninstall (async) — waiting");
   for (let i = 0; i < 12 && fs.existsSync(EXE); i++) await sleep(2000);
+  // uninstall.exe deletes itself last — its absence is the real
+  // "uninstall complete" signal; installing earlier races the file sweep.
+  // The frozen-backend tree is thousands of files; allow generous time.
+  {
+    const t0 = Date.now();
+    while (fs.existsSync(uninst) && Date.now() - t0 < 480000)
+      await sleep(3000);
+    if (fs.existsSync(uninst)) {
+      // If a ~nsu trampoline still lingers after a true silent run it
+      // is a genuine installer anomaly — record and reap it so the
+      // reinstall isn't blocked; a missing trampoline fails outright.
+      const stray = strayUninstallers();
+      if (!stray)
+        fail("uninstaller did not finish within 480s and no trampoline to reap");
+      note(`uninstaller trampoline lingered post-sweep — reaped ${stray}` +
+        (fs.existsSync(EXE) ? "; payload files remained" : ""));
+      killStrayUninstallers();
+    }
+    killStrayUninstallers(); // belt-and-suspenders before reinstall
+    await sleep(3000); // settle after self-delete
+  }
   if (!fs.existsSync(path.join(DATA_DIR, "atomic.db")))
     fail("user database removed by uninstall");
   if (fs.readdirSync(path.join(DATA_DIR, "assets")).length === 0 && dbBefore)
@@ -377,8 +458,17 @@ async function main() {
   ok("13. uninstall preserved user data — atomic.db + assets intact");
   const installer = process.env.C1_INSTALLER;
   if (installer && fs.existsSync(installer)) {
-    execFileSync(installer, ["//S"], { stdio: "ignore" });
+    const inst = spawn(installer, ["/S"], { stdio: "ignore" });
+    let exited = false;
+    inst.on("exit", () => { exited = true; });
+    const t0 = Date.now();
+    while (!exited && Date.now() - t0 < 300000) await sleep(2000);
+    if (!exited) {
+      try { inst.kill("SIGKILL"); } catch {}
+      fail("installer did not exit within 300s");
+    }
     for (let i = 0; i < 30 && !fs.existsSync(EXE); i++) await sleep(2000);
+    if (!fs.existsSync(EXE)) fail("reinstall produced no exe");
     launch(); await creds();
     if (!(await api("GET", "/api/projects")).find((x) => x.id === p1))
       fail("pre-uninstall project missing after reinstall");

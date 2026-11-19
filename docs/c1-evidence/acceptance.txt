@@ -1,0 +1,24 @@
+INFO backend http://127.0.0.1:56312 via installed app
+PASS 1. clean install launched — frozen sidecar serving API, no system Python
+INFO pre-existing projects after install: 188
+PASS 2. multi-project reopening — two projects, isolated job lists
+PASS 3. startup + sidecar readiness — screenplay→scaffold→keyframes built on installed backend
+INFO backend http://127.0.0.1:62196 via installed app
+PASS 4. durable job interruption — killed mid-hold, reconciled on relaunch, attempt closed
+PASS 5. cancellation + retry — held job cancelled cleanly, no late result, retry succeeded
+INFO backend http://127.0.0.1:64804 via installed app
+INFO backend http://127.0.0.1:50428 via installed app
+PASS 6. simulated GPU reservation recovery — parked job reconciled, no stale reservation
+PASS 7. backup/restore — package round-trips into a new project identity
+PASS 8. timeline edit + audio mix — assembly applied, clip trimmed, lane gain set
+PASS 9. export + bundled ffprobe — real FFmpeg pipeline, h264 output validated
+INFO backend http://127.0.0.1:63297 via installed app
+PASS 10. restart persistence — project, timeline, jobs intact
+PASS 11. bounded shutdown — all app processes exited in 1214ms
+PASS 12. no orphan processes — backend + shell fully terminated
+INFO assets dir empty post-uninstall — checking contents
+PASS 13. uninstall preserved user data — atomic.db + assets intact
+INFO backend http://127.0.0.1:49715 via installed app
+PASS 14. reinstall over preserved data — project + history reopened
+
+C1 ACCEPTANCE: 14/14 PASS
