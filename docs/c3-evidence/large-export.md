@@ -62,3 +62,26 @@ never pixels. Fixed by carrying each clip's timeline position in PTS
 (`setpts=PTS-STARTPTS+{tl_start_s}/TB`). PCM/audio parity was
 unaffected (audio positions via leading-silence, a different and
 correct mechanism).
+
+## C3-F8 — Installed staged-export verification (`ab085a2`)
+
+Frozen PyInstaller backend + NSIS 76.4 MiB built from `ab085a2`,
+installed silently. `scripts/cdp-c3-acceptance.cjs` (12 checks) ran
+with `ADE_STAGE_MAX_INPUTS=1` to force the staged machinery on the
+assembled timeline (~2 unique mock sources + duplicate overlay lane →
+`ade-edl/2` composite, windows split at clip boundaries).
+
+- A tight-loop process monitor (50 ms CIM sampling, started **before**
+  the export commit — a ~2 s job outruns post-commit polling) captured
+  **2 distinct `<job>-stageN.mkv` ffmpeg invocations** followed by the
+  concat/final encode — the staged pipeline provably ran inside the
+  installed app (`docs/c3-evidence/ffmpeg-monitor.txt`).
+- Output validated by the **bundled** ffprobe
+  (`backend/_internal/ffmpeg/bin/ffprobe.exe`): h264, 8.0 s.
+- **12/12 checks PASS** (`docs/c3-evidence/acceptance.txt`): unauth
+  refusal, 20-shot storyboard, 24-job queue, CAS browse, sim-only
+  surface + live refusal, backup/restore, staged export, cancellation
+  → terminal, restart persistence, 1.4 s bounded shutdown, no orphans.
+- Shipped-code delta `ab085a2..6226b8e`: `git diff --stat` = zero
+  `backend/` + `apps/` changes — the installed binary is the merged
+  head's code.
