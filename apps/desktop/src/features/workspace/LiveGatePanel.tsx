@@ -146,6 +146,16 @@ export function LiveGatePanel({ pid, revision, details, onCommitted }: {
             : <span className="text-faint">no permit armed{permit && permit.consumed > 0 ? ` · ${permit.consumed} consumed` : ""}</span>],
           ["Proposed reservation", <span className="text-fg">≤ $0.05</span>],
           ["Live dispatch", <b className="text-danger">BLOCKED</b>],
+          ...(permit?.armed?.request_fingerprint ? [[
+            "Request fp",
+            <code className="text-faint" title={permit.armed.request_fingerprint}>
+              {permit.armed.request_fingerprint.slice(0, 16)}…</code>,
+          ]] as [string, React.ReactNode][] : []),
+          ...(permit?.armed?.permit_fingerprint ? [[
+            "Permit fp",
+            <code className="text-faint" title={permit.armed.permit_fingerprint}>
+              {permit.armed.permit_fingerprint.slice(0, 16)}…</code>,
+          ]] as [string, React.ReactNode][] : []),
         ];
         return (
           <div className="mt-3 rounded border border-line bg-panel p-2.5 text-xs"

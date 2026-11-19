@@ -118,6 +118,11 @@ def _expiry(hours=1):
 def _approve_arm(client, pid, **overrides):
     doc = {"approve": "validate_arm", "provider_key": "deepseek",
            "model_id": "deepseek-flash", "project_id": pid,
+           "request_fingerprint": lp.request_fingerprint(
+               provider_key="deepseek", model_id="deepseek-flash",
+               project_id=pid, credential_ref="deepseek",
+               prompt=PROMPT, max_output_tokens=32,
+               max_cost_usd="0.05"),
            "not_after": _expiry()}
     doc.update(overrides)
     (_owner_dir(client) / "arm-approval.json"

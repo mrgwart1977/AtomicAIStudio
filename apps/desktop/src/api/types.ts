@@ -161,6 +161,9 @@ export interface LivePermitArmed {
   armed_at: string;
   max_cost_usd: string;
   max_output_tokens: number;
+  // B2b-L — hashes only; never request content or secrets.
+  request_fingerprint?: string | null;
+  permit_fingerprint?: string | null;
 }
 
 export interface LiveStatus {
