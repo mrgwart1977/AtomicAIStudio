@@ -45,7 +45,11 @@ def stalled(*_a, **_k):
 
 bridge.scan_watch_folder = stalled
 
-svc = ImportWatchService(sf, shutdown_grace_s=0.5)
+# Real-host pressure would pause scan scheduling under CI saturation
+# (the A6 flake signature: "scan was not scheduled"). The property under
+# test is bounded exit, not pressure gating — pin it deterministic.
+svc = ImportWatchService(sf, shutdown_grace_s=0.5,
+                         pressure=lambda: "ok")
 asyncio.run(svc._tick())                # schedules the stalled scan
 deadline = threading.Event()
 assert svc._pending, "scan was not scheduled"
