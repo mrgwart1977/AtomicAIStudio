@@ -206,6 +206,47 @@ def test_zero_byte_blob_ok(tmp_path):
 
 # ---------- full-path API refusal (no partial mutation) ----------
 
+def test_member_count_cap(tmp_path):
+    """The archive's own member count is bounded even when the manifest
+    file list is small — extra whitelisted-skipped members can't be
+    used as an unbounded enumeration vector."""
+    import app.domain.backup as bk
+    import unittest.mock as um
+    m = _manifest()
+    # bound is len(namelist) > cap+8 — patch the cap down so the test
+    # doesn't write 200k members.
+    with um.patch.object(bk, "MAX_MANIFEST_FILES", 4):
+        pkg = _pkg(tmp_path, "many.atomicpkg", m,
+                   members=[(f"files/j{i}", b"x") for i in range(14)])
+        assert "members" in _import_code(pkg) or \
+            "limit" in _import_code(pkg)
+
+
+def test_corrupt_member_is_clean_refusal(tmp_path):
+    """A member whose stored bytes are CRC-corrupt refuses with
+    PackageError, not a raw zipfile exception."""
+    import struct
+    p = tmp_path / "crc.atomicpkg"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("manifest.json", json.dumps(_manifest(
+            files=[{"sha256": SHA, "byte_size": 4,
+                    "arcname": f"files/{SHA}"}])))
+        zf.writestr(f"files/{SHA}", b"data")
+    # Corrupt a byte inside the stored member's data so CRC-32 fails
+    # on read while the central directory stays intact.
+    raw = bytearray(p.read_bytes())
+    # local header: sig(4)+ver(2)+flag(2)+meth(2)+time(2)+date(2)+
+    # crc(4)+csize(4)+usize(4)+nlen(2)+elen(2) then name then data
+    # find the second local header (files/…) and flip its first data byte
+    second = raw.find(b"PK\x03\x04", 4)
+    nlen, elen = struct.unpack_from("<HH", raw, second + 26)
+    data_off = second + 30 + nlen + elen
+    raw[data_off] ^= 0xFF
+    p.write_bytes(bytes(raw))
+    code = _import_code(p)
+    assert "corrupt" in code or "hash mismatch" in code, code
+
+
 def test_import_refused_leaves_no_project_trace(client, tmp_path):
     """End-to-end: a hostile package fails the job and creates nothing."""
     from tests.test_a8_wizard import _commit, _rev

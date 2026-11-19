@@ -429,6 +429,10 @@ def import_package(
             namelist = zf.namelist()
             if len(namelist) != len(set(namelist)):
                 raise PackageError("package contains duplicate members")
+            if len(namelist) > MAX_MANIFEST_FILES + 8:
+                raise PackageError(
+                    f"package has {len(namelist)} members — "
+                    f"limit is {MAX_MANIFEST_FILES}")
             names = set(namelist)
             for entry in names:
                 # Traversal/absolute names are refused for EVERY member —
@@ -451,22 +455,26 @@ def import_package(
                 size = 0
                 if reporter:
                     reporter.set_file(sha[:12])
-                with zf.open(arc) as src, open(out_path, "wb") as out:
-                    for chunk in iter_chunks(src):
-                        if cancel_check:
-                            cancel_check()
-                        h.update(chunk)
-                        size += len(chunk)
-                        # Bomb discipline: refuse the instant the stream
-                        # exceeds the DECLARED size — a corrupted/lying
-                        # manifest can't fill the disk while hashing.
-                        if size > meta["byte_size"]:
-                            raise PackageError(
-                                f"blob {sha[:8]} exceeds declared size "
-                                "(package corrupt or hostile)")
-                        out.write(chunk)
-                        if reporter:
-                            reporter.tick(len(chunk))
+                try:
+                    with zf.open(arc) as src, open(out_path, "wb") as out:
+                        for chunk in iter_chunks(src):
+                            if cancel_check:
+                                cancel_check()
+                            h.update(chunk)
+                            size += len(chunk)
+                            # Bomb discipline: refuse the instant the stream
+                            # exceeds the DECLARED size — a corrupted/lying
+                            # manifest can't fill the disk while hashing.
+                            if size > meta["byte_size"]:
+                                raise PackageError(
+                                    f"blob {sha[:8]} exceeds declared size "
+                                    "(package corrupt or hostile)")
+                            out.write(chunk)
+                            if reporter:
+                                reporter.tick(len(chunk))
+                except zipfile.BadZipFile as e:
+                    raise PackageError(
+                        f"corrupt member {arc}: {e}") from None
                 if size != meta["byte_size"]:
                     raise PackageError(
                         f"blob {sha[:8]} size mismatch: declared "

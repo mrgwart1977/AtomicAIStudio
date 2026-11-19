@@ -32,7 +32,7 @@ issue #96 gate implemented but not enabled.**
 ### AS-3 Loopback API abuse (other local processes)
 - **Vectors:** stolen token, cross-project access, unauthenticated WS, hostile origin.
 - **Controls:** `X-Atomic-Token` required on all protected routers; `?token=` removed (A3); WS closes non-auth first frames; host/origin allowlists in `app/security.py`; every project row carries `project_id` enforced in DB+API queries.
-- **Residual:** a local process that can read the token from the spawned sidecar's environment can impersonate the frontend — accepted for a single-user desktop app; documented for C4 human review.
+- **Residual:** a local process running as the same user that can read the token from the spawned sidecar's environment can impersonate the frontend. This is a real residual local privilege boundary — not a universal safety claim: it is acceptable only because the product is single-user, single-host; any multi-user or remote-access deployment would need a different auth model. Retained for C4 human review.
 
 ### AS-4 Credential disclosure
 - **Vectors:** secrets in logs, backups, API bodies, crash dumps, frontend store.
