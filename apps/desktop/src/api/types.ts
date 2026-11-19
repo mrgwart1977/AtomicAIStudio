@@ -155,6 +155,14 @@ export interface LiveProviderStatus {
   live_exposure_usd: number;
 }
 
+export interface LivePermitArmed {
+  provider_key: string;
+  model_id: string;
+  armed_at: string;
+  max_cost_usd: string;
+  max_output_tokens: number;
+}
+
 export interface LiveStatus {
   stage: string;
   global_disabled: boolean;
@@ -163,6 +171,9 @@ export interface LiveStatus {
   global_exposure_usd: number;
   timeouts: Record<string, Record<string, number>>;
   providers: Record<string, LiveProviderStatus>;
+  // B2b-P — read-only validation-permit summary (armed record fields
+  // only; the prompt is never surfaced).
+  permit?: { armed: LivePermitArmed | null; consumed: number };
 }
 
 // bridge.cli.detect live response (C1.5 §5) — unauthenticated paths only;
