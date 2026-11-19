@@ -318,16 +318,14 @@ class RestRemoteProvider:
         self._transport = transport
         self._api_key = api_key
         # #96: resolved-IP pinning contract. A live-marked transport may
-        # only ever receive a FetchPlan it must dial literally — it can
-        # never be constructed without a resolver, and fetch_artifact
-        # must hand it `stream_pinned`, never a raw URL. Simulated
-        # transports keep the no-DNS path; an injected resolver opts a
-        # test into exercising the gate end-to-end.
-        if getattr(transport, "is_live_transport", False) \
-                and artifact_resolver is None:
-            raise EgressRefused(
-                "live artifact fetch requires an egress resolver — "
-                "the resolved-IP pin cannot be produced")
+        # only ever receive a FetchPlan it must dial literally —
+        # fetch_artifact requires `stream_pinned`, never a raw URL, so a
+        # live transport without that method is fail-closed at the USE
+        # boundary even though construction is allowed (LiveHTTPTransport
+        # today). Simulated transports keep the no-DNS path; an injected
+        # resolver opts a test into exercising the gate end-to-end. A
+        # live transport with no injected resolver falls back to system
+        # DNS — planning only, still undialable without stream_pinned.
         self._artifact_resolver = artifact_resolver
 
     def _plan_artifact(self, url: str):

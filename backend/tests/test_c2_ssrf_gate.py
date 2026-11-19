@@ -306,10 +306,22 @@ def _image_provider(transport, **kw):
 
 
 @pytest.mark.asyncio
-async def test_live_transport_requires_resolver_at_construction():
-    from app.domain.workers.rest_providers import EgressRefused
-    with pytest.raises(EgressRefused):
-        _image_provider(_FakeLiveTransport())
+async def test_live_transport_without_stream_pinned_refused_at_fetch():
+    """Construction is allowed; the fail-closed boundary is at the fetch —
+    a live transport that cannot dial the pinned IP is refused, and no
+    resolution/transport call ever happens for it."""
+    from app.domain.workers.rest_providers import RemoteError
+
+    class _LiveNoPin:
+        is_live_transport = True
+        async def handle_async_request(self, req):  # pragma: no cover
+            raise AssertionError("must never be reached")
+
+    t = _LiveNoPin()
+    p = _image_provider(t, artifact_resolver=resolver_returning(
+        "93.184.216.34"))
+    with pytest.raises(RemoteError, match="stream_pinned"):
+        await p.fetch_artifact("https://cdn.ideogram.ai/x.png")
 
 
 @pytest.mark.asyncio
