@@ -164,6 +164,12 @@ def test_disk_preflight_blocks_video_job(client, tmp_path, monkeypatch):
     assert job["status"] == "failed"
     assert "disk" in job["error"].lower()
     assert "preflight" in job["error"].lower()
+    # Refusal is clean — preflight blocks before any resource exists:
+    # no attempt row, no work dir, no live cancel registration.
+    assert "attempts" not in (job.get("progress_json") or {})
+    wdir = client.app.state.settings.data_dir / "jobs" / pid / r["job_id"]
+    assert not wdir.exists()
+    assert job["id"] not in eng._cancel_events
 
 
 def test_interrupted_nonresumable_purges_workfiles(client, tmp_path):
