@@ -209,7 +209,7 @@ export function AssetsPage() {
         </label>
       </div>
 
-      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
       {msg && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{msg}</p>}
 
       <div className="mt-5 grid grid-cols-4 gap-4">
@@ -294,7 +294,7 @@ export function AssetsPage() {
         <div className="fixed inset-y-0 right-0 z-20 flex w-96 flex-col border-l border-line bg-panel shadow-2xl">
           <div className="flex items-center justify-between border-b border-line p-4">
             <h3 className="font-semibold">Shared library</h3>
-            <button onClick={() => setShared(null)} className="text-muted hover:text-fg">✕</button>
+            <button onClick={() => setShared(null)} aria-label="Close shared library" className="text-muted hover:text-fg">✕</button>
           </div>
           <div className="flex-1 overflow-y-auto p-4">
             {shared.length === 0 && (

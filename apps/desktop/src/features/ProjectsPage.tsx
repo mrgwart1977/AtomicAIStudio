@@ -201,7 +201,7 @@ export function ProjectsPage() {
         <span className="text-xs text-faint">{shown.length} project{shown.length === 1 ? "" : "s"}</span>
       </div>
 
-      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
 
       <div className="mt-6 grid grid-cols-3 gap-5">
         {shown.map((p) => (

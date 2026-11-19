@@ -432,6 +432,7 @@ export function ProvidersPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search providers…"
+            aria-label="Search providers"
             className="mb-2 w-full rounded-md border border-line bg-ink px-2.5 py-1.5 text-sm text-fg placeholder:text-faint focus:border-action focus:outline-none"
           />
           <div className="flex gap-1">
@@ -477,6 +478,7 @@ export function ProvidersPage() {
             <div key={task} className="mb-1 flex items-center justify-between gap-2">
               <span className="capitalize">{task} default</span>
               <select
+                aria-label={`${task} default provider`}
                 value={defaults[task] ?? ""}
                 disabled={busy}
                 onChange={(e) => setTaskDefault(task, e.target.value)}
@@ -628,6 +630,7 @@ export function ProvidersPage() {
                           value={bridgePrompt}
                           onChange={(e) => setBridgePrompt(e.target.value)}
                           placeholder={`Prompt to take to ${selected.label}…`}
+                          aria-label={`Prompt to take to ${selected.label}`}
                           rows={3}
                           className="mb-1.5 w-full rounded-md border border-line bg-ink px-2.5 py-1.5 text-sm text-fg placeholder:text-faint focus:border-action focus:outline-none"
                         />

@@ -468,7 +468,7 @@ export function AssistedPanel({ pid, revision, providers, details,
         </>
       )}
       {notice && <p className="mt-2 text-xs text-teal">{notice}</p>}
-      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      {error && <p className="mt-2 text-xs text-danger" role="alert">{error}</p>}
     </section>
   );
 }

@@ -118,7 +118,7 @@ export function PromptBar() {
           {busy ? "Working…" : "Review request"}
         </button>
       </div>
-      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
 
       <Dialog.Root open={proposal !== null} onOpenChange={(o) => !o && setProposal(null)}>
         <Dialog.Portal>

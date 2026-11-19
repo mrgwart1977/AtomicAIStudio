@@ -358,7 +358,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                 </div>
               )}
 
-              {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+              {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
               <div className="mt-5 flex items-center gap-2">
                 <button
                   onClick={() => void save()}

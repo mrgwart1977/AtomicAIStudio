@@ -537,7 +537,7 @@ export function CloudImagePanel({ pid, revision, simSummary, reservations,
       )}
 
       {loadErr && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{loadErr}</p>}
-      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+      {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
       {notice && <p className="mt-3 rounded border border-teal/40 bg-teal/10 p-2 text-sm text-teal">{notice}</p>}
 
       {/* ---------- approval card (fresh preview required on change) ---------- */}

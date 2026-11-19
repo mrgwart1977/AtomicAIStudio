@@ -219,7 +219,7 @@ export function NewProjectDialog({
             </div>
           )}
 
-          {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger">{error}</p>}
+          {error && <p className="mt-3 rounded border border-danger/40 bg-danger/10 p-2 text-sm text-danger" role="alert">{error}</p>}
           <div className="mt-6 flex justify-between">
             <button
               onClick={() => (step === 0 ? onOpenChange(false) : setStep(step - 1))}

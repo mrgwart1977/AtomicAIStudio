@@ -23,6 +23,7 @@ export function RenameDialog({
           <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
           <input
             autoFocus
+            aria-label={title}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
