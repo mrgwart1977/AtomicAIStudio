@@ -215,7 +215,11 @@ async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   killApp(); await sleep(1500);
 
-  launch(); await creds();
+  // ADE_STAGE_MAX_INPUTS=1 forces the staged submix: the assembled
+  // timeline holds ~2 unique mock sources (plus a duplicate overlay),
+  // so every position still fits ≤1 unique source while windows must
+  // split at clip boundaries.
+  launch({ ADE_STAGE_MAX_INPUTS: "1" }); await creds();
   const h = await api("GET", "/health", undefined, 200);
   if (!h || h.status !== "ok") fail("health not ready");
 
@@ -319,7 +323,25 @@ async function main() {
   const det = await api("GET", `/api/projects/${p1}/timelines/${tid}`);
   if (!det.clips.length) fail("assembly placed no clips");
   note(`timeline detail ${det.clips.length} clips in ${Date.now() - t5}ms`);
-  ok(`5. large timeline — ${det.clips.length} clips assembled, detail read`);
+  // C3-F8 — force the ade-edl/2 composite path: a second video track
+  // holding a clip makes the timeline v1-inrepresentable, so the export
+  // below must route through the staged machinery when the app is
+  // launched with ADE_STAGE_MAX_INPUTS=2.
+  {
+    await commit(p1, "timeline.track.add",
+      { timeline_id: tid, kind: "video" });
+    const trks = (await api("GET", `/api/projects/${p1}/timelines/${tid}`))
+      .tracks;
+    const overlay = trks.filter((t) => t.kind === "video")
+      .sort((a, b) => (b.position || 0) - (a.position || 0))[0];
+    const src = det.clips[0];
+    await commit(p1, "timeline.clip.place", {
+      timeline_id: tid, asset_id: src.source_asset_id,
+      version_id: src.source_version_id || undefined,
+      track_id: overlay.id, start_frames: 0, allow_duplicate: true });
+    note(`v2 forced: overlay clip on track ${overlay.id}`);
+  }
+  ok(`5. large timeline — ${det.clips.length} clips + overlay, detail read`);
 
   // ---- 6. CAS browsing + pagination ----
   const t6 = Date.now();
@@ -361,12 +383,39 @@ async function main() {
     const p = await preview(p1, "timeline.export",
       { timeline_id: tid, profile: "720p" });
     const rt = p.resolved_timeline;
+    // Monitor ffmpeg command lines BEFORE committing — a staged export
+    // renders per-window intermediates (<job>-stageN.mkv) before the
+    // concat pass, and the whole job can finish in ~2s. One PowerShell
+    // process loops tightly (~20 samples/s) so even sub-second stage
+    // renders are captured; results land in a log file parsed after.
+    const monLog = path.join(OUT, "ffmpeg-monitor.txt");
+    fs.writeFileSync(monLog, "");
+    const mon = spawn("powershell", ["-NoProfile", "-Command",
+      "while ($true) { " +
+      "Get-CimInstance Win32_Process -Filter \"name='ffmpeg.exe'\" | " +
+      "ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" } | " +
+      `Out-File -Append -Encoding utf8 '${monLog.replace(/\\/g, "\\\\")}'; ` +
+      "Start-Sleep -Milliseconds 50 }"],
+      { stdio: "ignore" });
     const r = await commit(p1, "timeline.export", {
       timeline_id: tid, profile: "720p",
       expected_timeline: rt ? { id: rt.id, revision: rt.revision } : undefined,
       expected_edl_sha: rt?.edl_sha256 });
-    const ej = await waitJob(p1, r.job_id, 240);
+    let ej;
+    try {
+      ej = await waitJob(p1, r.job_id, 240);
+    } finally {
+      try { mon.kill(); } catch {}
+      try { execFileSync("taskkill", ["/F", "/PID", String(mon.pid)],
+        { stdio: "ignore" }); } catch {}
+    }
+    const monOut = fs.readFileSync(monLog, "utf8");
+    const stageRuns = monOut.match(/-stage\d+\.mkv/g) || [];
+    const sawStageArgv = stageRuns.length > 0;
     if (ej.status !== "succeeded") fail(`export ${ej.status}: ${ej.error || ""}`);
+    if (!sawStageArgv)
+      fail("no -stageN.mkv ffmpeg argv observed — staged path did not run");
+    const stageSeen = stageRuns.length;
     const fp = findFfprobe();
     if (!fp) fail("ffprobe not found");
     const f = await assetFile(p1, ej.output_asset_id, ".mp4");
@@ -377,7 +426,8 @@ async function main() {
     if (Number(probe.format.duration) <= 0) fail("zero-duration export");
     fs.writeFileSync(path.join(OUT, "export-probe.json"),
       JSON.stringify(probe, null, 2));
-    note(`export ${probe.format.duration}s validated`);
+    note(`export ${probe.format.duration}s validated — ` +
+         `staged path exercised (${stageSeen} stage argv seen)`);
   }
   ok("9. timeline export + bundled ffprobe — h264 output validated");
 
