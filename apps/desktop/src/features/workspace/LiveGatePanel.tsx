@@ -51,7 +51,7 @@ export function LiveGatePanel({ pid, revision, details, onCommitted }: {
   return (
     <section className="mt-4 rounded-md border border-violet/40 bg-card p-4"
       data-testid="live-gate-panel">
-      <h2 className="text-sm font-semibold">Live exit gate — Stage A</h2>
+      <h2 className="text-sm font-semibold">Live exit gate — preparation (B2b-P)</h2>
       <p className="mt-2 text-xs text-muted">
         Safety gates for future real-provider validation. <b>No live dispatch
         exists in this build</b> — enabling only records the audited opt-in a
@@ -125,6 +125,47 @@ export function LiveGatePanel({ pid, revision, details, onCommitted }: {
           );
         })}
       </ul>
+
+      {/* B2b-P — DeepSeek validation readiness. Read-only summary of
+          every gate the future single live request must pass. There is
+          NO execution control here by design: arming/running happens
+          only through audited commands + owner approval files, and
+          none of that is wired in this build. */}
+      {status && (() => {
+        const ds = status.providers["deepseek"];
+        if (!ds) return null;
+        const permit = status.permit;
+        const rows: [string, React.ReactNode][] = [
+          ["Credential", ds.credential_configured
+            ? <span className="text-teal">configured (vault)</span>
+            : <span className="text-faint">not configured</span>],
+          ["Model", <span className="text-fg">{ds.model_id ?? "deepseek-flash"}</span>],
+          ["Mock validation", <span className="text-teal">simulated contract OK</span>],
+          ["Authorization", permit?.armed
+            ? <span className="text-amber">permit ARMED — {permit.armed.armed_at?.slice(0, 10)}</span>
+            : <span className="text-faint">no permit armed{permit && permit.consumed > 0 ? ` · ${permit.consumed} consumed` : ""}</span>],
+          ["Proposed reservation", <span className="text-fg">≤ $0.05</span>],
+          ["Live dispatch", <b className="text-danger">BLOCKED</b>],
+        ];
+        return (
+          <div className="mt-3 rounded border border-line bg-panel p-2.5 text-xs"
+            data-testid="deepseek-readiness">
+            <div className="mb-1.5 font-medium text-fg">DeepSeek validation readiness</div>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              {rows.map(([k, v]) => (
+                <div key={k} className="contents">
+                  <dt className="text-faint">{k}</dt><dd>{v}</dd>
+                </div>
+              ))}
+            </dl>
+            {ds.blocked_reason && !ds.enabled && (
+              <p className="mt-1.5 text-[11px] text-faint">
+                first gate: {ds.blocked_reason}
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="mt-3 flex items-center gap-2">
         {status?.global_disabled ? (

@@ -110,4 +110,25 @@ describe("LiveGatePanel", () => {
     fireEvent.click(await screen.findByTestId("live-enable-deepseek"));
     await waitFor(() => screen.getByText(/422: credential/));
   });
+
+  it("B2b-P readiness block: states shown, dispatch BLOCKED, no exec control", async () => {
+    apiFetch.mockImplementation((u: string) =>
+      u.includes("cloud/live-status")
+        ? Promise.resolve(status({
+            permit: { armed: null, consumed: 2 } }))
+        : Promise.reject(new Error("unmocked")));
+    render(createElement(LiveGatePanel, PROPS));
+    const block = await screen.findByTestId("deepseek-readiness");
+    expect(block.textContent).toContain("configured");
+    expect(block.textContent).toContain("deepseek-flash");
+    expect(block.textContent).toContain("simulated contract OK");
+    expect(block.textContent).toContain("no permit armed");
+    expect(block.textContent).toContain("2 consumed");
+    expect(block.textContent).toContain("0.05");
+    expect(block.textContent).toContain("BLOCKED");
+    // nothing that could dispatch exists — only enable/disable/kill
+    // opt-in commands, all of which are audited flags, not execution
+    expect(block.querySelector("button")).toBeNull();
+    expect(screen.queryByTestId("live-run")).toBeNull();
+  });
 });

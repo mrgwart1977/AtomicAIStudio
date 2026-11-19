@@ -81,6 +81,7 @@ class RemoteErrorKind(str, enum.Enum):
     FORBIDDEN = "forbidden"            # 403 — not permitted
     CONFLICT = "conflict"              # 409 — state conflict, ambiguous
     RATE_LIMITED = "rate_limited"      # 429 — refused before processing
+    PAYMENT_REQUIRED = "payment_required"  # 402 — balance/billing refusal
     SERVER_ERROR = "server_error"      # 5xx — may have processed
     TRANSPORT = "transport"            # timeout/connect — outcome unknown
     MALFORMED = "malformed"            # 2xx we cannot parse — ambiguous
@@ -209,7 +210,13 @@ DEEPSEEK_CHAT_SPEC = EndpointSpec(
     submit_path="/chat/completions",
     poll_path=None,
     cancel_path=None,
-    submit_extra={"stream": False},
+    # B2b-P — bounded contract is non-thinking by policy: DeepSeek
+    # DEFAULTS to thinking when `thinking` is omitted (or when only
+    # reasoning_effort is set — the explicit object takes precedence),
+    # so it must be sent, never assumed. Non-thinking replies carry no
+    # reasoning_content; the parser only reads message.content.
+    submit_extra={"stream": False,
+                  "thinking": {"type": "disabled"}},
     idempotency="none",
     docs="https://api-docs.deepseek.com/api/create-chat-completion",
 )
@@ -240,6 +247,10 @@ SPECS = {s.provider_key: s for s in
 _STATUS_MAP = {
     400: (RemoteErrorKind.VALIDATION, "none_confirmed"),
     401: (RemoteErrorKind.AUTHENTICATION, "none_confirmed"),
+    # 402 Insufficient Balance (DeepSeek) — the provider refuses to
+    # process on an empty account: no work was accepted, confirmed
+    # no-charge. Never lump with 5xx ambiguity.
+    402: (RemoteErrorKind.PAYMENT_REQUIRED, "none_confirmed"),
     403: (RemoteErrorKind.FORBIDDEN, "none_confirmed"),
     404: (RemoteErrorKind.VALIDATION, "none_confirmed"),
     409: (RemoteErrorKind.CONFLICT, "unknown"),

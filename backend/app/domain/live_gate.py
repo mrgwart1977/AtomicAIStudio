@@ -416,6 +416,25 @@ def verification_evidence_valid(ev: dict | None, *,
 def status_report(session: Session, vault: Any) -> dict[str, Any]:
     st = state(session)
     providers: dict[str, Any] = {}
+    # B2b-P — read-only permit summary for the readiness surface:
+    # armed/consumed counts only; the permit record itself (which
+    # carries the prompt) is never exposed here.
+    permit_armed = None
+    permit_consumed = 0
+    try:
+        from app.domain import live_permit as _lp
+        pa = _lp.armed(session)
+        if pa is not None:
+            permit_armed = {
+                "provider_key": pa["provider_key"],
+                "model_id": pa["model_id"],
+                "armed_at": pa["armed_at"],
+                "max_cost_usd": pa["max_cost_usd"],
+                "max_output_tokens": pa["max_output_tokens"],
+            }
+        permit_consumed = len(_lp.consumed_history(session))
+    except Exception:
+        pass  # permit state is auxiliary — never break the report
     for key in sorted(LIVE_PROVIDERS):
         entry = st["providers"].get(key) or {}
         allowed, code = dispatch_admission(
@@ -440,4 +459,5 @@ def status_report(session: Session, vault: Any) -> dict[str, Any]:
         "global_exposure_usd": micro_to_usd(live_exposure_micro(session)),
         "timeouts": LIVE_TIMEOUTS,
         "providers": providers,
+        "permit": {"armed": permit_armed, "consumed": permit_consumed},
     }
