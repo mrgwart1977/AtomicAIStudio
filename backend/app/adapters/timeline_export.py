@@ -207,6 +207,7 @@ class TimelineExportAdapter:
                 except OSError:
                     alias[p] = p
             return alias[p]
+        r = None
         try:
             if is_v2:
                 if not plan["clips"] and not plan["audio_clips"]:
@@ -218,11 +219,67 @@ class TimelineExportAdapter:
                     tx.h264_encoder, ffmpeg["path"], supervise.run)
                 clip_paths = {c["clip_id"]: short_src(str(p))
                               for c, p in zip(clips, paths)}
-                argv, graph = tx.build_composite_argv(
-                    ffmpeg["path"], plan, clip_paths, target, crf,
-                    str(out_path), encoder=enc,
-                    script_path=str(script_path))
-                script_path.write_text(graph, encoding="utf-8")
+                stages = tx.stage_windows(plan, clip_paths)
+                if len(stages) <= 1:
+                    argv, graph = tx.build_composite_argv(
+                        ffmpeg["path"], plan, clip_paths, target, crf,
+                        str(out_path), encoder=enc,
+                        script_path=str(script_path))
+                    script_path.write_text(graph, encoding="utf-8")
+                else:
+                    # C3 staged submix: per-window lossless intermediates,
+                    # concat-demuxer final encode — argv, handles, and
+                    # memory all bounded regardless of source count.
+                    yield {"progress": 0.3, "stage":
+                           f"staged render ({len(stages)} windows)"}
+                    interm: list[Path] = []
+                    list_path = work / f"{handle.job_id}-concat.txt"
+                    try:
+                        for si, (F, M) in enumerate(stages):
+                            handle.check_cancel()
+                            sub = tx.stage_subplan(plan, F, M)
+                            ipath = (work /
+                                     f"{handle.job_id}-stage{si}.mkv")
+                            gpath = work / f"{handle.job_id}-g{si}.txt"
+                            sargv, sgraph = tx.build_stage_argv(
+                                ffmpeg["path"], sub, clip_paths,
+                                target, str(ipath), str(gpath))
+                            gpath.write_text(sgraph, encoding="utf-8")
+                            r = await asyncio.to_thread(
+                                supervise.run, sargv,
+                                timeout_s=timeout_s,
+                                cancel=handle.cancel_event)
+                            gpath.unlink(missing_ok=True)
+                            if r["cancelled"]:
+                                raise JobCancelled()
+                            if r["exit"] != 0 or not ipath.is_file():
+                                ipath.unlink(missing_ok=True)
+                                tail = (r["output_tail"] or
+                                        "ffmpeg failed").strip()[-300:]
+                                raise ValueError(
+                                    f"stage {si} render failed: {tail}")
+                            interm.append(ipath)
+                            yield {"progress":
+                                   0.3 + 0.45 * (si + 1) / len(stages),
+                                   "stage": f"window {si + 1}/"
+                                            f"{len(stages)}"}
+                        list_path.write_text(
+                            tx.concat_list([str(p) for p in interm]),
+                            encoding="utf-8")
+                        dur_s = float(plan["program_frames"]
+                                      / Fraction(target["fps_num"],
+                                                 target["fps_den"]))
+                        fargv = tx.build_final_argv(
+                            ffmpeg["path"], str(list_path), dur_s,
+                            str(out_path), enc, crf,
+                            has_audio=bool(plan["audio_clips"]))
+                        r = await asyncio.to_thread(
+                            supervise.run, fargv, timeout_s=timeout_s,
+                            cancel=handle.cancel_event)
+                    finally:
+                        for p_ in interm:
+                            p_.unlink(missing_ok=True)
+                        list_path.unlink(missing_ok=True)
             elif path_kind == "copy":
                 list_path = work / f"{handle.job_id}-concat.txt"
                 list_path.write_text(tx.concat_list([str(p) for p in paths]),
@@ -243,9 +300,10 @@ class TimelineExportAdapter:
                     ffmpeg["path"], segments, target, crf, str(out_path),
                     encoder=enc, script_path=str(script_path))
                 script_path.write_text(graph, encoding="utf-8")
-            r = await asyncio.to_thread(
-                supervise.run, argv, timeout_s=timeout_s,
-                cancel=handle.cancel_event)
+            if r is None:
+                r = await asyncio.to_thread(
+                    supervise.run, argv, timeout_s=timeout_s,
+                    cancel=handle.cancel_event)
         finally:
             script_path.unlink(missing_ok=True)
             for orig, link in alias.items():
