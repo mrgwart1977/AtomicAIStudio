@@ -1,0 +1,17 @@
+INFO backend http://127.0.0.1:54507 via installed app
+PASS 1. unauthorized loopback requests rejected (no token + wrong token)
+PASS 2. authorized local application operations work
+PASS 3. malicious package import refused — traversal member rejected, job failed
+PASS 4. valid backup/restore remains functional — content survived roundtrip
+PASS 5. synthetic credential isolation — metadata-only API, ciphertext-only vault
+PASS 6. project separation — isolated characters/jobs
+INFO 21 adapters, 5 cloud/generation — all mock
+PASS 7. simulated-only provider surface — all cloud/generation adapters are mock
+PASS 8. provider planning remains read-only — no jobs/projects created
+PASS 9. no live provider activity — live dispatch gate refused, no live jobs
+PASS 10. timeline/shotlist regression — scaffold produced shots, timeline readable
+INFO backend http://127.0.0.1:63149 via installed app
+PASS 11. restart persistence — project + content intact
+INFO bounded shutdown 1.7s
+PASS 12. clean shutdown — no orphan processes
+C2 ACCEPTANCE: 12/12 PASS

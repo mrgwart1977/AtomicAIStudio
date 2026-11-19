@@ -116,6 +116,14 @@ re-upgrade · newer-stamped DB refusal.
   Product-side uninstaller is correct — silent run sweeps fully and
   preserves `AtomicAIStudio` data.
 
+## Closeout
+
+- **PR #157** — final reviewed head `842ad43` + gate-4 assertion
+  `f508a4b`; **merged at `ec5df84`** (squash). Migration head
+  `0026_a7` unchanged.
+- **Post-merge main CI run `44439129416`: 6/6 success** — changes,
+  package, frontend, backend 3.12, backend 3.14, tauri-check.
+
 ## Remaining risks / non-goals
 
 - Windows logoff behavior is not automatable in CI — noted for the

@@ -409,7 +409,10 @@ def test_corrupt_package_rejected_before_commit(client, tmp_path):
     assert r.status_code == 200
     job = wait_for_job(client, r.json()["project_id"], r.json()["job_id"])
     assert job["status"] == "failed"
-    assert "hash mismatch" in (job["error"] or "") or "corrupt" in (job["error"] or "")
+    # C2 hardening may refuse on declared-size mismatch before the hash
+    # check — both are valid "corrupt package" refusals.
+    assert any(w in (job["error"] or "")
+               for w in ("hash mismatch", "corrupt", "size mismatch"))
 
 
 def test_format_v1_compat_roundtrip(client, tmp_path):

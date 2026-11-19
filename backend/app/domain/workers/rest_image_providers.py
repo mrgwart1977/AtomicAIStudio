@@ -517,11 +517,14 @@ class BflFluxProvider(RestRemoteProvider):
 
 
 def make_image_provider(provider_key: str, *, transport: Any,
-                        api_key: str = "") -> RestRemoteProvider:
+                        api_key: str = "",
+                        artifact_resolver: Any = None
+                        ) -> RestRemoteProvider:
     spec = IMAGE_SPECS[provider_key]
     cls = {"openai-images": OpenAIImagesProvider,
            "gemini-images": GeminiImagesProvider,
            "recraft": RecraftProvider,
            "ideogram": IdeogramProvider,
            "bfl-flux": BflFluxProvider}[provider_key]
-    return cls(spec, transport=transport, api_key=api_key)
+    return cls(spec, transport=transport, api_key=api_key,
+               artifact_resolver=artifact_resolver)

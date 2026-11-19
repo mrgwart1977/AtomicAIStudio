@@ -333,6 +333,65 @@ def read_manifest(pkg: Path) -> dict:
     return data
 
 
+MAX_MANIFEST_FILES = 200_000      # generous ceiling; real packages are far smaller
+MAX_PACKAGE_TOTAL_BYTES = 1 << 40  # 1 TiB declared-total ceiling
+
+
+def _unsafe_member_name(entry: str) -> bool:
+    """True for any traversal or absolute anchor in a zip member name.
+
+    Checked on both separators — zip names are posix-typed but Windows
+    extractors also honor ``\\`` — and on string form so drive-less
+    roots (``/x``, ``\\\\host``, ``C:\\x``) can't slip past pathlib's
+    platform-relative ``is_absolute``.
+    """
+    if not entry or entry != entry.strip():
+        return True
+    parts = [p for p in entry.replace("\\", "/").split("/") if p]
+    if ".." in parts:
+        return True
+    if entry.startswith(("/", "\\")):
+        return True
+    if len(entry) >= 2 and entry[1] == ":":
+        return True
+    return False
+
+
+def _validate_manifest_files(manifest: dict) -> None:
+    """Strict manifest field checks — refusal happens BEFORE any blob is
+    extracted or any row is written. Enforces: each files[] entry carries
+    a 64-hex sha256, a non-negative int byte_size, and the canonical
+    ``files/<sha256>`` arcname (so the manifest can only reference
+    whitelisted members); no duplicate arcnames; bounded count and
+    declared total (a lying manifest can't size a disk-fill)."""
+    files = manifest.get("files", [])
+    if not isinstance(files, list) or len(files) > MAX_MANIFEST_FILES:
+        raise PackageError("manifest files list missing or oversized")
+    seen_arcs: set[str] = set()
+    total = 0
+    for f in files:
+        if not isinstance(f, dict):
+            raise PackageError("manifest file entry malformed")
+        sha = f.get("sha256")
+        if not isinstance(sha, str) or len(sha) != 64 or \
+                any(c not in "0123456789abcdef" for c in sha):
+            raise PackageError("manifest file entry has invalid sha256")
+        size = f.get("byte_size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise PackageError("manifest file entry has invalid byte_size")
+        arc = f.get("arcname")
+        if arc != f"files/{sha}":
+            raise PackageError(
+                "manifest file entry has non-canonical arcname — "
+                "only files/<sha256> members may be referenced")
+        if arc in seen_arcs:
+            raise PackageError("manifest has duplicate arcname")
+        seen_arcs.add(arc)
+        total += size
+        if total > MAX_PACKAGE_TOTAL_BYTES:
+            raise PackageError("package declared size exceeds ceiling")
+
+
 def _remap_ids(obj: Any, id_map: dict[str, str]) -> Any:
     """Walk JSON-like structure; replace any string equal to a mapped id."""
     if isinstance(obj, dict):
@@ -358,6 +417,7 @@ def import_package(
     removed and no partial project committed."""
     manifest = read_manifest(pkg)
     files_meta = {f["sha256"]: f for f in manifest.get("files", [])}
+    _validate_manifest_files(manifest)
 
     staging = pkg.parent / (pkg.name + ".staging")
     staging.mkdir(parents=True, exist_ok=True)
@@ -366,12 +426,24 @@ def import_package(
         total = sum(f["byte_size"] for f in manifest.get("files", [])) or 1
         done = 0
         with zipfile.ZipFile(pkg) as zf:
-            names = set(zf.namelist())
+            namelist = zf.namelist()
+            if len(namelist) != len(set(namelist)):
+                raise PackageError("package contains duplicate members")
+            if len(namelist) > MAX_MANIFEST_FILES + 8:
+                raise PackageError(
+                    f"package has {len(namelist)} members — "
+                    f"limit is {MAX_MANIFEST_FILES}")
+            names = set(namelist)
             for entry in names:
+                # Traversal/absolute names are refused for EVERY member —
+                # a hostile name is never silently ignored. Checked on
+                # BOTH separators: zip names are posix-typed but '\'
+                # slips past posix parsing on Windows, and pathlib's
+                # is_absolute misses drive-less roots.
+                if _unsafe_member_name(entry):
+                    raise PackageError(f"unsafe archive member: {entry}")
                 if entry != "manifest.json" and not entry.startswith("files/"):
                     continue  # whitelist — ignore unexpected members
-                if ".." in Path(entry).parts or Path(entry).is_absolute():
-                    raise PackageError(f"unsafe archive member: {entry}")
             for sha, meta in files_meta.items():
                 if cancel_check:
                     cancel_check()
@@ -383,15 +455,30 @@ def import_package(
                 size = 0
                 if reporter:
                     reporter.set_file(sha[:12])
-                with zf.open(arc) as src, open(out_path, "wb") as out:
-                    for chunk in iter_chunks(src):
-                        if cancel_check:
-                            cancel_check()
-                        h.update(chunk)
-                        size += len(chunk)
-                        out.write(chunk)
-                        if reporter:
-                            reporter.tick(len(chunk))
+                try:
+                    with zf.open(arc) as src, open(out_path, "wb") as out:
+                        for chunk in iter_chunks(src):
+                            if cancel_check:
+                                cancel_check()
+                            h.update(chunk)
+                            size += len(chunk)
+                            # Bomb discipline: refuse the instant the stream
+                            # exceeds the DECLARED size — a corrupted/lying
+                            # manifest can't fill the disk while hashing.
+                            if size > meta["byte_size"]:
+                                raise PackageError(
+                                    f"blob {sha[:8]} exceeds declared size "
+                                    "(package corrupt or hostile)")
+                            out.write(chunk)
+                            if reporter:
+                                reporter.tick(len(chunk))
+                except zipfile.BadZipFile as e:
+                    raise PackageError(
+                        f"corrupt member {arc}: {e}") from None
+                if size != meta["byte_size"]:
+                    raise PackageError(
+                        f"blob {sha[:8]} size mismatch: declared "
+                        f"{meta['byte_size']}, got {size}")
                 if h.hexdigest() != sha:
                     raise PackageError(f"hash mismatch on blob {sha[:8]} (corrupt package)")
                 extracted[sha] = out_path

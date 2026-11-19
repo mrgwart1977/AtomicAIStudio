@@ -280,7 +280,7 @@ class RestRemoteProvider:
     idempotency: str
 
     def __init__(self, spec: EndpointSpec, *, transport: Any,
-                 api_key: str = "") -> None:
+                 api_key: str = "", artifact_resolver: Any = None) -> None:
         # Transport is REQUIRED and must be an in-memory mock in C2.0c —
         # any real transport class (or None, which lets httpx pick a
         # live default) is refused. This is the egress boundary.
@@ -317,6 +317,30 @@ class RestRemoteProvider:
         self.idempotency = spec.idempotency
         self._transport = transport
         self._api_key = api_key
+        # #96: resolved-IP pinning contract. A live-marked transport may
+        # only ever receive a FetchPlan it must dial literally —
+        # fetch_artifact requires `stream_pinned`, never a raw URL, so a
+        # live transport without that method is fail-closed at the USE
+        # boundary even though construction is allowed (LiveHTTPTransport
+        # today). Simulated transports keep the no-DNS path; an injected
+        # resolver opts a test into exercising the gate end-to-end. A
+        # live transport with no injected resolver falls back to system
+        # DNS — planning only, still undialable without stream_pinned.
+        self._artifact_resolver = artifact_resolver
+
+    def _plan_artifact(self, url: str):
+        """Produce the validated FetchPlan the transport must honor.
+
+        Live transports always get one (issue #96); simulated transports
+        only when a resolver was injected — simulation performs no DNS
+        by design."""
+        from app.net import egress as _egress
+        if getattr(self._transport, "is_live_transport", False) \
+                or self._artifact_resolver is not None:
+            return _egress.plan_fetch(
+                url, resolver=self._artifact_resolver
+                or _egress._default_resolver)
+        return None
 
     @property
     def transport_is_simulated(self) -> bool:
@@ -492,12 +516,32 @@ class RestRemoteProvider:
                 "hosts — refused",
                 charge_evidence="none_confirmed")
         try:
+            # #96 — resolved-IP gate runs BEFORE any transport call.
+            # A live transport gets a FetchPlan and must implement
+            # stream_pinned to dial the pinned literal IP (with the
+            # original host as SNI); it is never handed a raw URL.
+            plan = self._plan_artifact(url)
+            if getattr(self._transport, "is_live_transport", False):
+                pinned_stream = getattr(self._transport, "stream_pinned",
+                                        None)
+                if pinned_stream is None:
+                    raise RemoteError(
+                        RemoteErrorKind.VALIDATION,
+                        "transport cannot enforce the resolved-IP pin "
+                        "(no stream_pinned) — refused",
+                        charge_evidence="none_confirmed")
+                stream_ctx = pinned_stream(self._client, plan)
+            else:
+                # Simulated transport: the URL goes to the injected
+                # mock only — the plan (when a resolver was injected)
+                # already ran the gate for coverage.
+                stream_ctx = self._client.stream("GET", url)
             # NO auth headers on artifact fetches: delivery URLs are
             # pre-signed and self-authenticating — the provider key
             # must never leak to a CDN host, allowlisted or not.
             # Redirects are never followed (client follows none); a 3xx
             # is a failed retrieval, not a silent re-validation point.
-            async with self._client.stream("GET", url) as resp:
+            async with stream_ctx as resp:
                 if not (200 <= resp.status_code < 300):
                     raise RemoteError(
                         RemoteErrorKind.VALIDATION,
