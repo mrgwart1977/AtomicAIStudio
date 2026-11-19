@@ -312,7 +312,7 @@ export function ModelManagerPage() {
                   <button
                     onClick={() => void openPreflight(m)}
                     disabled={busy}
-                    className="rounded-md bg-action px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                    className="rounded-md bg-action px-3 py-1.5 text-xs text-ink disabled:opacity-50"
                   >
                     Install…
                   </button>

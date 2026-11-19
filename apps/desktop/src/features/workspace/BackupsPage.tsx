@@ -170,7 +170,7 @@ export function BackupsPage() {
         <button
           onClick={() => void exportBackup()}
           disabled={busy || !destOk || !!activeJob}
-          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
         >
           Back up this project
         </button>
@@ -381,7 +381,7 @@ export function BackupsPage() {
             <button
               onClick={() => void confirmImport()}
               disabled={busy}
-              className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+              className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
             >
               Import as new project
             </button>

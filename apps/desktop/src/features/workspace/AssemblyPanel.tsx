@@ -226,7 +226,7 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
               {versions ? "Hide history" : "History"}
             </button>)}
           <button type="button"
-            className="rounded bg-action px-2 py-0.5 text-[10px] text-white disabled:opacity-40"
+            className="rounded bg-action px-2 py-0.5 text-[10px] text-ink disabled:opacity-40"
             disabled={busy}
             onClick={() => void previewPlan()}>
             {noPlan ? "Build first cut" : "Re-plan"}
@@ -374,7 +374,7 @@ export function AssemblyPanel({ projectId, timeline, onChanged }: {
               </span>)}
             <span className="ml-auto flex gap-1">
               <button type="button"
-                className="rounded bg-action px-2 py-0.5 text-[10px] text-white disabled:opacity-40"
+                className="rounded bg-action px-2 py-0.5 text-[10px] text-ink disabled:opacity-40"
                 disabled={busy || plan.sources_stale === true}
                 title={plan.sources_stale
                   ? "Sources changed — re-plan before applying"

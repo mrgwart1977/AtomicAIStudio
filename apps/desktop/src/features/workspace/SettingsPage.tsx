@@ -268,7 +268,7 @@ export function SettingsPage() {
         <button
           onClick={() => void save()}
           disabled={busy}
-          className="rounded-md bg-action px-5 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+          className="rounded-md bg-action px-5 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
         >
           {busy ? "Saving…" : "Save settings"}
         </button>

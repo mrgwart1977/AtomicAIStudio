@@ -308,6 +308,14 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
 
   const fps = detail.fps_num / detail.fps_den;
   const clipKey = (e: React.KeyboardEvent, clip: TimelineClip) => {
+    // Enter/Space selects — a role="button" div does NOT synthesize
+    // onClick for keyboard, so without this the inspector is
+    // unreachable keyboard-only. Runs even on locked lanes.
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setSelClipId(clip.id);
+      return;
+    }
     if (!active || busy) return;
     const track = tracks.find((t) => t.id === clip.track_id);
     if (!track) return;
@@ -1339,6 +1347,7 @@ export function TimelineEditor({ detail, active, busy, onRun, onRemoveClip }: {
                         x.out_clip_id === c.id || x.in_clip_id === c.id)}
                       onKeyDown={(e) => clipKey(e, c)}
                       trackKind={t.kind}
+                      trackName={t.name}
                       projectId={detail.project_id}
                       viewL={viewX.l / ppf}
                       viewR={viewX.r / ppf}
@@ -1628,7 +1637,7 @@ const MAX_BMP = 16384;
 const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   draggable, onSelect, onPointerDown, onTrimDown, onFadeDown, fadeView,
   xf, onKeyDown,
-  trackKind, projectId, viewL, viewR }: {
+  trackKind, trackName, projectId, viewL, viewR }: {
   clip: TimelineClip;
   tl: TimelineDetail;
   ppf: number;
@@ -1643,6 +1652,7 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
   xf?: TimelineCrossfade;
   onKeyDown: (e: React.KeyboardEvent) => void;
   trackKind?: string;
+  trackName?: string;
   projectId: string;
   viewL?: number;
   viewR?: number;
@@ -1662,7 +1672,9 @@ const LaneClip = memo(function LaneClip({ clip, tl, ppf, selected, ghosted,
     <div
       role="button"
       tabIndex={0}
-      aria-label={`Clip ${clip.source_sha256.slice(0, 10)} at frame ${clip.start_frames}`}
+      aria-label={`${trackKind ?? "video"} clip on ${trackName ?? "lane"
+        } — starts ${fmtTc(clip.start_frames, tl)}, ${
+        clipTlExtent(clip, tl)} frames`}
       aria-pressed={selected}
       data-testid="lane-clip"
       onClick={onSelect}
@@ -1821,7 +1833,7 @@ function ClipInspector({ clip, tl, track, lane, active, busy, ripple, onClose, o
             title={ripple
               ? "Trim with ripple — later clips on this lane shift to fill or make room"
               : "Trim in place — later clips stay put"}
-            className="rounded bg-action px-2 py-0.5 text-white disabled:opacity-40"
+            className="rounded bg-action px-2 py-0.5 text-ink disabled:opacity-40"
           >Apply trim</button>
           <label className="text-muted">Start frame
             <input value={startF} onChange={(e) => setStartF(e.target.value)}

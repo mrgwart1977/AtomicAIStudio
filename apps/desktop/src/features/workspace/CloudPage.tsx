@@ -21,7 +21,7 @@ const inputCls =
   "w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg placeholder:text-faint";
 const labelCls = "mb-1 block text-xs font-medium text-muted";
 const btnCls =
-  "rounded-md bg-action px-3 py-1.5 text-sm text-white hover:bg-action/80 disabled:opacity-40";
+  "rounded-md bg-action px-3 py-1.5 text-sm text-ink hover:bg-action/80 disabled:opacity-40";
 
 /** Mirrors backend cloud_cost.t1_text_strategy: A-class provider with a
  * documented T1 official_api strategy covering text.* — nothing else is

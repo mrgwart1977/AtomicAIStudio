@@ -164,7 +164,7 @@ export function ProjectsPage() {
         </div>
         <button
           onClick={() => setWizard(true)}
-          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi"
+          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi"
         >
           + New project
         </button>

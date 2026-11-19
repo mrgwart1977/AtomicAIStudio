@@ -4,6 +4,22 @@ Authoritative tracking for the C4 human-acceptance phase. Statuses are
 **NOT RUN / PASS / FAIL / BLOCKED**. A check is PASS only when a human
 executed it and recorded evidence — nothing here is auto-marked.
 
+## Inventory reconciliation
+
+**42 unique checks.** Breakdown: 19 N3 items (A1–A8, B1–B2, C1–C6,
+D1–D3) + 7 listening procedures (L1–L7) + 7 wizard usability tasks
+(U1–U7) + 9 Windows acceptance items (W1–W9) = **42**. An earlier
+report said "35" — that was an arithmetic error; this document's
+tables carry the full 42, each with a unique, unambiguous identifier
+(`grep -oE '^\| [A-Z][0-9]+'` → 42 unique ids, zero duplicates).
+
+**Intentional overlap, not double-counting:** L4 (gain automation)
+deliberately mirrors n3 A7's focus from the generated-content side —
+they are distinct check rows with distinct procedures and evidence.
+A4 (n3) and W5 (Windows shutdown) share surface but different
+procedures/evidence. No check is counted twice; no N3 item is
+omitted — all 19 are preserved verbatim in section 1.
+
 - **Build under test:** C3-merged main (`3298ae6`+ closeout `90ad6c2`),
   NSIS `Atomic Dream Engine_0.1.0_x64-setup.exe`, frozen backend.
 - **Authoritative checklist:** `docs/n3-human-checklist.md` — the sole
@@ -15,27 +31,31 @@ executed it and recorded evidence — nothing here is auto-marked.
 
 ## 1. N3 audio/editing checklist — 19 items (all NOT RUN)
 
-| # | Check | Status | Tester | Date | Build | Procedure | Evidence |
+Check names carried **verbatim** from `docs/n3-human-checklist.md`;
+"How" and "Pass if" criteria are authoritative there and are not
+repeated here (no rewording).
+
+| # | Check (verbatim) | Status | Tester | Date | Build | Procedure | Evidence |
 |---|-------|--------|--------|------|-------|-----------|----------|
-| A1 | Scrub onset immediate | NOT RUN | — | — | — | n3-checklist A1 | — |
-| A2 | Scrub continuous | NOT RUN | — | — | — | n3-checklist A2 | — |
-| A3 | Scrub stops on release | NOT RUN | — | — | — | n3-checklist A3 | — |
+| A1 | Scrub onset feels immediate | NOT RUN | — | — | — | n3-checklist A1 | — |
+| A2 | Scrub is continuous, not stuttery | NOT RUN | — | — | — | n3-checklist A2 | — |
+| A3 | Scrub stops cleanly on release | NOT RUN | — | — | — | n3-checklist A3 | — |
 | A4 | Cancel restores | NOT RUN | — | — | — | n3-checklist A4 | — |
-| A5 | Silence over gap | NOT RUN | — | — | — | n3-checklist A5 | — |
-| A6 | Mute/solo respected | NOT RUN | — | — | — | n3-checklist A6 | — |
-| A7 | Automation audible | NOT RUN | — | — | — | n3-checklist A7 | — |
+| A5 | Scrub over silence/gap is silent | NOT RUN | — | — | — | n3-checklist A5 | — |
+| A6 | Scrub respects mute/solo | NOT RUN | — | — | — | n3-checklist A6 | — |
+| A7 | Scrub reflects automation | NOT RUN | — | — | — | n3-checklist A7 | — |
 | A8 | Rapid zig-zag | NOT RUN | — | — | — | n3-checklist A8 | — |
-| B1 | Preview≈export | NOT RUN | — | — | — | n3-checklist B1 | — |
-| B2 | Transport feel | NOT RUN | — | — | — | n3-checklist B2 | — |
-| C1 | Edge auto-scroll | NOT RUN | — | — | — | n3-checklist C1 | — |
+| B1 | Preview matches export intent | NOT RUN | — | — | — | n3-checklist B1 | — |
+| B2 | Play/pause/stop feel | NOT RUN | — | — | — | n3-checklist B2 | — |
+| C1 | Clip drag has edge auto-scroll | NOT RUN | — | — | — | n3-checklist C1 | — |
 | C2 | Anchored zoom | NOT RUN | — | — | — | n3-checklist C2 | — |
-| C3 | Ruler pinned | NOT RUN | — | — | — | n3-checklist C3 | — |
-| C4 | Numeric edits | NOT RUN | — | — | — | n3-checklist C4 | — |
-| C5 | Undo predictability | NOT RUN | — | — | — | n3-checklist C5 | — |
+| C3 | Ruler stays visible | NOT RUN | — | — | — | n3-checklist C3 | — |
+| C4 | Numeric edits don't displace the timeline | NOT RUN | — | — | — | n3-checklist C4 | — |
+| C5 | Undo is predictable | NOT RUN | — | — | — | n3-checklist C5 | — |
 | C6 | Keyframe delete | NOT RUN | — | — | — | n3-checklist C6 | — |
-| D1 | LONG responsive | NOT RUN | — | — | — | n3-checklist D1 | — |
+| D1 | App stays responsive | NOT RUN | — | — | — | n3-checklist D1 | — |
 | D2 | Waveforms render | NOT RUN | — | — | — | n3-checklist D2 | — |
-| D3 | Long scrub live | NOT RUN | — | — | — | n3-checklist D3 | — |
+| D3 | Scrub still feels live | NOT RUN | — | — | — | n3-checklist D3 | — |
 
 ## 2. C4.2 — Human audio validation procedures (all NOT RUN)
 

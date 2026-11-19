@@ -231,7 +231,7 @@ export function NewProjectDialog({
               <button
                 onClick={() => setStep(step + 1)}
                 disabled={!canNext}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
               >
                 Continue
               </button>
@@ -239,7 +239,7 @@ export function NewProjectDialog({
               <button
                 onClick={create}
                 disabled={busy}
-                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
               >
                 {busy ? "Creating…" : "Create project"}
               </button>

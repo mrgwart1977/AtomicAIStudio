@@ -219,7 +219,7 @@ export function TimelinePage() {
             />
             <div className="mt-1.5 flex gap-1">
               <button onClick={createTimeline} disabled={busy || !newName.trim()}
-                className="rounded bg-action px-2 py-0.5 text-[11px] text-white disabled:opacity-40">Create</button>
+                className="rounded bg-action px-2 py-0.5 text-[11px] text-ink disabled:opacity-40">Create</button>
               <button onClick={() => setCreating(false)}
                 className="rounded border border-line px-2 py-0.5 text-[11px] text-muted">Cancel</button>
             </div>
@@ -312,7 +312,7 @@ export function TimelinePage() {
                     onClick={() => renameTo.trim() && run("timeline.update", {
                       timeline_id: selTl.id, name: renameTo.trim(),
                     }).then((ok) => ok && setRenaming(false))}
-                    className="rounded bg-action px-2 py-1 text-xs text-white"
+                    className="rounded bg-action px-2 py-1 text-xs text-ink"
                   >Save</button>
                 </span>
               ) : (
@@ -435,7 +435,7 @@ export function TimelinePage() {
                       Any timeline edit after this point cancels the export request.
                     </p>
                     <button disabled={busy} onClick={() => void runExport()}
-                      className="mt-1.5 rounded bg-action px-2.5 py-1 text-[11px] text-white disabled:opacity-40">
+                      className="mt-1.5 rounded bg-action px-2.5 py-1 text-[11px] text-ink disabled:opacity-40">
                       Start export
                     </button>
                   </div>

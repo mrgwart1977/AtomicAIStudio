@@ -305,6 +305,23 @@ describe("TimelineEditor", () => {
     expect(insp.textContent).toMatch(/frames 0–72/);
   });
 
+  it("Enter/Space selects a focused clip — keyboard path to inspector", async () => {
+    // C4.4: a role="button" div does NOT synthesize onClick on Enter;
+    // clipKey must handle it or the inspector is unreachable by keyboard.
+    setup();
+    const clips = screen.getAllByTestId("lane-clip");
+    clips[0].focus();
+    fireEvent.keyDown(clips[0], { key: "Enter" });
+    const insp = await screen.findByTestId("clip-inspector");
+    expect(insp.textContent).toMatch(/frames 0–72/);
+    cleanup();
+    setup();
+    const again = screen.getAllByTestId("lane-clip");
+    again[1].focus();
+    fireEvent.keyDown(again[1], { key: " " });
+    await screen.findByTestId("clip-inspector");
+  });
+
   it("keyboard ←/→ nudges by frames; Delete removes", async () => {
     setup();
     const clips = screen.getAllByTestId("lane-clip");

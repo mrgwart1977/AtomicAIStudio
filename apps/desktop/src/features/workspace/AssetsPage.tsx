@@ -187,7 +187,7 @@ export function AssetsPage() {
         <button
           onClick={() => void importAsset()}
           disabled={busy}
-          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+          className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
         >
           Import
         </button>
@@ -335,7 +335,7 @@ export function AssetsPage() {
                 onClick={() => {
                   void apiFetch<SharedAsset[]>(`/api/projects/${project.id}/shared-assets`).then(setShared);
                 }}
-                className="w-full rounded-md bg-action px-3 py-2 text-sm text-white"
+                className="w-full rounded-md bg-action px-3 py-2 text-sm text-ink"
               >
                 Refresh
               </button>

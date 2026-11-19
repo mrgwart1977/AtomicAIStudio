@@ -212,7 +212,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
               setSel(null);
               setForm({});
             }}
-            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-white hover:bg-action-hi"
+            className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-action-hi"
           >
             + New
           </button>
@@ -363,7 +363,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                 <button
                   onClick={() => void save()}
                   disabled={busy || !form.name?.trim()}
-                  className="rounded-md bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hi disabled:opacity-40"
+                  className="rounded-md bg-action px-4 py-2 text-sm font-medium text-ink hover:bg-action-hi disabled:opacity-40"
                 >
                   {busy ? "Saving…" : creating ? "Create" : "Save new revision"}
                 </button>

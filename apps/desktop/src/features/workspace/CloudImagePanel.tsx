@@ -21,7 +21,7 @@ const inputCls =
   "w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg placeholder:text-faint";
 const labelCls = "mb-1 block text-xs font-medium text-muted";
 const btnCls =
-  "rounded-md bg-action px-3 py-1.5 text-sm text-white hover:bg-action/80 disabled:opacity-40";
+  "rounded-md bg-action px-3 py-1.5 text-sm text-ink hover:bg-action/80 disabled:opacity-40";
 const ghostBtn =
   "rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:text-fg disabled:opacity-40";
 
