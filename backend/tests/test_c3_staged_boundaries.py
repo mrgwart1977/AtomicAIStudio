@@ -448,6 +448,9 @@ def _distinct_mp4s(ffmpeg, out_dir: Path, n: int) -> list[Path]:
     """n byte-distinct tiny mp4s — distinct lavfi colors → distinct
     sha → distinct CAS objects → distinct -i inputs."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Detect the encoder the resolved binary actually ships — the
+    # bundled CI build has libopenh264, full Gyan builds have libx264.
+    enc = tx.h264_encoder(ffmpeg, supervise.run)
 
     def make(i):
         p = out_dir / f"s{i}.mp4"
@@ -458,8 +461,7 @@ def _distinct_mp4s(ffmpeg, out_dir: Path, n: int) -> list[Path]:
         r = subprocess.run(
             [ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
              f"color=c=#{r8:02x}{g8:02x}{b8:02x}:s=32x32:r=24:d=0.25",
-             "-c:v", "libx264", "-preset", "ultrafast",
-             "-pix_fmt", "yuv420p", str(p)],
+             "-c:v", enc, "-pix_fmt", "yuv420p", str(p)],
             capture_output=True, timeout=60)
         assert r.returncode == 0, r.stderr
         return p
