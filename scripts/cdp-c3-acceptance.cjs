@@ -182,26 +182,27 @@ async function waitProcsGone(timeout = 15) {
 
 // ---- helpers for asset file + ffprobe (from C1 driver) ----
 function findFfprobe() {
-  const root = `${process.env.LOCALAPPDATA}\Atomic Dream Engine`;
-  for (const c of [`${root}\backend\ffprobe.exe`,
-                   `${root}\backend\ffmpeg\ffprobe.exe`,
-                   `${root}\resources\ffprobe.exe`])
-    if (fs.existsSync(c)) return c;
+  const root = `${process.env.LOCALAPPDATA}\\Atomic Dream Engine`;
+  for (const r of [root,
+                   path.join(root, "backend", "_internal", "ffmpeg", "bin"),
+                   path.join(root, "resources")]) {
+    const p = path.join(r, "ffprobe.exe"); if (fs.existsSync(p)) return p;
+  }
   try {
-    const d = `${process.env.LOCALAPPDATA}\Microsoft\WinGet\Packages`;
-    for (const g of fs.readdirSync(d).filter((x) => /FFmpeg/i.test(x))) {
-      const base = path.join(d, g);
-      for (const b of fs.readdirSync(base)) {
-        const f = path.join(base, b, "bin", "ffprobe.exe");
-        if (fs.existsSync(f)) return f;
-      }
-    }
+    const out = execFileSync("cmd", ["/c", "dir /s /b ffprobe.exe"],
+      { cwd: root }).toString();
+    const f = out.split(/\r?\n/).filter(Boolean)[0];
+    if (f && fs.existsSync(f)) return f;
   } catch {}
   return null;
 }
 async function assetFile(pid, assetId, ext) {
-  const a = await api("GET", `/api/projects/${pid}/assets/${assetId}/file`);
-  return a && a.path ? a.path : a;
+  const r = await fetch(`${API}/api/projects/${pid}/assets/${assetId}/file`,
+    { headers: { "X-Atomic-Token": TOKEN } });
+  if (r.status !== 200) fail(`asset fetch ${r.status}`);
+  const f = path.join(OUT, `probe-${assetId}${ext}`);
+  fs.writeFileSync(f, Buffer.from(await r.arrayBuffer()));
+  return f;
 }
 async function preview(pid, ct, payload) {
   const rev = (await api("GET", `/api/projects/${pid}`)).revision;
@@ -259,13 +260,15 @@ async function main() {
   {
     let done = 0;
     for (const s of board.flatMap((b) => b.shots).slice(0, 8)) {
-      for (const role of ["start", "end"]) {
-        const pg = await preview(p1, "keyframe.generate",
-          { shot_id: s.shot.id, role });
+      for (const role of ["start", "end"])
+        await commit(p1, "keyframe.create",
+          { shot_id: s.shot.id, role, prompt: `${role} prompt` });
+      const klist = await api("GET",
+        `/api/projects/${p1}/shots/${s.shot.id}/keyframes`);
+      for (const k of klist) {
+        if (k.result_asset_id) continue;
         const rk = await commit(p1, "keyframe.generate",
-          { shot_id: s.shot.id, role,
-            expected_shot: pg.resolved_shot,
-            expected_prompt: pg.resolved_prompt?.prompt_sha256 });
+          { keyframe_id: k.id });
         const j = await waitJob(p1, rk.job_id, 90);
         if (j.status !== "succeeded") fail(`keyframe ${j.status}: ${j.error}`);
         done++;
@@ -380,12 +383,15 @@ async function main() {
 
   // ---- 10. cancellation + cleanup ----
   {
-    const pg = await preview(p1, "keyframe.generate",
-      { shot_id: board[0].shots[0].shot.id, role: "start" });
+    const s0 = board[0].shots[0].shot.id;
+    await commit(p1, "keyframe.create",
+      { shot_id: s0, role: "start", prompt: "cancel probe" });
+    const k0 = (await api("GET",
+      `/api/projects/${p1}/shots/${s0}/keyframes`))
+      .filter((k) => !k.result_asset_id)[0];
+    if (!k0) fail("no keyframe to cancel-generate");
     const rk = await commit(p1, "keyframe.generate",
-      { shot_id: board[0].shots[0].shot.id, role: "start",
-        expected_shot: pg.resolved_shot,
-        expected_prompt: pg.resolved_prompt?.prompt_sha256 });
+      { keyframe_id: k0.id });
     await fetch(`${API}/api/jobs/${rk.job_id}/cancel`,
       { method: "POST", headers: { "X-Atomic-Token": TOKEN } });
     const j = await waitJob(p1, rk.job_id, 60);
