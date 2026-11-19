@@ -453,7 +453,9 @@ def composite_canvas(plan: dict, profile: str,
 def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                          canvas: dict, crf: int, out_path: str,
                          encoder: str = "libx264",
-                         script_path: str | None = None):
+                         script_path: str | None = None,
+                         limiter: bool = True,
+                         audio_codec: str = "aac"):
     """One-pass multitrack render. `paths` maps clip_id -> resolved
     source file (pinned-sha CAS path). Graph:
 
@@ -526,7 +528,11 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
         parts.append(
             f"[{vspec(paths[c['clip_id']])}]trim="
             f"start={_flt(in_s)}:end={_flt(end_s)},"
-            f"setpts=PTS-STARTPTS,"
+            # PTS carries the clip's TIMELINE position — overlay draws
+            # the secondary while main pts is inside it; resetting to
+            # 0 would consume every clip at output frame 0 and drop
+            # everything not starting at the origin (eof_action=pass).
+            f"setpts=PTS-STARTPTS+{_flt(c['tl_start_s'])}/TB,"
             f"fps={fps},"
             f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease"
             f"[c{i}]")
@@ -558,7 +564,11 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
                 proc = _lane_chain(a["stream"], a, tl_fps)
                 lead = _q((a["start_tl"] - a["head_tl"])
                           * AUDIO_RATE / tl_fps)
-            if lead:
+            # C3 staged: a clip whose stream starts before the window
+            # reports a negative lead — the post-envelope atrim inside
+            # the chain already cuts it, so it plays from stage
+            # position 0.
+            if lead > 0:
                 a_parts.append(
                     f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
                     f"atrim=end_sample={lead}[sil{j}]")
@@ -568,16 +578,20 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
             else:
                 a_parts.append(f"{proc}[am{j}]")
             mix_in += f"[am{j}]"
-        a_parts.append(
+        mix_chain = (
             f"{mix_in}amix=inputs={len(a_inputs) + 1}:"
-            f"duration=first:normalize=0,"
+            f"duration=first:normalize=0"
             # Explicit limiter contract — never rely on defaults:
             # ceiling −0.45 dBFS, 5 ms attack / 50 ms release,
             # level=0 disables auto-makeup (default would boost
             # quiet mixes), latency=1 compensates the lookahead
-            # delay so the mix stays sample-aligned.
-            f"alimiter=limit=0.95:attack=5:release=50:"
-            f"level=0:latency=1[a]")
+            # delay so the mix stays sample-aligned. Staged
+            # intermediates omit it — one pass applies at the final
+            # concat so its state machine sees the whole program.
+            + (",alimiter=limit=0.95:attack=5:release=50:"
+               "level=0:latency=1" if limiter else "")
+            + "[a]")
+        a_parts.append(mix_chain)
         parts += a_parts
     graph = ";".join(parts)
     if script_path is not None:
@@ -586,11 +600,18 @@ def build_composite_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
         argv += ["-filter_complex", graph]
     argv += ["-map", f"[{cur}]"]
     if a_inputs:
-        argv += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k",
-                 "-ar", str(AUDIO_RATE)]
-    argv += ["-c:v", encoder, "-preset", "fast", "-crf", str(crf),
-             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-             "-t", dur_s, out_path]
+        if audio_codec == "aac":
+            argv += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k",
+                     "-ar", str(AUDIO_RATE)]
+        else:
+            argv += ["-map", "[a]", "-c:a", audio_codec]
+    argv += ["-c:v", encoder]
+    if encoder != "ffv1":
+        argv += ["-preset", "fast", "-crf", str(crf)]
+    argv += ["-pix_fmt", "yuv420p"]
+    if out_path.endswith(".mp4"):
+        argv += ["-movflags", "+faststart"]
+    argv += ["-t", dur_s, out_path]
     if script_path is not None:
         return argv, graph
     return argv
@@ -671,6 +692,12 @@ def _lane_chain(spec: str, a: dict, tl_fps: Fraction) -> str:
         kind = "in" if xf["role"] == "in" else "out"
         chain += (f",afade=t={kind}:start_sample={xf['off']}"
                   f":nb_samples={xf['n']}:curve={xf['curve']}")
+    if "stage_skip_src" in a:
+        # Staged: the stream kept its full original segment + anchors
+        # so envelopes continue across the boundary exactly; cut the
+        # stage window out of the rendered stream here.
+        chain += (f",atrim=start_sample={a['stage_skip_src']}"
+                  f":end_sample={a['stage_end_src']},asetpts=PTS-STARTPTS")
     return chain + f",aresample={AUDIO_RATE},asetpts=PTS-STARTPTS"
 
 
@@ -728,6 +755,201 @@ def _auto_exprs(a: dict, db_sum: float, tl_fps: Fraction) -> str:
             f"({_seg_expr(toffs, [p['gain_db'] for p in tpts], tstep)})")
     env = f"pow(10,({'+'.join(terms)})/20)"
     return f"val(0)*({env})|val(1)*({env})"
+
+
+# ------------------------------------------------------------------
+# C3 staged submix — bounded multi-stage export
+#
+# The single-pass composite emits one ``-i`` per UNIQUE source; on
+# Windows the ~32k CreateProcess command-line limit caps that at
+# ~750 sources even with ~40-char hardlink aliases. Staged mode splits
+# the program into frame-exact windows each holding <= STAGE_MAX_INPUTS
+# unique sources, renders each window to a LOSSLESS intermediate
+# (ffv1 video + pcm_f32le audio in .mkv — no encode generation lost),
+# then concatenates intermediates via the concat DEMUXER (a file list,
+# not argv) into the single final encode. One limiter pass lives in
+# the final stage so its 5 ms/50 ms state machine sees the whole
+# program exactly as the single-pass path does.
+#
+# Stage-boundary exactness: every envelope anchor is stream-local in
+# source units, so a window starting at frame F rewires each clip as
+# (skip_tl, skip_src) — occupancy/timeline fields shift by -F, stream
+# anchors shift by -skip. At fps values where a tl frame is not an
+# integer number of samples (e.g. 29.97 → 1601.6), boundary rounding
+# can differ by at most one audio sample — inaudible and documented.
+# ------------------------------------------------------------------
+STAGE_MAX_INPUTS = 200
+_INTERMEDIATE_V = ("ffv1", "yuv420p")
+_INTERMEDIATE_A = ("pcm_f32le", ".mkv")
+
+
+def stage_windows(plan: dict, clip_paths: dict[str, str],
+                  max_inputs: int | None = None) -> list[tuple[int, int]]:
+    """Greedy (start, end) tl-frame windows with <= max_inputs unique
+    sources each. Ends land on activity boundaries so windows stay as
+    large as the input budget allows."""
+    if max_inputs is None:
+        max_inputs = STAGE_MAX_INPUTS
+    tl_fps = Fraction(plan["fps_num"], plan["fps_den"])
+    events: list[tuple[Fraction, Fraction, str]] = []
+    for c in plan["clips"]:
+        events.append((Fraction(c["start_frame"]),
+                       Fraction(c["occ_end_frame"]),
+                       clip_paths[c["clip_id"]]))
+    for a in plan.get("audio_clips") or []:
+        if a["embedded"]:
+            s0 = a["start_tl"]
+            e0 = s0 + a["dur_s"] * tl_fps
+        else:
+            s0 = a["start_tl"] - a["head_tl"]
+            e0 = s0 + a["head_tl"] + a["extent_tl"]
+        events.append((s0, e0, clip_paths[a["clip_id"]]))
+    if not events:
+        return []
+    # Fractional event edges (non-integer tl fps) snap UP: a clip
+    # starting at 119.88 first shows in frame 120 and one ending at
+    # 119.88 still contributes frame 119 — ceil keeps every stage
+    # boundary on a whole frame and tiles the program exactly.
+    bounds = sorted({_ceil(s) for s, _, _ in events} |
+                    {_ceil(e) for _, e, _ in events})
+    by_start = sorted(events)  # (s, e, path)
+    prog = bounds[-1]
+    stages: list[tuple[int, int]] = []
+    F = Fraction(0)
+    while F < prog:
+        # unique sources EVER active inside [F, b): a source enters the
+        # trial set when b passes its start and never leaves (the e > F
+        # condition is fixed per stage) — one advancing pointer each.
+        active: set[str] = set()
+        M = F
+        i = 0
+        for b in bounds:
+            if b <= F:
+                continue
+            while i < len(by_start) and by_start[i][0] < b:
+                s, e, p = by_start[i]
+                if e > F:
+                    active.add(p)
+                i += 1
+            if len(active) > max_inputs:
+                if M > F:
+                    break
+                raise ValueError(
+                    f"{len(active)} unique sources overlap at one "
+                    f"position — exceeds the {max_inputs}-input stage "
+                    "capacity")
+            M = b
+        if M <= F:
+            M = F + 1  # degenerate single-frame window; cannot be empty
+        stages.append((int(F), int(M)))
+        F = Fraction(M)
+    return stages
+
+
+def stage_subplan(plan: dict, F: int, M: int) -> dict:
+    """The [F, M) tl-frame window as an independent plan — every
+    timeline-anchored field rebased to stage origin, every stream-local
+    anchor rebased by the trimmed source prefix."""
+    tl_fps = Fraction(plan["fps_num"], plan["fps_den"])
+    Ff, Mf = Fraction(F), Fraction(M)
+    clips: list[dict[str, Any]] = []
+    for c in plan["clips"]:
+        s, e = Fraction(c["start_frame"]), Fraction(c["occ_end_frame"])
+        if e <= Ff or s >= Mf:
+            continue
+        skip = max(Ff - s, Fraction(0))
+        take = min(e, Mf) - max(s, Ff)
+        extent = e - s  # occupancy in tl frames
+        src_per_tl = c["dur_s"] / extent if extent else Fraction(0)
+        nc = dict(c)
+        nc["in_s"] = c["in_s"] + skip * src_per_tl
+        nc["dur_s"] = take * src_per_tl
+        nc["start_frame"] = int(max(s, Ff) - Ff)
+        nc["occ_end_frame"] = int(min(e, Mf) - Ff)
+        nc["tl_start_s"] = (max(s, Ff) - Ff) / tl_fps
+        nc["tl_end_s"] = (min(e, Mf) - Ff) / tl_fps
+        clips.append(nc)
+    audio: list[dict[str, Any]] = []
+    for a in plan.get("audio_clips") or []:
+        na = dict(a)
+        if a["embedded"]:
+            s = a["start_tl"]
+            ext = a["dur_s"] * tl_fps
+            e = s + ext
+            if e <= Ff or s >= Mf:
+                continue
+            skip = max(Ff - s, Fraction(0))
+            take = min(e, Mf) - max(s, Ff)
+            rate_s = a["dur_s"] / ext if ext else Fraction(0)
+            na["in_s"] = a["in_s"] + skip * rate_s
+            na["dur_s"] = take * rate_s
+            na["start_tl"] = s - Ff
+            na["tl_start_s"] = na["start_tl"] / tl_fps
+            na["tl_end_s"] = na["tl_start_s"] + take / tl_fps
+            na["track_auto"] = [{**p, "at_tl": p["at_tl"] - Ff}
+                                for p in a["track_auto"]]
+            audio.append(na)
+            continue
+        s0 = a["start_tl"] - a["head_tl"]          # stream start (tl)
+        e0 = s0 + a["head_tl"] + a["extent_tl"]    # stream end (tl)
+        if e0 <= Ff or s0 >= Mf:
+            continue
+        skip_tl = max(Ff - s0, Fraction(0))
+        take_tl = min(e0, Mf) - max(Ff, s0)
+        skip_src = _q(skip_tl * a["rate"] / tl_fps)
+        take_src = _q(take_tl * a["rate"] / tl_fps)
+        # Keep the FULL original stream segment and every stream-local
+        # anchor (head_src, extent_src, fades, xf.off, automation offs)
+        # untouched — afade/aeval anchors are stream positions and must
+        # never go negative when an envelope crosses the boundary.
+        # `_lane_chain` appends a post-envelope atrim that cuts the
+        # [skip_src, skip_src+take_src) window out of the rendered
+        # stream — bit-identical envelope state to the single pass.
+        na["stage_skip_src"] = skip_src
+        na["stage_end_src"] = skip_src + take_src
+        na["start_tl"] = a["start_tl"] - Ff
+        na["track_auto"] = [{**p, "at_tl": p["at_tl"] - Ff}
+                            for p in a["track_auto"]]
+        audio.append(na)
+    clips.sort(key=lambda c: (c["track_position"], c["tl_start_s"],
+                              c["clip_id"]))
+    return {"clips": clips, "audio_clips": audio,
+            "program_frames": Mf - Ff,
+            "fps_num": plan["fps_num"], "fps_den": plan["fps_den"]}
+
+
+def build_stage_argv(ffmpeg: str, plan: dict, paths: dict[str, str],
+                     canvas: dict, out_path: str,
+                     script_path: str) -> tuple[list[str], str]:
+    """Intermediate render: same composite graph minus the limiter —
+    ffv1 + pcm_f32le, lossless."""
+    argv, graph = build_composite_argv(
+        ffmpeg, plan, paths, canvas, crf=0, out_path=out_path,
+        encoder="ffv1", script_path=script_path, limiter=False,
+        audio_codec="pcm_f32le")
+    return argv, graph
+
+
+def build_final_argv(ffmpeg: str, list_path: str, dur_s: float,
+                     out_path: str, encoder: str, crf: int,
+                     has_audio: bool, limiter: bool = True) -> list[str]:
+    """Concat intermediates (file list — argv stays bounded at ANY
+    stage count) into the single final encode. The ONE limiter pass
+    lives here so its state machine sees the whole program."""
+    argv = [ffmpeg, "-y", "-hide_banner", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", list_path]
+    if has_audio:
+        filt = ("alimiter=limit=0.95:attack=5:release=50:"
+                "level=0:latency=1" if limiter else "anull")
+        argv += ["-filter_complex", f"[0:a]{filt}[a]",
+                 "-map", "0:v", "-map", "[a]",
+                 "-c:a", "aac", "-b:a", "160k", "-ar", str(AUDIO_RATE)]
+    else:
+        argv += ["-map", "0:v"]
+    argv += ["-c:v", encoder, "-preset", "fast", "-crf", str(crf),
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+             "-t", _flt(dur_s), out_path]
+    return argv
 
 
 def build_copy_argv(ffmpeg: str, list_path: str, out_path: str) -> list[str]:
