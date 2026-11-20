@@ -24,6 +24,7 @@ never constructed; no real request, credential, or spend exists.
 """
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import os
@@ -607,6 +608,51 @@ class TestPermitExpiry:
         _approve_exec(client, permit)
         jid, out = _run(client, pid, approve_exec=False)
         assert out["outcome"] == "succeeded"
+
+    def test_expiry_between_consume_and_send_refused(self):
+        """Send-time revalidation: a permit that was unexpired at
+        consume but lapses in the admission→send window must NOT
+        initiate a request. The transport re-checks not_after
+        immediately before handing the request to the wire layer —
+        provably nothing is sent and the refusal is none_confirmed."""
+        sent: list[str] = []
+
+        def capture(req):
+            sent.append(str(req.url))
+            return httpx.Response(200, json=DEEPSEEK_OK)
+        inner = httpx.MockTransport(capture)
+        # Drive the transport directly — expiry check is inside
+        # handle_async_request, after egress + DNS, before the send.
+        transport = lt.LiveHTTPTransport(
+            provider_key="deepseek", inner=inner,
+            resolver=GOOD_RESOLVER,
+            permit_not_after=datetime.now(timezone.utc)
+            - timedelta(milliseconds=1))
+        req = httpx.Request(
+            "POST", "https://api.deepseek.com/chat/completions")
+        with pytest.raises(LiveTransportRefused) as exc:
+            asyncio.run(transport.handle_async_request(req))
+        assert exc.value.code == "permit_expired"
+        assert exc.value.charge_evidence == "none_confirmed"
+        assert sent == []                  # wire layer never reached
+        assert transport._sent == []       # send boundary never crossed
+
+    def test_expiry_unexpired_at_send_passes(self):
+        """Boundary complement: a permit still inside not_after at the
+        send boundary proceeds to the inner transport normally."""
+        inner = httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"ok": True}))
+        transport = lt.LiveHTTPTransport(
+            provider_key="deepseek", inner=inner,
+            resolver=GOOD_RESOLVER,
+            permit_not_after=datetime.now(timezone.utc)
+            + timedelta(seconds=60))
+        req = httpx.Request(
+            "POST", "https://api.deepseek.com/chat/completions")
+        resp = asyncio.run(transport.handle_async_request(req))
+        assert resp.status_code == 200
+        assert transport._sent == [
+            "https://api.deepseek.com/chat/completions"]
 
     def test_expired_permit_disarmable(self, client, vault):
         """A dead permit doesn't deadlock the lane — disarm clears it

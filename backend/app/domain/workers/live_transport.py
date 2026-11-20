@@ -36,6 +36,7 @@ import inspect
 import ipaddress
 import json
 import socket
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import httpx
@@ -275,20 +276,22 @@ class LiveHTTPTransport(httpx.AsyncBaseTransport):
                  timeout_s: float | None = None,
                  base_backend=None,
                  generation_probe: Callable | None = None,
-                 expected_generation: str | None = None):
+                 expected_generation: str | None = None,
+                 permit_not_after: datetime | None = None):
         self.provider_key = provider_key
         self.is_real = inner is None
         self._inner = inner or _SecureHTTPTransport(
             resolver=resolver, base_backend=base_backend)
         self._resolver = resolver
-        # Last-possible staleness check: the probe runs immediately
-        # before the request is handed to the inner (wire) transport,
-        # narrowing the credential-rotation race to the send itself —
-        # the one window no software check can close without holding a
-        # vault lock across network I/O (which is deliberately never
-        # done; see docs/b2bl-readiness-package.md).
+        # Last-possible staleness checks: generation probe and permit
+        # expiry run immediately before the request is handed to the
+        # inner (wire) transport, narrowing the rotation/expiry races
+        # to the send itself — the one window no software check can
+        # close without holding a vault lock across network I/O (which
+        # is deliberately never done; see docs/b2bl-readiness-package.md).
         self._gen_probe = generation_probe
         self._expected_gen = expected_generation
+        self._permit_not_after = permit_not_after
         cfg = lg.LIVE_TIMEOUTS.get(provider_key, {})
         self._total_s = timeout_s or cfg.get("total_s", 60.0)
         self._sent: list[str] = []  # URLs attempted — test introspection
@@ -310,6 +313,14 @@ class LiveHTTPTransport(httpx.AsyncBaseTransport):
                 f"{self.provider_key}: credential generation changed "
                 "between authorization and send — the approved "
                 "credential is stale; request never sent",
+                charge_evidence="none_confirmed")
+        if (self._permit_not_after is not None
+                and datetime.now(timezone.utc) >= self._permit_not_after):
+            raise LiveTransportRefused(
+                "permit_expired",
+                f"{self.provider_key}: armed permit expired between "
+                "admission and send — an expired permit must not "
+                "initiate a request; nothing was sent",
                 charge_evidence="none_confirmed")
         self._sent.append(url)
         try:
@@ -457,13 +468,28 @@ async def live_dispatch(
             f"{provider_key}: required credential field(s) "
             f"{missing or ['api_key']} absent or empty — refusing "
             "before transport construction; nothing was sent")
+    # Send-time re-validation: the permit's expiry is re-checked inside
+    # the transport immediately before the wire send — an expiry landing
+    # in the admission→send window must not initiate a request either.
+    permit_not_after = None
+    if expected_permit is not None:
+        try:
+            na = datetime.fromisoformat(str(expected_permit["not_after"]))
+            permit_not_after = (na if na.tzinfo is not None
+                                else na.replace(tzinfo=timezone.utc))
+        except (TypeError, ValueError, KeyError):
+            _refuse_predispatch(
+                session, job_id, "permit_expiry",
+                "armed permit carries no valid expiry — refusing "
+                "before transport construction; nothing was sent")
     transport = LiveHTTPTransport(
         provider_key=provider_key, inner=inner, resolver=resolver,
         base_backend=base_backend,
         generation_probe=(
             (lambda: vault.current_generation(ref))
             if expected_permit is not None else None),
-        expected_generation=expected_gen)
+        expected_generation=expected_gen,
+        permit_not_after=permit_not_after)
     provider = make_provider(provider_key, transport=transport,
                              api_key=api_key)
     try:

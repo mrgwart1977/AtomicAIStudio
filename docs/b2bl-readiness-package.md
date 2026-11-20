@@ -155,13 +155,25 @@ chain (kill/enablement/model grant/evidence freshness/caps/
 concurrency), approval file valid, provider/model/project/
 **credential_generation** match, **and `request_fingerprint` match**.
 
-**Permit expiry:** the approval's `not_after` is carried verbatim onto
-the armed permit record. Consumption after expiry refuses
-(`permit_expired`) without consuming; a missing or malformed expiry on
-the record fails closed (`permit_expiry` — legacy permits cannot
-become valid by omission). Expiry is re-checked at dispatch admission
-inside `consume()` and persists across restart (AppSetting KV).
-Expired permits remain safely disarmable.
+**Permit expiry — three enforcement points:** the approval's
+`not_after` is carried verbatim onto the armed permit record. (1)
+Consumption: `consume()` refuses an expired permit (`permit_expired`)
+without consuming; missing/malformed expiry fails closed
+(`permit_expiry` — legacy permits cannot become valid by omission).
+(2) Dispatch admission: `consume()` runs inside the `spend.admit`
+commit, so expiry is re-evaluated at the admission boundary.
+(3) Send-time: `LiveHTTPTransport` re-checks `not_after` immediately
+before the wire send — an expiry landing in the admission→send window
+refuses `permit_expired` (`none_confirmed`, nothing sent, reservation
+released). An expired permit therefore never initiates a request at
+any software checkpoint. Expiry persists across restart (AppSetting
+KV); expired permits remain safely disarmable. **Behavior if expiry
+occurs after the request legitimately enters transmission:** the send
+proceeds — the credential was approved and the window authorized; the
+outcome classifies normally and expiry never retroactively voids a
+completed request. **Clock:** `datetime.now(timezone.utc)` vs the
+stored ISO `not_after`; machine-clock skew is an owner responsibility
+(the approval itself bounds the window the owner chose).
 
 Preview for the owner — everything visible before approval:
 - `live-status` report + LiveGatePanel readiness block: credential
@@ -249,6 +261,7 @@ transport (C2 test battery covers every control):
 | Auth before network | admission + reservation COMMIT precede transport construction |
 | Credential timing | `vault.get_fields_with_generation` only inside the boundary, after committed admission — decrypted fields + generation read atomically under one vault lock; mismatch vs permit → `credential_rotated` refusal before transport |
 | Credential staleness at send | generation probe inside `LiveHTTPTransport.handle_async_request` — rechecked immediately before the wire send; rotation → `credential_rotated` (`none_confirmed`) |
+| Permit staleness at send | `not_after` re-checked in the same pre-send block; expiry → `permit_expired` (`none_confirmed`) — an expired permit never initiates a request |
 | Secret redaction | provider error body never stored; audit carries metadata only |
 | Cancellation | sync contract — `cancel()` is `UnsupportedRemoteOp` by design |
 | Retries | `retries=0` in the pool; no retry code path exists |
@@ -260,14 +273,17 @@ B2b-L is NOT blocked on item 7 grounds. The image-artifact
 
 **Residual race — disclosed honestly:** generation is verified at
 consume, again atomically at credential read, and once more inside the
-transport immediately before the wire send. A rotation landing *during*
-the in-flight request cannot be prevented without holding a vault lock
-across network I/O (never done — the lock is only ever held for
-in-memory state reads/mutations). That final window is bounded by the
-60 s total timeout and fails safe either way: a rotated/revoked key
-gets a definitive provider refusal (no charge); a still-valid old key
-completes under the credential that was approved at the last passing
-check. No design claim is made beyond this.
+transport immediately before the wire send; permit expiry is verified
+at consume, at the admission commit, and in the same pre-send block.
+A rotation or expiry landing *during* the in-flight request cannot be
+prevented without holding a vault lock across network I/O (never done
+— the lock is only ever held for in-memory state reads/mutations).
+That final window is bounded by the 60 s total timeout and fails safe
+either way: a rotated/revoked key gets a definitive provider refusal
+(no charge); a still-valid old key completes under the credential that
+was approved at the last passing check; a permit expiring mid-flight
+lets the authorized request finish — expiry governs INITIATION, never
+voids an already-sent request. No design claim is made beyond this.
 
 ## 10. Issue #96 boundary assessment
 
@@ -289,13 +305,14 @@ boundary, no prompt/secret in audit); refusal tests cover replay,
 expiry, changed-request, missing fingerprint, cancel-absence,
 timeout-hold, 402-release, and restart durability.
 
-`tests/test_c2b3_credential_generation.py` — **38 PASS** (new
+`tests/test_c2b3_credential_generation.py` — **40 PASS** (new
 hardening suite, same zero-egress guard): all three rotation windows
 refuse closed; delete+re-create and same-value re-save invalidate;
 disarm voids/replays/stale-targets/consumed-targets deterministically
 and re-arm succeeds; expiry carried/boundaried/restart-durable/
-legacy-refused; strict `api_key` field; proven pre-dispatch release vs
-uncertain hold; real-vault generation lifecycle (Windows DPAPI).
+legacy-refused AND re-checked at the send boundary (both sides);
+strict `api_key` field; proven pre-dispatch release vs uncertain hold;
+real-vault generation lifecycle (Windows DPAPI).
 
 Companion evidence: `test_b2bp_failure_matrix.py`,
 `test_c2b2a_validation_permit.py`, `test_c2b1_live_transport.py`,
