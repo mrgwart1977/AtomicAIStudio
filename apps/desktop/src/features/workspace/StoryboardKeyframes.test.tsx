@@ -129,6 +129,7 @@ describe("KeyframesSection", () => {
     await waitFor(() => expect(commitCommand).toHaveBeenCalledWith(
       "p1", 7, "keyframe.generate",
       { keyframe_id: "kf1",
+        execution_target: "mock",
         expected_keyframe: { keyframe_id: "kf1", revision: 0 },
         expected_prompt: "psha" },
       "storyboard"));

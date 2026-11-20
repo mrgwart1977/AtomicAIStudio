@@ -36,7 +36,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
-from app.adapters.inference import SdCppAdapter, _device_env
+from app.adapters.inference import (
+    SdCppAdapter, _device_env, _result_apply_command)
 from app.domain import model_catalog, model_files
 from app.domain.workers.pool import WorkerPool, WorkerUnavailableError
 from app.domain.workers.ports import free_tcp_port
@@ -287,7 +288,7 @@ class SdCppServerAdapter(SdCppAdapter):
         out_path.write_bytes(blob)
         import hashlib
         sha = hashlib.sha256(blob).hexdigest()
-        yield {
+        out = {
             "done": True,
             "progress": 1.0,
             "output": {
@@ -303,3 +304,7 @@ class SdCppServerAdapter(SdCppAdapter):
                 },
             },
         }
+        _apply = _result_apply_command(request)
+        if _apply:
+            out["output"]["apply_command"] = _apply
+        yield out
