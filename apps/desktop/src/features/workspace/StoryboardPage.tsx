@@ -8,6 +8,7 @@ import type {
   CommandProposal,
   EntityRevision,
   Entity,
+  ModelCatalogEntry,
   ProviderDetail,
   ProviderSummary,
   ReferenceSet,
@@ -1447,6 +1448,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
   const [contracts, setContracts] = useState<string[]>([]);
   const [providerKey, setProviderKey] = useState("");
   const [modelId, setModelId] = useState("");
+  // G2-A — cloud simulation stays the default; local is real sd.cpp
+  // inference on an installed catalog model, explicitly selected.
+  const [target, setTarget] = useState<"cloud" | "local">("cloud");
+  const [modelKey, setModelKey] = useState("");
+  const [localModels, setLocalModels] = useState<ModelCatalogEntry[]>([]);
   const [compose, setCompose] = useState(true);
   const [pending, setPending] = useState<{ payload: Record<string, unknown>; proposal: CommandProposal } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1473,6 +1479,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
         setDetails(Object.fromEntries(ds));
       })
       .catch(() => {});
+    apiFetch<ModelCatalogEntry[]>("/api/models")
+      .then((ms) => {
+        if (live) setLocalModels(ms.filter((m) => m.modality === "image"));
+      })
+      .catch(() => { if (live) setLocalModels([]); });
     return () => { live = false; };
   }, [sourceId]);
 
@@ -1498,11 +1509,21 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
       ?.shot_generate as Record<string, unknown> | undefined)?.shot_id === shot.id)),
     [assets, shot.id]);
   const running = useMemo(() => Object.values(jobs).find((j) =>
-    j.project_id === projectId && j.adapter_id === "cloud.image.sim" &&
+    j.project_id === projectId &&
+    ["cloud.image.sim", "cloud.image.img2img.sim",
+     "gen.image.sdcpp", "gen.image.sdcpp-server"].includes(j.adapter_id) &&
     (j.status === "queued" || j.status === "running")),
     [jobs, projectId]);
 
   function payload(): Record<string, unknown> {
+    if (target === "local") {
+      return {
+        shot_id: shot.id,
+        execution_target: "local",
+        model_key: modelKey || undefined,
+        compose_prompt: compose,
+      };
+    }
     return {
       shot_id: shot.id,
       provider_key: providerKey || undefined,
@@ -1562,7 +1583,7 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
     <div className="mt-3 border-t border-dashed border-line pt-3" data-testid="shot-generate">
       <div className="flex items-center gap-2">
         <h5 className="text-[10px] font-semibold uppercase tracking-wide text-faint">
-          Generate for this shot <SimBadge />
+          Generate for this shot {target === "cloud" && <SimBadge />}
         </h5>
         {running && (
           <span className="rounded bg-teal/15 px-1.5 py-0.5 text-[10px] text-teal">
@@ -1571,22 +1592,46 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
         )}
       </div>
       <div className="mt-2 flex items-end gap-2">
-        <label className="block text-[11px] text-muted">Provider
-          <select value={providerKey} onChange={(e) => { setProviderKey(e.target.value); setModelId(""); }}
-            className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
-            <option value="">Choose…</option>
-            {selectable.map((p) => <option key={p.key} value={p.key}>{p.label} (simulated)</option>)}
+        <label className="block text-[11px] text-muted">Target
+          <select value={target}
+            onChange={(e) => setTarget(e.target.value as "cloud" | "local")}
+            className="mt-0.5 w-36 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+            <option value="cloud">Cloud (simulated)</option>
+            <option value="local">Local — real inference</option>
           </select>
         </label>
-        <label className="block text-[11px] text-muted">Model
-          <select value={modelId} onChange={(e) => setModelId(e.target.value)}
-            className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
-            <option value="">Choose…</option>
-            {models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
-          </select>
-        </label>
+        {target === "local" ? (
+          <label className="block text-[11px] text-muted">Model
+            <select value={modelKey} onChange={(e) => setModelKey(e.target.value)}
+              className="mt-0.5 w-56 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+              <option value="">Choose…</option>
+              {localModels.map((m) => (
+                <option key={m.key} value={m.key}
+                  disabled={m.install?.status !== "installed"}>
+                  {m.display_name}
+                  {m.install?.status !== "installed" ? " — not installed" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (<>
+          <label className="block text-[11px] text-muted">Provider
+            <select value={providerKey} onChange={(e) => { setProviderKey(e.target.value); setModelId(""); }}
+              className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+              <option value="">Choose…</option>
+              {selectable.map((p) => <option key={p.key} value={p.key}>{p.label} (simulated)</option>)}
+            </select>
+          </label>
+          <label className="block text-[11px] text-muted">Model
+            <select value={modelId} onChange={(e) => setModelId(e.target.value)}
+              className="mt-0.5 w-40 rounded border border-line bg-card px-2 py-1 text-xs text-fg">
+              <option value="">Choose…</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
+            </select>
+          </label>
+        </>)}
         <button
-          disabled={busy || !providerKey}
+          disabled={busy || (target === "local" ? !modelKey : !providerKey)}
           onClick={() => void preview()}
           className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:border-teal hover:text-teal disabled:opacity-40">
           {busy ? "…" : "Preview"}
@@ -1598,7 +1643,13 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
         Add scene, character & continuity context to the prompt
       </label>
       <p className="mt-1.5 text-[10px] text-faint">
-        {sourceId ? "Image-to-image using the bound source frame" : "Text-to-image"}
+        {target === "local"
+          ? sourceId
+            ? "Local image-to-image is not verified yet — the bound source keeps generation on the simulated path."
+            : "Local runs real sd.cpp inference on the selected installed model."
+          : sourceId
+            ? "Image-to-image using the bound source frame"
+            : "Text-to-image"}
         {setId ? " with the bound reference set" : ""}. Save the shot first —
         generation uses the saved bindings, not this dialog's draft values.
       </p>
@@ -1618,7 +1669,11 @@ function ShotGenerate({ shot, projectId, setId, sourceId, onDone }: {
       )}
       {pending && (
         <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 p-2.5">
-          <div className="text-xs font-medium">Confirm simulated generation</div>
+          <div className="text-xs font-medium">
+            {pending.payload.execution_target === "local"
+              ? "Confirm LOCAL real inference"
+              : "Confirm simulated generation"}
+          </div>
           <div className="mt-1 text-[11px] text-muted">
             {pending.proposal.summary}
             {pending.proposal.cost_estimate?.est_cost_usd != null && (

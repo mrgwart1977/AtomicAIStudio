@@ -53,9 +53,13 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
   const [preview, setPreview] = useState<{
     kind: "compose" | "generate"; kfId: string;
     prompt: string; warnings: string[];
+    target?: string;
     expected_keyframe?: Record<string, unknown>;
     expected_prompt?: string;
   } | null>(null);
+  // G2-A — explicit generation target: mock stays the default; local is
+  // real sd.cpp inference and must be chosen deliberately.
+  const [genTarget, setGenTarget] = useState<"mock" | "local">("mock");
   const jobs = useApp((s) => s.jobs);
 
   const load = useCallback(async () => {
@@ -158,12 +162,14 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
     if (dirty(kf)) await save(kf);
     try {
       const prop = await previewCommand(
-        projectId, "keyframe.generate", { keyframe_id: kf.id });
+        projectId, "keyframe.generate",
+        { keyframe_id: kf.id, execution_target: genTarget });
       const rp = prop.resolved_prompt;
       setPreview({
         kind: "generate", kfId: kf.id,
         prompt: rp?.prompt ?? "(unresolved prompt)",
         warnings: prop.warnings ?? [],
+        target: genTarget,
         expected_keyframe: prop.resolved_keyframe ?? undefined,
         expected_prompt: rp?.prompt_sha256,
       });
@@ -188,6 +194,7 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
       } else {
         await commitCommand(projectId, rev, "keyframe.generate",
           { keyframe_id: pv.kfId,
+            execution_target: pv.target ?? "mock",
             ...(pv.expected_keyframe
                 ? { expected_keyframe: pv.expected_keyframe } : {}),
             ...(pv.expected_prompt
@@ -216,8 +223,9 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
         </div>
       </div>
       <p className="mt-0.5 text-[10px] text-muted">
-        Still-image beats for this shot. Drafts compose continuity context;
-        generation is mock — labeled, deterministic, no inference.
+        Still-image beats for this shot. Drafts compose continuity context.
+        Mock generation is labeled and deterministic; local runs real
+        sd.cpp inference on an installed model.
       </p>
       {err && <p className="mt-1 text-[11px] text-danger" role="alert">{err}</p>}
 
@@ -225,7 +233,10 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
         <div className="mt-2 rounded border border-teal/40 bg-panel p-2" role="dialog"
           aria-label={preview.kind === "compose" ? "Prompt draft proposal" : "Generation preview"}>
           <p className="text-[10px] uppercase tracking-wide text-teal">
-            {preview.kind === "compose" ? "Proposed draft" : "Composed prompt — mock generation"}
+            {preview.kind === "compose" ? "Proposed draft"
+              : preview.target === "local"
+                ? "Composed prompt — LOCAL real inference"
+                : "Composed prompt — mock generation"}
           </p>
           <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap text-[11px] text-fg">
             {preview.prompt}
@@ -357,10 +368,20 @@ export function KeyframesSection({ projectId, shotId, run, onChanged }: {
                         {m.compatibility.reasons.length > 0 &&
                           ` — ${m.compatibility.reasons[0]}`}
                         {m.install?.status !== "installed" &&
-                          " · not installed (mock output regardless)"}
+                          (genTarget === "local"
+                            ? " · not installed — local generation will refuse"
+                            : " · not installed (mock output regardless)")}
                       </p>
                     );
                   })()}
+                  <label className="block"><span className={LBL}>Generation target</span>
+                    <select className={SEL}
+                      aria-label="Generation target"
+                      value={genTarget}
+                      onChange={(e) => setGenTarget(e.target.value as "mock" | "local")}>
+                      <option value="mock">Mock — simulated, no inference</option>
+                      <option value="local">Local — real sd.cpp inference</option>
+                    </select></label>
                   <div className="flex items-center gap-2">
                     <button type="button" disabled={!dirty(kf)}
                       onClick={() => void save(kf)}

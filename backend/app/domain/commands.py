@@ -602,6 +602,12 @@ def _compose_shot_generate(session: Session, project: Project,
     image command + effective payload. Returns (shot, inner_type,
     composed). Composition is server-side only: bindings come from the
     shot row, never the client."""
+    target = payload.get("execution_target") or "cloud"
+    if target not in ("cloud", "local"):
+        raise CommandError(
+            422, "shot.generate execution_target must be 'cloud' or "
+                 "'local' — real local inference must be explicitly "
+                 "selected")
     try:
         shot = sb.get_shot(session, payload.get("shot_id") or "", project.id)
     except KeyError:
@@ -660,25 +666,73 @@ def _compose_shot_generate(session: Session, project: Project,
                      f"over this model's {comp['budget']['limit']}-char "
                      "budget. Shorten the prompt or disable context "
                      "composition (compose_prompt=false).")
-    inner = ("generate.image.img2img" if src
-             else "generate.image.cloud")
-    composed = {
-        "provider_key": payload.get("provider_key"),
-        "model_id": payload.get("model_id"),
-        "prompt": comp["prompt"] if comp else prompt,
-        "negative_prompt": payload.get("negative_prompt"),
-        "execution_target": "cloud",
-        "size": payload.get("size"),
-        "quality": payload.get("quality"),
-        "seed": payload.get("seed"),
-        "max_cost_usd": payload.get("max_cost_usd"),
-        "scene_id": shot.scene_id,
-        "shot_id": shot.id,
-        "character_id": char_id or payload.get("character_id"),
-        "location_id": shot.location_id,
-    }
-    if src:
-        composed["source_asset_id"] = src
+    if target == "local":
+        # G2-A — explicit local routing onto the real sd.cpp adapters.
+        # A bound source image means img2img: the local init-image
+        # contract is not verified on the pinned runtime, so it refuses
+        # rather than silently falling back to the simulated path.
+        if src:
+            raise CommandError(
+                422, "local image-to-image is not verified on the "
+                     "pinned runtime — source-asset generation stays "
+                     "on the simulated path for now")
+        local_adapter = payload.get("local_adapter") or "sdcpp-server"
+        if local_adapter not in ("sdcpp-server", "sdcpp"):
+            raise CommandError(
+                422, "local_adapter must be 'sdcpp-server' (persistent "
+                     "worker) or 'sdcpp' (subprocess)")
+        local_adapter_id = ("gen.image.sdcpp-server"
+                            if local_adapter == "sdcpp-server"
+                            else "gen.image.sdcpp")
+        inner = ("generate.image.persistent"
+                 if local_adapter == "sdcpp-server" else "generate.image")
+        _check_generation(session, project, {
+            "prompt": comp["prompt"] if comp else prompt,
+            "model_key": payload.get("model_key"),
+            "device": payload.get("device", "auto"),
+            "shot_id": shot.id,
+            "scene_id": shot.scene_id,
+        }, local_adapter_id)
+        composed = {
+            "model_key": payload.get("model_key"),
+            "prompt": comp["prompt"] if comp else prompt,
+            "negative_prompt": payload.get("negative_prompt"),
+            "execution_target": "local",
+            "local_adapter_id": local_adapter_id,
+            "seed": payload.get("seed"),
+            "device": payload.get("device", "auto"),
+            "runtime_flavor": payload.get("runtime_flavor"),
+            "residency_mode": payload.get("residency_mode"),
+            "memory_risk_acknowledged":
+                bool(payload.get("memory_risk_acknowledged")),
+            "scene_id": shot.scene_id,
+            "shot_id": shot.id,
+            "character_id": char_id or payload.get("character_id"),
+            "location_id": shot.location_id,
+        }
+        for k in ("width", "height", "steps", "cfg", "sampler", "batch"):
+            if payload.get(k) is not None:
+                composed[k] = payload[k]
+    else:
+        inner = ("generate.image.img2img" if src
+                 else "generate.image.cloud")
+        composed = {
+            "provider_key": payload.get("provider_key"),
+            "model_id": payload.get("model_id"),
+            "prompt": comp["prompt"] if comp else prompt,
+            "negative_prompt": payload.get("negative_prompt"),
+            "execution_target": "cloud",
+            "size": payload.get("size"),
+            "quality": payload.get("quality"),
+            "seed": payload.get("seed"),
+            "max_cost_usd": payload.get("max_cost_usd"),
+            "scene_id": shot.scene_id,
+            "shot_id": shot.id,
+            "character_id": char_id or payload.get("character_id"),
+            "location_id": shot.location_id,
+        }
+        if src:
+            composed["source_asset_id"] = src
     if comp is not None:
         # Composed-prompt provenance: what context was added, what was
         # omitted by the budget, and the fingerprint the approval pins.
@@ -695,6 +749,11 @@ def _compose_shot_generate(session: Session, project: Project,
         }
     if rs_id:
         composed["reference_set_id"] = rs_id
+        # Pinned-seed guidance: a set seed becomes the request seed only
+        # when the caller didn't choose one (guidance, not an identity
+        # guarantee) — matches the inner pipelines' own resolution.
+        if composed.get("seed") is None:
+            composed["seed"] = rs.seed
         # Forward the caller's stale-approval pins untouched — the
         # inner pipeline re-resolves and compares them.
         for k in ("expected_references", "expected_set"):
@@ -838,6 +897,12 @@ def _compose_keyframe_generate(session: Session, project: Project,
     (keyframe, request)."""
     from app.domain import keyframes as kd
     from app.domain import prompt_compose
+    target = payload.get("execution_target") or "mock"
+    if target not in ("mock", "local"):
+        raise CommandError(
+            422, "keyframe.generate execution_target must be 'mock' or "
+                 "'local' — real local inference must be explicitly "
+                 "selected")
     kf = _get_keyframe(session, project, payload)
     if kf.status != "active":
         raise CommandError(422, "cannot generate from an archived keyframe")
@@ -891,10 +956,59 @@ def _compose_keyframe_generate(session: Session, project: Project,
             "prompt_context": comp,
         },
     }
+    if target == "local":
+        # G2-A — explicit local routing onto the real sd.cpp adapters.
+        # The request carries everything the adapter validates plus the
+        # resolved adapter id compose stamps; commit refuses to dispatch
+        # anything else — simulated adapters never substitute.
+        if payload.get("mock_hold"):
+            raise CommandError(
+                422, "mock_hold applies only to the mock target — the "
+                     "local adapter has no test barrier")
+        local_adapter = payload.get("local_adapter") or "sdcpp-server"
+        if local_adapter not in ("sdcpp-server", "sdcpp"):
+            raise CommandError(
+                422, "local_adapter must be 'sdcpp-server' (persistent "
+                     "worker) or 'sdcpp' (subprocess)")
+        local_adapter_id = ("gen.image.sdcpp-server"
+                            if local_adapter == "sdcpp-server"
+                            else "gen.image.sdcpp")
+        model_key = req.get("model_key")
+        _check_generation(session, project, {
+            "prompt": req["prompt"], "model_key": model_key,
+            "device": payload.get("device", "auto"),
+            "shot_id": shot.id, "scene_id": shot.scene_id,
+        }, local_adapter_id)
+        from app.domain import compatibility, model_catalog
+        spec = model_catalog.get(model_key or "")
+        width = int(payload.get("width") or settings.get("width") or 512)
+        height = int(payload.get("height") or settings.get("height") or 512)
+        batch = int(payload.get("batch") or settings.get("batch") or 1)
+        req.update({
+            "execution_target": "local",
+            "local_adapter_id": local_adapter_id,
+            "width": width,
+            "height": height,
+            "steps": int(payload.get("steps") or settings.get("steps") or 25),
+            "cfg": float(payload.get("cfg") or settings.get("cfg") or 7.0),
+            "sampler": payload.get("sampler") or settings.get("sampler"),
+            "batch": batch,
+            "device": payload.get("device", "auto"),
+            "runtime_flavor": payload.get("runtime_flavor"),
+            "residency_mode": payload.get("residency_mode"),
+            "memory_risk_acknowledged":
+                bool(payload.get("memory_risk_acknowledged")),
+            "est_vram_bytes": compatibility.estimate_vram(
+                spec, width, height, batch,
+                payload.get("residency_mode")) if spec else None,
+            "allow_cpu": bool(spec.capabilities.get("cpu_fallback"))
+                         if spec else True,
+        })
+        return kf, req
     hold = parse_mock_hold(payload.get("mock_hold"))
     if hold:
         # Deterministic test barrier for the mock adapter only —
-        # keyframe.generate always routes to mock.image.
+        # keyframe.generate defaults to mock.image.
         req["hold"] = hold
     return kf, req
 
@@ -1833,6 +1947,11 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         warnings += _validate(session, project, _vinner, _vcomposed)
     if command_type.startswith("keyframe."):
         _validate_keyframe(session, project, command_type, payload)
+        if command_type == "keyframe.generate" \
+                and payload.get("execution_target") == "local":
+            warnings.append(
+                "Runs REAL local inference via sd.cpp — output is "
+                "genuine model output, not a simulated placeholder")
     if command_type.startswith("clip."):
         _validate_clip(session, project, command_type, payload)
     if command_type.startswith("dialogue."):
@@ -2447,6 +2566,39 @@ def _validate_keyframe(session: Session, project: Project,
                 and not (shot.prompt or "").strip():
             raise CommandError(
                 422, "keyframe has no prompt — write one or compose a draft")
+        target = payload.get("execution_target") or "mock"
+        if target not in ("mock", "local"):
+            raise CommandError(
+                422, "keyframe.generate execution_target must be 'mock' "
+                     "or 'local' — real local inference must be "
+                     "explicitly selected")
+        if target == "local":
+            # G2-A — same gates the compose applies at commit, checked
+            # here so preview refuses honestly instead of approving a
+            # request commit would reject.
+            if payload.get("mock_hold"):
+                raise CommandError(
+                    422, "mock_hold applies only to the mock target — "
+                         "the local adapter has no test barrier")
+            local_adapter = payload.get("local_adapter") or "sdcpp-server"
+            if local_adapter not in ("sdcpp-server", "sdcpp"):
+                raise CommandError(
+                    422, "local_adapter must be 'sdcpp-server' "
+                         "(persistent worker) or 'sdcpp' (subprocess)")
+            from app.db.models import Shot as _Shot
+            _shot = session.get(_Shot, k.shot_id)
+            settings = k.settings_json or {}
+            model_key = (payload.get("model_key")
+                         or settings.get("model_key"))
+            _check_generation(session, project, {
+                "prompt": payload.get("prompt") or kf_prompt(k),
+                "model_key": model_key,
+                "device": payload.get("device", "auto"),
+                "shot_id": k.shot_id,
+                "scene_id": _shot.scene_id if _shot else None,
+            }, "gen.image.sdcpp-server" if local_adapter == "sdcpp-server"
+               else "gen.image.sdcpp")
+            return
         parse_mock_hold(payload.get("mock_hold"))
         return
     if command_type == "keyframe.result":
@@ -5156,13 +5308,35 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         _adapter_id = (_cloud_adapter_id(job_engine._registry,
                                          payload["provider_key"])
                        if command_type == "generate.text.cloud"
-                       # C4-B — the composed request decides which
-                       # simulated image adapter runs (img2img when a
-                       # source bound, else cloud text-to-image).
-                       else ("cloud.image.img2img.sim"
-                             if command_type == "shot.generate"
-                             and request.get("mode") == "img2img"
-                             else JOB_COMMANDS[command_type]))
+                       # G2-A — an explicit local target dispatches the
+                       # real adapter compose stamped in the request.
+                       else (request.get("local_adapter_id")
+                             if request.get("execution_target") == "local"
+                             # C4-B — the composed request decides which
+                             # simulated image adapter runs (img2img when
+                             # a source bound, else cloud text-to-image).
+                             else ("cloud.image.img2img.sim"
+                                   if command_type == "shot.generate"
+                                   and request.get("mode") == "img2img"
+                                   else JOB_COMMANDS[command_type])))
+        # G2-A — fail closed: 'local' can only resolve to a real local
+        # adapter stamped by the server-side compose AND registered in
+        # this build. Anything else — missing stamp, foreign adapter id,
+        # persistent inference disabled — refuses rather than falling
+        # back to mock/simulated generation.
+        if request.get("execution_target") == "local":
+            if _adapter_id not in ("gen.image.sdcpp",
+                                   "gen.image.sdcpp-server"):
+                raise CommandError(
+                    422, "local execution_target requires a resolvable "
+                         "local adapter — refusing rather than falling "
+                         "back to simulated generation")
+            if job_engine._registry.get(_adapter_id) is None:
+                raise CommandError(
+                    422, f"local adapter '{_adapter_id}' is not available "
+                         "in this build — persistent inference may be "
+                         "disabled; select local_adapter 'sdcpp' or "
+                         "enable it")
         # A7 — a submit carrying plan_fingerprint pins the exact cloud
         # plan it was approved against; provider/credential/budget
         # drift since the preview refuses the submit.
@@ -5771,6 +5945,11 @@ def _job_request(session: Session, project: Project, command_type: str,
             "set_thumbnail": bool(payload.get("set_thumbnail")),
             "residency_mode": payload.get("residency_mode"),
             "memory_risk_acknowledged": bool(payload.get("memory_risk_acknowledged")),
+            # G2-A — shot.generate composes onto this pipeline; the
+            # resolved target + adapter must survive into the request or
+            # commit would dispatch the JOB_COMMANDS default instead.
+            "execution_target": payload.get("execution_target"),
+            "local_adapter_id": payload.get("local_adapter_id"),
             "est_vram_bytes": compatibility.estimate_vram(
                 spec, int(payload.get("width", 512)), int(payload.get("height", 512)),
                 int(payload.get("batch", 1)), payload.get("residency_mode")) if spec else None,

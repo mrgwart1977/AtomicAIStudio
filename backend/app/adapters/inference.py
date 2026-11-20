@@ -127,6 +127,29 @@ def _spawn_supervised_async(argv, *, env, cwd):
     return proc, queue
 
 
+def _result_apply_command(req: dict) -> dict | None:
+    """G2-A — the audited result-landing command a completed generation
+    emits, same contract the mock adapter uses: a pinned keyframe.result
+    takes precedence over a plain shot thumbnail update. ``__asset__``
+    and ``__job__`` are placeholders the job engine substitutes."""
+    if req.get("keyframe_id"):
+        return {"command_type": "keyframe.result",
+                "payload": {
+                    "keyframe_id": req["keyframe_id"],
+                    "shot_id": req.get("shot_id"),
+                    "result_asset_id": "__asset__",
+                    "job_id": "__job__",
+                    "expected_keyframe_revision":
+                        req.get("expected_result_revision"),
+                    "expected_planning_sha":
+                        req.get("expected_planning_sha")}}
+    if req.get("shot_id") and req.get("set_thumbnail"):
+        return {"command_type": "shot.update",
+                "payload": {"shot_id": req["shot_id"],
+                            "thumbnail_asset_id": "__asset__"}}
+    return None
+
+
 class SdCppAdapter:
     """Real text-to-image via a stable-diffusion.cpp `sd` worker binary.
 
@@ -478,11 +501,9 @@ class SdCppAdapter:
                 "extra_assets": assets[1:],
             },
         }
-        if req.get("shot_id") and req.get("set_thumbnail"):
-            out["output"]["apply_command"] = {
-                "command_type": "shot.update",
-                "payload": {"shot_id": req["shot_id"], "thumbnail_asset_id": "__asset__"},
-            }
+        _apply = _result_apply_command(req)
+        if _apply:
+            out["output"]["apply_command"] = _apply
         yield out
 
 
