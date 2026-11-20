@@ -5,6 +5,8 @@ import type { Asset, Entity, EntityAssetLink, EntityRevision, ReferenceSet } fro
 import { AuthImage } from "../../components/AuthImage";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
+import { LoraBindingPicker } from "./LoraBindingPicker";
+import { emitLoraRefs, normalizeLoraEntries, type LoraRef } from "./lora";
 
 const FIELD_HINTS: Record<string, { key: string; label: string }[]> = {
   character: [
@@ -79,6 +81,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
   const refreshProject = useApp((s) => s.refreshProjectData);
   const entityAssets = useApp((s) => s.entityAssets);
   const refreshEntityAssets = useApp((s) => s.refreshEntityAssets);
+  const models = useApp((s) => s.models);
   const assets = useApp((s) => s.assetsPage?.items ?? []);
   const worlds = entitiesByType.world ?? [];
 
@@ -87,6 +90,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
   const [form, setForm] = useState<Record<string, string>>({});
   const [lists, setLists] = useState<Record<string, Record<string, string>[]>>({});
   const [csv, setCsv] = useState<Record<string, string>>({});
+  const [loraRefs, setLoraRefs] = useState<LoraRef[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showArchive, setShowArchive] = useState(false);
@@ -139,8 +143,8 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
     );
     setCsv({
       tags: Array.isArray(e.data?.tags) ? (e.data.tags as string[]).join(", ") : "",
-      loras: Array.isArray(e.data?.loras) ? (e.data.loras as string[]).join(", ") : "",
     });
+    setLoraRefs(normalizeLoraEntries(e.data?.loras));
     if (project) void refreshEntityAssets(e.id);
     setError(null);
   }
@@ -173,10 +177,12 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
       const rows = (lists[d.key] ?? []).filter((r) => r.name?.trim());
       if (rows.length) data[d.key] = rows;
     }
-    for (const k of ["tags", "loras"]) {
-      const arr = (csv[k] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-      if (arr.length) data[k] = arr;
-    }
+    const tags = (csv.tags ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    if (tags.length) data.tags = tags;
+    // B-3b — character default loras are a template only: emitted
+    // losslessly (legacy strings stay strings); always sent so a cleared
+    // picker persists [] instead of silently keeping the old value.
+    if (etype === "character") data.loras = emitLoraRefs(loraRefs);
     const payload: Record<string, unknown> = {
       name: form.name?.trim() ?? "",
       summary: form.summary ?? "",
@@ -211,6 +217,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
               setCreating(true);
               setSel(null);
               setForm({});
+              setLoraRefs([]);
             }}
             className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-action-hi"
           >
@@ -351,10 +358,19 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
                     <input value={csv.tags ?? ""} onChange={(e) => setCsv({ ...csv, tags: e.target.value })}
                       className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm text-fg" />
                   </label>
-                  <label className="block text-sm text-muted">LoRA associations (comma-separated)
-                    <input value={csv.loras ?? ""} onChange={(e) => setCsv({ ...csv, loras: e.target.value })}
-                      className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm text-fg" />
-                  </label>
+                  <div className="col-span-2">
+                    <p className="mb-1 text-[11px] text-faint">
+                      Default identity adapters — prefilled when this character
+                      joins a shot; they only bind if the user saves there too.
+                    </p>
+                    <LoraBindingPicker
+                      refs={loraRefs}
+                      onChange={setLoraRefs}
+                      models={models}
+                      roles={["identity"]}
+                      idPrefix={`entity-${sel ?? "new"}`}
+                    />
+                  </div>
                 </div>
               )}
 

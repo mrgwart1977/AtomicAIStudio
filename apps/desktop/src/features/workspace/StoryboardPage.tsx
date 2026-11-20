@@ -4,7 +4,6 @@ import { apiFetch, listReferenceSets } from "../../api/client";
 import { AuthImage } from "../../components/AuthImage";
 import { commitCommand, previewCommand } from "../../api/commands";
 import type {
-  CastMember,
   CommandProposal,
   EntityRevision,
   Entity,
@@ -20,6 +19,11 @@ import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 import { compareShots } from "./continuity";
+import { castPayload, castStateOf, type CastState } from "./castState";
+import { LoraBindingPicker } from "./LoraBindingPicker";
+import {
+  eligibleIdentityDefaults, isLoraEntry, type LoraRef,
+} from "./lora";
 import {
   draftFromPlanning, planningFromDraft, PlanningSection,
   ShotMediaSection, FOLLOW_SHORT,
@@ -52,37 +56,8 @@ const chipColor = (id: string) => {
 const initials = (name: string) =>
   name.split(/\s+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
 
-// Per-cast-row editable state (mirrors shot_characters columns).
-interface CastState {
-  wardrobe_variant: string;
-  blocking: string;
-  expression: string;
-  emotion: string;
-  action_instructions: string;
-  dialogue: string;
-  voice_override: string;
-  model_ref: string;
-  loras: string; // comma-separated → lora_json
-}
-const castStateOf = (c?: Partial<CastMember>): CastState => ({
-  wardrobe_variant: c?.wardrobe_variant ?? "",
-  blocking: c?.blocking ?? "",
-  expression: c?.expression ?? "",
-  emotion: c?.emotion ?? "",
-  action_instructions: c?.action_instructions ?? "",
-  dialogue: c?.dialogue ?? "",
-  voice_override: c?.voice_override ?? "",
-  model_ref: c?.model_ref ?? "",
-  loras: (c?.lora_json ?? []).join(", "),
-});
-const castPayload = (s: CastState) => ({
-  schema_version: 1,
-  wardrobe_variant: s.wardrobe_variant, blocking: s.blocking,
-  expression: s.expression, emotion: s.emotion,
-  action_instructions: s.action_instructions, dialogue: s.dialogue,
-  voice_override: s.voice_override, model_ref: s.model_ref,
-  loras: s.loras.split(",").map((x) => x.trim()).filter(Boolean),
-});
+// Per-cast-row editable state lives in ./castState.ts (mirrors backend
+// cast_state.py naming).
 
 export function StoryboardPage() {
   const project = useApp((s) => s.currentProject());
@@ -940,6 +915,9 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
   const [removed, setRemoved] = useState<string[]>([]);
   const [pick, setPick] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  // B-3b — adapter catalog for the per-cast binding picker.
+  const allModels = useApp((s) => s.models);
+  const loraModels = useMemo(() => allModels.filter(isLoraEntry), [allModels]);
   // A2 — shot-planning draft (camera/framing/timing); serialized to the
   // validated planning doc on save via shot.update's merge semantics.
   const [plan, setPlan] = useState(() => draftFromPlanning(shot?.planning_json));
@@ -976,6 +954,12 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
   const charName = (id: string) =>
     characters.find((c) => c.id === id)?.name ??
     inheritedRows.find((c) => c.character_id === id)?.character.name ?? "?";
+  // B-3b — a character's stored default loras offered as a prefill.
+  // Eligible = resolves to an installed, valid identity-role catalog
+  // adapter. Applying still requires the shot save — nothing binds early.
+  const charDefaults = (cid: string): LoraRef[] =>
+    eligibleIdentityDefaults(
+      characters.find((c) => c.id === cid)?.data?.loras, loraModels);
 
   async function save() {
     setBusy(true);
@@ -1034,7 +1018,7 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     void refreshRevs();
   }
 
-  const castFields: { key: keyof CastState; label: string; hint?: string }[] = [
+  const castFields: { key: Exclude<keyof CastState, "lora_refs">; label: string; hint?: string }[] = [
     { key: "expression", label: "Facial expression" },
     { key: "emotion", label: "Emotional state" },
     { key: "wardrobe_variant", label: "Wardrobe / costume variant" },
@@ -1043,7 +1027,6 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     { key: "dialogue", label: "Dialogue" },
     { key: "voice_override", label: "Voice" },
     { key: "model_ref", label: "Model / LoRA identity ref" },
-    { key: "loras", label: "LoRAs (comma-separated)" },
   ];
 
   return (
@@ -1319,17 +1302,32 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
                           className="rounded border border-line px-1.5 py-0.5 text-xs text-muted hover:text-danger">✕</button>
                       </div>
                       {expanded === cid && (
-                        <div className="grid grid-cols-2 gap-2 border-t border-line p-3">
-                          {castFields.map((f) => (
-                            <label key={f.key} className="block text-[11px] text-muted">
-                              {f.label}
-                              <input
-                                value={cast[cid][f.key]}
-                                onChange={(e) => setCast({ ...cast, [cid]: { ...cast[cid], [f.key]: e.target.value } })}
-                                className="mt-0.5 w-full rounded border border-line bg-panel px-2 py-1 text-xs text-fg"
-                              />
-                            </label>
-                          ))}
+                        <div className="border-t border-line p-3">
+                          <div className="grid grid-cols-2 gap-2">
+                            {castFields.map((f) => (
+                              <label key={f.key} className="block text-[11px] text-muted">
+                                {f.label}
+                                <input
+                                  value={cast[cid][f.key]}
+                                  onChange={(e) => setCast({ ...cast, [cid]: { ...cast[cid], [f.key]: e.target.value } })}
+                                  className="mt-0.5 w-full rounded border border-line bg-panel px-2 py-1 text-xs text-fg"
+                                />
+                              </label>
+                            ))}
+                          </div>
+                          <div className="mt-2">
+                            <LoraBindingPicker
+                              refs={cast[cid].lora_refs}
+                              onChange={(refs) => setCast({
+                                ...cast, [cid]: { ...cast[cid], lora_refs: refs },
+                              })}
+                              models={loraModels}
+                              roles={["identity", "style"]}
+                              defaults={charDefaults(cid)}
+                              defaultsLabel="Apply character defaults to this shot"
+                              idPrefix={`cast-${cid}`}
+                            />
+                          </div>
                         </div>
                       )}
                     </li>

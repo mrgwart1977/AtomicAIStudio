@@ -94,6 +94,60 @@ export function boundLoraKeys(entries: unknown): Set<string> {
   return new Set(loraKeys(entries));
 }
 
+/** Emit display refs back to `lora_json` payload entries (backend
+ *  `_lora_list` contract). Lossless where the backend is: legacy
+ *  strings emit as strings, structured refs emit {key, strength?}.
+ *  `invalid` refs are EXCLUDED — the backend would refuse the whole
+ *  save; the picker surfaces them for explicit removal instead. */
+export function emitLoraRefs(
+  refs: LoraRef[],
+): (string | { key: string; strength?: number })[] {
+  const out: (string | { key: string; strength?: number })[] = [];
+  for (const r of refs) {
+    if (r.kind === "key") out.push(r.key);
+    else if (r.kind === "structured") {
+      const o: { key: string; strength?: number } = { key: r.key };
+      if (r.strength !== null) o.strength = r.strength;
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+/** Count of refs the emit drops — drives the picker's warning. */
+export function invalidLoraCount(refs: LoraRef[]): number {
+  return refs.filter((r) => r.kind === "invalid").length;
+}
+
+/** Bound-key membership view over normalized refs (picker-level —
+ *  don't feed refs back through normalizeLoraEntries). */
+export function refsBoundKeys(refs: LoraRef[]): Set<string> {
+  return new Set(refs.flatMap((r) => (r.kind === "invalid" ? [] : [r.key])));
+}
+
+/** Character `data.loras` defaults eligible to offer as a shot-cast
+ *  prefill — resolves each stored ref to an installed, valid,
+ *  identity-role catalog adapter. Everything else (unknown keys,
+ *  invalid entries, style refs, unavailable adapters) is not offered;
+ *  applying still requires an explicit shot-level save. */
+export function eligibleIdentityDefaults(
+  stored: unknown,
+  models: ModelCatalogEntry[],
+): LoraRef[] {
+  return normalizeLoraEntries(stored).flatMap((r): LoraRef[] => {
+    if (r.kind === "invalid") return [];
+    const m = models.find(
+      (x) => isLoraEntry(x) && x.key === r.key);
+    if (!m || loraRole(m) !== "identity"
+        || loraCatalogState(m, null) !== "available") return [];
+    return [{
+      kind: "structured", key: r.key,
+      strength: r.kind === "structured" ? r.strength : null,
+      raw: r.kind === "structured" ? r.raw : { key: r.key },
+    }];
+  });
+}
+
 /** True when a catalog entry is an attachable adapter, not a generatable
  *  model. */
 export function isLoraEntry(entry: ModelCatalogEntry): boolean {

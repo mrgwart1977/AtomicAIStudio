@@ -4,8 +4,9 @@
 import { describe, expect, it } from "vitest";
 import type { ModelCatalogEntry } from "../../api/types";
 import {
-  boundLoraKeys, duplicateLoraKeys, isLoraEntry, loraCatalogState,
-  loraKeys, loraRole, normalizeLoraEntries,
+  boundLoraKeys, duplicateLoraKeys, eligibleIdentityDefaults,
+  emitLoraRefs, invalidLoraCount, isLoraEntry, loraCatalogState,
+  loraKeys, loraRole, normalizeLoraEntries, refsBoundKeys,
 } from "./lora";
 
 function entry(over: Partial<ModelCatalogEntry> = {}): ModelCatalogEntry {
@@ -232,5 +233,49 @@ describe("loraKeys / boundLoraKeys — key extraction", () => {
 
   it("invalid entries contribute no keys", () => {
     expect(loraKeys([42, { key: "ok" }, "fine"])).toEqual(["ok", "fine"]);
+  });
+});
+
+describe("emitLoraRefs / refsBoundKeys / invalidLoraCount — payload emit", () => {
+  it("emits losslessly: strings stay strings, dicts keep strength", () => {
+    const refs = normalizeLoraEntries(
+      ["legacy", { key: "a", strength: 0.5 }, { key: "b" }]);
+    expect(emitLoraRefs(refs)).toEqual(
+      ["legacy", { key: "a", strength: 0.5 }, { key: "b" }]);
+  });
+
+  it("invalid refs are excluded from emit but counted for warnings", () => {
+    const refs = normalizeLoraEntries([42, "ok"]);
+    expect(emitLoraRefs(refs)).toEqual(["ok"]);
+    expect(invalidLoraCount(refs)).toBe(1);
+  });
+
+  it("refsBoundKeys is the membership view over normalized refs", () => {
+    const refs = normalizeLoraEntries(["a", { key: "b" }, 42]);
+    expect(refsBoundKeys(refs)).toEqual(new Set(["a", "b"]));
+  });
+});
+
+describe("eligibleIdentityDefaults — character default prefill", () => {
+  it("offers only installed, identity-role catalog matches", () => {
+    const models = [
+      entry({ key: "char.a", capabilities: { lora_role: "identity" } }),
+      entry({ key: "style.s", capabilities: { lora_role: "style" } }),
+      entry({ key: "char.off", install: { status: "not_installed" } }),
+    ];
+    const out = eligibleIdentityDefaults(
+      ["char.a", { key: "style.s" }, "char.off", "no-cat", 42], models);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: "structured", key: "char.a" });
+  });
+
+  it("stored strength carries into the prefill offer", () => {
+    const models = [entry({ key: "char.a" })];
+    expect(eligibleIdentityDefaults(
+      [{ key: "char.a", strength: 0.7 }], models)[0])
+      .toMatchObject({ strength: 0.7 });
+    // legacy string defaults offer with default (null) strength
+    expect(eligibleIdentityDefaults(["char.a"], models)[0])
+      .toMatchObject({ strength: null });
   });
 });
