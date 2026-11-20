@@ -149,8 +149,12 @@ describe("LoraBindingPicker — defaults prefill + legacy refs", () => {
 
   it("invalid stored entries show a warning and a remove path", () => {
     const { onChange } = setup(normalizeLoraEntries([42, "ok"]));
-    expect(screen.getByRole("alert").textContent)
-      .toContain("1 invalid stored entry cannot be saved");
+    const alert = screen.getByRole("alert").textContent;
+    expect(alert).toContain("1 invalid stored entry");
+    // copy must describe actual behavior: preserved when untouched,
+    // blocks only adapter changes
+    expect(alert).toContain("preserved as-is");
+    expect(alert).toContain("can't be saved");
     fireEvent.click(screen.getByTitle("Remove this invalid entry"));
     expect(onChange).toHaveBeenCalledWith([
       { kind: "key", key: "ok", raw: "ok" },

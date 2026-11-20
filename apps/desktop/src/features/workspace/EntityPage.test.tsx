@@ -72,9 +72,12 @@ describe("EntityPage — character default loras", () => {
     expect(screen.getByText(/not been validated in this build/)).toBeTruthy();
   });
 
-  it("save emits data.loras losslessly through character.update", async () => {
+  it("deliberate default edit emits data.loras losslessly through character.update", async () => {
     commitCommand.mockResolvedValue({});
     await openEditor();
+    // intentional change: remove the legacy string ref, keep the
+    // structured catalog binding — emit must stay lossless
+    fireEvent.click(screen.getByTitle('Remove "legacy-ref"'));
     fireEvent.click(screen.getByText("Save new revision"));
     await waitFor(() => expect(commitCommand).toHaveBeenCalled());
     const [, , type, payload] = commitCommand.mock.calls.at(-1)! as [
@@ -82,10 +85,22 @@ describe("EntityPage — character default loras", () => {
     ];
     expect(type).toBe("character.update");
     expect(payload.character_id).toBe("c1");
-    // legacy string stays a string; structured keeps strength — no conversion
+    // structured entry keeps strength — no conversion
     expect(payload.data.loras).toEqual([
-      "legacy-ref", { key: "char.ada", strength: 0.9 },
+      { key: "char.ada", strength: 0.9 },
     ]);
+  });
+
+  it("a save with no lora edits omits data.loras — stored value preserved", async () => {
+    commitCommand.mockClear();
+    commitCommand.mockResolvedValue({});
+    await openEditor();
+    fireEvent.click(screen.getByText("Save new revision"));
+    await waitFor(() => expect(commitCommand).toHaveBeenCalled());
+    const payload = commitCommand.mock.calls.at(-1)![3] as
+      { data: Record<string, unknown> };
+    // untouched refs → key absent → backend merge keeps stored bytes
+    expect("loras" in payload.data).toBe(false);
   });
 
   it("unbinding via the checkbox persists on save; clearing emits []", async () => {
@@ -101,6 +116,63 @@ describe("EntityPage — character default loras", () => {
     const payload = commitCommand.mock.calls.at(-1)![3] as
       { data: { loras: unknown[] } };
     expect(payload.data.loras).toEqual([]);
+  });
+
+  it("an unrelated profile edit omits data.loras — malformed entries preserved", async () => {
+    commitCommand.mockResolvedValue({});
+    const bad = {
+      ...CHAR, id: "c2", name: "Eve",
+      data: { loras: [42, { nokey: 1 }, "kept-ref"] },
+    };
+    const saved = state.entities.character;
+    state.entities = { ...state.entities, character: [...saved, bad] };
+    try {
+      render(<EntityPage etype="character" title="Characters" />);
+      fireEvent.click(await screen.findByText("Eve"));
+      await screen.findByText(/Default identity adapters/);
+      // invalid refs are shown honestly
+      expect(screen.getByRole("alert").textContent)
+        .toContain("2 invalid stored entries");
+      // change only the summary — an unrelated edit
+      fireEvent.change(screen.getByLabelText("Summary"),
+        { target: { value: "edited" } });
+      fireEvent.click(screen.getByText("Save new revision"));
+      await waitFor(() => expect(commitCommand).toHaveBeenCalled());
+      const payload = commitCommand.mock.calls.at(-1)![3] as
+        { data: Record<string, unknown> };
+      // loras key absent → merge preserves stored bytes verbatim
+      expect("loras" in payload.data).toBe(false);
+    } finally {
+      state.entities = { ...state.entities, character: saved };
+    }
+  });
+
+  it("editing defaults with invalid entries remaining blocks the save", async () => {
+    commitCommand.mockResolvedValue({});
+    const bad = {
+      ...CHAR, id: "c3", name: "Gia",
+      data: { loras: [99, "char.ada"] },
+    };
+    const saved = state.entities.character;
+    state.entities = { ...state.entities, character: [...saved, bad] };
+    try {
+      commitCommand.mockClear();
+      render(<EntityPage etype="character" title="Characters" />);
+      fireEvent.click(await screen.findByText("Gia"));
+      await screen.findByText(/Default identity adapters/);
+      // user touches adapters — char.ada is a bound string ref; uncheck it
+      fireEvent.click(screen.getByText("Ada identity").closest("li")!
+        .querySelector("input[type=checkbox]")!);
+      fireEvent.click(screen.getByText("Save new revision"));
+      // the save-level block names the surface — distinct from the
+      // picker's standing warning
+      await waitFor(() => screen.getByText(/in default LoRAs/));
+      expect(screen.getByText(/in default LoRAs/).textContent)
+        .toContain("1 invalid stored adapter entry");
+      expect(commitCommand).not.toHaveBeenCalled();
+    } finally {
+      state.entities = { ...state.entities, character: saved };
+    }
   });
 
   it("a backend refusal surfaces as a readable error, not a silent drop", async () => {

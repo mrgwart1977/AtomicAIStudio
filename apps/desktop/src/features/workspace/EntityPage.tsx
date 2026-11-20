@@ -6,7 +6,8 @@ import { AuthImage } from "../../components/AuthImage";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 import { LoraBindingPicker } from "./LoraBindingPicker";
-import { emitLoraRefs, normalizeLoraEntries, type LoraRef } from "./lora";
+import { loraUpdatePlan } from "./castState";
+import { normalizeLoraEntries, type LoraRef } from "./lora";
 
 const FIELD_HINTS: Record<string, { key: string; label: string }[]> = {
   character: [
@@ -91,6 +92,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
   const [lists, setLists] = useState<Record<string, Record<string, string>[]>>({});
   const [csv, setCsv] = useState<Record<string, string>>({});
   const [loraRefs, setLoraRefs] = useState<LoraRef[]>([]);
+  const [origLoraRefs, setOrigLoraRefs] = useState<LoraRef[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showArchive, setShowArchive] = useState(false);
@@ -144,7 +146,9 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
     setCsv({
       tags: Array.isArray(e.data?.tags) ? (e.data.tags as string[]).join(", ") : "",
     });
-    setLoraRefs(normalizeLoraEntries(e.data?.loras));
+    const refs = normalizeLoraEntries(e.data?.loras);
+    setLoraRefs(refs);
+    setOrigLoraRefs(refs);
     if (project) void refreshEntityAssets(e.id);
     setError(null);
   }
@@ -179,10 +183,20 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
     }
     const tags = (csv.tags ?? "").split(",").map((x) => x.trim()).filter(Boolean);
     if (tags.length) data.tags = tags;
-    // B-3b — character default loras are a template only: emitted
-    // losslessly (legacy strings stay strings); always sent so a cleared
-    // picker persists [] instead of silently keeping the old value.
-    if (etype === "character") data.loras = emitLoraRefs(loraRefs);
+    // B-3b preservation — same three-way rule as shot cast: untouched
+    // defaults omit data.loras (merge keeps the stored bytes exactly);
+    // changed-with-invalids blocks; deliberate change emits ([] clears).
+    if (etype === "character") {
+      const plan = loraUpdatePlan(loraRefs, origLoraRefs);
+      if (plan.kind === "block") {
+        setError(
+          `${plan.invalid} invalid stored adapter entr${plan.invalid === 1 ? "y" : "ies"} ` +
+          `in default LoRAs — changes can't be saved until they're removed ` +
+          `(Stored references section) or corrected outside the app.`);
+        return;
+      }
+      if (plan.kind === "emit") data.loras = plan.loras;
+    }
     const payload: Record<string, unknown> = {
       name: form.name?.trim() ?? "",
       summary: form.summary ?? "",
@@ -218,6 +232,7 @@ export function EntityPage({ etype, title }: { etype: string; title: string }) {
               setSel(null);
               setForm({});
               setLoraRefs([]);
+              setOrigLoraRefs([]);
             }}
             className="rounded-md bg-action px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-action-hi"
           >

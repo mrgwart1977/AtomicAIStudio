@@ -19,7 +19,9 @@ import { SimBadge } from "./cloudShared";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useApp } from "../../stores/appStore";
 import { compareShots } from "./continuity";
-import { castPayload, castStateOf, type CastState } from "./castState";
+import {
+  castPayload, castStateOf, loraUpdatePlan, type CastState,
+} from "./castState";
 import { LoraBindingPicker } from "./LoraBindingPicker";
 import {
   eligibleIdentityDefaults, isLoraEntry, type LoraRef,
@@ -989,9 +991,23 @@ function ShotDialog({ scene, entry, onClose, characters, locations, imageAssets,
     }
     for (const cid of Object.keys(cast)) {
       if (added.includes(cid) || removed.includes(cid)) continue;
-      if (JSON.stringify(cast[cid]) !== JSON.stringify(origCast[cid])) {
-        cmds.push(["shot.cast.update", { shot_id: shot!.id, character_id: cid, state: castPayload(cast[cid]) }]);
+      if (JSON.stringify(cast[cid]) === JSON.stringify(origCast[cid])) continue;
+      // B-3b preservation: loras untouched → omit the key so the partial
+      // update leaves stored lora_json byte-identical (incl. malformed
+      // historical entries). Changed-with-invalids → block the save.
+      const plan = loraUpdatePlan(cast[cid].lora_refs, origCast[cid].lora_refs);
+      if (plan.kind === "block") {
+        setBusy(false);
+        setErr(`${charName(cid)}: ${plan.invalid} invalid stored adapter ` +
+          `entr${plan.invalid === 1 ? "y" : "ies"} — adapter changes can't ` +
+          `be saved until they're removed (see the cast row's Stored ` +
+          `references section).`);
+        return;
       }
+      cmds.push(["shot.cast.update", {
+        shot_id: shot!.id, character_id: cid,
+        state: castPayload(cast[cid], { includeLoras: plan.kind === "emit" }),
+      }]);
     }
     let ok = true;
     if (shot) {

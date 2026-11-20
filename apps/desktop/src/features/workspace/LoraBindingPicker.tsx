@@ -196,8 +196,10 @@ export function LoraBindingPicker({
           </ul>
           {invalid > 0 && (
             <p className="mt-1 rounded border border-amber/40 bg-amber/10 px-2 py-1 text-[11px] text-amber" role="alert">
-              {invalid} invalid stored entr{invalid === 1 ? "y" : "ies"} cannot be
-              saved — remove {invalid === 1 ? "it" : "them"} above, or correct the data outside the app.
+              {invalid} invalid stored entr{invalid === 1 ? "y" : "ies"} — left
+              untouched {invalid === 1 ? "it's" : "they're"} preserved as-is,
+              but adapter changes can't be saved until {invalid === 1 ? "it's" : "they're"}
+              removed (✕ above) or corrected outside the app.
             </p>
           )}
         </div>
