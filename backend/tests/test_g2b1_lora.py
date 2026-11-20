@@ -9,6 +9,7 @@ and real files on disk only.
 import hashlib
 import json
 import struct
+from pathlib import Path
 
 import pytest
 
@@ -442,9 +443,85 @@ def test_stage_removed_install_refused(client, tmp_path, monkeypatch):
         s.commit()
     req = {"prompt": "x", "loras": [{
         "key": spec.key, "install_row_id": row_id, "sha256": sha,
-        "staged_name": "x.safetensors", "strength": 1.0}]}
+        "staged_name": f"{spec.key}-{sha[:12]}.safetensors",
+        "strength": 1.0}]}
     with pytest.raises(ValueError, match="removed or changed"):
         _adapter(client)._stage_loras(req, tmp_path / "j-loras")
+
+
+def test_stage_postcopy_tamper_refused(client, tmp_path, monkeypatch):
+    """Verify→copy TOCTOU: if the bytes that land in staging differ from
+    the queue-pinned sha256 (source swapped mid-copy, hostile redirect),
+    staging refuses and leaves nothing behind."""
+    pid, c, sh, spec = _kf_setup(client, tmp_path, monkeypatch)
+    src = _install_lora(client, spec)
+    with client.app.state.session_factory() as s:
+        from app.db.models import ModelInstall
+        from sqlalchemy import select
+        row = s.execute(select(ModelInstall).where(
+            ModelInstall.model_key == spec.key)).scalar_one()
+    sha = hashlib.sha256(src.read_bytes()).hexdigest()
+    req = {"prompt": "x", "loras": [{
+        "key": spec.key, "install_row_id": row.id, "sha256": sha,
+        "staged_name": f"{spec.key}-{sha[:12]}.safetensors",
+        "strength": 1.0}]}
+    import shutil as _shutil
+    real_copy = _shutil.copyfile
+
+    def evil_copy(src_p, dst_p):
+        real_copy(src_p, dst_p)
+        Path(dst_p).write_bytes(b"tampered weights")
+
+    monkeypatch.setattr(_shutil, "copyfile", evil_copy)
+    staged = tmp_path / "j-evil-loras"
+    with pytest.raises(ValueError, match="pinned sha256"):
+        _adapter(client)._stage_loras(req, staged)
+    assert not staged.exists()  # cleaned up — nothing handed to sd.cpp
+
+
+@pytest.mark.parametrize("bad", [
+    "../evil-a1b2c3d4e5f6.safetensors",
+    "dir/evil-a1b2c3d4e5f6.safetensors",
+    "dir\\evil-a1b2c3d4e5f6.safetensors",
+    "/abs/evil-a1b2c3d4e5f6.safetensors",
+    "C:\\evil-a1b2c3d4e5f6.safetensors",
+    "..\\up-a1b2c3d4e5f6.safetensors",
+    "CON.safetensors",               # reserved device stem
+    "NUL.safetensors",               # reserved device stem
+    "evil-a1b2c3d4e5f6.gguf",        # wrong extension
+    "plain.safetensors",             # no -<sha12> contract
+    "evil-a1b2c3d4e5f6.safetensorsx",  # trailing junk
+    "evil -a1b2c3d4e5f6.safetensors",  # space in name
+    "",
+])
+def test_staged_name_adversarial(bad):
+    """The staging boundary re-verifies the naming contract — a queued
+    request can never redirect the runtime to another path."""
+    from app.domain import lora_tags
+    with pytest.raises(ValueError):
+        lora_tags.validate_staged_name(bad)
+
+
+def test_staged_name_contract_ok():
+    from app.domain import lora_tags
+    ok = "char.alice-v3-9f2c41ab77d2.safetensors"
+    assert lora_tags.validate_staged_name(ok) == ok
+
+
+def test_stage_bad_name_refused(client, tmp_path, monkeypatch):
+    """End-to-end at the adapter: a poisoned staged_name dies before
+    any file is copied."""
+    pid, c, sh, spec = _kf_setup(client, tmp_path, monkeypatch)
+    src = _install_lora(client, spec)
+    sha = hashlib.sha256(src.read_bytes()).hexdigest()
+    req = {"prompt": "x", "loras": [{
+        "key": spec.key, "install_row_id": "row", "sha256": sha,
+        "staged_name": "../escape-a1b2c3d4e5f6.safetensors",
+        "strength": 1.0}]}
+    staged = tmp_path / "j-bad-loras"
+    with pytest.raises(ValueError, match="unsafe staged"):
+        _adapter(client)._stage_loras(req, staged)
+    assert not (tmp_path / "escape-a1b2c3d4e5f6.safetensors").exists()
 
 
 def test_orphan_staging_purged(client, tmp_path):
@@ -538,6 +615,11 @@ def test_keyframe_lora_e2e(client, tmp_path, monkeypatch):
     assert entry["key"] == spec.key and entry["sha256"] == sha
     assert entry["install_row_id"] and entry["role"] == "identity"
     assert entry["bound_character_id"] == c["id"]
+    # Base-model provenance: the pinned lora record carries the exact
+    # base hash it was validated against (catalog-pinned sha256).
+    base_spec = model_catalog.get("sd15.fp16")
+    assert entry["base_model_key"] == "sd15.fp16"
+    assert entry["base_model_sha256"] == base_spec.files[0].sha256
     assert req["runtime_prompt_sha256"] == hashlib.sha256(
         args[prompt_i].encode()).hexdigest()
     assert req["keyframe_generate"]["prompt_context"]["prompt_sha256"] \
@@ -567,5 +649,19 @@ def test_shot_lora_e2e_style(client, tmp_path, monkeypatch):
     req = _job_req(client, job["id"])
     assert req["loras"][0]["role"] == "style"
     assert req["loras"][0]["bound_character_id"] is None
+    assert req["loras"][0]["base_model_key"] == "sd15.fp16"
     assert req["origin_command_type"] == "shot.generate"
     assert req["runtime_prompt_sha256"]
+
+
+def test_generate_video_loras_refused(client, tmp_path, monkeypatch):
+    """loras on generate.video fails closed — never silently stripped
+    into a video request, never launched."""
+    spec = _lora_spec("lora.id")
+    _add_lora(monkeypatch, spec)
+    pid = make_project(client)["id"]
+    r = _commit(client, pid, "generate.video", {
+        "model_key": "any.video", "prompt": "a pan",
+        "loras": [{"key": spec.key}]}, expect=422)
+    assert "loras" in r.json()["detail"]
+    assert "job_id" not in r.json()

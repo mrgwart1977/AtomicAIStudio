@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import time
 import urllib.request
@@ -215,6 +216,25 @@ def verify_model_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
 
 
 # ------------------------------------------------------------------- LoRA
+
+def force_rmtree(path: Path) -> None:
+    """Best-effort tree removal that tolerates read-only members.
+
+    G2-B staged LoRAs are chmod'd read-only after verification; on
+    Windows a read-only attribute blocks plain ``rmtree``. The retry
+    clears the bit and re-attempts; any residual failure is swallowed —
+    cleanup must never mask the job's real outcome."""
+    def _retry(func, p, _exc):
+        try:
+            os.chmod(p, 0o666)
+            func(p)
+        except OSError:
+            pass
+    try:
+        shutil.rmtree(path, onexc=_retry)
+    except OSError:
+        pass
+
 
 _MAX_LORA_HEADER = 64 * 1024 * 1024
 # Tensor-name families every supported LoRA layout uses at least one of —

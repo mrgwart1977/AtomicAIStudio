@@ -35,6 +35,36 @@ def reject_lora_syntax(text: str | None, *, field: str = "prompt") -> None:
             "never inside prompt text")
 
 
+# Canonical staged filename contract — "<key>-<sha12>.safetensors".
+_STAGED_NAME_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-f]{12}\.safetensors")
+# Windows device names are illegal as file stems on any drive.
+_WIN_STEM_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10))})
+
+
+def validate_staged_name(name: str) -> str:
+    """Verify a queued ``staged_name`` against the app-generated contract
+    at the staging boundary — independent of however the value arrived.
+    Absolute paths, separators, traversal, unexpected extensions,
+    Windows-illegal forms, and anything off-contract are refused."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("staged LoRA name is required")
+    if Path(name).name != name or ".." in name or name != name.strip():
+        raise ValueError(f"unsafe staged LoRA name '{name}'")
+    stem = name.rsplit(".", 1)[0]
+    if stem.upper() in _WIN_STEM_RESERVED \
+            or stem.endswith((" ", ".")):
+        raise ValueError(f"unsafe staged LoRA name '{name}'")
+    if not _STAGED_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"staged LoRA name '{name}' does not match the "
+            "<key>-<sha12>.safetensors contract")
+    return name
+
+
 def lora_tag(entry: dict) -> str:
     """The one canonical application-emitted tag form. ``staged_name`` is
     adapter-derived ({key}-{sha12}.safetensors) — never user-controlled."""

@@ -339,54 +339,87 @@ class SdCppAdapter:
         the runtime prompt (composed prompt + approved tags)."""
         from app.domain import lora_tags
         if staged_dir.exists():
-            shutil.rmtree(staged_dir, ignore_errors=True)  # attempt re-run
+            model_files.force_rmtree(staged_dir)  # attempt re-run
         staged_dir.mkdir(parents=True)
-        with self._sf() as s:
-            for entry in req["loras"]:
-                row = s.get(ModelInstall, entry.get("install_row_id"))
-                if row is None or row.status != "installed" \
-                        or row.model_key != entry["key"]:
-                    raise ValueError(
-                        f"LoRA '{entry['key']}' was removed or changed "
-                        "since the job was queued")
-                root = Path(row.install_root).resolve()
-                raw = Path(row.install_root) / row.rel_dir / row.file_name
-                src = raw.resolve()
-                if not src.is_relative_to(root) or not src.is_file():
-                    raise ValueError(
-                        f"LoRA '{entry['key']}' resolves outside its "
-                        "install root — refused")
-                if raw.is_symlink() or (
-                        hasattr(raw, "is_junction")
-                        and raw.is_junction()):
-                    raise ValueError(
-                        f"LoRA '{entry['key']}' is a link/reparse point "
-                        "— refused")
-                sha = hashlib.sha256()
-                with open(src, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(4 * 1024 * 1024),
-                                      b""):
-                        sha.update(chunk)
-                if sha.hexdigest() != entry["sha256"]:
-                    raise ValueError(
-                        f"LoRA '{entry['key']}' content changed since "
-                        "the job was queued — refusing")
-                lspec = model_catalog.get(entry["key"])
-                ok, why = (model_files.verify_lora_file(src, lspec)
-                           if lspec else (False, "spec removed"))
-                if not ok:
-                    raise ValueError(
-                        f"LoRA '{entry['key']}' failed structural "
-                        f"verification: {why}")
-                shutil.copyfile(src, staged_dir / entry["staged_name"])
+        try:
+            with self._sf() as s:
+                for entry in req["loras"]:
+                    self._stage_one_lora(s, entry, staged_dir)
+        except Exception:
+            # Never hand sd.cpp a partially staged directory.
+            model_files.force_rmtree(staged_dir)
+            raise
         prompt = lora_tags.apply_lora_tags(req["prompt"], req["loras"])
         pinned = req.get("runtime_prompt_sha256")
         if pinned and hashlib.sha256(
                 prompt.encode("utf-8")).hexdigest() != pinned:
+            model_files.force_rmtree(staged_dir)
             raise ValueError(
                 "runtime prompt drifted since the job was queued — "
                 "refusing")
         return prompt
+
+    def _stage_one_lora(self, s, entry: dict, staged_dir: Path) -> None:
+        """Stage one pinned lora: re-lock the install row to the queued
+        pin, re-verify containment/structure/sha, copy, then RE-HASH the
+        staged bytes and mark them read-only. The staged file the
+        runtime reads must equal the queue-pinned sha256 — verified on
+        the copy, not assumed from the source."""
+        from app.domain import lora_tags
+        staged_name = lora_tags.validate_staged_name(
+            entry.get("staged_name"))
+        row = s.get(ModelInstall, entry.get("install_row_id"))
+        if row is None or row.status != "installed" \
+                or row.model_key != entry["key"]:
+            raise ValueError(
+                f"LoRA '{entry['key']}' was removed or changed "
+                "since the job was queued")
+        root = Path(row.install_root).resolve()
+        raw = Path(row.install_root) / row.rel_dir / row.file_name
+        src = raw.resolve()
+        if not src.is_relative_to(root) or not src.is_file():
+            raise ValueError(
+                f"LoRA '{entry['key']}' resolves outside its "
+                "install root — refused")
+        if raw.is_symlink() or (
+                hasattr(raw, "is_junction")
+                and raw.is_junction()):
+            raise ValueError(
+                f"LoRA '{entry['key']}' is a link/reparse point "
+                "— refused")
+        sha = hashlib.sha256()
+        with open(src, "rb") as fh:
+            for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                sha.update(chunk)
+        if sha.hexdigest() != entry["sha256"]:
+            raise ValueError(
+                f"LoRA '{entry['key']}' content changed since "
+                "the job was queued — refusing")
+        lspec = model_catalog.get(entry["key"])
+        ok, why = (model_files.verify_lora_file(src, lspec)
+                   if lspec else (False, "spec removed"))
+        if not ok:
+            raise ValueError(
+                f"LoRA '{entry['key']}' failed structural "
+                f"verification: {why}")
+        staged = staged_dir / staged_name
+        shutil.copyfile(src, staged)
+        # Post-copy verification — closes the verify→copy window: the
+        # staged bytes are what sd.cpp actually reads and they must equal
+        # the queue-pinned sha256 exactly.
+        digest = hashlib.sha256()
+        with open(staged, "rb") as fh:
+            for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != entry["sha256"]:
+            raise ValueError(
+                f"staged LoRA '{entry['key']}' does not match its "
+                "pinned sha256 — refusing")
+        # Read-only: no application path may rewrite a staged artifact
+        # before launch. (This blocks app-level writes; a hostile
+        # process with filesystem write access can clear the bit —
+        # that boundary is documented, not claimed.)
+        os.chmod(staged, 0o444)
 
     async def validate(self, request: dict[str, Any]) -> list[str]:
         errors = []
@@ -425,7 +458,7 @@ class SdCppAdapter:
                 yield u
         finally:
             if staged_dir is not None:
-                shutil.rmtree(staged_dir, ignore_errors=True)
+                model_files.force_rmtree(staged_dir)
 
     async def _run(self, handle: JobHandle,
                    staged_dir: Path | None) -> AsyncIterator[dict[str, Any]]:

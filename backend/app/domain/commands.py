@@ -3126,6 +3126,15 @@ def _check_loras(session: Session, project: Project, loras_in,
     if base_spec is None or base_spec.family != "sd1.5":
         raise CommandError(
             422, "LoRA adapters are enabled for SD 1.5 image models only")
+    # Base-model provenance pin: the catalog sha when pinned, else the
+    # installed row's recorded sha. Traceable, immutable request state —
+    # the worker's existing resolve path enforces integrity at run time.
+    base_row = session.execute(
+        select(ModelInstall).where(
+            ModelInstall.model_key == base_spec.key,
+            ModelInstall.status == "installed")).scalars().first()
+    base_sha = (base_spec.files[0].sha256 if base_spec.files else None) \
+        or (base_row.sha256 if base_row else "") or ""
 
     seen_keys: set[str] = set()
     seen_sha: set[str] = set()
@@ -3246,6 +3255,8 @@ def _check_loras(session: Session, project: Project, loras_in,
             "install_row_id": row.id, "staged_name": staged_name,
             "strength": strength, "role": role,
             "base_family": spec.family,
+            "base_model_key": base_spec.key,
+            "base_model_sha256": base_sha,
             "bound_character_id": bound_char,
         })
     return out
@@ -3279,6 +3290,12 @@ def _check_video_generation(session: Session, project: Project, payload: dict) -
 
     from app.db.models import Asset, Scene, Shot
 
+    if payload.get("loras"):
+        # G2-B — loras are image-adapter selections. A video request
+        # carrying them fails closed rather than silently stripping them.
+        raise CommandError(
+            422, "loras are image-adapter selections only — video "
+                 "generation refuses rather than dropping them")
     if not (payload.get("prompt") or "").strip() and not payload.get("image_asset_id"):
         raise CommandError(422, "a prompt or a source image is required for video generation")
     spec = model_catalog.get(payload.get("model_key") or "")
@@ -6572,6 +6589,12 @@ def _job_request(session: Session, project: Project, command_type: str,
         }
     elif command_type == "generate.video":
         from app.domain import compatibility, model_catalog
+        if payload.get("loras"):
+            # G2-B — same fail-closed refusal as _check_video_generation;
+            # covers composed/internal callers that bypass _validate.
+            raise CommandError(
+                422, "loras are image-adapter selections only — video "
+                     "generation refuses rather than dropping them")
         spec = model_catalog.get(payload.get("model_key") or "")
         i2v_src = payload.get("image_asset_id")
         w, h = payload.get("width"), payload.get("height")
