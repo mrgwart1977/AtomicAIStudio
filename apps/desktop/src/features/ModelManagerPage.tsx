@@ -13,6 +13,10 @@ import type {
   ModelValidation,
   ModelsDir,
 } from "../api/types";
+import {
+  isLoraEntry, loraCatalogState, loraRole,
+  LORA_RUNTIME_NOTE, LORA_STATE_BADGE,
+} from "./workspace/lora";
 
 function gb(bytes: number | null | undefined): string {
   if (bytes == null) return "unknown";
@@ -93,6 +97,12 @@ export function ModelManagerPage() {
     () => new Map((compat?.models ?? []).map((m) => [m.key, m])),
     [compat],
   );
+
+  // B-3a — attachable adapters (modality "lora") live in their own
+  // section: they modify a base model at generation time, so listing
+  // them among generatable models would misrepresent what they do.
+  const generativeModels = useMemo(() => models.filter((m) => !isLoraEntry(m)), [models]);
+  const loraModels = useMemo(() => models.filter(isLoraEntry), [models]);
 
   // Model-download jobs are app-level (no project) — find any in-flight ones.
   const downloadJobs = useMemo(
@@ -204,7 +214,7 @@ export function ModelManagerPage() {
 
       {/* --- model catalog --- */}
       <section className="mt-6 space-y-3">
-        {models.map((m) => {
+        {generativeModels.map((m) => {
           const c = COMPAT[m.compatibility.status];
           const ce = compatByKey.get(m.key);
           const inst = m.install;
@@ -345,6 +355,120 @@ export function ModelManagerPage() {
             </div>
           );
         })}
+      </section>
+
+      {/* --- adapters (LoRA) --- */}
+      <section className="mt-8">
+        <h2 className="text-lg font-semibold">Adapters (LoRA)</h2>
+        <p className="mt-1 text-sm text-muted">
+          Adapters tune an installed base model for a character identity or a visual
+          style at generation time — they are not models you run on their own.
+        </p>
+        <p className="mt-1 text-xs text-faint" role="note">{LORA_RUNTIME_NOTE}</p>
+        {loraModels.length === 0 ? (
+          <div className="mt-3 rounded-lg border border-dashed border-line p-4 text-sm text-muted">
+            No adapters are cataloged yet. When LoRA adapters are added to the
+            catalog and installed, they appear here with their role, base-family
+            compatibility, and verification status.
+          </div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {loraModels.map((m) => {
+              const inst = m.install;
+              const job = modelJob(m.key);
+              const downloading = job && (job.status === "queued" || job.status === "running");
+              const installed = inst?.status === "installed";
+              const role = loraRole(m);
+              const state = LORA_STATE_BADGE[loraCatalogState(m, null)];
+              const s = SUPPORT[m.support];
+              const check = checks[m.key];
+              return (
+                <div key={m.key} className="rounded-lg border border-line bg-card p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-base font-semibold">{m.display_name}</h3>
+                    <span className="text-xs text-faint">v{m.version}</span>
+                    {role && (
+                      <span className="rounded bg-sky/15 px-2 py-0.5 text-xs capitalize text-sky">
+                        {role} adapter
+                      </span>
+                    )}
+                    <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">
+                      for {m.family} bases
+                    </span>
+                    <span className={`rounded px-2 py-0.5 text-xs ${state.cls}`}>{state.label}</span>
+                    {s && <span className={`rounded px-2 py-0.5 text-xs ${s.cls}`}>{s.label}</span>}
+                    {inst?.status === "failed" && (
+                      <span className="rounded bg-rose/15 px-2 py-0.5 text-xs text-rose">install failed</span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-sm text-muted">{m.notes}</p>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted md:grid-cols-4">
+                    <div><dt className="inline text-faint">License: </dt><dd className="inline">{m.license.name}</dd></div>
+                    <div><dt className="inline text-faint">Download: </dt><dd className="inline">{gb(m.download_bytes)}</dd></div>
+                    <div><dt className="inline text-faint">Format: </dt><dd className="inline">{m.format}</dd></div>
+                    <div><dt className="inline text-faint">Source: </dt><dd className="inline">{String(m.source.provider ?? "local")}</dd></div>
+                    {installed && (
+                      <div className="col-span-2">
+                        <dt className="inline text-faint">On disk: </dt>
+                        <dd className="inline">{gb(inst?.byte_size)} · {inst?.install_root}\{inst?.rel_dir}</dd>
+                      </div>
+                    )}
+                  </dl>
+                  {downloading && job && (
+                    <div className="mt-3">
+                      <div className="h-1.5 w-full overflow-hidden rounded bg-line/40">
+                        <div className="h-full bg-teal transition-all" style={{ width: `${Math.round(job.progress * 100)}%` }} />
+                      </div>
+                      <p className="mt-1 text-xs text-muted">
+                        {job.message || "Downloading…"} — {Math.round(job.progress * 100)}%
+                      </p>
+                    </div>
+                  )}
+                  {check === "loading" && <p className="mt-2 text-xs text-muted">Running read-only checks…</p>}
+                  {check && check !== "loading" && (
+                    <ul className="mt-2 space-y-0.5 rounded border border-line p-2 text-xs">
+                      {check.checks.map((ch) => (
+                        <li key={ch.name} className={
+                          ch.ok === false
+                            ? (ch.severity === "warning" ? "text-amber"
+                               : ch.severity === "info" ? "text-muted" : "text-rose")
+                            : ch.ok === null ? "text-faint" : "text-teal"}>
+                          {ch.ok === false ? "✗" : ch.ok === null ? "·" : "✓"} {ch.name.replaceAll("_", " ")} — {ch.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {!installed && !downloading && m.license.commercial_ok && m.files.length > 0 && m.support !== "planned" && (
+                      <button
+                        onClick={() => void openPreflight(m)}
+                        disabled={busy}
+                        className="rounded-md bg-action px-3 py-1.5 text-xs text-ink disabled:opacity-50"
+                      >
+                        Install…
+                      </button>
+                    )}
+                    {installed && (
+                      <button
+                        onClick={() => setRemoveTarget(m)}
+                        disabled={busy}
+                        className="rounded-md border border-rose/40 px-3 py-1.5 text-xs text-rose disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    )}
+                    <button
+                      onClick={() => void toggleChecks(m)}
+                      className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-fg"
+                    >
+                      {check ? "Hide checks" : "Compatibility checks"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       {/* --- storage --- */}

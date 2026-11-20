@@ -120,9 +120,11 @@ const VALIDATION = {
   ],
 };
 
+const mockState: { models: unknown[] } = { models: MODELS };
+
 vi.mock("../stores/appStore", () => ({
   useApp: (sel: (s: unknown) => unknown) => sel({
-    hardware: null, adapters: [], models: MODELS, gpuState: null,
+    hardware: null, adapters: [], models: mockState.models, gpuState: null,
     jobs: {},
     refreshHardware: () => Promise.resolve(),
     refreshModels: () => Promise.resolve(),
@@ -141,7 +143,10 @@ function mockApi() {
 }
 
 describe("ModelManagerPage — C5-E compatibility surface", () => {
-  beforeEach(() => { cleanup(); apiFetch.mockReset(); mockApi(); });
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset(); mockApi();
+    mockState.models = MODELS;
+  });
 
   it("shows the five-way availability label, never misleading for planned", async () => {
     render(<ModelManagerPage />);
@@ -183,5 +188,81 @@ describe("ModelManagerPage — C5-E compatibility surface", () => {
       expect(apiFetch).toHaveBeenCalledWith(
         "/api/models/sd15.q8/benchmark",
         expect.objectContaining({ method: "POST" })));
+  });
+});
+
+// B-3a — adapters (modality "lora") get their own honest section:
+// role + base-family chips, advisory state badges, install/remove via
+// the existing approval flow, and a truthful empty state.
+const LORA = {
+  key: "char.ada", display_name: "Ada — identity adapter", family: "sd1.5",
+  version: "1.0", adapter_id: "gen.image.sdcpp", compatible_adapters: [],
+  format: "safetensors", source: { provider: "huggingface" },
+  license: { name: "CC0", commercial_ok: true, notes: "" },
+  files: [{ name: "ada.safetensors", size_bytes: 2e8, sha256: "y" }],
+  download_bytes: 2e8,
+  requirements: {}, capabilities: { lora_role: "identity" },
+  runtime_key: "sdcpp", support: "tested", modality: "lora",
+  modes: [], notes: "character identity adapter",
+  install: { status: "installed", verified: true, byte_size: 2e8,
+             install_root: "M:", rel_dir: "char.ada" },
+  compatibility: { status: "compatible", reasons: [], warnings: [],
+                   suggested: {}, estimate: {} },
+};
+
+const LORA_EXPERIMENTAL = {
+  ...LORA,
+  key: "style.grain", display_name: "Grain — style adapter",
+  capabilities: { lora_role: "style" },
+  support: "experimental",
+  install: { status: "not_installed" },
+};
+
+describe("ModelManagerPage — B-3a LoRA adapters section", () => {
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset(); mockApi();
+    mockState.models = MODELS;
+  });
+
+  it("shows the adapters section with an honest empty state + note", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Adapters (LoRA)"));
+    expect(screen.getByText(/No adapters are cataloged yet/)).toBeTruthy();
+    expect(screen.getByText(
+      /real LoRA image generation has not been validated/)).toBeTruthy();
+  });
+
+  it("lora entries render as adapters, never as generatable models", async () => {
+    mockState.models = [...MODELS, LORA];
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Ada — identity adapter"));
+    expect(screen.getByText("identity adapter")).toBeTruthy();
+    expect(screen.getByText("for sd1.5 bases")).toBeTruthy();
+    // adapter cards show no "Can generate" generative modes line —
+    // still exactly the 3 generative entries.
+    expect(screen.getAllByText(/Can generate:/)).toHaveLength(3);
+    // installed adapter exposes its own Remove (one per installed card)
+    expect(screen.getAllByText("Remove")).toHaveLength(2);
+    expect(screen.queryByText(/No adapters are cataloged/)).toBeNull();
+  });
+
+  it("experimental-tier adapters are marked unverified, not usable", async () => {
+    mockState.models = [...MODELS, LORA_EXPERIMENTAL];
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Grain — style adapter"));
+    expect(screen.getByText("style adapter")).toBeTruthy();
+    expect(screen.getByText("Unverified")).toBeTruthy();
+    // a known hash + files does NOT upgrade the honest state
+    expect(screen.queryByText("Installed")).toBeNull();
+  });
+
+  it("adapters install through the same explicit approval flow", async () => {
+    mockState.models = [...MODELS, LORA_EXPERIMENTAL];
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Grain — style adapter"));
+    const installs = screen.getAllByText("Install…");
+    fireEvent.click(installs[installs.length - 1]);
+    await waitFor(() => screen.getByText("Approve download & install"));
+    expect(screen.getByText(/Nothing downloads until you approve/)).toBeTruthy();
   });
 });

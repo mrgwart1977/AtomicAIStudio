@@ -1045,7 +1045,7 @@ export type CompatStatus =
   | "restricted" | "unavailable" | "planned";
 
 export type SupportTier = "production" | "tested" | "experimental" | "planned";
-export type Modality = "image" | "video" | "audio" | "multimodal";
+export type Modality = "image" | "video" | "audio" | "multimodal" | "lora";
 
 export interface Compatibility {
   status: CompatStatus;
@@ -1098,6 +1098,8 @@ export interface ModelCatalogEntry {
     batch?: { min?: number; max?: number; default?: number };
     ref_images?: boolean;
     lora?: boolean;
+    /** G2-B — modality:"lora" entries declare which adapter role they fill. */
+    lora_role?: "identity" | "style";
     precision?: string[];
     gpu_selection?: boolean;
     cpu_fallback?: boolean;
