@@ -1509,3 +1509,56 @@ export interface WizardDerived {
   honesty: { all_simulated: boolean; counts: Record<string, number>; note: string };
   revision: number;
 }
+
+// ---------- B-3c — LoRA resolution preview (read-only) ----------
+
+export interface LoraPreviewRequested {
+  shape: "string" | "object" | "invalid";
+  key?: unknown;
+  strength?: unknown;
+}
+
+export interface LoraPreviewAdapter {
+  key: string;
+  version: string;
+  role: "identity" | "style";
+  strength: number;
+  sha256: string;
+  staged_name: string;
+  base_family: string;
+  base_model_key: string;
+  base_model_sha256: string;
+  bound_character_id: string | null;
+}
+
+export interface LoraPreview {
+  accepted: boolean;
+  errors: string[];
+  prompt_errors: string[];
+  requested: LoraPreviewRequested[];
+  resolved: LoraPreviewAdapter[];
+  hashes: {
+    adapter_sha256: Record<string, string>;
+    base_model_sha256: string | null;
+    prompt_sha256: string | null;
+    runtime_prompt_sha256: string | null;
+    unavailable: string[];
+  };
+  est_vram_lora_overhead_bytes: number | null;
+  context: {
+    shot_id: string | null;
+    keyframe_id: string | null;
+    model_key: string | null;
+    proposed_from_cast: boolean;
+  };
+  notes: string[];
+}
+
+export interface LoraPreviewRequest {
+  model_key?: string;
+  loras?: unknown[];
+  shot_id?: string;
+  keyframe_id?: string;
+  prompt?: string;
+  negative_prompt?: string;
+}

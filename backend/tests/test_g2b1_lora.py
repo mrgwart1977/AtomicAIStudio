@@ -241,15 +241,16 @@ def test_lora_strength_nonfinite(client, tmp_path, monkeypatch):
     pid, c, sh, spec = _kf_setup(client, tmp_path, monkeypatch)
     _bind_loras(client, pid, sh["shot"]["id"], c["id"], spec.key)
     from app.db.models import Project, Shot
-    from app.domain.commands import CommandError, _check_loras
+    from app.domain.commands import CommandError
+    from app.domain.lora_resolve import check_loras
     with client.app.state.session_factory() as s:
         project = s.get(Project, pid)
         shot = s.get(Shot, sh["shot"]["id"])
         for bad in (float("nan"), float("inf"), float("-inf")):
             with pytest.raises(CommandError):
-                _check_loras(s, project, [{"key": spec.key,
-                                           "strength": bad}],
-                             model_catalog.get("sd15.fp16"), shot=shot)
+                check_loras(s, project, [{"key": spec.key,
+                                          "strength": bad}],
+                            model_catalog.get("sd15.fp16"), shot=shot)
 
 
 def test_lora_duplicate_refused(client, tmp_path, monkeypatch):

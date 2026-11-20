@@ -59,6 +59,8 @@ from app.schemas.api import (
     ResourceSettingsOut,
     ResourceSettingsUpdate,
     JobOut,
+    LoraPreviewOut,
+    LoraPreviewRequest,
     ModelCatalogEntryOut,
     ModelInstallRequest,
     ModelsDirOut,
@@ -837,6 +839,35 @@ def undo_command(command_id: str, project: Project = Depends(get_project), db: S
         raise HTTPException(exc.status_code, exc.detail) from exc
     db.commit()
     return command
+
+
+# ---------- B-3c — LoRA resolution preview (read-only) ----------
+
+@api_router.post("/api/projects/{project_id}/loras/preview",
+                 response_model=LoraPreviewOut)
+def lora_resolution_preview(
+    body: LoraPreviewRequest,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+):
+    """Backend-authoritative preview of which LoRA selections the B-1
+    gate would accept for a local shot/keyframe generation request.
+
+    Read-only and side-effect-free: resolver SELECTs + file stat only —
+    no command recorded, no job queued, no subprocess, no download.
+    Refusals return 200 with accepted=false + explicit reasons so they
+    render next to accepted output; a result is advisory only — any
+    later generation re-validates against current state."""
+    from app.domain.lora_resolve import resolve_lora_preview
+    return resolve_lora_preview(
+        db, project,
+        model_key=body.model_key,
+        loras_in=body.loras,
+        shot_id=body.shot_id,
+        keyframe_id=body.keyframe_id,
+        prompt=body.prompt,
+        negative_prompt=body.negative_prompt,
+    )
 
 
 # ---------- jobs ----------

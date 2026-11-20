@@ -39,6 +39,14 @@ from app.db.models import (
 from app.domain import bibles
 from app.domain import screenplay as spd
 from app.domain import storyboard as sb
+# B-3c — shared LoRA resolution (extracted B-1 gate + prompt guard +
+# shot-cast helper); the read-only preview resolver lives there too.
+from app.domain.lora_resolve import (
+    LORA_VRAM_OVERHEAD_BYTES,
+    check_loras,
+    lora_prompt_guard,
+    shot_cast_ids,
+)
 
 SUPPORTED_COMMANDS = {
     "prompt.set_text",
@@ -555,20 +563,6 @@ def _refset_refs(session: Session, project: Project, payload: dict) -> tuple:
     return rs, entries, weights
 
 
-def _shot_cast_ids(session: Session, shot) -> set[str]:
-    """C4-B — a shot's effective cast: its own shot_characters UNION
-    the scene-level cast it inherits (mirrors the storyboard payload's
-    cast + inherited lists)."""
-    from app.db.models import SceneCharacter, ShotCharacter
-    own = {r.character_id for r in session.execute(
-        select(ShotCharacter).where(ShotCharacter.shot_id == shot.id)
-    ).scalars()}
-    inherited = {r.character_id for r in session.execute(
-        select(SceneCharacter).where(SceneCharacter.scene_id == shot.scene_id)
-    ).scalars()}
-    return own | inherited
-
-
 def _check_shot_bindings(session: Session, project: Project, shot,
                          payload: dict, *, cast_known: bool) -> None:
     """C4-B — validate reference_set_id / source_asset_id bindings on
@@ -583,7 +577,7 @@ def _check_shot_bindings(session: Session, project: Project, shot,
             raise CommandError(
                 404, "reference set not found in this project") from None
         if cast_known:
-            cast = _shot_cast_ids(session, shot)
+            cast = shot_cast_ids(session, shot)
             if cast and rs.character_id not in cast:
                 raise CommandError(
                     422, "reference set's character is not in this "
@@ -627,7 +621,7 @@ def _compose_shot_generate(session: Session, project: Project,
         # Generate-time is STRICT, unlike bind-time: a bound set whose
         # character was removed from the effective cast (own ∪ scene
         # inherited) must refuse — never fall back to unrelated refs.
-        cast = _shot_cast_ids(session, shot)
+        cast = shot_cast_ids(session, shot)
         if rs.character_id not in cast:
             raise CommandError(
                 422, "reference set's character is not in this shot's "
@@ -694,7 +688,7 @@ def _compose_shot_generate(session: Session, project: Project,
             "scene_id": shot.scene_id,
         }, local_adapter_id)
         from app.domain import model_catalog as _mc
-        loras = _check_loras(session, project, payload.get("loras"),
+        loras = check_loras(session, project, payload.get("loras"),
                              _mc.get(payload.get("model_key") or ""),
                              shot=shot)
         if loras and local_adapter != "sdcpp":
@@ -702,7 +696,7 @@ def _compose_shot_generate(session: Session, project: Project,
                 422, "LoRA adapters are supported on the 'sdcpp' "
                      "subprocess adapter only — persistent-server LoRA "
                      "is deferred")
-        _lora_prompt_guard(
+        lora_prompt_guard(
             comp["prompt"] if comp else prompt,
             payload.get("negative_prompt") or "")
         composed = {
@@ -820,7 +814,7 @@ def _shot_gen_fingerprint(session: Session, shot, composed: dict) -> dict:
         "source_sha256": src_sha,
         "reference_set_id": composed.get("reference_set_id"),
         "continuity": shot.continuity_json or {},
-        "cast": sorted(_shot_cast_ids(session, shot)),
+        "cast": sorted(shot_cast_ids(session, shot)),
     }
 
 
@@ -1009,14 +1003,14 @@ def _compose_keyframe_generate(session: Session, project: Project,
         }, local_adapter_id)
         from app.domain import compatibility, model_catalog
         spec = model_catalog.get(model_key or "")
-        loras = _check_loras(session, project, payload.get("loras"),
+        loras = check_loras(session, project, payload.get("loras"),
                              spec, shot=shot)
         if loras and local_adapter != "sdcpp":
             raise CommandError(
                 422, "LoRA adapters are supported on the 'sdcpp' "
                      "subprocess adapter only — persistent-server LoRA "
                      "is deferred")
-        _lora_prompt_guard(req["prompt"], req.get("negative_prompt") or "")
+        lora_prompt_guard(req["prompt"], req.get("negative_prompt") or "")
         width = int(payload.get("width") or settings.get("width") or 512)
         height = int(payload.get("height") or settings.get("height") or 512)
         batch = int(payload.get("batch") or settings.get("batch") or 1)
@@ -1442,10 +1436,10 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
                 if payload.get("shot_id") else None
             if _shot is not None and _shot.project_id != project.id:
                 _shot = None
-            _check_loras(session, project, payload["loras"],
+            check_loras(session, project, payload["loras"],
                          _mc.get(payload.get("model_key") or ""),
                          shot=_shot)
-            _lora_prompt_guard(
+            lora_prompt_guard(
                 payload.get("prompt") or "",
                 payload.get("negative_prompt") or "")
     if command_type == "generate.image.persistent":
@@ -3096,182 +3090,8 @@ def _check_generation(session: Session, project: Project, payload: dict,
         raise CommandError(404, "scene not found in this project")
 
 
-LORA_MAX_STRENGTH = 2.0
-LORA_MAX_PER_JOB = 2
-# Per-adapter admission overhead added to est_vram — resident weights +
-# scratch for at_runtime application. ESTIMATE, refined by real-run data.
-LORA_VRAM_OVERHEAD_BYTES = 768 * 1024 * 1024
-
-
-def _check_loras(session: Session, project: Project, loras_in,
-                 base_spec, *, shot=None) -> list[dict]:
-    """G2-B/B-1 — validate + pin structured ``loras`` selections.
-
-    Returns the pinned entries the durable request carries: every field
-    needed to re-verify and stage at worker start (install row, sha256,
-    deterministic staged name). Refuses — never silently strips — on any
-    violation. ``shot=None`` means no cast context: identity adapters
-    then refuse outright (there is nothing to bind them to)."""
-    import math
-    from pathlib import Path
-    from app.domain import cast_state, model_catalog
-    from app.db.models import ModelInstall, ShotCharacter
-
-    if not loras_in:
-        return []
-    if not isinstance(loras_in, list) or len(loras_in) > LORA_MAX_PER_JOB:
-        raise CommandError(
-            422, "loras accepts at most 2 adapters — one identity plus "
-                 "one style")
-    if base_spec is None or base_spec.family != "sd1.5":
-        raise CommandError(
-            422, "LoRA adapters are enabled for SD 1.5 image models only")
-    # Base-model provenance pin: the catalog sha when pinned, else the
-    # installed row's recorded sha. Traceable, immutable request state —
-    # the worker's existing resolve path enforces integrity at run time.
-    base_row = session.execute(
-        select(ModelInstall).where(
-            ModelInstall.model_key == base_spec.key,
-            ModelInstall.status == "installed")).scalars().first()
-    base_sha = (base_spec.files[0].sha256 if base_spec.files else None) \
-        or (base_row.sha256 if base_row else "") or ""
-
-    seen_keys: set[str] = set()
-    seen_sha: set[str] = set()
-    n_identity = 0
-    out: list[dict] = []
-    cast_ids = _shot_cast_ids(session, shot) if shot is not None else set()
-    for i, raw in enumerate(loras_in):
-        entry = {"key": raw} if isinstance(raw, str) \
-            else dict(raw) if isinstance(raw, dict) else None
-        if entry is None:
-            raise CommandError(
-                422, f"loras[{i}] must be a model key or a "
-                     "{'key', 'strength'} object")
-        key = (entry.get("key") or "")
-        if not isinstance(key, str) or not key.strip():
-            raise CommandError(422, f"loras[{i}].key is required")
-        key = key.strip()
-        if key in seen_keys:
-            raise CommandError(422, f"loras[{i}]: duplicate adapter '{key}'")
-        seen_keys.add(key)
-        spec = model_catalog.get(key)
-        if spec is None or spec.modality != "lora":
-            raise CommandError(
-                422, f"unknown LoRA '{key}' — pick an installed adapter")
-        if spec.support not in ("production", "tested"):
-            raise CommandError(
-                422, f"{spec.display_name} is {spec.support} — "
-                     "catalog-visible but not usable yet")
-        if not spec.license.get("commercial_ok", True):
-            raise CommandError(
-                422, f"{spec.display_name} has a restricted license and "
-                     "cannot be used")
-        if spec.family != base_spec.family:
-            raise CommandError(
-                422, f"{spec.display_name} targets '{spec.family}' base "
-                     f"models — incompatible with '{base_spec.family}'")
-        if spec.fmt != "safetensors":
-            raise CommandError(
-                422, f"{spec.display_name} is {spec.fmt} — only "
-                     "safetensors LoRAs are verified on this runtime")
-        role = (spec.capabilities or {}).get("lora_role")
-        if role not in ("identity", "style"):
-            raise CommandError(
-                422, f"{spec.display_name} declares no lora_role — "
-                     "unclassified adapters refuse")
-        row = session.execute(
-            select(ModelInstall).where(
-                ModelInstall.model_key == key,
-                ModelInstall.status == "installed")).scalars().first()
-        if row is None:
-            raise CommandError(
-                422, f"{spec.display_name} is not installed — install "
-                     "it from the Model Manager first")
-        src = (Path(row.install_root) / row.rel_dir / row.file_name
-               if row.file_name else None)
-        if src is None or not src.is_file():
-            raise CommandError(
-                422, f"{spec.display_name} install is incomplete — "
-                     "reinstall it")
-        sha = (spec.files[0].sha256 if spec.files else None) \
-            or (row.sha256 or "")
-        if not sha:
-            raise CommandError(
-                422, f"{spec.display_name} has no verifiable sha256 — "
-                     "the adapter cannot be pinned")
-        if sha in seen_sha:
-            raise CommandError(
-                422, f"loras[{i}]: same weights as another selection — "
-                     "duplicates are refused")
-        seen_sha.add(sha)
-        s = entry.get("strength")
-        if s is None:
-            strength = 1.0
-        else:
-            if isinstance(s, bool) or not isinstance(s, (int, float)):
-                raise CommandError(
-                    422, f"loras[{i}].strength must be a number")
-            strength = float(s)
-            if not math.isfinite(strength) \
-                    or strength <= 0 or strength > LORA_MAX_STRENGTH:
-                raise CommandError(
-                    422, f"loras[{i}].strength must be a finite number "
-                         "in (0, 2.0]")
-        bound_char = None
-        if role == "identity":
-            n_identity += 1
-            if n_identity > 1:
-                raise CommandError(
-                    422, "at most one identity LoRA per generation — "
-                         "multi-character blending is not supported")
-            if shot is not None:
-                for r in session.execute(
-                        select(ShotCharacter).where(
-                            ShotCharacter.shot_id == shot.id)).scalars():
-                    if r.character_id in cast_ids and key in \
-                            cast_state.lora_keys(r.lora_json):
-                        bound_char = r.character_id
-                        break
-            if bound_char is None:
-                raise CommandError(
-                    422, f"identity LoRA '{key}' is not bound to a "
-                         "character in this shot's cast — bind it via "
-                         "shot.cast first")
-        else:
-            linked = any(
-                key in cast_state.lora_keys(r.lora_json)
-                for r in session.execute(
-                    select(ShotCharacter).where(
-                        ShotCharacter.project_id == project.id)).scalars())
-            if not linked:
-                raise CommandError(
-                    422, f"style LoRA '{key}' is not linked to this "
-                         "project — bind it via shot.cast first")
-        staged_name = (f"{key}-{sha[:12]}"
-                       f"{Path(row.file_name).suffix or '.safetensors'}")
-        out.append({
-            "key": key, "version": spec.version, "sha256": sha,
-            "install_row_id": row.id, "staged_name": staged_name,
-            "strength": strength, "role": role,
-            "base_family": spec.family,
-            "base_model_key": base_spec.key,
-            "base_model_sha256": base_sha,
-            "bound_character_id": bound_char,
-        })
-    return out
-
-
-def _lora_prompt_guard(prompt: str, negative: str) -> None:
-    """G2-B/B-1 — last-mile injection scan over the exact text bound for
-    the runtime: prompt (composed — user text + context), negative prompt.
-    Runs on EVERY local image generation, lora-selected or not."""
-    from app.domain import lora_tags
-    try:
-        lora_tags.reject_lora_syntax(prompt, field="prompt")
-        lora_tags.reject_lora_syntax(negative, field="negative_prompt")
-    except lora_tags.LoraSyntaxError as e:
-        raise CommandError(422, str(e)) from e
+# B-3c — B-1 LoRA gate extracted to app/domain/lora_resolve.py (shared
+# with the read-only resolution preview). See that module.
 
 
 def _experimental_ok() -> bool:
@@ -6206,9 +6026,9 @@ def _job_request(session: Session, project: Project, command_type: str,
                 if payload.get("shot_id") else None
             if shot is not None and shot.project_id != project.id:
                 shot = None
-            loras = _check_loras(session, project, payload["loras"],
+            loras = check_loras(session, project, payload["loras"],
                                  spec, shot=shot)
-            _lora_prompt_guard(
+            lora_prompt_guard(
                 payload["prompt"], payload.get("negative_prompt") or "")
         req = {
             "command_type": command_type,
