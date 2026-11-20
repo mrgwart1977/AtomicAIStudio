@@ -87,6 +87,47 @@ def _str_list(field: str, value: Any) -> list[str]:
     return out
 
 
+def _lora_list(field: str, value: Any) -> list:
+    """loras entries — each entry keeps its submitted shape: bare key
+    strings stay strings (stored rows predate the schema upgrade);
+    structured {"key", "strength"?} dicts are the G2-B binding form."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _err(field, "a list of LoRA selections", value)
+    out = []
+    for i, x in enumerate(value):
+        if isinstance(x, str):
+            if x.strip():
+                out.append(x.strip())
+            continue
+        if not isinstance(x, dict):
+            raise _err(f"{field}[{i}]", "a key string or object", x)
+        key = x.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise _err(f"{field}[{i}].key", "a non-empty string", key)
+        entry = {"key": key.strip()}
+        s = x.get("strength")
+        if s is not None:
+            if isinstance(s, bool) or not isinstance(s, (int, float)):
+                raise _err(f"{field}[{i}].strength", "a number", s)
+            entry["strength"] = float(s)
+        out.append(entry)
+    return out
+
+
+def lora_keys(entries: Any) -> set[str]:
+    """Key set from a stored lora_json list — tolerates legacy strings
+    and structured entries (stored rows predate the schema upgrade)."""
+    out: set[str] = set()
+    for x in entries or []:
+        if isinstance(x, str):
+            out.add(x)
+        elif isinstance(x, dict) and isinstance(x.get("key"), str):
+            out.add(x["key"])
+    return out
+
+
 def parse_shot_cast_state(raw: Any, *, partial: bool = False) -> dict[str, Any]:
     """Validate + normalise a shot.cast.* `state` object.
 
@@ -120,9 +161,9 @@ def parse_shot_cast_state(raw: Any, *, partial: bool = False) -> dict[str, Any]:
         elif not partial:
             fields[f] = ""
 
-    loras: list[str] | None = None
+    loras: list[dict] | None = None
     if "loras" in src or not partial:
-        loras = _str_list("loras", src.get("loras"))
+        loras = _lora_list("loras", src.get("loras"))
 
     continuity: dict[str, Any] = {}
     if "continuity" in src:

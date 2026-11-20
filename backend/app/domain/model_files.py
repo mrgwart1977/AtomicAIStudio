@@ -214,6 +214,45 @@ def verify_model_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
     return verify_component(path, spec.files[0], spec.fmt)
 
 
+# ------------------------------------------------------------------- LoRA
+
+_MAX_LORA_HEADER = 64 * 1024 * 1024
+# Tensor-name families every supported LoRA layout uses at least one of —
+# kohya/diffusers (lora_down/lora_up or lora_A/lora_B) plus the alpha scale.
+_LORA_KEY_HINTS = ("lora_down", "lora_up", "lora_a", "lora_b", ".lora.",
+                   "alpha")
+
+
+def verify_lora_file(path: Path, spec: ModelSpec) -> tuple[bool, str]:
+    """Structural LoRA validation — a ``.safetensors`` EXTENSION alone
+    proves nothing. Parses the 8-byte length + JSON header and requires
+    LoRA-shaped tensor keys, then the declared sha256/size integrity.
+    gguf LoRAs stay refused until their metadata contract is verified
+    against the pinned runtime."""
+    if spec.fmt != "safetensors":
+        return False, (f"LoRA format '{spec.fmt}' is not enabled — only "
+                       "safetensors adapters are verified on this runtime")
+    if path.suffix.lower() != ".safetensors":
+        return False, "LoRA file must have a .safetensors extension"
+    try:
+        with open(path, "rb") as fh:
+            n = int.from_bytes(fh.read(8), "little")
+            if n <= 0 or n > _MAX_LORA_HEADER:
+                return False, "safetensors header length out of range"
+            header = json.loads(fh.read(n))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False, "file is not a parseable safetensors container"
+    if not isinstance(header, dict):
+        return False, "safetensors header is not a tensor map"
+    lower = {k.lower() for k in header}
+    if not any(any(h in k for h in _LORA_KEY_HINTS) for k in lower):
+        return False, ("no LoRA tensor names found — file parses as "
+                       "safetensors but does not look like a LoRA adapter")
+    ok, why = verify_component(path, spec.files[0], spec.fmt) \
+        if spec.files else (False, "LoRA spec declares no file")
+    return ok, why
+
+
 # ---------------------------------------------------------------- install
 
 def install_row(session: Session, spec: ModelSpec, root: Path) -> ModelInstall:

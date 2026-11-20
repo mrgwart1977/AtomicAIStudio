@@ -635,6 +635,11 @@ class JobEngine:
             for f in work_dir.glob(f"{job_id}*"):
                 if f.is_file():
                     f.unlink(missing_ok=True)
+                elif f.is_dir() and f.name == f"{job_id}-loras":
+                    # G2-B — orphaned LoRA staging (crash/interrupt):
+                    # removed on finalize and on startup reconcile.
+                    import shutil
+                    shutil.rmtree(f, ignore_errors=True)
         except OSError:
             log.warning("could not purge work-dir outputs for %s", job_id)
 

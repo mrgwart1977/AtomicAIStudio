@@ -201,6 +201,13 @@ class SdCppServerAdapter(SdCppAdapter):
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         request = handle.request
+        # G2-B — per-request LoRA switching on this server is unverified
+        # (prompt-tag passthrough, conditioning-cache keying, worker
+        # isolation). Refuse rather than run adapters silently.
+        if request.get("loras"):
+            raise ValueError(
+                "LoRA adapters are not supported on the persistent "
+                "adapter — select local_adapter 'sdcpp'")
         if self._argv_prefix is not None:
             # Test/stub mode — no model resolution needed.
             model_key = request.get("model_key") or "stub-model"

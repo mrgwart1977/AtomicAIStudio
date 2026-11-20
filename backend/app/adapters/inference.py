@@ -25,6 +25,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -322,6 +323,71 @@ class SdCppAdapter:
 
     # ------------------------------------------------------------ contract
 
+    # G2-B — adapter-owned constant (never a request field). at_runtime
+    # is the mode designed for prompt-tag-driven adapter selection; a
+    # change needs verified evidence, not a config toggle.
+    LORA_APPLY_MODE = "at_runtime"
+
+    def _stage_loras(self, req: dict, staged_dir: Path) -> str:
+        """G2-B/B-1 — verify the pinned loras selections and snapshot
+        each adapter file into the job-private staging dir.
+
+        A staged file is an independent byte COPY: source mutation or
+        path replacement after staging cannot reach the runtime. Rows
+        are re-locked to the queued pins (install_row_id + sha256) so a
+        job can never silently shift onto different weights. Returns
+        the runtime prompt (composed prompt + approved tags)."""
+        from app.domain import lora_tags
+        if staged_dir.exists():
+            shutil.rmtree(staged_dir, ignore_errors=True)  # attempt re-run
+        staged_dir.mkdir(parents=True)
+        with self._sf() as s:
+            for entry in req["loras"]:
+                row = s.get(ModelInstall, entry.get("install_row_id"))
+                if row is None or row.status != "installed" \
+                        or row.model_key != entry["key"]:
+                    raise ValueError(
+                        f"LoRA '{entry['key']}' was removed or changed "
+                        "since the job was queued")
+                root = Path(row.install_root).resolve()
+                raw = Path(row.install_root) / row.rel_dir / row.file_name
+                src = raw.resolve()
+                if not src.is_relative_to(root) or not src.is_file():
+                    raise ValueError(
+                        f"LoRA '{entry['key']}' resolves outside its "
+                        "install root — refused")
+                if raw.is_symlink() or (
+                        hasattr(raw, "is_junction")
+                        and raw.is_junction()):
+                    raise ValueError(
+                        f"LoRA '{entry['key']}' is a link/reparse point "
+                        "— refused")
+                sha = hashlib.sha256()
+                with open(src, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(4 * 1024 * 1024),
+                                      b""):
+                        sha.update(chunk)
+                if sha.hexdigest() != entry["sha256"]:
+                    raise ValueError(
+                        f"LoRA '{entry['key']}' content changed since "
+                        "the job was queued — refusing")
+                lspec = model_catalog.get(entry["key"])
+                ok, why = (model_files.verify_lora_file(src, lspec)
+                           if lspec else (False, "spec removed"))
+                if not ok:
+                    raise ValueError(
+                        f"LoRA '{entry['key']}' failed structural "
+                        f"verification: {why}")
+                shutil.copyfile(src, staged_dir / entry["staged_name"])
+        prompt = lora_tags.apply_lora_tags(req["prompt"], req["loras"])
+        pinned = req.get("runtime_prompt_sha256")
+        if pinned and hashlib.sha256(
+                prompt.encode("utf-8")).hexdigest() != pinned:
+            raise ValueError(
+                "runtime prompt drifted since the job was queued — "
+                "refusing")
+        return prompt
+
     async def validate(self, request: dict[str, Any]) -> list[str]:
         errors = []
         if not (request.get("prompt") or "").strip():
@@ -348,6 +414,21 @@ class SdCppAdapter:
         return errors
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
+        """Lifecycle wrapper — owns the per-job LoRA staging dir so every
+        exit path (success, failure, cancel, abandoned generator) leaves
+        nothing behind."""
+        req = handle.request
+        staged_dir = (Path(handle.work_dir) / f"{handle.job_id}-loras"
+                      if req.get("loras") else None)
+        try:
+            async for u in self._run(handle, staged_dir):
+                yield u
+        finally:
+            if staged_dir is not None:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+
+    async def _run(self, handle: JobHandle,
+                   staged_dir: Path | None) -> AsyncIterator[dict[str, Any]]:
         spec, weight, _ = self._resolve(handle.request)
         req = handle.request
         seed = req.get("seed", -1)
@@ -362,10 +443,21 @@ class SdCppAdapter:
         work.mkdir(parents=True, exist_ok=True)
         out_base = work / f"{handle.job_id}"
 
+        prompt = req["prompt"]
+        if req.get("loras"):
+            # Last-line injection defense over the runtime-bound text —
+            # the compose layer already scanned; anything that reached a
+            # request without compose gets stopped here.
+            from app.domain import lora_tags
+            lora_tags.reject_lora_syntax(prompt, field="prompt")
+            lora_tags.reject_lora_syntax(
+                req.get("negative_prompt"), field="negative_prompt")
+            prompt = self._stage_loras(req, staged_dir)
+
         argv = self._argv_prefix(req) + [
             "-M", "img_gen",  # valid modes: img_gen, adetailer, vid_gen, convert, upscale, metadata, vid_upscale
             "-m", str(weight),
-            "-p", req["prompt"],
+            "-p", prompt,
             "-o", str(out_base) + ".png",
             "-W", str(width), "-H", str(height),
             "--steps", str(steps),
@@ -378,6 +470,9 @@ class SdCppAdapter:
             argv += ["-n", req["negative_prompt"]]
         if req.get("sampler"):
             argv += ["--sampling-method", req["sampler"]]
+        if req.get("loras"):
+            argv += ["--lora-model-dir", str(staged_dir),
+                     "--lora-apply-mode", self.LORA_APPLY_MODE]
         rt_spec = model_catalog.get_runtime(req.get("runtime_key") or "sdcpp")
         flavor, flavor_reason = self._pick_flavor(req.get("runtime_flavor"), rt_spec)
         gpu = req.get("assigned_gpu")

@@ -693,6 +693,18 @@ def _compose_shot_generate(session: Session, project: Project,
             "shot_id": shot.id,
             "scene_id": shot.scene_id,
         }, local_adapter_id)
+        from app.domain import model_catalog as _mc
+        loras = _check_loras(session, project, payload.get("loras"),
+                             _mc.get(payload.get("model_key") or ""),
+                             shot=shot)
+        if loras and local_adapter != "sdcpp":
+            raise CommandError(
+                422, "LoRA adapters are supported on the 'sdcpp' "
+                     "subprocess adapter only — persistent-server LoRA "
+                     "is deferred")
+        _lora_prompt_guard(
+            comp["prompt"] if comp else prompt,
+            payload.get("negative_prompt") or "")
         composed = {
             "model_key": payload.get("model_key"),
             "prompt": comp["prompt"] if comp else prompt,
@@ -713,7 +725,19 @@ def _compose_shot_generate(session: Session, project: Project,
         for k in ("width", "height", "steps", "cfg", "sampler", "batch"):
             if payload.get(k) is not None:
                 composed[k] = payload[k]
+        if loras:
+            # G2-B — pinned selections validated above; the generate.image
+            # request builder re-validates and re-pins at commit.
+            composed["loras"] = loras
+            from app.domain import lora_tags
+            composed["runtime_prompt_sha256"] = \
+                lora_tags.runtime_prompt_sha256(
+                    composed["prompt"], loras)
     else:
+        if payload.get("loras"):
+            raise CommandError(
+                422, "loras apply to the local execution target only — "
+                     "they are never carried to simulated generation")
         inner = ("generate.image.img2img" if src
                  else "generate.image.cloud")
         composed = {
@@ -956,6 +980,10 @@ def _compose_keyframe_generate(session: Session, project: Project,
             "prompt_context": comp,
         },
     }
+    if target != "local" and payload.get("loras"):
+        raise CommandError(
+            422, "loras apply to the local execution target only — "
+                 "they are never carried to simulated generation")
     if target == "local":
         # G2-A — explicit local routing onto the real sd.cpp adapters.
         # The request carries everything the adapter validates plus the
@@ -981,6 +1009,14 @@ def _compose_keyframe_generate(session: Session, project: Project,
         }, local_adapter_id)
         from app.domain import compatibility, model_catalog
         spec = model_catalog.get(model_key or "")
+        loras = _check_loras(session, project, payload.get("loras"),
+                             spec, shot=shot)
+        if loras and local_adapter != "sdcpp":
+            raise CommandError(
+                422, "LoRA adapters are supported on the 'sdcpp' "
+                     "subprocess adapter only — persistent-server LoRA "
+                     "is deferred")
+        _lora_prompt_guard(req["prompt"], req.get("negative_prompt") or "")
         width = int(payload.get("width") or settings.get("width") or 512)
         height = int(payload.get("height") or settings.get("height") or 512)
         batch = int(payload.get("batch") or settings.get("batch") or 1)
@@ -998,12 +1034,21 @@ def _compose_keyframe_generate(session: Session, project: Project,
             "residency_mode": payload.get("residency_mode"),
             "memory_risk_acknowledged":
                 bool(payload.get("memory_risk_acknowledged")),
-            "est_vram_bytes": compatibility.estimate_vram(
+            "est_vram_bytes": ((compatibility.estimate_vram(
                 spec, width, height, batch,
-                payload.get("residency_mode")) if spec else None,
+                payload.get("residency_mode")) or 0)
+                + LORA_VRAM_OVERHEAD_BYTES * len(loras)) if spec else None,
             "allow_cpu": bool(spec.capabilities.get("cpu_fallback"))
                          if spec else True,
         })
+        if loras:
+            # G2-B — pinned at compose; the worker re-verifies row+sha
+            # before staging so a queued job can never silently shift
+            # onto different weights.
+            from app.domain import lora_tags
+            req["loras"] = loras
+            req["runtime_prompt_sha256"] = \
+                lora_tags.runtime_prompt_sha256(req["prompt"], loras)
         return kf, req
     hold = parse_mock_hold(payload.get("mock_hold"))
     if hold:
@@ -1389,8 +1434,27 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
         warnings.append("Uses the mock adapter — output is a placeholder, not AI inference")
     if command_type == "generate.image":
         _check_generation(session, project, payload, "gen.image.sdcpp")
+        if payload.get("loras"):
+            # G2-B — same checks as commit, surfaced at preview.
+            from app.domain import model_catalog as _mc
+            from app.db.models import Shot as _Shot
+            _shot = session.get(_Shot, payload["shot_id"]) \
+                if payload.get("shot_id") else None
+            if _shot is not None and _shot.project_id != project.id:
+                _shot = None
+            _check_loras(session, project, payload["loras"],
+                         _mc.get(payload.get("model_key") or ""),
+                         shot=_shot)
+            _lora_prompt_guard(
+                payload.get("prompt") or "",
+                payload.get("negative_prompt") or "")
     if command_type == "generate.image.persistent":
         _check_generation(session, project, payload, "gen.image.sdcpp-server")
+        if payload.get("loras"):
+            raise CommandError(
+                422, "LoRA adapters are supported on the 'sdcpp' "
+                     "subprocess adapter only — persistent-server LoRA "
+                     "is deferred")
         warnings.append(
             "Experimental persistent worker — keeps the model resident between jobs; "
             "not yet validated for production use")
@@ -2598,7 +2662,17 @@ def _validate_keyframe(session: Session, project: Project,
                 "scene_id": _shot.scene_id if _shot else None,
             }, "gen.image.sdcpp-server" if local_adapter == "sdcpp-server"
                else "gen.image.sdcpp")
+            if payload.get("loras"):
+                # G2-B — run the full composer so preview applies every
+                # commit gate (selection/binding/prompt-tag guard on the
+                # composed prompt) instead of approving what commit
+                # would refuse. The composer is a pure read.
+                _compose_keyframe_generate(session, project, payload)
             return
+        if payload.get("loras"):
+            # Same refusal commit raises — loras never ride the mock
+            # target and preview must not pretend otherwise.
+            _compose_keyframe_generate(session, project, payload)
         parse_mock_hold(payload.get("mock_hold"))
         return
     if command_type == "keyframe.result":
@@ -3020,6 +3094,173 @@ def _check_generation(session: Session, project: Project, payload: dict,
             raise CommandError(422, "shot does not belong to the given scene")
     if payload.get("scene_id") and session.get(Scene, payload["scene_id"]) is None:
         raise CommandError(404, "scene not found in this project")
+
+
+LORA_MAX_STRENGTH = 2.0
+LORA_MAX_PER_JOB = 2
+# Per-adapter admission overhead added to est_vram — resident weights +
+# scratch for at_runtime application. ESTIMATE, refined by real-run data.
+LORA_VRAM_OVERHEAD_BYTES = 768 * 1024 * 1024
+
+
+def _check_loras(session: Session, project: Project, loras_in,
+                 base_spec, *, shot=None) -> list[dict]:
+    """G2-B/B-1 — validate + pin structured ``loras`` selections.
+
+    Returns the pinned entries the durable request carries: every field
+    needed to re-verify and stage at worker start (install row, sha256,
+    deterministic staged name). Refuses — never silently strips — on any
+    violation. ``shot=None`` means no cast context: identity adapters
+    then refuse outright (there is nothing to bind them to)."""
+    import math
+    from pathlib import Path
+    from app.domain import cast_state, model_catalog
+    from app.db.models import ModelInstall, ShotCharacter
+
+    if not loras_in:
+        return []
+    if not isinstance(loras_in, list) or len(loras_in) > LORA_MAX_PER_JOB:
+        raise CommandError(
+            422, "loras accepts at most 2 adapters — one identity plus "
+                 "one style")
+    if base_spec is None or base_spec.family != "sd1.5":
+        raise CommandError(
+            422, "LoRA adapters are enabled for SD 1.5 image models only")
+
+    seen_keys: set[str] = set()
+    seen_sha: set[str] = set()
+    n_identity = 0
+    out: list[dict] = []
+    cast_ids = _shot_cast_ids(session, shot) if shot is not None else set()
+    for i, raw in enumerate(loras_in):
+        entry = {"key": raw} if isinstance(raw, str) \
+            else dict(raw) if isinstance(raw, dict) else None
+        if entry is None:
+            raise CommandError(
+                422, f"loras[{i}] must be a model key or a "
+                     "{'key', 'strength'} object")
+        key = (entry.get("key") or "")
+        if not isinstance(key, str) or not key.strip():
+            raise CommandError(422, f"loras[{i}].key is required")
+        key = key.strip()
+        if key in seen_keys:
+            raise CommandError(422, f"loras[{i}]: duplicate adapter '{key}'")
+        seen_keys.add(key)
+        spec = model_catalog.get(key)
+        if spec is None or spec.modality != "lora":
+            raise CommandError(
+                422, f"unknown LoRA '{key}' — pick an installed adapter")
+        if spec.support not in ("production", "tested"):
+            raise CommandError(
+                422, f"{spec.display_name} is {spec.support} — "
+                     "catalog-visible but not usable yet")
+        if not spec.license.get("commercial_ok", True):
+            raise CommandError(
+                422, f"{spec.display_name} has a restricted license and "
+                     "cannot be used")
+        if spec.family != base_spec.family:
+            raise CommandError(
+                422, f"{spec.display_name} targets '{spec.family}' base "
+                     f"models — incompatible with '{base_spec.family}'")
+        if spec.fmt != "safetensors":
+            raise CommandError(
+                422, f"{spec.display_name} is {spec.fmt} — only "
+                     "safetensors LoRAs are verified on this runtime")
+        role = (spec.capabilities or {}).get("lora_role")
+        if role not in ("identity", "style"):
+            raise CommandError(
+                422, f"{spec.display_name} declares no lora_role — "
+                     "unclassified adapters refuse")
+        row = session.execute(
+            select(ModelInstall).where(
+                ModelInstall.model_key == key,
+                ModelInstall.status == "installed")).scalars().first()
+        if row is None:
+            raise CommandError(
+                422, f"{spec.display_name} is not installed — install "
+                     "it from the Model Manager first")
+        src = (Path(row.install_root) / row.rel_dir / row.file_name
+               if row.file_name else None)
+        if src is None or not src.is_file():
+            raise CommandError(
+                422, f"{spec.display_name} install is incomplete — "
+                     "reinstall it")
+        sha = (spec.files[0].sha256 if spec.files else None) \
+            or (row.sha256 or "")
+        if not sha:
+            raise CommandError(
+                422, f"{spec.display_name} has no verifiable sha256 — "
+                     "the adapter cannot be pinned")
+        if sha in seen_sha:
+            raise CommandError(
+                422, f"loras[{i}]: same weights as another selection — "
+                     "duplicates are refused")
+        seen_sha.add(sha)
+        s = entry.get("strength")
+        if s is None:
+            strength = 1.0
+        else:
+            if isinstance(s, bool) or not isinstance(s, (int, float)):
+                raise CommandError(
+                    422, f"loras[{i}].strength must be a number")
+            strength = float(s)
+            if not math.isfinite(strength) \
+                    or strength <= 0 or strength > LORA_MAX_STRENGTH:
+                raise CommandError(
+                    422, f"loras[{i}].strength must be a finite number "
+                         "in (0, 2.0]")
+        bound_char = None
+        if role == "identity":
+            n_identity += 1
+            if n_identity > 1:
+                raise CommandError(
+                    422, "at most one identity LoRA per generation — "
+                         "multi-character blending is not supported")
+            if shot is not None:
+                for r in session.execute(
+                        select(ShotCharacter).where(
+                            ShotCharacter.shot_id == shot.id)).scalars():
+                    if r.character_id in cast_ids and key in \
+                            cast_state.lora_keys(r.lora_json):
+                        bound_char = r.character_id
+                        break
+            if bound_char is None:
+                raise CommandError(
+                    422, f"identity LoRA '{key}' is not bound to a "
+                         "character in this shot's cast — bind it via "
+                         "shot.cast first")
+        else:
+            linked = any(
+                key in cast_state.lora_keys(r.lora_json)
+                for r in session.execute(
+                    select(ShotCharacter).where(
+                        ShotCharacter.project_id == project.id)).scalars())
+            if not linked:
+                raise CommandError(
+                    422, f"style LoRA '{key}' is not linked to this "
+                         "project — bind it via shot.cast first")
+        staged_name = (f"{key}-{sha[:12]}"
+                       f"{Path(row.file_name).suffix or '.safetensors'}")
+        out.append({
+            "key": key, "version": spec.version, "sha256": sha,
+            "install_row_id": row.id, "staged_name": staged_name,
+            "strength": strength, "role": role,
+            "base_family": spec.family,
+            "bound_character_id": bound_char,
+        })
+    return out
+
+
+def _lora_prompt_guard(prompt: str, negative: str) -> None:
+    """G2-B/B-1 — last-mile injection scan over the exact text bound for
+    the runtime: prompt (composed — user text + context), negative prompt.
+    Runs on EVERY local image generation, lora-selected or not."""
+    from app.domain import lora_tags
+    try:
+        lora_tags.reject_lora_syntax(prompt, field="prompt")
+        lora_tags.reject_lora_syntax(negative, field="negative_prompt")
+    except lora_tags.LoraSyntaxError as e:
+        raise CommandError(422, str(e)) from e
 
 
 def _experimental_ok() -> bool:
@@ -5337,6 +5578,13 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                          "in this build — persistent inference may be "
                          "disabled; select local_adapter 'sdcpp' or "
                          "enable it")
+        # G2-B — loras only ever run on the subprocess adapter; any other
+        # resolution (sim, server, video) refuses rather than dropping
+        # the adapters or silently switching.
+        if request.get("loras") and _adapter_id != "gen.image.sdcpp":
+            raise CommandError(
+                422, "LoRA adapters run on the 'gen.image.sdcpp' "
+                     "subprocess adapter only")
         # A7 — a submit carrying plan_fingerprint pins the exact cloud
         # plan it was approved against; provider/credential/budget
         # drift since the preview refuses the submit.
@@ -5924,8 +6172,27 @@ def _job_request(session: Session, project: Project, command_type: str,
             req["shot_id"] = payload["shot_id"]
         req["set_thumbnail"] = bool(payload.get("set_thumbnail"))
     elif command_type in ("generate.image", "generate.image.persistent"):
-        from app.domain import compatibility, model_catalog
+        from app.domain import compatibility, lora_tags, model_catalog
         spec = model_catalog.get(payload.get("model_key") or "")
+        loras = []
+        if payload.get("loras"):
+            # G2-B — pinned selections from the shot/keyframe compose are
+            # re-validated here (idempotent); direct generate.image calls
+            # get the same checks with no cast context. Persistent LoRA
+            # stays refused until B-2 verifies server-side switching.
+            if command_type == "generate.image.persistent":
+                raise CommandError(
+                    422, "LoRA adapters are supported on the 'sdcpp' "
+                         "subprocess adapter only — persistent-server "
+                         "LoRA is deferred")
+            shot = session.get(Shot, payload["shot_id"]) \
+                if payload.get("shot_id") else None
+            if shot is not None and shot.project_id != project.id:
+                shot = None
+            loras = _check_loras(session, project, payload["loras"],
+                                 spec, shot=shot)
+            _lora_prompt_guard(
+                payload["prompt"], payload.get("negative_prompt") or "")
         req = {
             "command_type": command_type,
             "model_key": payload["model_key"],
@@ -5950,9 +6217,14 @@ def _job_request(session: Session, project: Project, command_type: str,
             # commit would dispatch the JOB_COMMANDS default instead.
             "execution_target": payload.get("execution_target"),
             "local_adapter_id": payload.get("local_adapter_id"),
-            "est_vram_bytes": compatibility.estimate_vram(
+            "loras": loras,
+            "runtime_prompt_sha256": (lora_tags.runtime_prompt_sha256(
+                payload["prompt"], loras) if loras
+                else payload.get("runtime_prompt_sha256")),
+            "est_vram_bytes": ((compatibility.estimate_vram(
                 spec, int(payload.get("width", 512)), int(payload.get("height", 512)),
-                int(payload.get("batch", 1)), payload.get("residency_mode")) if spec else None,
+                int(payload.get("batch", 1)), payload.get("residency_mode")) or 0)
+                + LORA_VRAM_OVERHEAD_BYTES * len(loras)) if spec else None,
             # models without a CPU path must stay queued (honest), not burn CPU
             "allow_cpu": bool(spec.capabilities.get("cpu_fallback")) if spec else True,
         }
