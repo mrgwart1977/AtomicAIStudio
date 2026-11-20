@@ -60,7 +60,10 @@ class ModelSpec:
     #   experimental — real model, runtime path not integrated yet
     #   planned      — future milestone; visible in catalog, never installable
     support: str = "production"
-    modality: str = "image"  # image | video | audio | multimodal
+    modality: str = "image"  # image | video | audio | multimodal | lora
+    # G2-B — "lora" entries are attachable adapters, not generatable
+    # models: `family` names the TARGET base family ("sd1.5") and
+    # capabilities["lora_role"] declares "identity" | "style".
     modes: tuple[str, ...] = ("text2image",)  # text2image | image2image | text2video | image2video | audio2video | ...
     # VRAM estimate anchors (ESTIMATES, not measurements): baseline peak at
     # 512x512, split into weight-resident + activation parts.
