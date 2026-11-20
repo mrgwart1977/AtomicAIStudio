@@ -113,9 +113,11 @@ export function loraRole(entry: ModelCatalogEntry): LoraRole | null {
  *  is shown as an info chip instead of a mismatch verdict. */
 export type LoraCatalogState =
   | "planned"              // support="planned" — future, never installable
-  | "family_mismatch"      // entry.family !== baseFamily
   | "unverified"           // support="experimental" — real artifact, unintegrated path
+  | "license_restricted"   // license.commercial_ok === false — backend refuses
+  | "family_mismatch"      // entry.family !== baseFamily
   | "incompatible_format"  // fmt !== "safetensors" (gguf LoRAs stay gated)
+  | "unknown_role"         // lora_role missing or not identity/style — backend refuses
   | "installing"           // install row in flight (downloading/verifying)
   | "not_installed"        // cataloged + valid, no completed install
   | "available";           // installed — eligible to bind & select
@@ -124,10 +126,18 @@ export function loraCatalogState(
   entry: ModelCatalogEntry,
   baseFamily: string | null,
 ): LoraCatalogState {
+  // Precedence mirrors the backend `_check_loras` eligibility order:
+  // support tier → license → family → format → role → install state.
   if (entry.support === "planned") return "planned";
-  if (baseFamily !== null && entry.family !== baseFamily) return "family_mismatch";
   if (entry.support === "experimental") return "unverified";
+  // Backend: spec.license.get("commercial_ok", True) — only an explicit
+  // restriction refuses; absent metadata is permitted at the same places
+  // the backend permits it, and the license name still renders on the
+  // card rather than being silently upgraded.
+  if (entry.license?.commercial_ok === false) return "license_restricted";
+  if (baseFamily !== null && entry.family !== baseFamily) return "family_mismatch";
   if (entry.format !== "safetensors") return "incompatible_format";
+  if (loraRole(entry) === null) return "unknown_role";
   const st = entry.install?.status;
   if (st === "downloading" || st === "verifying") return "installing";
   if (st !== "installed") return "not_installed";
@@ -136,9 +146,11 @@ export function loraCatalogState(
 
 export const LORA_STATE_BADGE: Record<LoraCatalogState, { label: string; cls: string }> = {
   planned: { label: "Planned", cls: "bg-line/40 text-muted" },
-  family_mismatch: { label: "Different base family", cls: "bg-rose/15 text-rose" },
   unverified: { label: "Unverified", cls: "bg-amber/15 text-amber" },
+  license_restricted: { label: "Restricted license", cls: "bg-rose/15 text-rose" },
+  family_mismatch: { label: "Different base family", cls: "bg-rose/15 text-rose" },
   incompatible_format: { label: "Unsupported format", cls: "bg-rose/15 text-rose" },
+  unknown_role: { label: "Role not supported", cls: "bg-rose/15 text-rose" },
   installing: { label: "Installing…", cls: "bg-sky/15 text-sky" },
   not_installed: { label: "Not installed", cls: "bg-line/40 text-muted" },
   available: { label: "Installed", cls: "bg-teal/15 text-teal" },

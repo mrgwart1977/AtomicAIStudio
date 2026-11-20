@@ -77,6 +77,63 @@ describe("loraCatalogState — advisory classification", () => {
       entry({ format: "gguf" }), "sd1.5")).toBe("incompatible_format");
   });
 
+  it("explicit restricted license is never available", () => {
+    expect(loraCatalogState(entry({
+      license: { name: "NC", url: "", commercial_ok: false, notes: "" },
+    }), "sd1.5")).toBe("license_restricted");
+    expect(loraCatalogState(entry({
+      license: { name: "CC0", url: "", commercial_ok: true, notes: "" },
+    }), "sd1.5")).toBe("available");
+  });
+
+  it("missing license metadata matches the backend's permissive default", () => {
+    // Backend: spec.license.get("commercial_ok", True) — absent metadata
+    // is permitted where the backend permits it; the license name still
+    // displays on the card. Advisory only — never an authorization claim.
+    expect(loraCatalogState(entry({
+      license: { name: "custom", url: "", commercial_ok: undefined as unknown as boolean, notes: "" },
+    }), "sd1.5")).toBe("available");
+  });
+
+  it("missing or unsupported roles are never available", () => {
+    expect(loraCatalogState(
+      entry({ capabilities: {} }), "sd1.5")).toBe("unknown_role");
+    expect(loraCatalogState(entry({
+      capabilities: { lora_role: "regional" as "identity" },
+    }), "sd1.5")).toBe("unknown_role");
+    expect(loraCatalogState(entry({
+      capabilities: { lora_role: null as unknown as "identity" },
+    }), "sd1.5")).toBe("unknown_role");
+    expect(loraCatalogState(
+      entry({ capabilities: { lora_role: "style" } }), "sd1.5"))
+      .toBe("available");
+  });
+
+  it("precedence mirrors backend gate order: support → license → family → format → role", () => {
+    // experimental + restricted license → unverified (support first)
+    expect(loraCatalogState(entry({
+      support: "experimental",
+      license: { name: "NC", url: "", commercial_ok: false, notes: "" },
+    }), "sd1.5")).toBe("unverified");
+    // restricted + family mismatch → license first
+    expect(loraCatalogState(entry({
+      family: "sdxl",
+      license: { name: "NC", url: "", commercial_ok: false, notes: "" },
+    }), "sd1.5")).toBe("license_restricted");
+    // mismatch + bad format → family first
+    expect(loraCatalogState(entry({
+      family: "sdxl", format: "gguf",
+    }), "sd1.5")).toBe("family_mismatch");
+    // bad format + missing role → format first
+    expect(loraCatalogState(entry({
+      format: "gguf", capabilities: {},
+    }), "sd1.5")).toBe("incompatible_format");
+    // missing role + not installed → role first
+    expect(loraCatalogState(entry({
+      capabilities: {}, install: { status: "not_installed" },
+    }), "sd1.5")).toBe("unknown_role");
+  });
+
   it("in-flight and absent installs report honestly", () => {
     for (const status of ["downloading", "verifying"]) {
       expect(loraCatalogState(
