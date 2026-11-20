@@ -6,6 +6,18 @@ scheduled, queued, or wired to any shipped control. Execution requires
 explicit owner approval of the B2b-L stage plus the owner-approval
 files described below.
 
+> **SUPERSEDED — historical record.** This B2b-P.10 proposal
+> originally specified the lighthouse prompt in the table below. The
+> current candidate validation request is defined by
+> `docs/b2bl-readiness-package.md` §3 — prompt `"Reply with exactly:
+> ATOMIC_DEEPSEEK_OK"` — which also documents the hardened
+> credential-generation binding, permit expiry, disarm, and pre-send
+> checks added after this proposal was written. **Future operators
+> must follow the readiness package**, not the prompt value here. This
+> document is preserved unchanged as the procedure's history; its
+> prompt and any fingerprint derived from it are superseded and not
+> executable.
+
 ## Proposed single request
 
 | Field | Value | Basis |

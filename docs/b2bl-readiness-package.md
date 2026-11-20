@@ -42,11 +42,14 @@ Newly-noted unused surface: `user_id` (isolation tag), vision/file
 content parts, Responses/Anthropic/FIM APIs, server tools — the frozen
 request uses none of them.
 
-## 3. The frozen lighthouse request (canonical)
+## 3. The frozen candidate request (canonical)
 
-The prompt already fixed in `docs/b2b-live-validation-proposal.md` is
-kept — "Write one sentence about a lighthouse." — per instruction to
-prefer the existing approved prompt.
+Candidate validation prompt (proposed for owner approval):
+**"Reply with exactly: ATOMIC_DEEPSEEK_OK"** — chosen so the response
+can be verified by exact match. This supersedes the earlier proposal's
+lighthouse prompt (`docs/b2b-live-validation-proposal.md` — now a
+historical record); any fingerprint or approval example computed
+against that prompt is void for this request.
 
 ```json
 {
@@ -57,7 +60,7 @@ prefer the existing approved prompt.
   "request_body": {
     "model": "deepseek-flash",
     "messages": [
-      {"role": "user", "content": "Write one sentence about a lighthouse."}
+      {"role": "user", "content": "Reply with exactly: ATOMIC_DEEPSEEK_OK"}
     ],
     "max_tokens": 32,
     "stream": false,
@@ -84,7 +87,17 @@ cost cap, project, credential ref, **credential generation** —
 produces a different fingerprint and invalidates approvals naming the
 old one. Secret material is never part of the fingerprint.
 
-**Credential generation** is a random UUID minted by the DPAPI vault
+**The fingerprint reported in the offline preflight review
+(`fad08e59…b751`) was computed with SYNTHETIC `project_id` and
+`credential_generation` placeholders and is NOT valid for real
+authorization.** It proves the mechanism is deterministic; it names no
+real project and no real credential generation. The real fingerprint
+must be computed by the application after the owner configures the
+actual project and the actual credential — it is then surfaced by the
+arm-refusal message and `live-status`, and only that application-
+computed value may be written into `arm-approval.json`. Synthetic
+placeholder values must never be inserted into real owner or execution
+approval files.
 on *every* write that stores material (`set_fields` — including
 re-saving an identical value, and fresh after delete+re-create). It is
 never derived from the secret or ciphertext — two consecutive saves of
@@ -96,29 +109,52 @@ outstanding approvals** — deliberate fail-safe; the vault cannot prove
 "same key" so it treats every write as a rotation. Empty or failed
 writes do not rotate.
 
-Response assessment (per instruction): the validation judges the actual
-response — HTTP status, `choices[0].message.content`,
-`finish_reason`, `usage` — not a literal "READY" match; minor
-formatting differences are not failure evidence.
+The generation identifier is **non-secret metadata** — it reveals only
+THAT a credential version exists, never its value — but it is still a
+binding: the approval's `credential_generation` must equal the
+generation of the credential actually used for dispatch, verified at
+arm, consume, atomic read, and the pre-send probe.
 
-## 4. Bounded worst-case cost
+**Response success criterion — two distinct judgments:**
+(1) *Connectivity/transport success:* HTTP 2xx with a parseable
+`choices[0].message.content` proves the request reached the provider
+and the contract holds. (2) *Exact-output validation:* the content,
+trimmed of surrounding whitespace, must equal exactly
+`ATOMIC_DEEPSEEK_OK`. A valid HTTP response with different text is
+recorded as a **validation discrepancy**, not an exact-output success
+— connectivity may still pass while content validation fails.
+`finish_reason` and `usage` are captured for accounting either way.
 
-| Component | Bound | Peak rate | Worst cost |
+## 4. Cost — illustrative estimate vs enforced reservation
+
+**Rates** (DeepSeek pricing page, **verified 2026-11-13 — subject to
+revalidation against the official page within 48 h before any
+execution**): deepseek-flash peak $0.30/1M input tokens (cache-miss),
+$1.20/1M output tokens, $0.006/1M cache-hit input; off-peak rates are
+half of peak.
+
+**Token counts below are ILLUSTRATIVE ESTIMATES — not bounds.** A
+character count is not a guaranteed token count: DeepSeek's own
+tokenizer decides, message-framing fields add tokens beyond the
+visible prompt text, and the provider may bill additional input we
+cannot observe (cache accounting, internal scaffolding). The honest
+figures:
+
+| Component | Illustrative estimate | At verified peak rate | Illustrative cost |
 |---|---|---|---|
-| Input | prompt is FIXED ≤ 500 chars ≈ ≤ 500 tokens absolute worst (1 tok/char) | $0.30/1M (cache-miss) | $0.00015 |
-| Output | `max_tokens` = 32 hard cap | $1.20/1M | $0.0000384 |
-| **Total** | | | **≈ $0.0002** |
+| Input | ~38 visible prompt chars + message-format overhead → order of tens of tokens | $0.30/1M | ≈ $0.00001–0.00003 |
+| Output | `max_tokens` = 32 hard cap (a real bound — the API will not emit more) | $1.20/1M | ≤ $0.0000384 |
+| **Total** | | | **order of ≈ $0.00005** |
 
-The $0.05 reservation is ~250× worst case — a **fail-safe bound, not
-an estimate**. DeepSeek documents **no** input-token cap parameter
-(context limit is implicit); input is therefore bounded by the fixed
-prompt, not a parameter.
-
-**DISCLOSURE — no provider-side cap:** DeepSeek offers no per-request
-charge limit; $0.05 is an internal reservation only. If the provider
-misbehaved or billed differently, real exposure is the account balance
-itself — the owner's operational control is keeping that balance
-small. The reservation never claims to be an externally enforced cap.
+The **$0.05 USD reservation is enforced by Atomic Dream Engine, not
+DeepSeek** — it is an internal admission check, not a provider-side
+spending cap. DeepSeek documents no per-request charge limit, so the
+estimate above is **not a guaranteed provider charge**; the provider
+could bill differently. **The provider account's available balance
+remains the broader financial exposure** — the owner's operational
+control is keeping that balance small. **Any pricing or model-contract
+change requires renewed pre-execution review** before the request may
+proceed.
 
 ## 5. Credential entry — owner instructions
 
@@ -147,7 +183,7 @@ Owner writes `%APPDATA%…\<data_dir>\owner\arm-approval.json`:
 
 Then the owner (or operator on their behalf) commits
 `cloud.live.validate_arm` with payload `{credential_ref: "deepseek",
-prompt: "Write one sentence about a lighthouse.", max_output_tokens:
+prompt: "Reply with exactly: ATOMIC_DEEPSEEK_OK", max_output_tokens:
 32, max_cost_usd: "0.05"}`. `arm()` refuses unless every check passes:
 permit free, prompt ≤500 chars, tokens ≤64, cost ≤$0.05, credential
 configured (metadata) **with a generation marker**, full admission
@@ -380,6 +416,8 @@ Post-dispatch ambiguity → hold + report, never a second request.
 | Provider request id | response `id` field if present |
 | Latency | ms |
 | Completion | `finish_reason`, outcome class |
+| Connectivity | HTTP 2xx + parseable content: pass/fail |
+| Exact-output validation | content trimmed == `ATOMIC_DEEPSEEK_OK`: pass / DISCREPANCY (different text is a discrepancy, never an exact-output pass) |
 | Usage | prompt/completion/cache-split tokens |
 | Calculated cost | micro-USD at catalog peak rates |
 | Settlement | settled / released / held-open |
@@ -405,11 +443,23 @@ Post-dispatch ambiguity → hold + report, never a second request.
 
 To execute, the owner must approve **B2b-L explicitly**, covering:
 one (1) `POST /chat/completions` to `api.deepseek.com`, model
-`deepseek-flash`, the frozen prompt above, `max_tokens` 32,
-`stream` false, `thinking` disabled, ≤ $0.05 internal reservation,
-owner-configured credential, owner-written arm + exec approval files.
-Nothing else is requested — no follow-ups, no retries, no further
-providers, no media, no tools.
+`deepseek-flash`, prompt `"Reply with exactly: ATOMIC_DEEPSEEK_OK"`,
+`max_tokens` 32, `stream` false, `thinking` disabled, ≤ $0.05
+reservation **enforced by Atomic Dream Engine — not a provider-side
+spending cap** (the provider account's available balance remains the
+broader financial exposure), owner-configured credential, and
+owner-written arm + exec approval files bound to the fingerprint the
+**application** computes at arm time — never a fingerprint from any
+document or rehearsal.
+
+**A real execution requires separate, explicit authorization** —
+nothing in this package, the readiness UI, or any artifact created so
+far grants it. **No automatic retries are permitted** — `retries=0`,
+no retry code path exists. **An uncertain network outcome must not be
+automatically resubmitted** — a non-terminal result holds the
+reservation `open` for explicit owner reconcile. Nothing else is
+requested — no follow-ups, no retries, no further providers, no media,
+no tools.
 
 ## 18. Package contents
 
