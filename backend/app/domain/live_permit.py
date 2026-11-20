@@ -66,6 +66,8 @@ MAX_PROMPT_CHARS = 500
 #       {"approve": "validate_arm",
 #        "provider_key": "deepseek", "model_id": "deepseek-flash",
 #        "project_id": "<project id>",
+#        "credential_generation": "<vault generation at approval time>",
+#        "request_fingerprint": "<sha256 of the canonical request>",
 #        "not_after": "<ISO-8601 UTC>"}
 #
 #   owner/exec-approval.json   — the Stage B2b execution lock.
@@ -147,6 +149,7 @@ def permit_fingerprint(permit: dict[str, Any]) -> str:
 
 def canonical_request(*, provider_key: str, model_id: str,
                       project_id: str, credential_ref: str,
+                      credential_generation: str | None,
                       prompt: str, max_output_tokens: int,
                       max_cost_usd: Any) -> dict[str, Any]:
     """The canonical wire request + authorization context the owner is
@@ -171,6 +174,7 @@ def canonical_request(*, provider_key: str, model_id: str,
         "authorization": {
             "project_id": project_id,
             "credential_ref": credential_ref,
+            "credential_generation": credential_generation,
             "scope": "single_request — one completion, non-streaming",
         },
     }
@@ -293,11 +297,19 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
     if not ref:
         raise PermitRefused("credential_ref", "a vault credential "
                             "reference is required")
-    if not vault.status(ref).get("configured"):
+    cred_status = vault.status(ref)
+    if not cred_status.get("configured"):
         raise PermitRefused(
             "credential_ref",
             f"no configured credential under '{ref}' — metadata check "
             "only, the secret itself is never read here")
+    gen = cred_status.get("generation")
+    if not gen:
+        raise PermitRefused(
+            "credential_generation",
+            f"credential '{ref}' carries no generation marker — an "
+            "unversioned credential cannot be bound to an approval; "
+            "re-save it in the vault first")
     # Full Stage A admission chain — enablement, evidence freshness,
     # budgets, caps, concurrency — must ALREADY pass before arming.
     allowed, code = lg.dispatch_admission(
@@ -312,22 +324,31 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
     doc = load_approval(data_dir, "arm")
     for f, want in (("provider_key", PERMIT_PROVIDER),
                     ("model_id", PERMIT_MODEL),
-                    ("project_id", project_id)):
+                    ("project_id", project_id),
+                    ("credential_generation", gen)):
         if doc.get(f) != want:
             raise PermitRefused(
                 f"owner_approval:{f}",
                 f"owner arm-approval {f} does not match this request")
     req_fp = request_fingerprint(
         provider_key=PERMIT_PROVIDER, model_id=PERMIT_MODEL,
-        project_id=project_id, credential_ref=ref, prompt=prompt,
+        project_id=project_id, credential_ref=ref,
+        credential_generation=gen, prompt=prompt,
         max_output_tokens=tokens, max_cost_usd=cost)
     if doc.get("request_fingerprint") != req_fp:
         raise PermitRefused(
             "owner_approval:request_fingerprint",
             "arm approval does not name this exact request — "
             "the fingerprint covers endpoint, body, thinking, "
-            "stream, cost cap and authorization scope. Expected "
+            "stream, cost cap, credential generation and "
+            "authorization scope. Expected "
             f"request_fingerprint: {req_fp}")
+    # The approval's expiry becomes the armed permit's own expiry —
+    # load_approval has already proven it parses and is unlapsed, so a
+    # missing/malformed value cannot reach the record.
+    expiry = datetime.fromisoformat(str(doc["not_after"]))
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
     st = _state(session)
     permit = {
         "permit_id": new_id(),
@@ -335,11 +356,13 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
         "model_id": PERMIT_MODEL,
         "project_id": project_id,
         "credential_ref": ref,
+        "credential_generation": gen,
         "prompt": prompt,
         "max_output_tokens": tokens,
         "max_cost_usd": str(cost),
         "request_fingerprint": req_fp,
         "armed_at": _now(),
+        "not_after": expiry.isoformat(),
         "armed_command_id": command_id,
     }
     st["armed"] = permit
@@ -353,7 +376,26 @@ def arm(session: Session, *, project_id: str, credential_ref: str,
 # ------------------------------------------------------------------
 
 _MATCH_FIELDS = ("provider_key", "model_id", "project_id",
-                 "credential_ref", "prompt", "max_output_tokens")
+                 "credential_ref", "credential_generation", "prompt",
+                 "max_output_tokens")
+
+
+def _permit_expiry(permit: dict[str, Any]) -> datetime:
+    """Parse the armed permit's expiry. Fail CLOSED on any defect —
+    a permit without a verifiable expiry is treated as invalid, never
+    as unbounded."""
+    raw = permit.get("not_after")
+    try:
+        na = datetime.fromisoformat(str(raw))
+        if na.tzinfo is None:
+            na = na.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise PermitRefused(
+            "permit_expiry",
+            "armed permit carries no valid expiry — it predates the "
+            "expiry binding or was tampered with; disarm and re-arm "
+            "under a fresh approval") from exc
+    return na
 
 
 def consume(session: Session, *, job_id: str,
@@ -376,6 +418,14 @@ def consume(session: Session, *, job_id: str,
     # Lock check FIRST — absent/expired/mis-scoped exec approval
     # refuses before anything else is compared.
     doc = load_approval(data_dir, "exec")
+    # Permit expiry — carried from the arm approval. An expired (or
+    # expiry-less legacy) permit can never be consumed; the refusal
+    # does not consume it, and disarm remains available.
+    if _permit_expiry(permit) <= datetime.now(timezone.utc):
+        raise PermitRefused(
+            "permit_expired",
+            "armed permit has expired — it can never be consumed; "
+            "disarm it and re-arm under a fresh approval")
     for f in _MATCH_FIELDS:
         if dispatch.get(f) != permit.get(f):
             raise PermitRefused(
@@ -398,6 +448,72 @@ def consume(session: Session, *, job_id: str,
     st["armed"] = None
     record = {**permit, "consumed_at": _now(), "consumed_job_id": job_id}
     st["consumed"].append(record)
+    _save(session, st)
+    return record
+
+
+# ------------------------------------------------------------------
+# disarm — void a stale/unwanted armed permit (de-authorizing only)
+# ------------------------------------------------------------------
+
+def voided_history(session: Session) -> list[dict[str, Any]]:
+    return list(_state(session).get("voided", []))
+
+
+def disarm(session: Session, *, permit_id: str,
+           fingerprint: str, reason: str | None,
+           command_id: str | None = None) -> dict[str, Any]:
+    """Void the armed permit — targeted by EXACT permit_id +
+    fingerprint so it can never touch a permit it didn't name.
+
+    Grants no authority: it only REMOVES an outstanding authorization,
+    so no owner approval file is required (same class as
+    cloud.live.disable). Deterministic outcomes:
+
+      * armed permit matches id+fingerprint → moved to ``voided``
+        (permanently non-consumable; consume() only ever reads
+        ``armed``).
+      * armed permit is a DIFFERENT permit → refuses without touching
+        it — a stale disarm can never void a newer arm.
+      * nothing armed but the same target is already voided →
+        idempotent replay, returns the voided record.
+      * target already consumed → refuses (already non-consumable;
+        refusal surfaces that fact rather than implying a void).
+    """
+    st = _state(session)
+    permit = st["armed"]
+    if permit is None:
+        for v in st.get("voided", []):
+            if v.get("permit_id") == permit_id:
+                if v.get("armed_fingerprint") == fingerprint:
+                    return {**v, "replay": True}
+                break
+        for c in st.get("consumed", []):
+            if c.get("permit_id") == permit_id:
+                raise PermitRefused(
+                    "already_consumed",
+                    "the targeted permit was already consumed — it is "
+                    "permanently non-consumable; nothing to void")
+        raise PermitRefused(
+            "no_permit", "no armed validation permit — nothing to disarm")
+    if permit.get("permit_id") != permit_id:
+        raise PermitRefused(
+            "stale_target",
+            "the targeted permit is not the armed one — a disarm "
+            "issued against an older permit cannot void the current "
+            "arm; refused, armed permit untouched")
+    fp = permit_fingerprint(permit)
+    if fp != fingerprint:
+        raise PermitRefused(
+            "fingerprint_mismatch",
+            "disarm fingerprint does not match the armed permit — "
+            "refused, permit stays armed")
+    st["armed"] = None
+    record = {**permit, "armed_fingerprint": fp,
+              "voided_at": _now(),
+              "voided_command_id": command_id,
+              "voided_reason": str(reason or "owner disarm")}
+    st.setdefault("voided", []).append(record)
     _save(session, st)
     return record
 

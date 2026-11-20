@@ -29,6 +29,7 @@ class CredentialStatusOut(BaseModel):
     configured: bool
     fields: list[str]
     set_at: str | None
+    generation: str | None = None
     readable: bool
     unreadable_reason: str | None
 

@@ -131,6 +131,7 @@ CommandType = Literal[
     "cloud.live.enable", "cloud.live.disable",
     "cloud.live.disable_all", "cloud.live.resume",
     "cloud.live.validate_arm", "cloud.live.validate_run",
+    "cloud.live.validate_disarm",
     "timeline.create", "timeline.update", "timeline.archive",
     "timeline.unarchive", "timeline.revert", "timeline.duplicate",
     "timeline.undo", "timeline.redo",

@@ -42,22 +42,42 @@ GOOD_RESOLVER = lambda h, p: ["93.184.216.34"]  # noqa: E731
 
 class RecordingVault:
     """Ref-aware vault double — only listed refs report configured, so
-    arm's metadata check genuinely distinguishes known refs from typos."""
+    arm's metadata check genuinely distinguishes known refs from typos.
+    Tracks a generation marker like the real vault."""
 
     def __init__(self, configured=True, refs=("deepseek",)):
         self.get_calls: list[str] = []
         self._configured = configured
         self._refs = set(refs)
+        self._fields = {"api_key": DUMMY_KEY}
+        self.generation = "gen-1"
+        self._rot = 1
 
     def status(self, key):
         return {"configured": self._configured and key in self._refs,
-                "fields": ["api_key"],
-                "set_at": "2026-01-01T00:00:00Z", "readable": True,
+                "fields": list(self._fields),
+                "set_at": "2026-01-01T00:00:00Z",
+                "generation": self.generation, "readable": True,
                 "unreadable_reason": None}
 
     def get_fields(self, key):
         self.get_calls.append(key)
-        return {"api_key": DUMMY_KEY}
+        return dict(self._fields)
+
+    def get_fields_with_generation(self, key):
+        self.get_calls.append(key)
+        return dict(self._fields), self.generation
+
+    def current_generation(self, key):
+        return self.generation
+
+    def rotate(self, fields=None):
+        """Simulate a credential write under the same ref — a NEW
+        generation every time, optionally new field values."""
+        self._rot += 1
+        self.generation = f"gen-{self._rot}"
+        if fields is not None:
+            self._fields = dict(fields)
 
 
 @pytest.fixture()
@@ -116,11 +136,15 @@ def _expiry(hours=1):
 
 
 def _approve_arm(client, pid, **overrides):
+    gen = client.app.state.provider_vault.status(
+        "deepseek").get("generation")
     doc = {"approve": "validate_arm", "provider_key": "deepseek",
            "model_id": "deepseek-flash", "project_id": pid,
+           "credential_generation": gen,
            "request_fingerprint": lp.request_fingerprint(
                provider_key="deepseek", model_id="deepseek-flash",
                project_id=pid, credential_ref="deepseek",
+               credential_generation=gen,
                prompt=PROMPT, max_output_tokens=32,
                max_cost_usd="0.05"),
            "not_after": _expiry()}
@@ -401,8 +425,8 @@ class TestRunDispatch:
 
     def test_crash_after_consume_cannot_replay(self, client, vault):
         """Kill lands between admission-commit and send: permit is
-        consumed durably, reservation held — a retry can never replay
-        the authorization."""
+        consumed durably, the proven non-send releases the reservation
+        — and a retry can never replay the authorization."""
         pid = make_project(client)["id"]
         _setup(client, pid, vault)
         _armed(client, pid)
@@ -427,12 +451,15 @@ class TestRunDispatch:
                 resolver=GOOD_RESOLVER, gate_probe=killer)
         assert ei.value.code == "global_kill"
         res = _reservation(client, jid)
-        assert res is not None and res.status == "open"
+        # proven pre-dispatch refusal — released, reason recorded;
+        # nothing was sent so holding would be phantom exposure
+        assert res is not None and res.status == "released"
+        assert "global_kill" in (res.reconcile_note or "")
         with _sf(client)() as s:
             assert lp.armed(s) is None
             assert len(lp.consumed_history(s)) == 1
             job = s.get(GenerationJob, jid)
-            assert job.status == "unknown"  # held, not failed
+            assert job.status == "failed"  # resolved refusal, not unknown
         # consumed permanently — no replay path exists
         with pytest.raises(lp.PermitRefused) as ei2:
             _run(client, pid)

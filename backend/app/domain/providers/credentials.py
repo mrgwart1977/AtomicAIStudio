@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,9 +91,11 @@ class CredentialVault:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._state: dict[str, Any] | None = None
-        # Serialize mutating ops — sync FastAPI endpoints run on a thread
-        # pool; two concurrent set_fields must not race the tmp-file swap.
-        self._mu = threading.Lock()
+        # Serialize ops that read or write state — sync FastAPI endpoints
+        # run on a thread pool; two concurrent writers must not race the
+        # tmp-file swap, and atomic field+generation reads need the same
+        # exclusion. RLock so get_fields_with_generation can nest calls.
+        self._mu = threading.RLock()
 
     # ---------- persistence ----------
 
@@ -107,6 +110,17 @@ class CredentialVault:
                 self._state = {"version": 1, "providers": {}}
         else:
             self._state = {"version": 1, "providers": {}}
+        # Lazy generation migration — entries written before generation
+        # tracking get a fresh identifier on first load. Ciphertext is
+        # never touched; the mint only marks "the credential as it
+        # exists now" so future writes can be distinguished from it.
+        dirty = False
+        for prov in self._state.get("providers", {}).values():
+            if prov.get("fields") and not prov.get("generation"):
+                prov["generation"] = uuid.uuid4().hex
+                dirty = True
+        if dirty:
+            self._save()
         return self._state
 
     def _save(self) -> None:
@@ -123,7 +137,14 @@ class CredentialVault:
 
     def set_fields(self, provider_key: str, fields: dict[str, str]) -> None:
         """Encrypt-and-store secret fields for a provider. Unknown/empty
-        values are ignored — never store empty ciphertext."""
+        values are ignored — never store empty ciphertext.
+
+        Every write that stores material rotates ``generation`` — a
+        random identifier with no secret-derived entropy — even when the
+        value being saved is identical. Authorization bound to a
+        generation is therefore invalidated by ANY credential write;
+        that is deliberate. A write that stores nothing (all values
+        empty) or fails partway leaves the prior generation intact."""
         if not _IS_WINDOWS:
             raise VaultUnavailable(
                 "Secure credential storage requires Windows DPAPI; "
@@ -132,29 +153,55 @@ class CredentialVault:
             state = self._load()
             prov = state["providers"].setdefault(
                 provider_key, {"fields": {}, "set_at": None})
+            # Encrypt everything FIRST — a mid-write failure must not
+            # leave partially replaced fields with a rotated generation.
+            new_blobs = {}
             for name, value in fields.items():
                 if value is None or value == "":
                     continue
-                prov["fields"][name] = base64.b64encode(
+                new_blobs[name] = base64.b64encode(
                     _protect(value.encode("utf-8"))).decode("ascii")
+            if not new_blobs:
+                return  # nothing stored — no rotation, no set_at bump
+            prov["fields"].update(new_blobs)
             prov["set_at"] = datetime.now(timezone.utc).isoformat()
+            prov["generation"] = uuid.uuid4().hex
             self._save()
 
     def get_fields(self, provider_key: str) -> dict[str, str]:
         """Decrypt all stored fields — backend-internal use only."""
-        prov = self._load()["providers"].get(provider_key)
-        if not prov:
-            return {}
-        out = {}
-        for name, b64 in prov.get("fields", {}).items():
-            try:
-                out[name] = _unprotect(base64.b64decode(b64)).decode("utf-8")
-            except SecretUnreadable:
-                raise
-            except Exception as e:
-                raise SecretUnreadable(
-                    f"Stored credential for {provider_key} is unreadable: {e}")
-        return out
+        with self._mu:
+            prov = self._load()["providers"].get(provider_key)
+            if not prov:
+                return {}
+            out = {}
+            for name, b64 in prov.get("fields", {}).items():
+                try:
+                    out[name] = _unprotect(base64.b64decode(b64)).decode("utf-8")
+                except SecretUnreadable:
+                    raise
+                except Exception as e:
+                    raise SecretUnreadable(
+                        f"Stored credential for {provider_key} is unreadable: {e}")
+            return out
+
+    def get_fields_with_generation(self, provider_key: str
+                                   ) -> tuple[dict[str, str], str | None]:
+        """Atomic read: decrypted fields + the generation minted WITH
+        them, under a single lock hold — a rotation cannot land between
+        the two values. The generation tells the caller whether the
+        credential it just read is still the one that was approved."""
+        with self._mu:
+            fields = self.get_fields(provider_key)
+            prov = self._load()["providers"].get(provider_key)
+            return fields, (prov or {}).get("generation")
+
+    def current_generation(self, provider_key: str) -> str | None:
+        """Generation probe — metadata only, no decryption. Used for a
+        final staleness check immediately before the wire send."""
+        with self._mu:
+            prov = self._load()["providers"].get(provider_key)
+            return (prov or {}).get("generation")
 
     def delete(self, provider_key: str) -> bool:
         """Remove a provider's secrets entirely. True if something was
@@ -169,22 +216,28 @@ class CredentialVault:
 
     def status(self, provider_key: str) -> dict[str, Any]:
         """Metadata only — presence + which fields exist + set_at +
-        decryptability probe. NEVER returns secret material."""
-        prov = self._load()["providers"].get(provider_key)
-        if not prov:
-            return {"configured": False, "fields": [], "set_at": None,
-                    "readable": False, "unreadable_reason": None}
-        fields = list(prov.get("fields", {}).keys())
-        readable, why = True, None
-        if _IS_WINDOWS and fields:
-            # probe decryption of the first field without surfacing it
-            first = prov["fields"][fields[0]]
-            try:
-                _unprotect(base64.b64decode(first))
-            except SecretUnreadable as e:
-                readable, why = False, str(e)
-            except Exception as e:
-                readable, why = False, f"vault error: {e}"
-        return {"configured": bool(fields), "fields": fields,
-                "set_at": prov.get("set_at"), "readable": readable,
-                "unreadable_reason": why}
+        generation + decryptability probe. NEVER returns secret
+        material. ``generation`` is a random rotation marker: it names
+        WHICH version of the credential is stored without revealing
+        anything about its value."""
+        with self._mu:
+            prov = self._load()["providers"].get(provider_key)
+            if not prov:
+                return {"configured": False, "fields": [], "set_at": None,
+                        "generation": None, "readable": False,
+                        "unreadable_reason": None}
+            fields = list(prov.get("fields", {}).keys())
+            readable, why = True, None
+            if _IS_WINDOWS and fields:
+                # probe decryption of the first field without surfacing it
+                first = prov["fields"][fields[0]]
+                try:
+                    _unprotect(base64.b64decode(first))
+                except SecretUnreadable as e:
+                    readable, why = False, str(e)
+                except Exception as e:
+                    readable, why = False, f"vault error: {e}"
+            return {"configured": bool(fields), "fields": fields,
+                    "set_at": prov.get("set_at"),
+                    "generation": prov.get("generation"),
+                    "readable": readable, "unreadable_reason": why}

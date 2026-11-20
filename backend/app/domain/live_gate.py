@@ -425,17 +425,29 @@ def status_report(session: Session, vault: Any) -> dict[str, Any]:
         from app.domain import live_permit as _lp
         pa = _lp.armed(session)
         if pa is not None:
+            expired = None
+            try:
+                na = datetime.fromisoformat(str(pa.get("not_after")))
+                if na.tzinfo is None:
+                    na = na.replace(tzinfo=timezone.utc)
+                expired = na <= datetime.now(timezone.utc)
+            except (TypeError, ValueError):
+                expired = True  # unverifiable expiry → treat as dead
             permit_armed = {
                 "provider_key": pa["provider_key"],
                 "model_id": pa["model_id"],
                 "armed_at": pa["armed_at"],
+                "not_after": pa.get("not_after"),
+                "expired": expired,
                 "max_cost_usd": pa["max_cost_usd"],
                 "max_output_tokens": pa["max_output_tokens"],
-                # Hashes only — the owner needs permit_fingerprint to
-                # write the exec approval, request_fingerprint to write
-                # the arm approval. Neither carries request content.
+                # Hashes + rotation marker only — the owner needs
+                # permit_fingerprint for the exec approval,
+                # request_fingerprint + credential_generation for the
+                # arm approval. None carries request content or secret.
                 "request_fingerprint": pa.get("request_fingerprint"),
                 "permit_fingerprint": _lp.permit_fingerprint(pa),
+                "credential_generation": pa.get("credential_generation"),
             }
         permit_consumed = len(_lp.consumed_history(session))
     except Exception:

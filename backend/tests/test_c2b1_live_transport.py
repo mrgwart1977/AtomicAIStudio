@@ -38,15 +38,25 @@ class RecordingVault:
     hand out secret material — the call count proves where it ran."""
     def __init__(self):
         self.get_calls: list[str] = []
+        self._fields = {"api_key": "dummy-b1-key"}
+        self.generation = "gen-1"
 
     def status(self, key):
-        return {"configured": True, "fields": ["api_key"],
-                "set_at": "2026-01-01T00:00:00Z", "readable": True,
+        return {"configured": True, "fields": list(self._fields),
+                "set_at": "2026-01-01T00:00:00Z",
+                "generation": self.generation, "readable": True,
                 "unreadable_reason": None}
 
     def get_fields(self, key):
         self.get_calls.append(key)
-        return {"api_key": "dummy-b1-key"}
+        return dict(self._fields)
+
+    def get_fields_with_generation(self, key):
+        self.get_calls.append(key)
+        return dict(self._fields), self.generation
+
+    def current_generation(self, key):
+        return self.generation
 
 
 @pytest.fixture()
@@ -542,8 +552,9 @@ class TestDispatchOrchestration:
 
     def test_kill_between_admission_and_send(self, client, vault):
         """Gate flips to kill AFTER admit commits but BEFORE send:
-        nothing is sent and the reservation stays OPEN for reconcile —
-        never silently released."""
+        nothing is sent — a PROVEN pre-dispatch refusal, so the
+        reservation is released with an auditable reason rather than
+        held as phantom exposure (post-send ambiguity still holds)."""
         pid = make_project(client)["id"]
         _budget(client, pid)
         _commit(client, pid, "cloud.live.enable", EN)
@@ -560,12 +571,13 @@ class TestDispatchOrchestration:
                       gate_probe=probe)
         assert ei.value.code == "global_kill"
         assert sends == []
-        # the admission already committed → the reservation row exists,
-        # open and un-released
+        # the admission committed → the reservation row exists, but a
+        # provable non-send releases it, reason recorded
         with _sf(client)() as s:
             rows = s.execute(select(SpendReservation).where(
                 SpendReservation.environment == "live")).scalars().all()
-        assert len(rows) == 1 and rows[0].status == "open"
+        assert len(rows) == 1 and rows[0].status == "released"
+        assert "global_kill" in (rows[0].reconcile_note or "")
 
     def test_ambiguous_outcome_holds_reservation(self, client, vault):
         """Transport dies mid-request → outcome unknown: reservation
