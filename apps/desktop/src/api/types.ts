@@ -56,6 +56,8 @@ export interface CredentialStatus {
   configured: boolean;
   fields: string[];
   set_at: string | null;
+  /** Non-secret rotation marker — changes on every credential write. */
+  generation?: string | null;
   readable: boolean;
   unreadable_reason: string | null;
 }
@@ -159,11 +161,14 @@ export interface LivePermitArmed {
   provider_key: string;
   model_id: string;
   armed_at: string;
+  not_after?: string | null;
+  expired?: boolean | null;
   max_cost_usd: string;
   max_output_tokens: number;
-  // B2b-L — hashes only; never request content or secrets.
+  // B2b-L — hashes + rotation marker only; never request content or secrets.
   request_fingerprint?: string | null;
   permit_fingerprint?: string | null;
+  credential_generation?: string | null;
 }
 
 export interface LiveStatus {

@@ -57,16 +57,34 @@ class RecordingVault:
     def __init__(self, configured=True):
         self.get_calls: list[str] = []
         self._configured = configured
+        self._fields = {"api_key": DUMMY_KEY}
+        self.generation = "gen-1"
+        self._rot = 1
 
     def status(self, key):
         return {"configured": self._configured and key == "deepseek",
-                "fields": ["api_key"],
-                "set_at": "2026-01-01T00:00:00Z", "readable": True,
+                "fields": list(self._fields),
+                "set_at": "2026-01-01T00:00:00Z",
+                "generation": self.generation, "readable": True,
                 "unreadable_reason": None}
 
     def get_fields(self, key):
         self.get_calls.append(key)
-        return {"api_key": DUMMY_KEY}
+        return dict(self._fields)
+
+    def get_fields_with_generation(self, key):
+        self.get_calls.append(key)
+        return dict(self._fields), self.generation
+
+    def current_generation(self, key):
+        return self.generation
+
+    def rotate(self, fields=None):
+        """Simulate a credential write — new generation every time."""
+        self._rot += 1
+        self.generation = f"gen-{self._rot}"
+        if fields is not None:
+            self._fields = dict(fields)
 
 
 @pytest.fixture()
@@ -109,17 +127,23 @@ def _expiry(hours=1):
             + timedelta(hours=hours)).isoformat()
 
 
-def _req_fp(pid):
+def _req_fp(client, pid):
+    gen = client.app.state.provider_vault.status(
+        "deepseek").get("generation")
     return lp.request_fingerprint(
         provider_key="deepseek", model_id="deepseek-flash",
         project_id=pid, credential_ref="deepseek",
+        credential_generation=gen,
         prompt=PROMPT, max_output_tokens=32, max_cost_usd="0.05")
 
 
 def _approve_arm(client, pid, **overrides):
+    gen = client.app.state.provider_vault.status(
+        "deepseek").get("generation")
     doc = {"approve": "validate_arm", "provider_key": "deepseek",
            "model_id": "deepseek-flash", "project_id": pid,
-           "request_fingerprint": _req_fp(pid),
+           "credential_generation": gen,
+           "request_fingerprint": _req_fp(client, pid),
            "not_after": _expiry()}
     doc.update(overrides)
     (_owner_dir(client) / "arm-approval.json"
@@ -200,11 +224,12 @@ class TestRehearsalSequence:
 
         # (2) request fingerprint creation — deterministic, covers
         # the whole canonical request; no secret material
-        fp = _req_fp(pid)
-        assert len(fp) == 64 and fp == _req_fp(pid)
+        fp = _req_fp(client, pid)
+        assert len(fp) == 64 and fp == _req_fp(client, pid)
         canon = lp.canonical_request(
             provider_key="deepseek", model_id="deepseek-flash",
             project_id=pid, credential_ref="deepseek",
+            credential_generation=vault.generation,
             prompt=PROMPT, max_output_tokens=32, max_cost_usd="0.05")
         assert canon["endpoint"] == (
             "https://api.deepseek.com/chat/completions")
@@ -299,7 +324,7 @@ class TestRehearsalSequence:
         with _sf(client)() as s:
             report = lg.status_report(s, vault)
         armed = report["permit"]["armed"]
-        assert armed["request_fingerprint"] == _req_fp(pid)
+        assert armed["request_fingerprint"] == _req_fp(client, pid)
         assert armed["permit_fingerprint"] == lp.permit_fingerprint(
             lp.armed(_sf(client)()))
         # prompt never surfaces in the report

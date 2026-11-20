@@ -73,6 +73,7 @@ SUPPORTED_COMMANDS = {
     "cloud.live.disable_all", "cloud.live.resume",
     # C2 exit gate — Stage B2a single-use DeepSeek validation permit
     "cloud.live.validate_arm", "cloud.live.validate_run",
+    "cloud.live.validate_disarm",
     # scenes & storyboard (M2)
     "scene.create", "scene.update", "scene.archive", "scene.unarchive",
     "scene.revert", "scene.duplicate", "scene.move",
@@ -169,6 +170,7 @@ SPEND_GUARDED_COMMANDS = {
     "cloud.live.disable_all", "cloud.live.resume",
     # B2a permit arm/run — check-then-act on permit + financial state
     "cloud.live.validate_arm", "cloud.live.validate_run",
+    "cloud.live.validate_disarm",
     # A7 — plan approval checks budget state before recording
     "cloud.plan",
     # project.delete checks for unresolved spend holds — the check must
@@ -363,6 +365,9 @@ def _summary(command_type: str, payload: dict) -> str:
                 "(B2a — one request, audited, consumed on dispatch)")
     if command_type == "cloud.live.validate_run":
         return "Run the armed DeepSeek validation request"
+    if command_type == "cloud.live.validate_disarm":
+        return ("Void the armed DeepSeek validation permit "
+                "(de-authorizing only — grants no execution authority)")
     if command_type.startswith("scene."):
         if command_type == "scene.create":
             return f"Create scene '{payload.get('title', '')}'"
@@ -1677,6 +1682,15 @@ def _validate(session: Session, project: Project, command_type: str, payload: di
             "Consumes the armed permit — exactly one dispatch attempt. "
             "Ambiguous outcomes hold the reservation for explicit "
             "reconcile; nothing is retried automatically.")
+    if command_type == "cloud.live.validate_disarm":
+        for f in ("permit_id", "permit_fingerprint"):
+            if payload.get(f) is None or str(payload.get(f)) == "":
+                raise CommandError(422, f"{f} is required")
+        warnings.append(
+            "Voids the armed permit permanently — it can never be "
+            "consumed afterward. Grants no authority; use it to clear "
+            "a stale, expired, or unwanted arm so a new arm can "
+            "proceed.")
     if command_type == "spend.reconcile":
         if not payload.get("job_id"):
             raise CommandError(422, "job_id is required")
@@ -5407,7 +5421,8 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     "Budget removed — that scope is now unconstrained")
 
     elif command_type in ("cloud.live.validate_arm",
-                          "cloud.live.validate_run"):
+                          "cloud.live.validate_run",
+                          "cloud.live.validate_disarm"):
         # B2a — handled by the dedicated permit branch further down;
         # checked before the startswith branch so validate_* never
         # falls into the Stage A handler.
@@ -5439,7 +5454,7 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                         "request_fingerprint"),
                     "stage": "B2a",
                 }
-            else:  # cloud.live.validate_run
+            elif command_type == "cloud.live.validate_run":
                 if session_factory is None:
                     raise CommandError(500, "session factory unavailable")
                 job_id = new_id()
@@ -5470,6 +5485,25 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                     "job_id": job_id,
                     "status": "dispatch_requested",
                     "stage": "B2a",
+                }
+            else:  # cloud.live.validate_disarm
+                rec = _lp.disarm(
+                    session, permit_id=str(payload["permit_id"]),
+                    fingerprint=str(payload["permit_fingerprint"]),
+                    reason=payload.get("reason"),
+                    command_id=command.id)
+                # Evidence only — id, fingerprint, timestamps, reason.
+                # The prompt the permit carried stays in state, never
+                # in audit.
+                audit["after"]["disarm"] = {
+                    "permit_id": rec["permit_id"],
+                    # The fingerprint disarm verified against the armed
+                    # record — IS the original armed permit's identity.
+                    "permit_fingerprint": str(
+                        payload["permit_fingerprint"]),
+                    "voided_at": rec.get("voided_at"),
+                    "replay": bool(rec.get("replay")),
+                    "reason": rec.get("voided_reason"),
                 }
         except (_lp.PermitRefused, LiveDispatchRefused) as exc:
             raise CommandError(

@@ -156,6 +156,16 @@ export function LiveGatePanel({ pid, revision, details, onCommitted }: {
             <code className="text-faint" title={permit.armed.permit_fingerprint}>
               {permit.armed.permit_fingerprint.slice(0, 16)}…</code>,
           ]] as [string, React.ReactNode][] : []),
+          ...(permit?.armed?.credential_generation ? [[
+            "Cred gen",
+            <code className="text-faint" title={permit.armed.credential_generation}>
+              {permit.armed.credential_generation.slice(0, 8)}…</code>,
+          ]] as [string, React.ReactNode][] : []),
+          ...(permit?.armed?.not_after ? [[
+            "Permit expiry",
+            <span className={permit.armed.expired ? "text-danger" : "text-faint"}>
+              {permit.armed.not_after.slice(0, 19)}{permit.armed.expired ? " — EXPIRED" : ""}</span>,
+          ]] as [string, React.ReactNode][] : []),
         ];
         return (
           <div className="mt-3 rounded border border-line bg-panel p-2.5 text-xs"

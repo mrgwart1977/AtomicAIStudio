@@ -273,12 +273,22 @@ class LiveHTTPTransport(httpx.AsyncBaseTransport):
     def __init__(self, *, provider_key: str, inner=None,
                  resolver: Callable | None = None,
                  timeout_s: float | None = None,
-                 base_backend=None):
+                 base_backend=None,
+                 generation_probe: Callable | None = None,
+                 expected_generation: str | None = None):
         self.provider_key = provider_key
         self.is_real = inner is None
         self._inner = inner or _SecureHTTPTransport(
             resolver=resolver, base_backend=base_backend)
         self._resolver = resolver
+        # Last-possible staleness check: the probe runs immediately
+        # before the request is handed to the inner (wire) transport,
+        # narrowing the credential-rotation race to the send itself —
+        # the one window no software check can close without holding a
+        # vault lock across network I/O (which is deliberately never
+        # done; see docs/b2bl-readiness-package.md).
+        self._gen_probe = generation_probe
+        self._expected_gen = expected_generation
         cfg = lg.LIVE_TIMEOUTS.get(provider_key, {})
         self._total_s = timeout_s or cfg.get("total_s", 60.0)
         self._sent: list[str] = []  # URLs attempted — test introspection
@@ -293,6 +303,14 @@ class LiveHTTPTransport(httpx.AsyncBaseTransport):
                 charge_evidence="none_confirmed")
         port = request.url.port or 443
         resolve_public(request.url.host, port, self._resolver)
+        if (self._gen_probe is not None
+                and self._gen_probe() != self._expected_gen):
+            raise LiveTransportRefused(
+                "credential_rotated",
+                f"{self.provider_key}: credential generation changed "
+                "between authorization and send — the approved "
+                "credential is stale; request never sent",
+                charge_evidence="none_confirmed")
         self._sent.append(url)
         try:
             resp = await asyncio.wait_for(
@@ -319,6 +337,20 @@ class LiveHTTPTransport(httpx.AsyncBaseTransport):
             await close()
 
 
+def _refuse_predispatch(session: Session, job_id: str,
+                        code: str, msg: str) -> None:
+    """Provable pre-dispatch refusal — raised only BEFORE
+    provider.submit, so no provider request ever existed. The
+    reservation is released with an auditable reason instead of being
+    held: a provable non-event must not consume budget. (Contrast:
+    anything past the send boundary stays held — billing can no
+    longer be ruled out.)"""
+    _spend.release(session, job_id=job_id,
+                   reason=f"pre-dispatch refusal: {code}")
+    session.commit()
+    raise LiveDispatchRefused(code, msg)
+
+
 # ------------------------------------------------------------------
 # the orchestrator — unreachable from any shipped surface in B1
 # ------------------------------------------------------------------
@@ -340,9 +372,12 @@ async def live_dispatch(
          credential metadata, evidence freshness, caps).
       2. spend.admit + COMMIT — financial admission lands durably
          BEFORE any transport exists.
-      3. Gate re-check — kill/disable racing admission→send leaves the
-         reservation OPEN for reconcile; nothing is sent.
-      4. vault.get_fields — the ONLY place secret material is read,
+      3. Gate re-check + credential binding — kill/disable racing
+         admission→send, credential rotation, or a missing required
+         credential field refuse BEFORE submit: proven pre-dispatch
+         refusals that release the reservation; nothing is sent.
+      4. vault.get_fields_with_generation — the ONLY place secret
+         material is read, atomically with the credential generation,
          inside this boundary, after every check above.
       5. Submit → classify → settle (confirmed) / release (confirmed
          refusal) / HOLD (ambiguous — never resubmit, never release).
@@ -370,6 +405,9 @@ async def live_dispatch(
             "provider_key": provider_key, "model_id": model_id,
             "project_id": project_id,
             "credential_ref": entry0.get("credential_ref"),
+            "credential_generation":
+                vault.status(entry0["credential_ref"]).get("generation")
+                if entry0.get("credential_ref") else None,
             "prompt": request.get("prompt"),
             "max_output_tokens": request.get("max_output_tokens"),
             "max_cost_usd": max_cost_usd},
@@ -379,20 +417,53 @@ async def live_dispatch(
     st = probe(session)
     entry = (st.get("providers") or {}).get(provider_key) or {}
     if st.get("global_disabled"):
-        raise LiveDispatchRefused(
-            "global_kill", "kill switch engaged between admission and "
-            "send — reservation held open for reconcile")
+        _refuse_predispatch(
+            session, job_id, "global_kill",
+            "kill switch engaged between admission and send — "
+            "nothing was sent; reservation released")
     if not entry.get("enabled"):
-        raise LiveDispatchRefused(
-            "not_enabled", "provider disabled between admission and "
-            "send — reservation held open for reconcile")
+        _refuse_predispatch(
+            session, job_id, "not_enabled",
+            "provider disabled between admission and send — "
+            "nothing was sent; reservation released")
 
     spec = SPECS[provider_key]
-    fields = vault.get_fields(entry["credential_ref"])
-    api_key = fields.get("api_key") or next(iter(fields.values()), "")
+    ref = entry["credential_ref"]
+    expected_gen = (expected_permit or {}).get("credential_generation")
+    if expected_permit is not None:
+        # Atomic read: decrypted fields + the generation minted with
+        # them under one vault lock — a rotation cannot slip between
+        # the check and the credential that gets used.
+        fields, gen = vault.get_fields_with_generation(ref)
+        if gen != expected_gen:
+            _refuse_predispatch(
+                session, job_id, "credential_rotated",
+                "credential changed since the permit was armed — "
+                "the approved generation no longer matches; nothing "
+                "was sent; disarm and re-arm under a fresh approval")
+    else:
+        fields = vault.get_fields(ref)
+    # Strict field selection — only the provider's declared required
+    # credential fields may authenticate. An arbitrary vault field is
+    # NEVER substituted as the Bearer token.
+    provider = lg.catalog.get_provider(provider_key) or {}
+    required = [f["name"] for f in (provider.get("credential_fields")
+                                    or []) if f.get("required")]
+    missing = [n for n in required if not fields.get(n)]
+    api_key = fields.get(required[0]) if required else fields.get("api_key")
+    if missing or not api_key:
+        _refuse_predispatch(
+            session, job_id, "credential_field",
+            f"{provider_key}: required credential field(s) "
+            f"{missing or ['api_key']} absent or empty — refusing "
+            "before transport construction; nothing was sent")
     transport = LiveHTTPTransport(
         provider_key=provider_key, inner=inner, resolver=resolver,
-        base_backend=base_backend)
+        base_backend=base_backend,
+        generation_probe=(
+            (lambda: vault.current_generation(ref))
+            if expected_permit is not None else None),
+        expected_generation=expected_gen)
     provider = make_provider(provider_key, transport=transport,
                              api_key=api_key)
     try:

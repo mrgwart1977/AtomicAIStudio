@@ -50,23 +50,43 @@ GOOD_RESOLVER = lambda h, p: ["93.184.216.34"]  # noqa: E731 — public test IP
 
 class RecordingVault:
     """Ref-aware vault double — listed refs report configured;
-    get_fields returns whatever secret was last "stored"."""
+    get_fields returns whatever secret was last "stored". Tracks a
+    generation marker like the real vault: rotate() simulates a
+    credential write (new generation, optional new value)."""
 
     def __init__(self, configured=True, refs=("deepseek",)):
         self.get_calls: list[str] = []
         self._configured = configured
         self._refs = set(refs)
-        self.secret = DUMMY_KEY
+        self._fields = {"api_key": DUMMY_KEY}
+        self.generation = "gen-1"
+        self._rot = 1
 
     def status(self, key):
         return {"configured": self._configured and key in self._refs,
-                "fields": ["api_key"],
-                "set_at": "2026-01-01T00:00:00Z", "readable": True,
+                "fields": list(self._fields),
+                "set_at": "2026-01-01T00:00:00Z",
+                "generation": self.generation, "readable": True,
                 "unreadable_reason": None}
 
     def get_fields(self, key):
         self.get_calls.append(key)
-        return {"api_key": self.secret}
+        return dict(self._fields)
+
+    def get_fields_with_generation(self, key):
+        self.get_calls.append(key)
+        return dict(self._fields), self.generation
+
+    def current_generation(self, key):
+        return self.generation
+
+    def rotate(self, fields=None):
+        """Simulate a credential write under the same ref — a NEW
+        generation every time, optionally new field values."""
+        self._rot += 1
+        self.generation = f"gen-{self._rot}"
+        if fields is not None:
+            self._fields = dict(fields)
 
 
 @pytest.fixture()
@@ -122,11 +142,15 @@ def _expiry(hours=1):
 
 
 def _approve_arm(client, pid, **overrides):
+    gen = client.app.state.provider_vault.status(
+        "deepseek").get("generation")
     doc = {"approve": "validate_arm", "provider_key": "deepseek",
            "model_id": "deepseek-flash", "project_id": pid,
+           "credential_generation": gen,
            "request_fingerprint": lp.request_fingerprint(
                provider_key="deepseek", model_id="deepseek-flash",
                project_id=pid, credential_ref="deepseek",
+               credential_generation=gen,
                prompt=PROMPT, max_output_tokens=32,
                max_cost_usd="0.05"),
            "not_after": _expiry()}
@@ -624,23 +648,39 @@ class TestB2bPMatrix:
 
     # ---- 27. credential replacement after approval ------------------------------------------
     def test_27_credential_replace_and_delete(self, client, vault):
-        """Replace (same ref, new value) → dispatch proceeds with the
-        NEW secret; delete (ref gone) → admission refuses before any
-        socket. The permit binds the credential_ref, not the value —
-        owner approval of the ref covers rotation by design."""
+        """Replace (same ref, new value) → the vault mints a NEW
+        generation → the dispatch binding fails closed: consume
+        refuses on credential_generation mismatch, the permit stays
+        armed as evidence, and nothing reaches the wire. Delete (ref
+        gone) → admission refuses before any socket."""
         pid = _mkproject(client)
         _setup(client, pid, vault)
         _armed(client, pid)
-        seen_auth: list[str] = []
+        _approve_exec(client)
+        vault.rotate({"api_key": "synthetic-rotated-key"})
+        sent: list[str] = []
 
         def capture(req):
-            seen_auth.append(req.headers.get("authorization", ""))
+            sent.append(str(req.url))
             return httpx.Response(200, json=DEEPSEEK_OK)
-        # replace the stored secret — dispatch uses the current value
-        vault.secret = "synthetic-rotated-key"
-        out = _run(client, pid, inner=httpx.MockTransport(capture))
-        assert out["outcome"] == "succeeded"
-        assert seen_auth == [f"Bearer synthetic-rotated-key"]
+        jid = new_id()
+        _mkjob(client, pid, jid, f"job:b2bp-{new_id()[:8]}")
+        with pytest.raises(lp.PermitRefused) as exc:
+            lp.run_validation(
+                _sf(client), project_id=pid, job_id=jid,
+                job_idempotency_key=f"job:b2bp-{new_id()[:8]}",
+                command_id=None, vault=vault,
+                data_dir=client.app.state.settings.data_dir,
+                inner=httpx.MockTransport(capture),
+                resolver=GOOD_RESOLVER)
+        assert exc.value.code == "mismatch:credential_generation"
+        assert sent == []               # nothing reached the wire
+        assert vault.get_calls == []    # secret never read either
+        with _sf(client)() as s:
+            assert lp.armed(s) is not None   # still armed — evidence
+            res = s.execute(select(SpendReservation).where(
+                SpendReservation.job_id == jid)).scalar_one_or_none()
+        assert res is None              # consume rollback — no booking
         # delete it entirely → a fresh run can never leave the gate
         vault._configured = False
         pid2 = _mkproject(client)
