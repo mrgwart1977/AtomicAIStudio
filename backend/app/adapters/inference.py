@@ -1335,6 +1335,11 @@ class ModelDownloadAdapter:
                     expected_size=mf.size_bytes,
                     allowed_hosts=allowed_hosts,
                     progress=on_bytes, cancel_check=handle.check_cancel,
+                    # verify-before-publish: the .part is checked against
+                    # the declared sha256/format BEFORE it is promoted —
+                    # invalid bytes never occupy the canonical path.
+                    verify=lambda p, _mf=mf: model_files.verify_component(
+                        p, _mf, spec.fmt),
                 ))
                 while not task.done():
                     yield {"progress": state["p"], "message": state["m"], "detail": state["d"]}
@@ -1342,12 +1347,8 @@ class ModelDownloadAdapter:
                 res = await task
                 total_bytes += res["bytes"]
                 yield {"progress": 0.05 + 0.9 * ((fi + 1) / n_files),
-                       "message": f"verifying {mf.name}",
+                       "message": f"verified {mf.name}",
                        "detail": state["d"] or reporter.snapshot()}
-                ok, why = await asyncio.to_thread(model_files.verify_component, dest, mf, spec.fmt)
-                if not ok:
-                    self._mark(spec.key, status="failed", error=f"verification failed ({mf.role}): {why}")
-                    raise ValueError(f"model failed integrity verification: {why}")
             self._mark(spec.key, status="installed", byte_size=total_bytes,
                        sha256=res["sha256"], verified=True, error=None)
         except JobCancelled:

@@ -584,6 +584,9 @@ def test_exact_size_enforced(tmp_path):
             allowed_hosts=HF, resolver=_resolver(),
             conn_factory=_factory(_by_host(
                 {"huggingface.co": _Resp(200, b"short")})))
+    assert not dest.exists()
+    # Recovery policy: a short .part is resumable — KEPT for the next run.
+    assert dest.with_suffix(".safetensors.part").exists()
 
 
 def test_stream_byte_cap(tmp_path):
@@ -596,6 +599,10 @@ def test_stream_byte_cap(tmp_path):
             allowed_hosts=HF, resolver=_resolver(),
             conn_factory=_factory(_by_host(
                 {"huggingface.co": _Resp(200, b"x" * 200 * 1024)})))
+    # Recovery policy: an over-cap .part can never become the artifact —
+    # DISCARDED so a retry cannot loop forever on the same refusal.
+    assert not dest.with_suffix(".safetensors.part").exists()
+    assert not dest.exists()
 
 
 def test_global_cap_without_expected(tmp_path):
@@ -651,6 +658,7 @@ def test_cancel_midstream(tmp_path):
             conn_factory=_factory(_by_host(
                 {"huggingface.co": _Resp(200, b"0123456789")})))
     assert dest.with_suffix(".safetensors.part").exists()  # kept, resumable
+    assert not dest.exists()         # cancelled bytes never published
 
 
 def test_retry_budget_and_sidecar_kept(tmp_path, monkeypatch):
@@ -795,3 +803,161 @@ def test_catalog_entries_have_known_providers():
         provider = (m.source or {}).get("provider")
         assert ds.allowed_hosts_for(provider), \
             f"{m.key}: provider {provider!r} has no host allowlist"
+
+
+# ------------------------------------------------- verify before publish
+
+def _part_paths(dest):
+    return (dest.with_suffix(".safetensors.part"),
+            dest.with_suffix(".safetensors.part.json"))
+
+
+def test_verify_runs_on_part_before_publish(tmp_path):
+    """The verify callback receives the .part path — verification happens
+    strictly before the canonical destination is written."""
+    seen = {}
+
+    def verify(p):
+        seen["path"] = str(p)
+        return True, "ok"
+    body = b"0123456789"
+    dest = _dest(tmp_path)
+    model_files.download_to(
+        dest, "https://huggingface.co/x", expected_size=len(body),
+        allowed_hosts=HF, resolver=_resolver(),
+        conn_factory=_factory(_by_host(
+            {"huggingface.co": _Resp(200, body)})), verify=verify)
+    assert seen["path"].endswith(".part")
+    assert dest.read_bytes() == body
+    assert not _part_paths(dest)[0].exists()      # .part promoted
+    assert not _part_paths(dest)[1].exists()      # sidecar cleaned
+
+
+def test_sha_mismatch_never_publishes(tmp_path):
+    """Declared-sha256 mismatch on a complete .part: refused BEFORE the
+    canonical path — dest never appears; wrong bytes are discarded
+    (a hash mismatch is not resumable)."""
+    body = b"0123456789"
+    mf = model_catalog.ModelFile(
+        name="model.safetensors", size_bytes=len(body),
+        url="https://huggingface.co/x", sha256="0" * 64)
+    dest = _dest(tmp_path)
+    with pytest.raises(model_files.ModelError, match="verification failed"):
+        model_files.download_to(
+            dest, "https://huggingface.co/x", expected_size=len(body),
+            allowed_hosts=HF, resolver=_resolver(),
+            conn_factory=_factory(_by_host(
+                {"huggingface.co": _Resp(200, body)})),
+            verify=lambda p: model_files.verify_component(
+                p, mf, "safetensors"))
+    assert not dest.exists()
+    assert not _part_paths(dest)[0].exists()
+    assert not _part_paths(dest)[1].exists()
+
+
+def test_magic_mismatch_never_publishes(tmp_path):
+    """No declared hash → size + format magic. Bad magic refuses before
+    publish."""
+    body = b"NOT-SAFETENSORS-BYTES"
+    mf = model_catalog.ModelFile(
+        name="model.safetensors", size_bytes=len(body),
+        url="https://huggingface.co/x", sha256=None)
+    dest = _dest(tmp_path)
+    with pytest.raises(model_files.ModelError, match="verification failed"):
+        model_files.download_to(
+            dest, "https://huggingface.co/x", expected_size=len(body),
+            allowed_hosts=HF, resolver=_resolver(),
+            conn_factory=_factory(_by_host(
+                {"huggingface.co": _Resp(200, body)})),
+            verify=lambda p: model_files.verify_component(
+                p, mf, "safetensors"))
+    assert not dest.exists()
+
+
+def test_failed_verify_preserves_prior_artifact(tmp_path):
+    """A previously valid canonical file is never destroyed by a failed
+    re-download — the invalid .part is discarded, dest untouched."""
+    dest = _dest(tmp_path)
+    old = b"PREVIOUSLY-VALID-ARTIFACT"
+    dest.write_bytes(old)
+    body = b"0123456789"
+    with pytest.raises(model_files.ModelError):
+        model_files.download_to(
+            dest, "https://huggingface.co/x", expected_size=len(body),
+            allowed_hosts=HF, resolver=_resolver(),
+            conn_factory=_factory(_by_host(
+                {"huggingface.co": _Resp(200, body)})),
+            verify=lambda p: (False, "sha256 mismatch"))
+    assert dest.read_bytes() == old
+
+
+def test_symlink_rechecked_each_attempt(tmp_path, monkeypatch):
+    """Per-attempt defense in depth: a .part that becomes a symlink
+    between attempts is refused before the next dial."""
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+    dest = _dest(tmp_path)
+    part = dest.with_suffix(".safetensors.part")
+    part.write_bytes(b"")
+    flip = {"v": False}
+    real = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink",
+        lambda self: flip["v"] if self == part else real(self))
+    calls = {"n": 0}
+
+    def script(conn):
+        calls["n"] += 1
+        flip["v"] = True        # substituted between attempts
+        raise OSError("connection reset")
+
+    with pytest.raises(EgressRefused, match="symlink"):
+        model_files.download_to(
+            dest, "https://huggingface.co/x", expected_size=10,
+            allowed_hosts=HF, resolver=_resolver(),
+            conn_factory=_factory(script))
+    assert calls["n"] == 1            # refused before the second dial
+
+
+def test_multicomponent_failure_not_installed(client, monkeypatch):
+    """wan21 has 3 components — a mid-set verify failure must fail the
+    whole install row, never mark the model installed."""
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+    monkeypatch.setattr(model_files, "disk_free_bytes", lambda p: None)
+    calls = {"n": 0}
+
+    def fake_dl(dest, url, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise model_files.ModelError(
+                "verification failed (b.safetensors): sha256 mismatch")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"FAKE")
+        return {"bytes": 4, "sha256": "0" * 64}
+    monkeypatch.setattr(model_files, "download_to", fake_dl)
+
+    from app.adapters.inference import ModelDownloadAdapter
+    from app.db.models import ModelInstall
+    from sqlalchemy import select
+    adapter = ModelDownloadAdapter(client.app.state.session_factory,
+                                   client.app.state.settings)
+
+    class _Handle:
+        request = {"model_key": "wan21.t2v.1_3b", "skip_runtime": True}
+        def check_cancel(self):
+            pass
+
+    async def drain():
+        async for _ in adapter.run(_Handle()):
+            pass
+    with pytest.raises(model_files.ModelError, match="verification failed"):
+        asyncio.run(drain())
+    assert calls["n"] == 2            # stopped at the failing component
+    with client.app.state.session_factory() as s:
+        row = s.execute(
+            select(ModelInstall)
+            .where(ModelInstall.model_key == "wan21.t2v.1_3b")
+            .order_by(ModelInstall.created_at.desc())
+        ).scalars().first()
+    assert row is not None
+    assert row.status == "failed"
+    assert not row.verified

@@ -116,9 +116,10 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
                 allowed_hosts: tuple[str, ...] = (),
                 deadline_s: float = 3600.0,
                 stall_s: float | None = None,
+                verify: Callable[[Path], tuple[bool, str]] | None = None,
                 resolver=None, connect=None, wrap=None,
                 conn_factory=None) -> dict:
-    """Stream url -> dest.part with Range-resume, then verify + rename.
+    """Stream url -> dest.part with Range-resume, verify, then publish.
 
     Issue #175 — pinned transport: `url` is the ONLY source (catalog-
     approved; a stored sidecar URL can never replace it). Every hop is
@@ -126,6 +127,18 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     validated literal IPs are dialed and TLS still authenticates the
     original hostname. Redirect-target URLs are never persisted — the
     <dest>.part.json sidecar stores the ENTRY url + expected size only.
+
+    Publication order (verify BEFORE the canonical path is touched):
+    exact-size check → optional `verify(.part)` (declared sha256 /
+    format-magic) → atomic os.replace. A failed verification never
+    publishes — a previously valid `dest` is left untouched.
+
+    Explicit recovery policy for partial state:
+      - incomplete-but-resumable .part (short / transient failure /
+        cancellation): KEPT for resume.
+      - .part that can never become the artifact (over-cap stream,
+        verify failure — appended bytes cannot repair wrong content):
+        DISCARDED.
     Returns {bytes, sha256}."""
     from app.domain import download_security as ds
     from app.net import egress
@@ -162,6 +175,12 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     attempt, max_attempts = 0, 8
     while True:
         attempt += 1
+        # Defense in depth: a local attacker could substitute .part/
+        # sidecar/dest between attempts — re-check each iteration. This
+        # shrinks but does not close the check→open TOCTOU window (a
+        # handle-based check would be needed for that).
+        for p in (part, sidecar, dest):
+            ds.ensure_not_symlink(p)
         conn = None
         try:
             conn, resp, start, total = ds.open_download_stream(
@@ -201,6 +220,13 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
         except egress.EgressRefused as exc:
             if conn is not None:
                 conn.close()
+            if exc.code == "size" and have > cap:
+                # Recovery policy: an over-cap .part can never become the
+                # artifact — discard rather than let resume re-fail
+                # forever. (Pre-stream "size" refusals leave the valid
+                # resumable prefix intact.)
+                part.unlink(missing_ok=True)
+                sidecar.unlink(missing_ok=True)
             # "resolve" can be a transient DNS flake — retry within the
             # budget; every other egress code is a policy refusal that
             # retrying cannot fix.
@@ -249,6 +275,16 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     with open(part, "rb") as fh:
         for chunk in iter(lambda: fh.read(_CHUNK), b""):
             sha.update(chunk)
+    if verify is not None:
+        ok, why = verify(part)
+        if not ok:
+            # Verify-before-publish: invalid bytes never reach the
+            # canonical path and `dest` (possibly a previously valid
+            # artifact) is untouched. Wrong content is NOT resumable —
+            # discard partial state per the explicit recovery policy.
+            part.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            raise ModelError(f"verification failed ({dest.name}): {why}")
     part.replace(dest)
     sidecar.unlink(missing_ok=True)
     return {"bytes": have, "sha256": sha.hexdigest()}
