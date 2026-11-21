@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -108,10 +109,17 @@ def validate_source_path(path_str: str) -> Path:
         raise ImportRefused("path_not_file",
                             "source is not a regular file")
     # Post-resolve re-check — the target could itself be a reparse point
-    # reached through a path component not covered above.
+    # reached through a path component not covered above; its ancestors
+    # are re-walked too (the resolved tree may differ from the lexical
+    # one — e.g. case/shortname normalization or device mappings).
     if _is_reparse(rp, is_dir=False):
         raise ImportRefused("path_is_link",
                             "resolved source is a link or reparse point")
+    for ancestor in rp.parents:
+        if _is_reparse(ancestor, is_dir=True):
+            raise ImportRefused(
+                "path_is_link",
+                "a resolved parent directory is a link or reparse point")
     return rp
 
 
@@ -174,7 +182,10 @@ def parse_safetensors(fh, file_size: int) -> dict[str, Any]:
                             "header length exceeds file size")
     try:
         header = json.loads(fh.read(n))
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, RecursionError):
+        # ValueError covers JSONDecodeError; RecursionError is a crafted
+        # deeply-nested header — malformed, not a raw crash. Neither may
+        # surface attacker-controlled metadata in a job error.
         raise ImportRefused("malformed_safetensors",
                             "header is not parseable JSON") from None
     if not isinstance(header, dict):
@@ -383,6 +394,12 @@ def inspect_file(path: Path, *,
         raise ImportRefused("io_error", "could not open the source file")
     try:
         st1 = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st1.st_mode):
+            # F3 — the path was a regular file at stat time, but the
+            # handle we actually opened must be proven regular too;
+            # devices/FIFOs/etc. refuse before any parse or hash.
+            raise ImportRefused("path_not_file",
+                                "opened source is not a regular file")
         rep = ImportReport(byte_size=st1.st_size, hashed_at=when(),
                            registration_stat=_stat_identity(st1))
         head = fh.read(16)

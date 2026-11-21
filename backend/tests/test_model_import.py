@@ -674,6 +674,96 @@ def test_cancel_after_success_row_stays(client, authed, tmp_path):
         assert s.get(ModelArtifact, aid) is not None
 
 
+# ------------------------------------------------------ corrective F1-F4
+
+def test_db_failure_never_leaks_path(client, authed, tmp_path, monkeypatch):
+    """F1 — a commit-time DB failure whose message embeds row params
+    (incl. the source path) must surface only a sanitized db_error code."""
+    from sqlalchemy.exc import IntegrityError
+    src = _write(tmp_path, "leak_probe.safetensors", _st_bytes())
+    marker = "DISTINCTIVE_PATH_MARKER_9f3e"
+    # A real StatementError whose str() echoes parameters — the exact
+    # payload that would leak if it reached job.error raw.
+    boom = IntegrityError("UNIQUE constraint failed",
+                          "INSERT INTO model_artifacts (...) VALUES (?)",
+                          (f"{src}::{marker}",), Exception("sqlite3"))
+    # The repr embeds the params payload — the marker proves a leak path
+    # exists if the raw exception ever reaches a serialized surface.
+    assert marker in str(boom)
+
+    def _explode(*a, **kw):
+        raise boom
+    monkeypatch.setattr(model_artifacts, "register_import", _explode)
+    r = _import(client, authed, src)
+    assert r.status_code == 202
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "failed"
+    dumped = json.dumps(job)
+    assert "db_error" in dumped
+    assert marker not in dumped and src not in dumped
+    with client.app.state.session_factory() as s:
+        assert s.execute(select(ModelArtifact).where(
+            ModelArtifact.source_type == "import")).scalars().all() == []
+        from app.db.models import AuditEvent
+        assert s.execute(select(AuditEvent).where(
+            AuditEvent.event_type == "model_import.registered")
+        ).scalars().all() == []
+
+
+def test_resolved_ancestor_reparse_refused(tmp_path, monkeypatch):
+    """F2 — an ancestor that only exists in the RESOLVED path is walked
+    and refused, not just the lexical request path's ancestors."""
+    src = tmp_path / "real.safetensors"
+    src.write_bytes(_st_bytes())
+    jdir = tmp_path / "junction_dir"
+    jdir.mkdir()
+    (jdir / "x.safetensors").write_bytes(_st_bytes())
+    real = model_import._is_reparse
+
+    def spy(p, *, is_dir):
+        if p == jdir:
+            return True  # resolved-only junction ancestor
+        return real(p, is_dir=is_dir)
+    monkeypatch.setattr(model_import, "_is_reparse", spy)
+    monkeypatch.setattr(
+        pathlib.Path, "resolve",
+        lambda self, strict=False: jdir / "x.safetensors")
+    with pytest.raises(ImportRefused) as e:
+        model_import.validate_source_path(str(src))
+    assert e.value.code == "path_is_link"
+
+
+def test_non_regular_handle_refused(tmp_path, monkeypatch):
+    """F3 — the opened handle's fstat mode must be S_ISREG; a FIFO-class
+    fd refuses before any parsing/hashing."""
+    import stat as _stat
+    src = tmp_path / "weights.safetensors"
+    src.write_bytes(_st_bytes())
+    orig = model_import.os.fstat
+
+    def fake_fstat(fd):
+        st = orig(fd)
+        # 0o170000 = the file-type bits (stat.S_IFMT is a function here,
+        # not a mask constant).
+        fifo_mode = (st.st_mode & ~0o170000) | _stat.S_IFIFO
+        return os.stat_result((fifo_mode,) + tuple(st[1:]))
+    monkeypatch.setattr(model_import.os, "fstat", fake_fstat)
+    with pytest.raises(ImportRefused) as e:
+        model_import.inspect_file(src)
+    assert e.value.code == "path_not_file"
+
+
+def test_safetensors_deeply_nested_json(tmp_path):
+    """F4 — a deeply-nested JSON header raises RecursionError, mapped to
+    malformed_safetensors (never a raw crash string in job.error)."""
+    hb = b'{"a":' * 200_000 + b"0" + b"}" * 200_000
+    src = tmp_path / "deep.safetensors"
+    src.write_bytes(len(hb).to_bytes(8, "little") + hb)
+    with pytest.raises(ImportRefused) as e:
+        model_import.inspect_file(src)
+    assert e.value.code == "malformed_safetensors"
+
+
 def test_interrupted_job_requeues_and_completes(client, authed, tmp_path):
     """Crash mid-run → reconcile_interrupted requeues (resumable) and the
     persisted private request_json lets the job complete on restart —

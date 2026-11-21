@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.adapters.base import CapabilityProfile, JobHandle
 from app.domain import model_artifacts, model_import
 
@@ -81,24 +83,37 @@ class ModelImportAdapter:
 
         yield {"progress": 0.9, "message": "registering artifact"}
         with self._sf() as s:
-            row, reused = model_artifacts.register_import(
-                s, source_uri=source_uri, report=report.to_json(),
-                license_json=lic,
-                family=req.get("family") or "",
-                role_hint=req.get("role_hint") or "")
-            # Audit without the path — artifact_id is the durable ref.
-            from app.db.models import AuditEvent, new_id
-            s.add(AuditEvent(
-                id=new_id(), project_id=None,
-                event_type="model_import.registered",
-                payload_json={
-                    "artifact_id": row.artifact_id,
-                    "reused": reused,
-                    "fmt": report.fmt,
-                    "suggested_arch": report.suggested_arch,
-                }))
-            s.commit()
-            artifact_id = row.artifact_id
+            try:
+                row, reused = model_artifacts.register_import(
+                    s, source_uri=source_uri, report=report.to_json(),
+                    license_json=lic,
+                    family=req.get("family") or "",
+                    role_hint=req.get("role_hint") or "")
+                # Audit without the path — artifact_id is the durable ref.
+                from app.db.models import AuditEvent, new_id
+                s.add(AuditEvent(
+                    id=new_id(), project_id=None,
+                    event_type="model_import.registered",
+                    payload_json={
+                        "artifact_id": row.artifact_id,
+                        "reused": reused,
+                        "fmt": report.fmt,
+                        "suggested_arch": report.suggested_arch,
+                    }))
+                s.commit()
+                artifact_id = row.artifact_id
+            except SQLAlchemyError:
+                # F1 — a DB failure string carries statement params,
+                # which include the source path. Roll back and surface
+                # only a sanitized code: the raw error must never reach
+                # job.error, result_json, events, responses, or logs.
+                try:
+                    s.rollback()
+                except SQLAlchemyError:
+                    pass  # rollback on a dead connection — nothing to lose
+                raise model_import.ImportRefused(
+                    "db_error",
+                    "artifact registration failed") from None
 
         yield {
             "done": True, "progress": 1.0,
