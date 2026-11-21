@@ -837,8 +837,16 @@ class LoraPreviewAdapterOut(BaseModel):
 class LoraPreviewHashesOut(BaseModel):
     adapter_sha256: dict[str, str]        # resolved key → pinned sha
     base_model_sha256: str | None = None
-    prompt_sha256: str | None = None
-    runtime_prompt_sha256: str | None = None
+    prompt_sha256: str | None = Field(
+        default=None,
+        description="sha256 of the SUPPLIED prompt text — a durable "
+                    "generation request hashes the composed prompt "
+                    "(context included), so values differ")
+    runtime_prompt_sha256: str | None = Field(
+        default=None,
+        description="sha256 of supplied prompt + resolved adapter tags "
+                    "— not the composed-prompt pin a durable job "
+                    "carries")
     unavailable: list[str] = []           # named-not-computable + why
 
 

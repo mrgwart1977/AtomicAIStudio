@@ -1,7 +1,7 @@
 // B-3c — backend-authoritative LoRA resolution preview panel.
 // Read-only inspection: refused and accepted resolutions both render
 // as data; results go stale on context change; nothing is submitted.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const loraPreview = vi.fn();
@@ -67,7 +67,7 @@ describe("LoraResolutionPreview", () => {
     expect(screen.getByText("identity")).toBeTruthy();
     expect(screen.getByText(/bound to/)).toBeTruthy();
     expect(screen.getAllByText(/aaaaaaaaaaaa/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/runtime prompt \(with tags\)/)).toBeTruthy();
+    expect(screen.getByText(/runtime prompt \(supplied text \+ tags\)/)).toBeTruthy();
     // honesty + advisory notes render
     expect(screen.getByText(/not been validated in this build/)).toBeTruthy();
     expect(screen.getByText(/advisory resolution/)).toBeTruthy();
@@ -155,5 +155,148 @@ describe("LoraResolutionPreview", () => {
     expect(loraPreview).toHaveBeenCalledTimes(1);
     // the panel is labeled read-only/advisory in text, not just color
     expect(screen.getByText("read-only · advisory")).toBeTruthy();
+  });
+
+  // ---- stale-response guard: deferred promises + context changes ----
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return {promise, resolve, reject};
+  }
+
+  const clickCheck = () =>
+    fireEvent.click(screen.getByText("Check what the backend would accept"));
+
+  it("ignores a response arriving after a project switch", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({pid: "p1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p2" shotId="s1" modelKey="sd15.fp16" />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("ignores a response arriving after a shot change", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({shotId: "s1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s2" modelKey="sd15.fp16" />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("ignores a response arriving after a model change", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({modelKey: "sd15.fp16"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.other" />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("ignores a response arriving after a keyframe change", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({shotId: undefined, keyframeId: "k1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" keyframeId="k2"
+                             modelKey="sd15.fp16" />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("lets only the latest same-context request win", async () => {
+    // req1 fires under s1; context leaves and returns to s1; req2 fires —
+    // both are literally for shot s1 but req1 must not overwrite req2.
+    const d1 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d1.promise);
+    const {rerender} = renderPanel({shotId: "s1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s2" modelKey="sd15.fp16" />,
+    );
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16" />,
+    );
+    const d2 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d2.promise);
+    clickCheck();
+    await act(async () => d2.resolve(REFUSED));
+    await screen.findByText("Backend refuses this selection.");
+    await act(async () => d1.resolve(ACCEPTED));
+    expect(screen.getByText("Backend refuses this selection.")).toBeTruthy();
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("ignores a stale rejection — newer result and no old error", async () => {
+    const d1 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d1.promise);
+    const {rerender} = renderPanel({shotId: "s1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s2" modelKey="sd15.fp16" />,
+    );
+    const d2 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d2.promise);
+    clickCheck();
+    await act(async () => d2.resolve(ACCEPTED));
+    await screen.findByText(/Backend accepts/);
+    await act(async () => d1.reject(new Error("stale boom")));
+    expect(screen.getByText(/Backend accepts/)).toBeTruthy();
+    expect(screen.queryByText(/stale boom/)).toBeNull();
+  });
+
+  it("a stale request's finally cannot clear a newer request's busy state", async () => {
+    const d1 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d1.promise);
+    const {rerender} = renderPanel({shotId: "s1"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s2" modelKey="sd15.fp16" />,
+    );
+    const d2 = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValueOnce(d2.promise);
+    clickCheck();
+    expect(screen.getByText("Checking…")).toBeTruthy();
+    await act(async () => d1.resolve(REFUSED));   // stale settle
+    expect(screen.getByText("Checking…")).toBeTruthy();   // still busy
+    await act(async () => d2.resolve(REFUSED));
+    expect(screen.getByText("Check what the backend would accept"))
+      .toBeTruthy();
+  });
+
+  it("renders the supplied-vs-composed provenance disclosure", async () => {
+    loraPreview.mockResolvedValue({
+      ...ACCEPTED,
+      notes: [...ACCEPTED.notes,
+              "prompt_sha256 / runtime_prompt_sha256 cover the supplied " +
+              "prompt text (runtime adds the resolved adapter tags) — a " +
+              "durable generation request hashes the composed prompt " +
+              "(context included), so these values differ from job-time " +
+              "pins"],
+    });
+    renderPanel({prompt: "a red door"});
+    clickCheck();
+    await screen.findByText(/supplied prompt →/);
+    expect(screen.getByText(/supplied prompt text.*composed prompt/))
+      .toBeTruthy();
+    expect(screen.getByText(/supplied text \+ tags/)).toBeTruthy();
   });
 });

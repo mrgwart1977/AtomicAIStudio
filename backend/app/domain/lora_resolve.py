@@ -377,6 +377,13 @@ def resolve_lora_preview(session: Session, project: Project, *,
     if prompt is None:
         unavailable.append("prompt_sha256 / runtime_prompt_sha256 — no "
                            "prompt supplied")
+    if prompt is not None:
+        notes.append(
+            "prompt_sha256 / runtime_prompt_sha256 cover the supplied "
+            "prompt text (runtime adds the resolved adapter tags) — a "
+            "durable generation request hashes the composed prompt "
+            "(context included), so these values differ from job-time "
+            "pins")
     unavailable.append(
         "staged-file content hash — adapter bytes are re-hashed by the "
         "worker at job start; the values above are the request pins")

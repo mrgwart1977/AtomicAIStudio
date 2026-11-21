@@ -4,7 +4,7 @@
 // explicit refusal reasons, and the request-level pins. Everything is
 // advisory — nothing here queues, writes, stages, or executes, and a
 // real generation re-validates against the then-current state.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { loraPreview } from "../../api/client";
 import type { LoraPreview, LoraPreviewAdapter } from "../../api/types";
 import { LORA_RUNTIME_NOTE } from "./lora";
@@ -50,30 +50,53 @@ export function LoraResolutionPreview({
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Stale-proofing: any context change invalidates the last answer —
-  // the panel requires a fresh check rather than trusting old output.
+  // Stale-proofing, two layers:
+  //  • ctxRef mirrors the current context synchronously at render time,
+  //    so a response landing after a prop change — even before passive
+  //    effects run — is recognized as stale and dropped.
+  //  • reqSeq is a monotonically increasing request id: an older request
+  //    for the same context can never overwrite a newer one, and a stale
+  //    request's finally block can't clear a newer request's loading
+  //    state.
+  const ctxRef = useRef({pid, shotId, keyframeId, modelKey});
+  ctxRef.current = {pid, shotId, keyframeId, modelKey};
+  const reqSeq = useRef(0);
+
   useEffect(() => {
+    reqSeq.current += 1;   // invalidate anything still in flight
     setResult(null);
     setErr(null);
-  }, [shotId, keyframeId, modelKey]);
+    setBusy(false);
+  }, [pid, shotId, keyframeId, modelKey]);
 
   async function run() {
+    const ctx = ctxRef.current;
+    const id = ++reqSeq.current;
+    const live = () =>
+      id === reqSeq.current &&
+      ctx.pid === ctxRef.current.pid &&
+      ctx.shotId === ctxRef.current.shotId &&
+      ctx.keyframeId === ctxRef.current.keyframeId &&
+      ctx.modelKey === ctxRef.current.modelKey;
     setBusy(true);
     setErr(null);
     try {
-      setResult(await loraPreview(pid, {
+      const res = await loraPreview(pid, {
         model_key: modelKey,
         shot_id: shotId,
         keyframe_id: keyframeId,
         loras,
         prompt: prompt || undefined,
         negative_prompt: negativePrompt || undefined,
-      }));
+      });
+      if (!live()) return;
+      setResult(res);
     } catch (e) {
+      if (!live()) return;
       setErr(e instanceof Error ? e.message : String(e));
       setResult(null);
     } finally {
-      setBusy(false);
+      if (id === reqSeq.current) setBusy(false);
     }
   }
 
@@ -186,10 +209,12 @@ export function LoraResolutionPreview({
                 <li>base model → <code>{sha12(result.hashes.base_model_sha256)}</code></li>
               )}
               {result.hashes.prompt_sha256 && (
-                <li>prompt → <code>{sha12(result.hashes.prompt_sha256)}</code></li>
+                <li>supplied prompt →{" "}
+                  <code>{sha12(result.hashes.prompt_sha256)}</code>
+                </li>
               )}
               {result.hashes.runtime_prompt_sha256 && (
-                <li>runtime prompt (with tags) →{" "}
+                <li>runtime prompt (supplied text + tags) →{" "}
                   <code>{sha12(result.hashes.runtime_prompt_sha256)}</code>
                 </li>
               )}

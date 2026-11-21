@@ -358,3 +358,113 @@ def test_preview_unavailable_hashes_named(client, tmp_path, monkeypatch):
     assert any("worker" in u and "job start" in u
                for u in out["hashes"]["unavailable"])
     assert any("advisory" in n for n in out["notes"])
+
+
+# ------------------------------------------------------- context edges
+
+def test_preview_wrong_project_keyframe(client, tmp_path, monkeypatch):
+    """A keyframe from another project must not resolve its shot here."""
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid = sh["shot"]["id"]
+    _bind_loras(client, pid, sid, c["id"], spec.key)
+    kf = _mk_kf(client, pid, sid, "start", prompt="a red door")
+    other_pid = make_project(client)["id"]
+    out = _preview(client, other_pid, model_key="sd15.fp16",
+                   keyframe_id=kf["id"], loras=[spec.key])
+    assert out["accepted"] is False
+    assert out["resolved"] == []
+    assert any("keyframe not found in this project" in e
+               for e in out["errors"])
+
+
+def test_preview_conflicting_context(client, tmp_path, monkeypatch):
+    """shot_id and keyframe_id resolving to different shots is an
+    explicit context error — never a silent pick-one."""
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid = sh["shot"]["id"]
+    _bind_loras(client, pid, sid, c["id"], spec.key)
+    sh2 = _shot(client, pid, sh["shot"]["scene_id"],
+                title="other", prompt="y")
+    kf = _mk_kf(client, pid, sh2["shot"]["id"], "start", prompt="y")
+    out = _preview(client, pid, model_key="sd15.fp16",
+                   shot_id=sid, keyframe_id=kf["id"], loras=[spec.key])
+    assert out["accepted"] is False
+    assert out["resolved"] == []
+    assert any("different shots" in e for e in out["errors"])
+
+
+def test_preview_no_context_identity_refused(client, tmp_path,
+                                             monkeypatch):
+    """No shot/keyframe context: identity adapters refuse outright —
+    there is nothing to bind them to — and the note says why."""
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid = sh["shot"]["id"]
+    _bind_loras(client, pid, sid, c["id"], spec.key)   # bound, but no ctx
+    out = _preview(client, pid, model_key="sd15.fp16",
+                   loras=[spec.key])
+    assert out["accepted"] is False
+    assert any("not bound to a character" in e for e in out["errors"])
+    assert any("no shot context" in n for n in out["notes"])
+    assert out["context"]["shot_id"] is None
+
+
+def test_preview_inherited_cast_authorized(client, tmp_path,
+                                           monkeypatch):
+    """A scene-level cast member the shot inherits satisfies the
+    identity binding when a shot-level override row carries it."""
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid = sh["shot"]["id"]
+    _commit(client, pid, "scene.cast.assign",
+            {"scene_id": sh["shot"]["scene_id"],
+             "character_id": c["id"]})
+    # shot-level override row for the inherited member carries loras
+    _bind_loras(client, pid, sid, c["id"], spec.key)
+    out = _preview(client, pid, model_key="sd15.fp16", shot_id=sid,
+                   loras=[spec.key])
+    assert out["accepted"] is True
+    assert out["resolved"][0]["bound_character_id"] == c["id"]
+
+
+def test_preview_style_project_linkage(client, tmp_path, monkeypatch):
+    """Documents existing B-1 style semantics: a style LoRA is
+    authorized by project-level cast linkage, not this shot's row."""
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid_a = sh["shot"]["id"]
+    sh_b = _shot(client, pid, sh["shot"]["scene_id"],
+                 title="other", prompt="y")
+    sty = _lora_spec("lora.style", role="style")
+    _add_lora(monkeypatch, sty)
+    _install_lora(client, sty)
+    # bound on shot B's cast row — NOT shot A's
+    _bind_loras(client, pid, sh_b["shot"]["id"], c["id"], sty.key)
+    out = _preview(client, pid, model_key="sd15.fp16", shot_id=sid_a,
+                   loras=[sty.key])
+    assert out["accepted"] is True
+    assert out["resolved"][0]["role"] == "style"
+
+
+def test_preview_hash_provenance_semantics(client, tmp_path,
+                                           monkeypatch):
+    """Preview hashes cover the SUPPLIED prompt text + resolved tags —
+    the response says so and never implies job-pin equivalence."""
+    from app.domain import lora_tags
+    pid, c, sh, spec = _full_setup(client, tmp_path, monkeypatch)
+    sid = sh["shot"]["id"]
+    _bind_loras(client, pid, sid, c["id"], spec.key)
+    prompt = "a red door at dusk"
+    out = _preview(client, pid, model_key="sd15.fp16", shot_id=sid,
+                   loras=[spec.key], prompt=prompt)
+    assert out["accepted"] is True
+    h = out["hashes"]
+    # derived from actual inputs — no invented values
+    assert h["prompt_sha256"] == hashlib.sha256(
+        prompt.encode("utf-8")).hexdigest()
+    a = out["resolved"][0]
+    assert h["runtime_prompt_sha256"] == lora_tags.runtime_prompt_sha256(
+        prompt, [{"staged_name": a["staged_name"],
+                  "strength": a["strength"]}])
+    # supplied-vs-composed disclosure is rendered
+    assert any("supplied" in n and "composed" in n
+               for n in out["notes"])
+    # the worker-side re-hash is still named unavailable
+    assert any("worker" in u for u in h["unavailable"])
