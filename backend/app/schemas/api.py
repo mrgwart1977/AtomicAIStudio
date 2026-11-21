@@ -787,3 +787,86 @@ class TimelineRevisionOut(BaseModel):
     revision: int
     summary: str
     created_at: datetime
+
+
+# ---------- B-3c — LoRA resolution preview (read-only) ----------
+
+
+class LoraPreviewRequest(BaseModel):
+    """Read-only adapter-resolution preview context.
+
+    `loras` mirrors the generation payload's `loras` field EXACTLY
+    (bare key strings or {"key", "strength"?} objects) and is validated
+    by the shared B-1 resolver — not by this schema — so refusal
+    semantics are identical to a real generation request. When omitted,
+    the proposed set is derived from the shot's stored cast bindings.
+
+    Context: shot_id and/or keyframe_id (a keyframe resolves its shot
+    exactly like keyframe.generate). prompt/negative_prompt are optional
+    — supplied text exercises the B-1 prompt-syntax guard and unlocks
+    prompt/runtime hash fields."""
+    model_key: str | None = None
+    loras: list[Any] | None = None
+    shot_id: str | None = None
+    keyframe_id: str | None = None
+    prompt: str | None = None
+    negative_prompt: str | None = None
+
+
+class LoraPreviewRequestedOut(BaseModel):
+    shape: str            # "string" | "object" | "invalid"
+    key: Any = None
+    strength: Any = None
+
+
+class LoraPreviewAdapterOut(BaseModel):
+    """A resolved, backend-accepted adapter — the same fields the
+    durable generation request pins (install_row_id stays internal)."""
+    key: str
+    version: str
+    role: str             # "identity" | "style"
+    strength: float
+    sha256: str
+    staged_name: str
+    base_family: str
+    base_model_key: str
+    base_model_sha256: str
+    bound_character_id: str | None = None
+
+
+class LoraPreviewHashesOut(BaseModel):
+    adapter_sha256: dict[str, str]        # resolved key → pinned sha
+    base_model_sha256: str | None = None
+    prompt_sha256: str | None = Field(
+        default=None,
+        description="sha256 of the SUPPLIED prompt text — a durable "
+                    "generation request hashes the composed prompt "
+                    "(context included), so values differ")
+    runtime_prompt_sha256: str | None = Field(
+        default=None,
+        description="sha256 of supplied prompt + resolved adapter tags "
+                    "— not the composed-prompt pin a durable job "
+                    "carries")
+    unavailable: list[str] = []           # named-not-computable + why
+
+
+class LoraPreviewContextOut(BaseModel):
+    shot_id: str | None = None
+    keyframe_id: str | None = None
+    model_key: str | None = None
+    proposed_from_cast: bool = False
+
+
+class LoraPreviewOut(BaseModel):
+    """Resolution preview result — refusal is DATA, not an HTTP error:
+    a refused selection returns 200 with accepted=false + reasons so it
+    can render alongside accepted output."""
+    accepted: bool
+    errors: list[str] = []                # context + B-1 resolver refusals
+    prompt_errors: list[str] = []         # prompt-syntax guard refusals
+    requested: list[LoraPreviewRequestedOut] = []
+    resolved: list[LoraPreviewAdapterOut] = []
+    hashes: LoraPreviewHashesOut
+    est_vram_lora_overhead_bytes: int | None = None
+    context: LoraPreviewContextOut
+    notes: list[str] = []

@@ -4,6 +4,7 @@ import { AuthImage } from "../../components/AuthImage";
 import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
 import { VideoGeneratePanel } from "./VideoGeneratePanel";
+import { LoraResolutionPreview } from "./LoraResolutionPreview";
 import type { Asset, AssetPage, BackendInfo, ModelCatalogEntry, RuntimeInfo } from "../../api/types";
 
 const inputCls =
@@ -397,6 +398,18 @@ export function GeneratePage() {
             </label>
           )}
         </div>
+
+        {/* B-3c — read-only backend resolution preview of the shot's
+            stored cast bindings. Advisory only; never submits a job. */}
+        {form.shot_id && model && (
+          <LoraResolutionPreview
+            pid={pid}
+            shotId={form.shot_id}
+            modelKey={model.key}
+            prompt={form.prompt}
+            negativePrompt={form.negative_prompt}
+          />
+        )}
 
         <button
           type="button"

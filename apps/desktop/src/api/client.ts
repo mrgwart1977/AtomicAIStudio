@@ -50,6 +50,18 @@ export async function listReferenceSets(
   return apiFetch(`/api/projects/${projectId}/reference-sets${q}`);
 }
 
+/** B-3c — backend-authoritative LoRA resolution preview. Read-only:
+ * nothing is queued, written, staged, or executed; the result is
+ * advisory and a real generation re-validates against current state. */
+export async function loraPreview(
+  projectId: string, req: import("./types").LoraPreviewRequest,
+): Promise<import("./types").LoraPreview> {
+  return apiFetch(`/api/projects/${projectId}/loras/preview`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
 // SEC-A1: `assetFileUrl` (token-in-query URLs) was removed — asset bytes
 // must be fetched with the X-Atomic-Token header via fetchAssetObjectUrl.
 
