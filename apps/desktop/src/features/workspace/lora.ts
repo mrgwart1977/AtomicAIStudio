@@ -13,14 +13,27 @@ export interface LoraSel {
   strength?: number;
 }
 
+/** B-3d — one per-request adapter selection entry. `strength` carries
+ *  the field's raw numeric state honestly:
+ *    finite number — a typed value (valid or not — validation decides)
+ *    null          — the input is incomplete: cleared or mid-edit, an
+ *                    unfinished entry that must block submission
+ *    undefined     — unspecified (e.g. a suggestion click default);
+ *                    resolves to the backend's 1.0 default
+ *  Nothing here is clamped, coerced, or silently rewritten. */
+export interface LoraSelectionEntry {
+  key: string;
+  strength?: number | null;
+}
+
 /** B-3d — per-request adapter selection state. EXPLICIT only: starts
  *  empty, is never populated from cast bindings or character defaults
  *  without a user click, and is cleared whenever the generation
  *  context (project / shot / keyframe / model) changes. `null` means
  *  "no adapter selected for this role" — the B-1 max is one each. */
 export interface LoraSelection {
-  identity: LoraSel | null;
-  style: LoraSel | null;
+  identity: LoraSelectionEntry | null;
+  style: LoraSelectionEntry | null;
 }
 
 export const EMPTY_LORA_SELECTION: LoraSelection = {
@@ -28,26 +41,61 @@ export const EMPTY_LORA_SELECTION: LoraSelection = {
   style: null,
 };
 
-/** Emit the request-level `loras` payload the backend accepts —
- *  identity first, then style, each as {key, strength} with strength
- *  always pinned so the request is unambiguous. Empty selection → []
- *  (callers omit the field entirely, which the backend treats the
- *  same as an empty list: no adapters on the request). */
-export function lorasForRequest(
-  sel: LoraSelection,
-): { key: string; strength: number }[] {
-  const out: { key: string; strength: number }[] = [];
-  if (sel.identity) {
-    out.push({ key: sel.identity.key, strength: sel.identity.strength ?? 1.0 });
-  }
-  if (sel.style) {
-    out.push({ key: sel.style.key, strength: sel.style.strength ?? 1.0 });
-  }
-  return out;
-}
-
 /** Adapter role declared by a catalog spec's capabilities["lora_role"]. */
 export type LoraRole = "identity" | "style";
+
+/** A validation failure on one selected adapter — `message` names the
+ *  role so the user can locate the field. */
+export interface LoraSelectionIssue {
+  role: LoraRole;
+  message: string;
+}
+
+export type LoraSelectionCheck =
+  | { ok: true; loras: { key: string; strength: number }[] }
+  | { ok: false; issues: LoraSelectionIssue[] };
+
+/** Shared validation boundary for the request payload — BOTH the
+ *  preview and the generate path consume this single result, so an
+ *  invalid or incomplete strength can never be serialized into a
+ *  request (a non-finite number would collapse to JSON null and
+ *  silently activate the backend's 1.0 default). Mirrors — never
+ *  replaces — the backend's (0, 2.0] rule; the backend still refuses
+ *  anything that reaches it.
+ *  ok → `loras` is the exact payload list (identity then style,
+ *  strength always pinned). !ok → `issues` names each role; nothing
+ *  is emitted and the selection may not be submitted.
+ *  An empty selection → {ok, loras:[]} — callers omit the field
+ *  entirely, which the backend treats identically: no adapters. */
+export function validateLoraSelection(sel: LoraSelection): LoraSelectionCheck {
+  const issues: LoraSelectionIssue[] = [];
+  const out: { key: string; strength: number }[] = [];
+  const roleName = (r: LoraRole) => (r === "identity" ? "Identity" : "Style");
+  for (const [role, e] of [["identity", sel.identity],
+                          ["style", sel.style]] as const) {
+    if (!e) continue;
+    if (e.strength === null) {
+      issues.push({ role, message:
+        `${roleName(role)} LoRA strength is incomplete — ` +
+        `enter a value within (0, 2.0] or remove the adapter.` });
+      continue;
+    }
+    const s = e.strength === undefined ? 1.0 : e.strength;
+    if (!Number.isFinite(s)) {
+      issues.push({ role, message:
+        `${roleName(role)} LoRA strength must be a finite ` +
+        `number within (0, 2.0].` });
+      continue;
+    }
+    if (s <= 0 || s > 2) {
+      issues.push({ role, message:
+        `${roleName(role)} LoRA strength must be within (0, 2.0].` });
+      continue;
+    }
+    out.push({ key: e.key, strength: s });
+  }
+  return issues.length ? { ok: false, issues } : { ok: true, loras: out };
+}
 
 /** One stored lora_json entry, normalized for display. LOSSLESS:
  *  preserves order, duplicates, and the original submitted value in

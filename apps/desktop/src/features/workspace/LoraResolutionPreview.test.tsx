@@ -361,4 +361,18 @@ describe("LoraResolutionPreview", () => {
       .toBeTruthy();
     expect(screen.getByText(/supplied text \+ tags/)).toBeTruthy();
   });
+
+  it("blocks the check while the selection is invalid", async () => {
+    renderPanel({
+      loras: undefined,
+      submitBlocked: "Identity LoRA strength must be a finite number within (0, 2.0].",
+    });
+    const btn = screen.getByText(
+      "Check what the backend would accept") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(screen.getByText(/LoRA selection is not valid/)).toBeTruthy();
+    fireEvent.click(btn);
+    await Promise.resolve();
+    expect(loraPreview).not.toHaveBeenCalled();
+  });
 });

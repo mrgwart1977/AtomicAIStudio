@@ -37,6 +37,7 @@ function AdapterRow({ a }: { a: LoraPreviewAdapter }) {
 
 export function LoraResolutionPreview({
   pid, shotId, keyframeId, modelKey, prompt, negativePrompt, loras,
+  submitBlocked,
 }: {
   pid: string;
   shotId?: string;
@@ -45,6 +46,9 @@ export function LoraResolutionPreview({
   prompt?: string;
   negativePrompt?: string;
   loras?: unknown[];
+  /** When set, the shared selection-validation boundary found an
+   *  invalid entry — the check is disabled and the reason shown. */
+  submitBlocked?: string;
 }) {
   const [result, setResult] = useState<LoraPreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -75,6 +79,7 @@ export function LoraResolutionPreview({
   }, [pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt]);
 
   async function run() {
+    if (submitBlocked) return;   // invalid selection — nothing submits
     const ctx = ctxRef.current;
     const id = ++reqSeq.current;
     const live = () =>
@@ -93,7 +98,7 @@ export function LoraResolutionPreview({
         model_key: modelKey,
         shot_id: shotId,
         keyframe_id: keyframeId,
-        loras,
+        loras,   // verbatim: [] = explicit none, undefined = derive cast
         prompt: prompt || undefined,
         negative_prompt: negativePrompt || undefined,
       });
@@ -129,11 +134,19 @@ export function LoraResolutionPreview({
       <button
         type="button"
         onClick={() => void run()}
-        disabled={busy}
+        disabled={busy || !!submitBlocked}
+        title={submitBlocked}
         className="mt-2 rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-teal disabled:opacity-50"
       >
         {busy ? "Checking…" : "Check what the backend would accept"}
       </button>
+
+      {submitBlocked && (
+        <p role="alert"
+           className="mt-2 rounded border border-amber/40 bg-amber/10 px-2 py-1 text-[11px] text-amber">
+          LoRA selection is not valid — {submitBlocked}
+        </p>
+      )}
 
       {err && (
         <p role="alert"

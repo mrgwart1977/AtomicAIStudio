@@ -9,7 +9,7 @@ import { LoraSelectionPanel, type LoraSuggestion } from "./LoraSelectionPanel";
 import {
   EMPTY_LORA_SELECTION,
   eligibleIdentityDefaults,
-  lorasForRequest,
+  validateLoraSelection,
   normalizeLoraEntries,
   type LoraSelection,
 } from "./lora";
@@ -171,6 +171,12 @@ export function GeneratePage() {
     }
     return out;
   }, [form.shot_id, storyboard, entities, models]);
+
+  // B-3d — single validation boundary shared by the preview and the
+  // generate payload: an invalid or incomplete strength produces
+  // named-role issues and nothing is ever serialized for a request.
+  const loraCheck = useMemo(() => validateLoraSelection(loraSel), [loraSel]);
+
   const runningJob = genJobs.find(
     (j) => j.status === "running" || j.status === "queued",
   );
@@ -239,7 +245,10 @@ export function GeneratePage() {
 
   async function generate() {
     if (!pid || !project || !model) return;
-    const reqLoras = lorasForRequest(loraSel);
+    if (!loraCheck.ok) {
+      setErr(loraCheck.issues.map((i) => i.message).join(" "));
+      return;
+    }
     setSubmitting(true);
     setErr(null);
     try {
@@ -260,7 +269,7 @@ export function GeneratePage() {
         runtime_flavor: form.flavor === "auto" ? undefined : form.flavor,
         // B-3d — explicit per-request selection only; absent when none
         // (backend treats absent/[] identically: no adapters).
-        loras: reqLoras.length ? reqLoras : undefined,
+        loras: loraCheck.loras.length ? loraCheck.loras : undefined,
       });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -473,6 +482,7 @@ export function GeneratePage() {
             suggestions={loraSuggestions}
             value={loraSel}
             onChange={setLoraSel}
+            issues={loraCheck.ok ? [] : loraCheck.issues}
           />
         )}
 
@@ -485,9 +495,12 @@ export function GeneratePage() {
             pid={pid}
             shotId={form.shot_id}
             modelKey={model.key}
-            loras={lorasForRequest(loraSel)}
+            loras={loraCheck.ok ? loraCheck.loras : undefined}
             prompt={form.prompt}
             negativePrompt={form.negative_prompt}
+            submitBlocked={loraCheck.ok
+              ? undefined
+              : loraCheck.issues.map((i) => i.message).join(" ")}
           />
         )}
 

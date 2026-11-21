@@ -6,7 +6,11 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelCatalogEntry } from "../../api/types";
 import { LoraSelectionPanel, type LoraSuggestion } from "./LoraSelectionPanel";
-import { EMPTY_LORA_SELECTION, type LoraSelection } from "./lora";
+import {
+  EMPTY_LORA_SELECTION,
+  validateLoraSelection,
+  type LoraSelection,
+} from "./lora";
 
 afterEach(cleanup);
 
@@ -181,5 +185,128 @@ describe("LoraSelectionPanel", () => {
   it("renders an honest empty state with no catalog loras", () => {
     setup(EMPTY_LORA_SELECTION, { models: [] });
     expect(screen.getByText(/No LoRA adapters in the catalog/)).toBeTruthy();
+  });
+
+  it("a cleared strength field marks the entry incomplete, never a number", () => {
+    const { onChange } = setup({ identity: { key: "char.ada", strength: 1.0 },
+                                style: null });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith(
+      { identity: { key: "char.ada", strength: null }, style: null });
+  });
+
+  it("non-numeric keystrokes are incomplete input, not a coerced value", () => {
+    const { onChange } = setup({ identity: { key: "char.ada", strength: 1.0 },
+                                style: null });
+    // a number input reports "" while the text can't parse — the
+    // selection marks it incomplete (null) rather than fabricating 0/1.0
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "e" } });
+    expect(onChange).toHaveBeenCalledWith(
+      { identity: { key: "char.ada", strength: null }, style: null });
+  });
+
+  it("a non-finite typed value passes through uncoerced for validation", () => {
+    const { onChange } = setup({ identity: { key: "char.ada", strength: 1.0 },
+                                style: null });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "1e999" } });
+    expect(onChange).toHaveBeenCalledWith(
+      { identity: { key: "char.ada", strength: Infinity }, style: null });
+  });
+
+  it("switching adapters preserves a typed strength, even an invalid one", () => {
+    const { onChange } = setup({ identity: { key: "char.ada", strength: 3 },
+                                style: null });
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.missing" } });
+    expect(onChange).toHaveBeenCalledWith(
+      { identity: { key: "char.missing", strength: 3 }, style: null });
+  });
+
+  it("validation issues render under their role with an alert", () => {
+    setup({ identity: { key: "char.ada", strength: 3 },
+            style: { key: "style.grain", strength: -1 } },
+          { issues: [
+            { role: "identity", message: "Identity LoRA strength must be within (0, 2.0]." },
+            { role: "style", message: "Style LoRA strength must be within (0, 2.0]." },
+          ] });
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts.map((a) => a.textContent)).toEqual([
+      "Identity LoRA strength must be within (0, 2.0].",
+      "Style LoRA strength must be within (0, 2.0].",
+    ]);
+  });
+});
+
+describe("validateLoraSelection — shared request boundary", () => {
+  const sel = (identity: number | null | undefined,
+               style?: number | null | undefined): LoraSelection => ({
+    identity: style === undefined && identity === undefined
+      ? null
+      : { key: "char.ada", strength: identity },
+    style: style === undefined ? null : { key: "style.grain", strength: style },
+  });
+
+  it.each([0.5, 1.0, 2.0])("accepts and pins a valid strength %s", (s) => {
+    const c = validateLoraSelection(sel(s));
+    expect(c).toEqual({ ok: true,
+                        loras: [{ key: "char.ada", strength: s }] });
+  });
+
+  it.each([0, -0.5, -2, 2.5, 3])("rejects an out-of-range strength %s", (s) => {
+    const c = validateLoraSelection(sel(s));
+    expect(c.ok).toBe(false);
+    if (!c.ok) {
+      expect(c.issues).toHaveLength(1);
+      expect(c.issues[0].role).toBe("identity");
+      expect(c.issues[0].message).toMatch(/within \(0, 2\.0\]/);
+    }
+  });
+
+  it.each([Infinity, -Infinity, NaN])("rejects the non-finite strength %s", (s) => {
+    const c = validateLoraSelection(sel(s));
+    expect(c.ok).toBe(false);
+    if (!c.ok) expect(c.issues[0].message).toMatch(/finite/);
+  });
+
+  it("rejects an incomplete (null) strength without emitting a payload", () => {
+    const c = validateLoraSelection(sel(null));
+    expect(c.ok).toBe(false);
+    if (!c.ok) expect(c.issues[0].message).toMatch(/incomplete/);
+  });
+
+  it("an unspecified strength resolves to the pinned 1.0 default", () => {
+    const c = validateLoraSelection({
+      identity: { key: "char.ada" }, style: null });
+    expect(c).toEqual({ ok: true,
+                        loras: [{ key: "char.ada", strength: 1.0 }] });
+  });
+
+  it("an invalid strength never serializes as null or silently as 1.0", () => {
+    // The B-3d defect class: a non-finite number becomes JSON null →
+    // backend reads it as the 1.0 default. With the boundary, no
+    // payload is emitted at all.
+    const c = validateLoraSelection(sel(Infinity));
+    expect(c.ok).toBe(false);
+    if (c.ok) throw new Error("unreachable");
+    const ok = validateLoraSelection(sel(1.5));
+    expect(ok.ok && JSON.stringify(ok.loras))
+      .toBe('[{"key":"char.ada","strength":1.5}]');
+  });
+
+  it("identity and style validate independently — one bad role blocks all", () => {
+    const c = validateLoraSelection(sel(1.5, 3));
+    expect(c.ok).toBe(false);
+    if (!c.ok) {
+      expect(c.issues).toHaveLength(1);
+      expect(c.issues[0].role).toBe("style");
+    }
+  });
+
+  it("an empty selection validates to an explicit-empty payload", () => {
+    expect(validateLoraSelection(EMPTY_LORA_SELECTION))
+      .toEqual({ ok: true, loras: [] });
   });
 });

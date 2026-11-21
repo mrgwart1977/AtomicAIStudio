@@ -13,6 +13,7 @@ import {
   loraRole,
   type LoraRole,
   type LoraSelection,
+  type LoraSelectionIssue,
 } from "./lora";
 
 export interface LoraSuggestion {
@@ -34,6 +35,7 @@ function RolePicker({
   suggestions,
   value,
   onChange,
+  issues,
 }: {
   role: LoraRole;
   title: string;
@@ -43,6 +45,7 @@ function RolePicker({
   suggestions: LoraSuggestion[];
   value: LoraSelection[typeof role];
   onChange: (v: LoraSelection[typeof role]) => void;
+  issues: LoraSelectionIssue[];
 }) {
   const options = models.filter((m) => isLoraEntry(m) && loraRole(m) === role);
   const entry = value ? models.find((m) => m.key === value.key) : undefined;
@@ -70,7 +73,11 @@ function RolePicker({
           value={value?.key ?? ""}
           onChange={(e) =>
             onChange(e.target.value
-              ? { key: e.target.value, strength: value?.strength ?? 1.0 }
+              // A fresh pick starts at the 1.0 default; switching
+              // adapters preserves whatever strength state was typed
+              // — including an incomplete/invalid one — so it is
+              // never silently reset to a valid value.
+              ? { key: e.target.value, strength: value ? value.strength : 1.0 }
               : null)
           }
         >
@@ -121,15 +128,31 @@ function RolePicker({
             min={0.05}
             max={2}
             step={0.05}
-            value={value.strength ?? 1.0}
+            // Raw editing state, never coerced: an unspecified value
+            // shows the 1.0 default, an incomplete field (null) shows
+            // empty, and a typed number — valid or not — is preserved
+            // for the validation boundary to judge.
+            value={value.strength === undefined
+              ? 1.0
+              : (value.strength ?? "")}
             onChange={(e) =>
-              onChange({ key: value.key, strength: Number(e.target.value) })
+              onChange({
+                key: value.key,
+                strength: e.target.value === "" ? null : Number(e.target.value),
+              })
             }
             className="w-20 rounded border border-line bg-card px-2 py-0.5 text-xs text-fg"
           />
           <span className="text-faint">(0, 2.0]</span>
         </label>
       )}
+
+      {issues.filter((i) => i.role === role).map((i, k) => (
+        <p key={k} role="alert"
+           className="rounded border border-rose/40 bg-rose/10 px-2 py-1 text-[10px] text-rose">
+          {i.message}
+        </p>
+      ))}
 
       {roleSuggestions.length > 0 && (
         <div className="flex flex-wrap items-center gap-1">
@@ -165,6 +188,7 @@ export function LoraSelectionPanel({
   suggestions,
   value,
   onChange,
+  issues = [],
 }: {
   /** Full catalog including modality:"lora" entries. */
   models: ModelCatalogEntry[];
@@ -176,6 +200,8 @@ export function LoraSelectionPanel({
   suggestions: LoraSuggestion[];
   value: LoraSelection;
   onChange: (sel: LoraSelection) => void;
+  /** Shared-validation failures — rendered under their role. */
+  issues?: LoraSelectionIssue[];
 }) {
   const hasLoras = models.some((m) => isLoraEntry(m));
   return (
@@ -216,6 +242,7 @@ export function LoraSelectionPanel({
             suggestions={suggestions}
             value={value.identity}
             onChange={(v) => onChange({ ...value, identity: v })}
+            issues={issues}
           />
           <RolePicker
             role="style"
@@ -226,6 +253,7 @@ export function LoraSelectionPanel({
             suggestions={suggestions}
             value={value.style}
             onChange={(v) => onChange({ ...value, style: v })}
+            issues={issues}
           />
         </>
       )}

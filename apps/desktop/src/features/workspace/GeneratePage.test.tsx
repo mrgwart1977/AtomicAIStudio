@@ -23,7 +23,9 @@ vi.mock("../../api/commands", () => ({
 
 const store = {
   currentProjectId: "p1",
-  currentProject: () => ({ id: "p1", revision: 7, name: "Proj" }),
+  currentProject() {
+    return { id: this.currentProjectId, revision: 7, name: "Proj" };
+  },
   models: [] as ModelCatalogEntry[],
   gpuState: null,
   storyboard: [] as unknown[],
@@ -108,6 +110,8 @@ beforeEach(() => {
                 capabilities: { lora_role: "style" } }),
   ];
   store.storyboard = BOARD;
+  store.currentProjectId = "p1";
+  store.entities.character = [];
 });
 
 afterEach(cleanup);
@@ -227,5 +231,149 @@ describe("GeneratePage — B-3d adapter selection", () => {
     expect(idSel.value).toBe("char.ada");
     // no cast-binding command was issued — only the selection changed
     expect(commitCommand).not.toHaveBeenCalled();
+  });
+
+  it("explicit none previews as an empty selection even with cast bindings", async () => {
+    render(<GeneratePage />);
+    attachShot("s1");   // Ada's cast binding exists — still explicit []
+    loraPreview.mockResolvedValue({
+      accepted: true, errors: [], prompt_errors: [],
+      requested: [], resolved: [], context: {},
+      hashes: { adapter_sha256: {}, base_model_sha256: null,
+                prompt_sha256: null, runtime_prompt_sha256: null,
+                unavailable: [] },
+      est_vram_lora_overhead_bytes: 0, notes: [],
+    });
+    fireEvent.click(screen.getByText("Check what the backend would accept"));
+    await screen.findByText(/Accepted — the request carries/);
+    // [] — never null/omitted — so the backend cannot derive cast loras
+    expect(loraPreview).toHaveBeenCalledWith("p1", expect.objectContaining({
+      loras: [],
+    }));
+  });
+
+  it("an invalid strength blocks Generate before any command", async () => {
+    render(<GeneratePage />);
+    attachShot("s1");
+    fillPrompt();
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.ada" } });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "1e999" } });   // → Infinity
+    fireEvent.click(screen.getByText("Generate"));
+    await screen.findAllByText(/Identity LoRA strength must be a finite/);
+    expect(commitCommand).not.toHaveBeenCalled();
+  });
+
+  it("an invalid strength blocks the preview check", async () => {
+    render(<GeneratePage />);
+    attachShot("s1");
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.ada" } });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "0" } });
+    const btn = screen.getByText(
+      "Check what the backend would accept") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(loraPreview).not.toHaveBeenCalled();
+    expect(screen.getByText(/LoRA selection is not valid/)).toBeTruthy();
+  });
+
+  it("a cleared strength field blocks submission as incomplete", async () => {
+    render(<GeneratePage />);
+    attachShot("s1");
+    fillPrompt();
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.ada" } });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "" } });
+    fireEvent.click(screen.getByText("Generate"));
+    await screen.findAllByText(/Identity LoRA strength is incomplete/);
+    expect(commitCommand).not.toHaveBeenCalled();
+  });
+
+  it("correcting an invalid strength restores normal payload construction", async () => {
+    render(<GeneratePage />);
+    attachShot("s1");
+    fillPrompt();
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.ada" } });
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "1e999" } });
+    fireEvent.click(screen.getByText("Generate"));
+    await screen.findAllByText(/must be a finite/);
+    fireEvent.change(screen.getByLabelText("Identity LoRA strength"),
+                     { target: { value: "1.5" } });
+    fireEvent.click(screen.getByText("Generate"));
+    await waitFor(() => expect(commitCommand).toHaveBeenCalled());
+    expect(commitCommand).toHaveBeenCalledWith(
+      "p1", 7, "generate.image",
+      expect.objectContaining({
+        loras: [{ key: "char.ada", strength: 1.5 }],
+      }));
+  });
+
+  it("changing projects clears an explicit selection", async () => {
+    const { rerender } = render(<GeneratePage />);
+    attachShot("s1");
+    fireEvent.change(screen.getByLabelText("Identity LoRA adapter"),
+                     { target: { value: "char.ada" } });
+    store.currentProjectId = "p2";
+    rerender(<GeneratePage />);
+    const idSel = screen.getByLabelText("Identity LoRA adapter") as HTMLSelectElement;
+    expect(idSel.value).toBe("");
+  });
+
+  it("offers scene-inherited character defaults without applying them", async () => {
+    store.storyboard = [
+      { scene: { id: "sc1", title: "Scene 1", position: 0 },
+        shots: [shot("s1", "Wide", [], [{
+          id: "sc9", character_id: "c2", position: 0,
+          character: { id: "c2", name: "Bia", status: "active" },
+          lora_json: null,
+        }])] },
+    ];
+    store.entities.character = [{
+      id: "c2", kind: "character", name: "Bia",
+      data: { loras: [{ key: "char.ada", strength: 0.8 }] },
+    }];
+    render(<GeneratePage />);
+    attachShot("s1");
+    const chip = await screen.findByTitle("Select char.ada for this request only");
+    expect(chip.textContent).toMatch(/Bia default/);
+    const idSel = screen.getByLabelText("Identity LoRA adapter") as HTMLSelectElement;
+    expect(idSel.value).toBe("");            // offered, never applied
+    fireEvent.click(chip);
+    expect(idSel.value).toBe("char.ada");
+  });
+
+  it("duplicate suggestion keys keep their per-source labels", async () => {
+    // char.ada is BOTH bound to Ada on the shot and Bia's character
+    // default — two distinct, correctly-attributed offers, not one
+    // misleadingly-labeled chip.
+    store.storyboard = [
+      { scene: { id: "sc1", title: "Scene 1", position: 0 },
+        shots: [shot("s1", "Wide", [{
+          id: "cr1", character_id: "c1", position: 0,
+          character: { id: "c1", name: "Ada", status: "active" },
+          lora_json: [{ key: "char.ada", strength: 0.7 }],
+        }], [{
+          id: "sc9", character_id: "c2", position: 0,
+          character: { id: "c2", name: "Bia", status: "active" },
+          lora_json: null,
+        }])] },
+    ];
+    store.entities.character = [{
+      id: "c2", kind: "character", name: "Bia",
+      data: { loras: [{ key: "char.ada", strength: 0.8 }] },
+    }];
+    render(<GeneratePage />);
+    attachShot("s1");
+    const chips = await screen.findAllByTitle(
+      "Select char.ada for this request only");
+    const labels = chips.map((c) => c.textContent ?? "");
+    expect(labels.some((l) => /bound to Ada/.test(l))).toBe(true);
+    expect(labels.some((l) => /Bia default/.test(l))).toBe(true);
   });
 });
