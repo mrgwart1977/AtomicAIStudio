@@ -520,7 +520,7 @@ def test_model_install_download_job(client, tmp_path, monkeypatch):
                         lambda path, f, fmt: (True, "ok"))
 
     def fake_dl(dest, url, *, expected_size=None, progress=None,
-                cancel_check=None, timeout=60):
+                cancel_check=None, timeout=60, **_kw):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"FAKE" * 1024)
         if progress:

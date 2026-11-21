@@ -18,7 +18,6 @@ import logging
 import os
 import shutil
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
@@ -113,69 +112,158 @@ def _format_magic_ok(path: Path, fmt: str) -> bool:
 def download_to(dest: Path, url: str, *, expected_size: int | None = None,
                 progress: Callable[[int, int], None] | None = None,
                 cancel_check: Callable[[], None] | None = None,
-                timeout: int = 60) -> dict:
-    """Stream url -> dest.part with Range-resume, then verify + rename.
+                timeout: int = 60,
+                allowed_hosts: tuple[str, ...] = (),
+                deadline_s: float = 3600.0,
+                stall_s: float | None = None,
+                verify: Callable[[Path], tuple[bool, str]] | None = None,
+                resolver=None, connect=None, wrap=None,
+                conn_factory=None) -> dict:
+    """Stream url -> dest.part with Range-resume, verify, then publish.
 
-    A <dest>.part.json sidecar records the source URL and expected size so
-    resume works across restarts. Returns {bytes, sha256}."""
+    Issue #175 — pinned transport: `url` is the ONLY source (catalog-
+    approved; a stored sidecar URL can never replace it). Every hop is
+    re-validated through the egress gate + a provider allowlist; only
+    validated literal IPs are dialed and TLS still authenticates the
+    original hostname. Redirect-target URLs are never persisted — the
+    <dest>.part.json sidecar stores the ENTRY url + expected size only.
+
+    Publication order (verify BEFORE the canonical path is touched):
+    exact-size check → optional `verify(.part)` (declared sha256 /
+    format-magic) → atomic os.replace. A failed verification never
+    publishes — a previously valid `dest` is left untouched.
+
+    Explicit recovery policy for partial state:
+      - incomplete-but-resumable .part (short / transient failure /
+        cancellation): KEPT for resume.
+      - .part that can never become the artifact (over-cap stream,
+        verify failure — appended bytes cannot repair wrong content):
+        DISCARDED.
+    Returns {bytes, sha256}."""
+    from app.domain import download_security as ds
+    from app.net import egress
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     sidecar = part.with_suffix(part.suffix + ".json")
-    meta = {"url": url, "expected_size": expected_size}
+    for p in (part, sidecar, dest):
+        ds.ensure_not_symlink(p)
+
+    # Sidecar reconciliation — reuse state only when it agrees with the
+    # catalog-approved source; mismatched partial state is discarded.
+    stored = None
     if sidecar.exists():
         try:
-            meta = {**meta, **json.loads(sidecar.read_text())}
+            stored = json.loads(sidecar.read_text())
         except (OSError, json.JSONDecodeError):
-            pass
-    url = meta["url"]
-    expected = meta.get("expected_size") or expected_size
+            stored = None
+    if not ds.reconcile_sidecar(stored, url=url, expected_size=expected_size):
+        part.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+    meta = {"url": url, "expected_size": expected_size}
+    sidecar.write_text(json.dumps(meta))
 
+    expected = expected_size
     have = part.stat().st_size if part.exists() else 0
-    headers = {"User-Agent": "atomic-dream-engine"}
-    total = expected
-    # Bounded in-stream retry: multi-GB downloads on flaky connections drop
-    # mid-stream; each attempt resumes via Range instead of restarting.
+    # Transfer cap is SEPARATE from the exact-size contract: declared size
+    # + slack, else the global ceiling when nothing is declared.
+    cap = (expected + ds.SIZE_SLACK) if expected else ds.GLOBAL_SIZE_CAP
+    stall = stall_s if stall_s is not None else float(timeout)
+    t0 = time.monotonic()
+    # Bounded retry: multi-GB downloads drop mid-stream; each attempt
+    # resumes via Range instead of restarting.
     attempt, max_attempts = 0, 8
     while True:
         attempt += 1
-        if have:
-            headers["Range"] = f"bytes={have}-"
-        req = urllib.request.Request(url, headers=headers)
+        # Defense in depth: a local attacker could substitute .part/
+        # sidecar/dest between attempts — re-check each iteration. This
+        # shrinks but does not close the check→open TOCTOU window (a
+        # handle-based check would be needed for that).
+        for p in (part, sidecar, dest):
+            ds.ensure_not_symlink(p)
+        conn = None
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if have and resp.status == 200:
-                    # Server ignored Range — restart cleanly rather than corrupt.
-                    have = 0
-                elif have and resp.status != 206:
-                    have = 0
-                cr = resp.headers.get("Content-Range")
-                if cr and "/" in cr:
-                    total = int(cr.split("/")[-1])
-                elif resp.headers.get("Content-Length"):
-                    total = have + int(resp.headers["Content-Length"])
-                mode = "ab" if have else "wb"
-                with open(part, mode) as fh:
-                    while True:
-                        if cancel_check is not None:
-                            cancel_check()
-                        chunk = resp.read(_CHUNK)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        have += len(chunk)
-                        if progress:
-                            progress(have, total or 0)
+            conn, resp, start, total = ds.open_download_stream(
+                url, resume_from=have, allowed_hosts=allowed_hosts,
+                expected_total=expected, timeout_s=timeout,
+                resolver=resolver, connect=connect, wrap=wrap,
+                conn_factory=conn_factory)
+            if have and start == 0:
+                have = 0  # server ignored Range — restart cleanly
+            last_data = time.monotonic()
+            with open(part, "ab" if have else "wb") as fh:
+                while True:
+                    if cancel_check is not None:
+                        cancel_check()
+                    chunk = resp.read(_CHUNK)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    have += len(chunk)
+                    now = time.monotonic()
+                    if now - last_data > stall:
+                        raise ModelError(
+                            f"download stalled — no progress for "
+                            f"{int(stall)}s, partial kept")
+                    last_data = now
+                    if have > cap:
+                        raise egress.EgressRefused(
+                            "size", f"stream exceeds {cap}-byte transfer cap")
+                    if now - t0 > deadline_s:
+                        raise ModelError(
+                            f"download deadline ({int(deadline_s)}s) exceeded "
+                            "— partial kept, resumable")
+                    if progress:
+                        progress(have, total or 0)
+            conn.close()
             break  # stream complete
-        except Exception as exc:
-            # Cancellation (JobCancelled — imported lazily by name to avoid an
-            # adapters→domain import cycle) must never be retried.
-            if exc.__class__.__name__ in ("JobCancelled", "ModelError"):
+        except egress.EgressRefused as exc:
+            if conn is not None:
+                conn.close()
+            if exc.code == "size" and have > cap:
+                # Recovery policy: an over-cap .part can never become the
+                # artifact — discard rather than let resume re-fail
+                # forever. (Pre-stream "size" refusals leave the valid
+                # resumable prefix intact.)
+                part.unlink(missing_ok=True)
+                sidecar.unlink(missing_ok=True)
+            # "resolve" can be a transient DNS flake — retry within the
+            # budget; every other egress code is a policy refusal that
+            # retrying cannot fix.
+            if exc.code != "resolve":
                 raise
-            # .part + sidecar stay on disk — next attempt resumes from `have`.
             sidecar.write_text(json.dumps(meta))
             if attempt >= max_attempts:
                 raise
             time.sleep(min(2 ** attempt, 30))
+        except ds.RangeUnsatisfiable:
+            if conn is not None:
+                conn.close()
+            # 416 — stored offset refused; discard partial state, restart.
+            have = 0
+            part.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            sidecar.write_text(json.dumps(meta))
+            if attempt >= max_attempts:
+                raise ModelError(
+                    "server refused resume (416) repeatedly — download failed")
+            time.sleep(min(2 ** attempt, 30))
+        except Exception as exc:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            # Cancellation (JobCancelled — imported lazily by name to avoid an
+            # adapters→domain import cycle) must never be retried.
+            if exc.__class__.__name__ in ("JobCancelled", "ModelError"):
+                raise
+            sidecar.write_text(json.dumps(meta))
+            if attempt >= max_attempts:
+                raise
+            retry_after = getattr(exc, "retry_after", None)
+            time.sleep(retry_after if retry_after is not None
+                       else min(2 ** attempt, 30))
 
     if expected and have != expected:
         sidecar.write_text(json.dumps(meta))
@@ -187,6 +275,16 @@ def download_to(dest: Path, url: str, *, expected_size: int | None = None,
     with open(part, "rb") as fh:
         for chunk in iter(lambda: fh.read(_CHUNK), b""):
             sha.update(chunk)
+    if verify is not None:
+        ok, why = verify(part)
+        if not ok:
+            # Verify-before-publish: invalid bytes never reach the
+            # canonical path and `dest` (possibly a previously valid
+            # artifact) is untouched. Wrong content is NOT resumable —
+            # discard partial state per the explicit recovery policy.
+            part.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            raise ModelError(f"verification failed ({dest.name}): {why}")
     part.replace(dest)
     sidecar.unlink(missing_ok=True)
     return {"bytes": have, "sha256": sha.hexdigest()}
@@ -415,9 +513,14 @@ def resolve_release_asset(spec: RuntimeSpec, flavor: str, *,
     if pinned:
         api = api.rsplit("/", 1)[0] + f"/tags/{spec.release_tag}" \
             if api.endswith("/latest") else api
-    fetch = fetch or (lambda url: json.loads(urllib.request.urlopen(
-        urllib.request.Request(url, headers={"User-Agent": "atomic-dream-engine"}),
-        timeout=30).read()))
+    # The release metadata fetch uses the same pinned/allowlisted
+    # transport as artifact downloads — a plain urlopen would re-open
+    # scheme/redirect/DNS gaps the artifact path just closed.
+    if fetch is None:
+        from app.domain import download_security as ds
+        fetch = lambda url: json.loads(ds.fetch_bytes(
+            url, allowed_hosts=ds.HOST_ALLOWLISTS["github"],
+            max_bytes=4 * 1024 * 1024, timeout_s=30))
     rel = fetch(api)
     needle = spec.asset_patterns.get(flavor, flavor).lower()
     for asset in rel.get("assets", []):
@@ -471,7 +574,10 @@ def install_runtime_zip(session: Session, settings, spec: RuntimeSpec, flavor: s
     session.flush()
 
     try:
+        from app.domain import download_security as ds
+        ds.ensure_contained(runtimes_root(settings), tmp_zip)
         res = download_to(tmp_zip, asset["url"], expected_size=asset.get("size") or None,
+                          allowed_hosts=ds.HOST_ALLOWLISTS["github"],
                           progress=progress, cancel_check=cancel_check)
         if cancel_check:
             cancel_check()
