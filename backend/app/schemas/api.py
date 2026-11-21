@@ -687,6 +687,29 @@ class ModelArtifactOut(BaseModel):
     install: dict[str, Any]
 
 
+class ModelImportRequest(BaseModel):
+    """U-2a — reference-only import of ONE user-owned file. The path is
+    retained only in job.request_json for execution/crash recovery —
+    JobOut never serializes it."""
+    path: str
+    license: dict[str, Any] = {}
+    family: str = ""
+    role_hint: str = ""
+
+
+class ModelImportOut(BaseModel):
+    job_id: str
+    status: str
+
+
+class ModelArtifactDetailOut(ModelArtifactOut):
+    """Authenticated detail view — the only surface that carries
+    source_uri and the full inspection report (local trust boundary)."""
+    source_uri: str | None = None
+    imported_at: str | None = None
+    import_report: dict[str, Any] = {}
+
+
 class ModelsDirOut(BaseModel):
     dir: str
     source: str  # "app setting" | "built-in default"

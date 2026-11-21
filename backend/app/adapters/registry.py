@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 
 from app.adapters.base import ProviderAdapter
+from app.adapters.import_adapter import ModelImportAdapter
 from app.adapters.inference import (
     ModelBenchmarkAdapter,
     ModelDownloadAdapter,
@@ -111,6 +112,7 @@ class AdapterRegistry:
             self.register(SdCppVideoAdapter(session_factory, settings))
             self.register(ModelDownloadAdapter(session_factory, settings))
             self.register(ModelBenchmarkAdapter(session_factory, settings))
+            self.register(ModelImportAdapter(session_factory, settings))
             # M4.1 Phase 2A — real persistent sd-server worker. Registered
             # only behind ATOMIC_PERSISTENT_INFERENCE_ENABLED=1:
             # unvalidated persistent inference is not selectable by default.

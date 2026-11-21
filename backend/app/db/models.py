@@ -860,6 +860,12 @@ class ModelArtifact(Base):
     tags_json: Mapped[list] = mapped_column(JSON, default=list)
     meta_json: Mapped[dict] = mapped_column(JSON, default=dict)        # source, files manifest, runtime_key, adapter_id
     install_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # U-2a — import provenance. source_uri is the user's absolute source
+    # path (Text — arbitrary-length Windows paths incl. \\?\ extended
+    # form); never copied into list views, job events, or audit payloads.
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    import_report_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

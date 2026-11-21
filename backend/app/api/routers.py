@@ -61,8 +61,11 @@ from app.schemas.api import (
     JobOut,
     LoraPreviewOut,
     LoraPreviewRequest,
+    ModelArtifactDetailOut,
     ModelArtifactOut,
     ModelCatalogEntryOut,
+    ModelImportOut,
+    ModelImportRequest,
     ModelInstallRequest,
     ModelsDirOut,
     PackageImportRequest,
@@ -175,6 +178,73 @@ def list_model_artifacts(request: Request, db: Session = Depends(get_db)):
     parsed as a model key."""
     from app.domain import model_artifacts
     return model_artifacts.list_artifacts(db)
+
+
+@api_router.get("/api/models/artifacts/{artifact_id}",
+                response_model=ModelArtifactDetailOut)
+def get_model_artifact(artifact_id: str, request: Request,
+                       db: Session = Depends(get_db)):
+    """U-2a — authenticated detail view: the only surface that returns
+    source_uri and the full inspection report."""
+    from app.domain import model_artifacts
+    from app.db.models import ModelArtifact
+    row = db.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise HTTPException(404, "unknown artifact")
+    inst = None
+    if row.artifact_id.startswith(model_artifacts.PREFIX_CATALOG):
+        from app.domain.model_files import installs_by_key
+        inst = installs_by_key(db).get(
+            row.artifact_id[len(model_artifacts.PREFIX_CATALOG):])
+        if inst:
+            inst = {k: v for k, v in inst.items() if k != "disk_free_bytes"}
+    else:
+        inst = {"status": "registered", "managed_by": row.managed_by}
+    return model_artifacts.artifact_to_dict(row, inst, detail=True)
+
+
+@api_router.post("/api/models/import", status_code=202,
+                 response_model=ModelImportOut)
+def import_model(body: ModelImportRequest, request: Request,
+                 db: Session = Depends(get_db)):
+    """U-2a — enqueue a durable reference-only import of ONE user-owned
+    file. Always 202: inspection + full SHA-256 run on the job; reuse of
+    an existing artifact happens inside the job after fresh hashing, so
+    no pre-commit '201 registered' exists. Sync checks are limited to
+    request shape + cheap path classification (no content reads)."""
+    from app.domain.model_import import ImportRefused, validate_source_path
+
+    if not (body.license or {}).get("name", "").strip():
+        raise HTTPException(422, "license_required")
+    try:
+        rp = validate_source_path(body.path)
+    except ImportRefused as e:
+        raise HTTPException(422, e.code) from None
+
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.import",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().all()
+    resolved = str(rp)
+    for j in in_flight:
+        if (j.request_json or {}).get("source_path") == resolved:
+            raise HTTPException(
+                409, "an import for this file is already in progress")
+
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.import",
+        kind="model_import",
+        request={"source_path": resolved,
+                 "license": body.license,
+                 "family": body.family,
+                 "role_hint": body.role_hint},
+        idempotency_key=f"modelimp:{new_id()[:8]}",
+    )
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
 
 
 @api_router.get("/api/models/{model_key}", response_model=ModelCatalogEntryOut)
