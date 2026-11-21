@@ -751,6 +751,119 @@ MODELS: dict[str, ModelSpec] = {
         notes="Highest-quality open t2v baseline, but 13B-class memory needs put it beyond consumer "
               "single-GPU cards — tracked for high-end/workstation tiers.",
     ),
+    # B-3e-1 — first curated LoRA adapters (sd1.5). Both entries are
+    # metadata-verified against primary sources: immutable revision-pinned
+    # URLs, published sha256, named licenses, documented roles/triggers.
+    # support="experimental" is deliberate and honest: catalog inclusion
+    # and installation do NOT establish runtime compatibility — no LoRA
+    # inference has been validated on sd.cpp, and check_loras refuses
+    # experimental adapters for generation until that validation exists.
+    "lora.id.babylittlelo": ModelSpec(
+        key="lora.id.babylittlelo",
+        display_name="BabyLittleLo — character identity LoRA (SD 1.5)",
+        family="sd1.5",
+        version="1.0-0bad08e",
+        adapter_id="gen.image.sdcpp",
+        fmt="safetensors",
+        source={
+            "provider": "huggingface",
+            "repo": "AiAF/BabyLittleLo_LoAR_SD1.5",
+            "revision": "0bad08ebf49d1d31befb8e1c568b00b9650335f8",
+            "url": "https://huggingface.co/AiAF/BabyLittleLo_LoAR_SD1.5/"
+                   "resolve/0bad08ebf49d1d31befb8e1c568b00b9650335f8/"
+                   "BabyLittleLo-SD1.5.safetensors",
+        },
+        license={
+            "name": "CC0-1.0",
+            "url": "https://huggingface.co/AiAF/BabyLittleLo_LoAR_SD1.5",
+            "commercial_ok": True,
+            "notes": "Public-domain dedication — unrestricted use, no "
+                     "attribution required. Original fictional character.",
+        },
+        files=(ModelFile(
+            name="BabyLittleLo-SD1.5.safetensors",
+            size_bytes=151_124_544,  # HF tree API lfs size
+            url="https://huggingface.co/AiAF/BabyLittleLo_LoAR_SD1.5/"
+                "resolve/0bad08ebf49d1d31befb8e1c568b00b9650335f8/"
+                "BabyLittleLo-SD1.5.safetensors",
+            sha256="15d98a7828936dda787c4e4d2d5ab10f2306a2cf10ab8c75a08a76e844709cbe",
+        ),),
+        requirements={
+            "min_vram_bytes": 768 * MIB,   # per-adapter activation overhead (B-1)
+            "rec_vram_bytes": 768 * MIB,
+            "min_ram_bytes": 2 * GIB,
+            "min_disk_bytes": 200 * MIB,
+            "backends": ["vulkan", "cuda", "cpu"],
+        },
+        capabilities={
+            "lora_role": "identity",
+            "trigger_tokens": ["babylittlelo \\(person\\)", "@bblittlelo",
+                               "bblittlelo \\(person\\)"],
+        },
+        support="experimental",
+        modality="lora",
+        modes=("text2image",),
+        notes="Kohya sd-scripts layout (lora_down/lora_up/alpha, dim 128, "
+              "unet + text encoder) trained on the official SD 1.5 fp32 "
+              "checkpoint — layout is the canonical sd.cpp-supported form "
+              "but has NOT been verified to load. Activation tokens must "
+              "appear in the prompt. Experimental: installable but "
+              "generation-ineligible until LoRA inference is validated. "
+              "No identity-consistency or output-quality claims are made.",
+    ),
+    "lora.style.pixelart": ModelSpec(
+        key="lora.style.pixelart",
+        display_name="Pixel Art style LoRA (SD 1.5)",
+        family="sd1.5",
+        version="1.0-54ed396",
+        adapter_id="gen.image.sdcpp",
+        fmt="safetensors",
+        source={
+            "provider": "huggingface",
+            "repo": "SedatAl/pixel-art-LoRa",
+            "revision": "54ed39696bebc825817a6d9dc630dd4c50edc813",
+            "url": "https://huggingface.co/SedatAl/pixel-art-LoRa/resolve/"
+                   "54ed39696bebc825817a6d9dc630dd4c50edc813/"
+                   "pytorch_lora_weights.safetensors",
+        },
+        license={
+            "name": "CreativeML OpenRAIL-M",
+            "url": "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
+            "commercial_ok": True,
+            "notes": "Commercial use allowed with use restrictions (no "
+                     "illegal/harmful content) — same license family as the "
+                     "SD 1.5 base weights.",
+        },
+        files=(ModelFile(
+            name="pytorch_lora_weights.safetensors",
+            size_bytes=3_226_184,  # HF tree API lfs size
+            url="https://huggingface.co/SedatAl/pixel-art-LoRa/resolve/"
+                "54ed39696bebc825817a6d9dc630dd4c50edc813/"
+                "pytorch_lora_weights.safetensors",
+            sha256="ad5034703699e910d5f9525ea5db64abcbd8d7396ff8f771c09403f3adb048ad",
+        ),),
+        requirements={
+            "min_vram_bytes": 768 * MIB,   # per-adapter activation overhead (B-1)
+            "rec_vram_bytes": 768 * MIB,
+            "min_ram_bytes": 2 * GIB,
+            "min_disk_bytes": 20 * MIB,
+            "backends": ["vulkan", "cuda", "cpu"],
+        },
+        capabilities={
+            "lora_role": "style",
+            "trigger_tokens": ["pixel art"],
+        },
+        support="experimental",
+        modality="lora",
+        modes=("text2image",),
+        notes="Diffusers-layout adapter (unet.*.lora.down/lora.up dotted "
+              "names, UNet attention layers only) trained on the "
+              "diffusiondb-pixelart dataset — sd.cpp compatibility with "
+              "this naming is UNCERTAIN and unverified. Prompt should "
+              "include 'pixel art'. Experimental: installable but "
+              "generation-ineligible until LoRA inference is validated. "
+              "No output-quality claims are made.",
+    ),
 }
 
 

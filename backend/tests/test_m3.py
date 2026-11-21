@@ -110,7 +110,7 @@ def test_catalog_integrity():
         assert m.license["name"] and m.license["url"]
         assert m.requirements["min_vram_bytes"] > 0
         assert m.support in ("production", "tested", "experimental", "planned")
-        assert m.modality in ("image", "video", "audio", "multimodal")
+        assert m.modality in ("image", "video", "audio", "multimodal", "lora")
         assert m.modes, "every entry declares at least one generation mode"
         assert set(m.modes) & set(m.capabilities.get("tasks", [])) or not m.capabilities.get("tasks")
         # a model can never be installable AND planned
@@ -491,7 +491,8 @@ def test_models_endpoint_lists_catalog(client):
             "compatible", "limited", "unsupported", "unknown", "restricted", "unavailable", "planned"}
         assert m["license"]["name"]
         assert "download_bytes" in m
-        assert m["modality"] in ("image", "video", "audio", "multimodal")
+        assert m["modality"] in ("image", "video", "audio", "multimodal",
+                                 "lora")
         assert m["support"] in ("production", "tested", "experimental", "planned")
         assert m["modes"]
     keys = {m["key"] for m in models}
