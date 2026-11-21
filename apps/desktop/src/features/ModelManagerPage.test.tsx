@@ -120,11 +120,13 @@ const VALIDATION = {
   ],
 };
 
-const mockState: { models: unknown[] } = { models: MODELS };
+const mockState: { models: unknown[]; artifacts: unknown[] } =
+  { models: MODELS, artifacts: [] };
 
 vi.mock("../stores/appStore", () => ({
   useApp: (sel: (s: unknown) => unknown) => sel({
     hardware: null, adapters: [], models: mockState.models, gpuState: null,
+    artifacts: mockState.artifacts,
     jobs: {},
     refreshHardware: () => Promise.resolve(),
     refreshModels: () => Promise.resolve(),
@@ -264,5 +266,51 @@ describe("ModelManagerPage — B-3a LoRA adapters section", () => {
     fireEvent.click(installs[installs.length - 1]);
     await waitFor(() => screen.getByText("Approve download & install"));
     expect(screen.getByText(/Nothing downloads until you approve/)).toBeTruthy();
+  });
+});
+
+describe("ModelManagerPage — U-1 universal model library", () => {
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset(); mockApi();
+    mockState.models = MODELS; mockState.artifacts = [];
+  });
+
+  it("renders a read-only registry view with an honest empty state", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Universal Model Library"));
+    expect(screen.getByText(/No artifacts registered yet/)).toBeTruthy();
+    expect(screen.getByText(/read-only/)).toBeTruthy();
+  });
+
+  it("lists artifacts with kind, arch, ownership, source, and install state", async () => {
+    mockState.artifacts = [{
+      artifact_id: "catalog:sd15.fp16", display_name: "SD 1.5 fp16",
+      kind: "model", arch: "sd1.5", family: "sd1.5", modality: "image",
+      fmt: "gguf", role: "diffusion", version: "1.5",
+      source_type: "catalog", managed_by: "atomic",
+      uri: null, content_sha256: "ab".repeat(32), byte_size: 2e9,
+      license: {}, support_tier: "production", enabled: true,
+      tags: [], meta: {}, install_id: "i1",
+      install: { status: "installed" },
+    }, {
+      artifact_id: "import:ext1", display_name: "User Model",
+      kind: "model", arch: "sdxl", family: "", modality: "image",
+      fmt: "gguf", role: "diffusion", version: "", source_type: "import",
+      managed_by: "external", uri: "E:/lib/custom.gguf",
+      content_sha256: null, byte_size: 0, license: {},
+      support_tier: "unknown", enabled: true, tags: [], meta: {},
+      install_id: null, install: { status: "not_installed" },
+    }];
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("User Model"));
+    expect(screen.getByText("SD 1.5 fp16")).toBeTruthy();
+    expect(screen.getByText("atomic-managed")).toBeTruthy();
+    expect(screen.getByText("external")).toBeTruthy();
+    expect(screen.getByText("installed")).toBeTruthy();
+    expect(screen.getByText("not installed")).toBeTruthy();
+    expect(screen.getByText(/no checksum declared/)).toBeTruthy();
+    // registry rows expose no install/download actions of their own
+    const section = screen.getByText("Universal Model Library").closest("section");
+    expect(section?.querySelector("button")).toBeNull();
   });
 });

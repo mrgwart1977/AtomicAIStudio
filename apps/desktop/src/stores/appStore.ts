@@ -10,6 +10,7 @@ import type {
   GpuSchedulerState,
   HardwareReport,
   Job,
+  ModelArtifact,
   ModelCatalogEntry,
   Project,
   ProjectCard,
@@ -43,6 +44,7 @@ interface AppState {
   hardware: HardwareReport | null;
   adapters: AdapterProfile[];
   models: ModelCatalogEntry[];
+  artifacts: ModelArtifact[];
   gpuState: GpuSchedulerState | null;
   generateShotId: string | null;
   promptDraft: string;
@@ -95,6 +97,7 @@ export const useApp = create<AppState>((set, get) => ({
   hardware: null,
   adapters: [],
   models: [],
+  artifacts: [],
   gpuState: null,
   generateShotId: null,
   promptDraft: "",
@@ -243,11 +246,12 @@ export const useApp = create<AppState>((set, get) => ({
     set({ hardware, adapters });
   },
   refreshModels: async () => {
-    const [models, gpuState] = await Promise.all([
+    const [models, gpuState, artifacts] = await Promise.all([
       apiFetch<ModelCatalogEntry[]>("/api/models"),
       apiFetch<GpuSchedulerState>("/api/gpu/scheduler"),
+      apiFetch<ModelArtifact[]>("/api/models/artifacts"),
     ]);
-    set({ models, gpuState });
+    set({ models, gpuState, artifacts });
   },
   setGenerateShotId: (generateShotId) => set({ generateShotId }),
   currentProject: () => get().projects.find((p) => p.id === get().currentProjectId),

@@ -660,6 +660,33 @@ class RuntimeOut(BaseModel):
     installs: dict[str, Any] = {}  # per-flavor rows, keyed e.g. "sdcpp-vulkan"
 
 
+class ModelArtifactOut(BaseModel):
+    """U-1 — universal model/adapter registry row (read-only projection).
+    `install` is projected from the authoritative model_installs row,
+    never stored on the artifact."""
+    artifact_id: str
+    display_name: str
+    kind: str            # model | adapter | auxiliary
+    arch: str
+    family: str
+    modality: str
+    fmt: str
+    role: str
+    version: str
+    source_type: str     # catalog | import | discovered | trained
+    managed_by: str      # atomic | external
+    uri: str | None = None
+    content_sha256: str | None = None
+    byte_size: int
+    license: dict[str, Any]
+    support_tier: str
+    enabled: bool
+    tags: list[str]
+    meta: dict[str, Any]
+    install_id: str | None = None
+    install: dict[str, Any]
+
+
 class ModelsDirOut(BaseModel):
     dir: str
     source: str  # "app setting" | "built-in default"

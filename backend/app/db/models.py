@@ -827,6 +827,43 @@ class RuntimeInstall(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ModelArtifact(Base):
+    """U-1 — universal model/adapter registry row. READ-ONLY PROJECTION:
+    catalog-seeded rows mirror `model_catalog`; `install_id` associates
+    the authoritative `model_installs` row without copying its state.
+    Three distinct identity layers: `artifact_id` (registry identity,
+    e.g. "catalog:sd15.fp16"), `content_sha256` (content identity, full
+    checksum of the primary file, NULL when undeclared), `install_id`
+    (installation identity). `managed_by` marks the ownership boundary:
+    "atomic" = under the models root; "external" = referenced in place
+    and never modified by the app."""
+
+    __tablename__ = "model_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    kind: Mapped[str] = mapped_column(String(20), default="model")      # model | adapter | auxiliary
+    arch: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    family: Mapped[str] = mapped_column(String(40), default="")
+    modality: Mapped[str] = mapped_column(String(20), default="image")
+    fmt: Mapped[str] = mapped_column(String(30), default="unknown")
+    role: Mapped[str] = mapped_column(String(60), default="")
+    version: Mapped[str] = mapped_column(String(60), default="")
+    source_type: Mapped[str] = mapped_column(String(20), default="catalog")   # catalog|import|discovered|trained
+    managed_by: Mapped[str] = mapped_column(String(20), default="atomic")     # atomic | external
+    uri: Mapped[str | None] = mapped_column(Text, nullable=True)              # resolved file location
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    license_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    support_tier: Mapped[str] = mapped_column(String(20), default="unknown", index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    tags_json: Mapped[list] = mapped_column(JSON, default=list)
+    meta_json: Mapped[dict] = mapped_column(JSON, default=dict)        # source, files manifest, runtime_key, adapter_id
+    install_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class AppSetting(Base):
     """Durable app-level key/value settings (backup default dir, etc.).
     Not project-scoped — survives restarts and migrations."""

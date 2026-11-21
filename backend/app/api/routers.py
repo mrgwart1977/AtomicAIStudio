@@ -61,6 +61,7 @@ from app.schemas.api import (
     JobOut,
     LoraPreviewOut,
     LoraPreviewRequest,
+    ModelArtifactOut,
     ModelCatalogEntryOut,
     ModelInstallRequest,
     ModelsDirOut,
@@ -162,6 +163,18 @@ def get_models_dir(request: Request, db: Session = Depends(get_db)):
         "free_bytes": model_files.disk_free_bytes(root),
         "used_bytes": used,
     }
+
+
+@api_router.get("/api/models/artifacts",
+                response_model=list[ModelArtifactOut])
+def list_model_artifacts(request: Request, db: Session = Depends(get_db)):
+    """U-1 — the universal artifact registry: catalog-seeded model and
+    adapter rows with install state projected from model_installs.
+    Read-only view; install rows remain authoritative.
+    NOTE: declared before /api/models/{model_key} so "artifacts" is not
+    parsed as a model key."""
+    from app.domain import model_artifacts
+    return model_artifacts.list_artifacts(db)
 
 
 @api_router.get("/api/models/{model_key}", response_model=ModelCatalogEntryOut)

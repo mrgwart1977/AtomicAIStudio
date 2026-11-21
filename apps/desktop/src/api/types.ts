@@ -1122,6 +1122,38 @@ export interface ModelCatalogEntry {
 }
 
 
+// ---------- U-1: universal model/adapter registry ----------
+
+/** U-1 — read-only artifact registry row. `install` is projected from
+ * the authoritative model_installs row; the artifact row stores no
+ * install state of its own. `managed_by` is the ownership boundary:
+ * "atomic" = app-managed under the models root; "external" = referenced
+ * in place, never modified by the app. */
+export interface ModelArtifact {
+  artifact_id: string;
+  display_name: string;
+  kind: "model" | "adapter" | "auxiliary" | string;
+  arch: string;
+  family: string;
+  modality: string;
+  fmt: string;
+  role: string;
+  version: string;
+  source_type: "catalog" | "import" | "discovered" | "trained" | string;
+  managed_by: "atomic" | "external" | string;
+  uri: string | null;
+  content_sha256: string | null;
+  byte_size: number;
+  license: Record<string, unknown>;
+  support_tier: string;
+  enabled: boolean;
+  tags: string[];
+  meta: Record<string, unknown>;
+  install_id: string | null;
+  install: { status: string } & Record<string, unknown>;
+}
+
+
 // ---------- C5-E: consolidated compatibility ----------
 
 export type AvailabilityClass =
