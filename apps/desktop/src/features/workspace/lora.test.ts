@@ -279,3 +279,38 @@ describe("eligibleIdentityDefaults — character default prefill", () => {
       .toMatchObject({ strength: null });
   });
 });
+
+describe("B-3e-1 curated catalog entries — advisory classification", () => {
+  // Mirror of the backend ModelSpec shape for the two curated entries.
+  // trigger_tokens ride along in capabilities — advisory only, the
+  // backend resolver never reads them.
+  it("identity entry classifies unverified with its role readable", () => {
+    const e = entry({
+      key: "lora.id.babylittlelo", support: "experimental",
+      capabilities: {
+        lora_role: "identity",
+        trigger_tokens: ["babylittlelo \(person\)", "@bblittlelo",
+                         "bblittlelo \(person\)"],
+      } as ModelCatalogEntry["capabilities"],
+    });
+    expect(isLoraEntry(e)).toBe(true);
+    expect(loraRole(e)).toBe("identity");
+    expect(loraCatalogState(e, "sd1.5")).toBe("unverified");
+    // even after a future install row exists, tier stays honest
+    expect(loraCatalogState({ ...e, install: { status: "installed" } },
+                            "sd1.5")).toBe("unverified");
+  });
+
+  it("style entry classifies unverified with its role readable", () => {
+    const e = entry({
+      key: "lora.style.pixelart", support: "experimental",
+      capabilities: {
+        lora_role: "style",
+        trigger_tokens: ["pixel art"],
+      } as ModelCatalogEntry["capabilities"],
+    });
+    expect(isLoraEntry(e)).toBe(true);
+    expect(loraRole(e)).toBe("style");
+    expect(loraCatalogState(e, "sd1.5")).toBe("unverified");
+  });
+});
