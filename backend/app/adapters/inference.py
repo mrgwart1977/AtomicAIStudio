@@ -35,7 +35,7 @@ from sqlalchemy import select
 
 from app.adapters.base import CapabilityProfile, JobCancelled, JobHandle
 from app.db.models import ModelInstall, RuntimeInstall, utcnow
-from app.domain import compatibility, hardware, model_catalog, model_files, proc_guard
+from app.domain import compatibility, download_security, hardware, model_catalog, model_files, proc_guard
 from app.domain.media import engine as media_engine
 from app.domain.media import policy as media_policy
 from app.domain.model_catalog import ModelSpec
@@ -1316,14 +1316,24 @@ class ModelDownloadAdapter:
             dest_dir = model_files.model_dir(root, spec)
             n_files = len(spec.files)
             total_bytes = 0
+            # #175: catalog-declared URLs are the ONLY download sources —
+            # legacy job requests carrying 'source_url' are ignored, never
+            # used (the override field was unreachable and is removed).
+            if req.get("source_url"):
+                log.warning("ops.model.download: ignoring unexpected "
+                            "'source_url' in job request")
+            allowed_hosts = download_security.allowed_hosts_for(
+                (spec.source or {}).get("provider"))
             for fi, mf in enumerate(spec.files):
                 yield {"progress": 0.05 + 0.9 * (fi / n_files),
                        "message": f"downloading {spec.display_name} ({mf.role} {fi + 1}/{n_files})"}
+                download_security.ensure_component_name(mf.name)
                 dest = dest_dir / mf.name
-                url = req.get("source_url") or mf.url
+                download_security.ensure_contained(root, dest)
                 task = asyncio.create_task(asyncio.to_thread(
-                    model_files.download_to, dest, url,
+                    model_files.download_to, dest, mf.url,
                     expected_size=mf.size_bytes,
+                    allowed_hosts=allowed_hosts,
                     progress=on_bytes, cancel_check=handle.check_cancel,
                 ))
                 while not task.done():

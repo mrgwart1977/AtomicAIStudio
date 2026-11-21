@@ -201,6 +201,15 @@ def check_url(url: str, *, allowed_schemes: frozenset[str] = frozenset(
         raise EgressRefused("port", "unparseable port")
     if port is not None and port not in allowed_ports:
         raise EgressRefused("port", f"non-default port {port} refused")
+    # #175: IDNA-canonicalize names so unicode/confusable and full-width-dot
+    # forms (evil。com, xn--) resolve to the ASCII host allowlists and DNS
+    # actually see. IP literals skip canonicalization entirely.
+    if check_ip_literal(host) is None:
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except (UnicodeError, ValueError):
+            raise EgressRefused("host",
+                                f"hostname {host!r} is not valid IDNA")
     ip = check_ip_literal(host)
     if ip is not None:
         _check_ip(ip)  # literal hosts are validated immediately
