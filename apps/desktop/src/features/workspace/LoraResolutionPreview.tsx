@@ -37,6 +37,7 @@ function AdapterRow({ a }: { a: LoraPreviewAdapter }) {
 
 export function LoraResolutionPreview({
   pid, shotId, keyframeId, modelKey, prompt, negativePrompt, loras,
+  submitBlocked,
 }: {
   pid: string;
   shotId?: string;
@@ -45,21 +46,29 @@ export function LoraResolutionPreview({
   prompt?: string;
   negativePrompt?: string;
   loras?: unknown[];
+  /** When set, the shared selection-validation boundary found an
+   *  invalid entry — the check is disabled and the reason shown. */
+  submitBlocked?: string;
 }) {
   const [result, setResult] = useState<LoraPreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Stale-proofing, two layers:
-  //  • ctxRef mirrors the current context synchronously at render time,
-  //    so a response landing after a prop change — even before passive
-  //    effects run — is recognized as stale and dropped.
+  //  • ctxRef mirrors the current context synchronously at render time —
+  //    project/shot/keyframe/model AND the proposed selection, strength,
+  //    and prompt text — so a response landing after any relevant change
+  //    (even before passive effects run) is recognized as stale.
   //  • reqSeq is a monotonically increasing request id: an older request
   //    for the same context can never overwrite a newer one, and a stale
   //    request's finally block can't clear a newer request's loading
   //    state.
-  const ctxRef = useRef({pid, shotId, keyframeId, modelKey});
-  ctxRef.current = {pid, shotId, keyframeId, modelKey};
+  const selKey = JSON.stringify(loras ?? null);
+  const ctxRef = useRef(
+    {pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt},
+  );
+  ctxRef.current =
+    {pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt};
   const reqSeq = useRef(0);
 
   useEffect(() => {
@@ -67,9 +76,10 @@ export function LoraResolutionPreview({
     setResult(null);
     setErr(null);
     setBusy(false);
-  }, [pid, shotId, keyframeId, modelKey]);
+  }, [pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt]);
 
   async function run() {
+    if (submitBlocked) return;   // invalid selection — nothing submits
     const ctx = ctxRef.current;
     const id = ++reqSeq.current;
     const live = () =>
@@ -77,7 +87,10 @@ export function LoraResolutionPreview({
       ctx.pid === ctxRef.current.pid &&
       ctx.shotId === ctxRef.current.shotId &&
       ctx.keyframeId === ctxRef.current.keyframeId &&
-      ctx.modelKey === ctxRef.current.modelKey;
+      ctx.modelKey === ctxRef.current.modelKey &&
+      ctx.selKey === ctxRef.current.selKey &&
+      ctx.prompt === ctxRef.current.prompt &&
+      ctx.negativePrompt === ctxRef.current.negativePrompt;
     setBusy(true);
     setErr(null);
     try {
@@ -85,7 +98,7 @@ export function LoraResolutionPreview({
         model_key: modelKey,
         shot_id: shotId,
         keyframe_id: keyframeId,
-        loras,
+        loras,   // verbatim: [] = explicit none, undefined = derive cast
         prompt: prompt || undefined,
         negative_prompt: negativePrompt || undefined,
       });
@@ -121,11 +134,19 @@ export function LoraResolutionPreview({
       <button
         type="button"
         onClick={() => void run()}
-        disabled={busy}
+        disabled={busy || !!submitBlocked}
+        title={submitBlocked}
         className="mt-2 rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-teal disabled:opacity-50"
       >
         {busy ? "Checking…" : "Check what the backend would accept"}
       </button>
+
+      {submitBlocked && (
+        <p role="alert"
+           className="mt-2 rounded border border-amber/40 bg-amber/10 px-2 py-1 text-[11px] text-amber">
+          LoRA selection is not valid — {submitBlocked}
+        </p>
+      )}
 
       {err && (
         <p role="alert"
