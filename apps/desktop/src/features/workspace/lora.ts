@@ -13,6 +13,39 @@ export interface LoraSel {
   strength?: number;
 }
 
+/** B-3d — per-request adapter selection state. EXPLICIT only: starts
+ *  empty, is never populated from cast bindings or character defaults
+ *  without a user click, and is cleared whenever the generation
+ *  context (project / shot / keyframe / model) changes. `null` means
+ *  "no adapter selected for this role" — the B-1 max is one each. */
+export interface LoraSelection {
+  identity: LoraSel | null;
+  style: LoraSel | null;
+}
+
+export const EMPTY_LORA_SELECTION: LoraSelection = {
+  identity: null,
+  style: null,
+};
+
+/** Emit the request-level `loras` payload the backend accepts —
+ *  identity first, then style, each as {key, strength} with strength
+ *  always pinned so the request is unambiguous. Empty selection → []
+ *  (callers omit the field entirely, which the backend treats the
+ *  same as an empty list: no adapters on the request). */
+export function lorasForRequest(
+  sel: LoraSelection,
+): { key: string; strength: number }[] {
+  const out: { key: string; strength: number }[] = [];
+  if (sel.identity) {
+    out.push({ key: sel.identity.key, strength: sel.identity.strength ?? 1.0 });
+  }
+  if (sel.style) {
+    out.push({ key: sel.style.key, strength: sel.style.strength ?? 1.0 });
+  }
+  return out;
+}
+
 /** Adapter role declared by a catalog spec's capabilities["lora_role"]. */
 export type LoraRole = "identity" | "style";
 

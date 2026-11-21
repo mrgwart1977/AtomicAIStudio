@@ -282,6 +282,68 @@ describe("LoraResolutionPreview", () => {
       .toBeTruthy();
   });
 
+  it("goes stale on selection change — old result clears", async () => {
+    loraPreview.mockResolvedValue(ACCEPTED);
+    const {rerender} = renderPanel({loras: [{key: "char.ada", strength: 1}]});
+    clickCheck();
+    await screen.findByText(/Backend accepts 1 adapter/);
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16"
+                             loras={[{key: "char.ada", strength: 0.5}]} />,
+    );
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("goes stale on prompt change — old result clears", async () => {
+    loraPreview.mockResolvedValue(ACCEPTED);
+    const {rerender} = renderPanel({prompt: "a red door"});
+    clickCheck();
+    await screen.findByText(/Backend accepts 1 adapter/);
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16"
+                             prompt="a blue door" />,
+    );
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("goes stale on negative-prompt change — old result clears", async () => {
+    loraPreview.mockResolvedValue(ACCEPTED);
+    const {rerender} = renderPanel({negativePrompt: "blurry"});
+    clickCheck();
+    await screen.findByText(/Backend accepts 1 adapter/);
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16"
+                             negativePrompt="noisy" />,
+    );
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("drops an in-flight response when the prompt changed mid-flight", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({prompt: "a red door"});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16"
+                             prompt="a blue door" />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
+  it("drops an in-flight response when the selection changed", async () => {
+    const d = deferred<typeof ACCEPTED>();
+    loraPreview.mockReturnValue(d.promise);
+    const {rerender} = renderPanel({loras: [{key: "a", strength: 1}]});
+    clickCheck();
+    rerender(
+      <LoraResolutionPreview pid="p1" shotId="s1" modelKey="sd15.fp16"
+                             loras={[{key: "b", strength: 1}]} />,
+    );
+    await act(async () => d.resolve(ACCEPTED));
+    expect(screen.queryByText(/Backend accepts/)).toBeNull();
+  });
+
   it("renders the supplied-vs-composed provenance disclosure", async () => {
     loraPreview.mockResolvedValue({
       ...ACCEPTED,

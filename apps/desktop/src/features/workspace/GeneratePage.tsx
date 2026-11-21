@@ -5,6 +5,14 @@ import { commitCommand } from "../../api/commands";
 import { useApp } from "../../stores/appStore";
 import { VideoGeneratePanel } from "./VideoGeneratePanel";
 import { LoraResolutionPreview } from "./LoraResolutionPreview";
+import { LoraSelectionPanel, type LoraSuggestion } from "./LoraSelectionPanel";
+import {
+  EMPTY_LORA_SELECTION,
+  eligibleIdentityDefaults,
+  lorasForRequest,
+  normalizeLoraEntries,
+  type LoraSelection,
+} from "./lora";
 import type { Asset, AssetPage, BackendInfo, ModelCatalogEntry, RuntimeInfo } from "../../api/types";
 
 const inputCls =
@@ -83,6 +91,8 @@ export function GeneratePage() {
   const generateShotId = useApp((s) => s.generateShotId);
   const refreshModels = useApp((s) => s.refreshModels);
   const refreshStoryboard = useApp((s) => s.refreshStoryboard);
+  const entities = useApp((s) => s.entities);
+  const refreshEntities = useApp((s) => s.refreshEntities);
 
   const [form, setForm] = useState<GenForm>(defaults(undefined));
   const [advanced, setAdvanced] = useState(false);
@@ -94,6 +104,10 @@ export function GeneratePage() {
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
 
   const [mode, setMode] = useState<"image" | "video">("image");
+  // B-3d — explicit per-request adapter selection. Never persisted and
+  // never auto-populated: only a user click sets it, and the effect
+  // below clears it whenever the generation context changes.
+  const [loraSel, setLoraSel] = useState<LoraSelection>(EMPTY_LORA_SELECTION);
   const installed = useMemo(
     () => models.filter((m) => (m.modality ?? "image") === "image" && m.install?.status === "installed"),
     [models],
@@ -122,6 +136,41 @@ export function GeneratePage() {
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [jobs],
   );
+
+  // B-3d — cast-binding + character-default SUGGESTIONS for the selected
+  // shot. Display-only: each offers a click-to-select; nothing here is
+  // ever applied automatically or written back.
+  const loraSuggestions = useMemo((): LoraSuggestion[] => {
+    if (!form.shot_id) return [];
+    const shot = storyboard
+      .flatMap((s) => s.shots)
+      .find((sh) => sh.shot.id === form.shot_id);
+    if (!shot) return [];
+    const out: LoraSuggestion[] = [];
+    const seen = new Set<string>();
+    const offer = (key: string, strength: number | null, label: string) => {
+      const tag = `${label}:${key}`;
+      if (!seen.has(tag)) {
+        seen.add(tag);
+        out.push({ key, strength, label });
+      }
+    };
+    for (const m of [...shot.cast, ...shot.inherited]) {
+      for (const r of normalizeLoraEntries(m.lora_json)) {
+        if (r.kind === "invalid") continue;
+        offer(r.key, r.kind === "structured" ? r.strength : null,
+              `bound to ${m.character.name}`);
+      }
+      const ent = (entities.character ?? [])
+        .find((e) => e.id === m.character_id);
+      for (const r of eligibleIdentityDefaults(ent?.data?.loras, models)) {
+        if (r.kind === "invalid") continue;
+        offer(r.key, r.kind === "structured" ? r.strength : null,
+              `${m.character.name} default`);
+      }
+    }
+    return out;
+  }, [form.shot_id, storyboard, entities, models]);
   const runningJob = genJobs.find(
     (j) => j.status === "running" || j.status === "queued",
   );
@@ -149,8 +198,17 @@ export function GeneratePage() {
     void refreshStoryboard();
     void loadGenerated();
     void apiFetch<RuntimeInfo[]>("/api/runtimes").then(setRuntimes).catch(() => {});
+    void refreshEntities("character").catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid]);
+
+  // B-3d — changing project/shot/model drops the explicit selection:
+  // adapters are never silently carried into a different context.
+  const loraCtxKey = `${pid ?? ""}|${form.shot_id}|${model?.key ?? ""}`;
+  useEffect(() => {
+    setLoraSel((s) => (s.identity || s.style ? EMPTY_LORA_SELECTION : s));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loraCtxKey]);
 
   // Pre-fill the shot target when arriving from the storyboard.
   useEffect(() => {
@@ -181,6 +239,7 @@ export function GeneratePage() {
 
   async function generate() {
     if (!pid || !project || !model) return;
+    const reqLoras = lorasForRequest(loraSel);
     setSubmitting(true);
     setErr(null);
     try {
@@ -199,6 +258,9 @@ export function GeneratePage() {
         shot_id: form.shot_id || undefined,
         set_thumbnail: form.set_thumbnail && !!form.shot_id,
         runtime_flavor: form.flavor === "auto" ? undefined : form.flavor,
+        // B-3d — explicit per-request selection only; absent when none
+        // (backend treats absent/[] identically: no adapters).
+        loras: reqLoras.length ? reqLoras : undefined,
       });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -267,6 +329,7 @@ export function GeneratePage() {
             </p>
           ) : (
             <select
+              aria-label="Model"
               className={inputCls}
               value={model?.key ?? ""}
               onChange={(e) => pickModel(e.target.value)}
@@ -381,7 +444,7 @@ export function GeneratePage() {
 
         <div>
           <label className={labelCls}>Attach result to a shot (optional)</label>
-          <select className={inputCls} value={form.shot_id} onChange={(e) => set("shot_id", e.target.value)}>
+          <select aria-label="Attach result to a shot" className={inputCls} value={form.shot_id} onChange={(e) => set("shot_id", e.target.value)}>
             <option value="">No shot — save to assets only</option>
             {shots.map((s) => (
               <option key={s.id} value={s.id}>{s.label}</option>
@@ -399,13 +462,30 @@ export function GeneratePage() {
           )}
         </div>
 
-        {/* B-3c — read-only backend resolution preview of the shot's
-            stored cast bindings. Advisory only; never submits a job. */}
+        {/* B-3d — explicit per-request adapter selection (max one
+            identity + one style). Suggestions are click-to-apply only;
+            the selection clears on any context change. */}
+        {model && (
+          <LoraSelectionPanel
+            models={models}
+            baseFamily={model.family}
+            hasShot={!!form.shot_id}
+            suggestions={loraSuggestions}
+            value={loraSel}
+            onChange={setLoraSel}
+          />
+        )}
+
+        {/* B-3c — read-only backend resolution preview. It receives the
+            SAME explicit selection the generate request would carry —
+            including an empty list — so what it shows is what a commit
+            would submit, not an implicit cast default. */}
         {form.shot_id && model && (
           <LoraResolutionPreview
             pid={pid}
             shotId={form.shot_id}
             modelKey={model.key}
+            loras={lorasForRequest(loraSel)}
             prompt={form.prompt}
             negativePrompt={form.negative_prompt}
           />

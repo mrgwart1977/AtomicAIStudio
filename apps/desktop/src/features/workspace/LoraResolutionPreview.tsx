@@ -51,15 +51,20 @@ export function LoraResolutionPreview({
   const [busy, setBusy] = useState(false);
 
   // Stale-proofing, two layers:
-  //  • ctxRef mirrors the current context synchronously at render time,
-  //    so a response landing after a prop change — even before passive
-  //    effects run — is recognized as stale and dropped.
+  //  • ctxRef mirrors the current context synchronously at render time —
+  //    project/shot/keyframe/model AND the proposed selection, strength,
+  //    and prompt text — so a response landing after any relevant change
+  //    (even before passive effects run) is recognized as stale.
   //  • reqSeq is a monotonically increasing request id: an older request
   //    for the same context can never overwrite a newer one, and a stale
   //    request's finally block can't clear a newer request's loading
   //    state.
-  const ctxRef = useRef({pid, shotId, keyframeId, modelKey});
-  ctxRef.current = {pid, shotId, keyframeId, modelKey};
+  const selKey = JSON.stringify(loras ?? null);
+  const ctxRef = useRef(
+    {pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt},
+  );
+  ctxRef.current =
+    {pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt};
   const reqSeq = useRef(0);
 
   useEffect(() => {
@@ -67,7 +72,7 @@ export function LoraResolutionPreview({
     setResult(null);
     setErr(null);
     setBusy(false);
-  }, [pid, shotId, keyframeId, modelKey]);
+  }, [pid, shotId, keyframeId, modelKey, selKey, prompt, negativePrompt]);
 
   async function run() {
     const ctx = ctxRef.current;
@@ -77,7 +82,10 @@ export function LoraResolutionPreview({
       ctx.pid === ctxRef.current.pid &&
       ctx.shotId === ctxRef.current.shotId &&
       ctx.keyframeId === ctxRef.current.keyframeId &&
-      ctx.modelKey === ctxRef.current.modelKey;
+      ctx.modelKey === ctxRef.current.modelKey &&
+      ctx.selKey === ctxRef.current.selKey &&
+      ctx.prompt === ctxRef.current.prompt &&
+      ctx.negativePrompt === ctxRef.current.negativePrompt;
     setBusy(true);
     setErr(null);
     try {
