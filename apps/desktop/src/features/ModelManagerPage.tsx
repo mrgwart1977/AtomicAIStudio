@@ -68,6 +68,7 @@ export function ModelManagerPage() {
   const hw = useApp((s) => s.hardware);
   const adapters = useApp((s) => s.adapters);
   const models = useApp((s) => s.models);
+  const artifacts = useApp((s) => s.artifacts);
   const gpuState = useApp((s) => s.gpuState);
   const jobs = useApp((s) => s.jobs);
   const refreshHw = useApp((s) => s.refreshHardware);
@@ -586,6 +587,69 @@ export function ModelManagerPage() {
             </li>
           ))}
         </ul>
+      </section>
+
+      {/* --- U-1: universal model library (read-only registry view) --- */}
+      <section className="mt-6">
+        <h2 className="text-lg font-semibold">Universal Model Library</h2>
+        <p className="mt-1 text-sm text-muted">
+          The artifact registry — every model and adapter the app knows
+          about, with where it came from and who manages it. This view is
+          read-only: installs still run through the catalog above.
+        </p>
+        {artifacts.length === 0 ? (
+          <div className="mt-3 rounded-lg border border-dashed border-line p-4 text-sm text-muted">
+            No artifacts registered yet.
+          </div>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {artifacts.map((a) => (
+              <li key={a.artifact_id}
+                  className="rounded-lg border border-line bg-card p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-fg">{a.display_name}</span>
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.kind}</span>
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.arch}</span>
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.modality}</span>
+                  <span className={`rounded px-2 py-0.5 text-xs ${
+                    a.managed_by === "external" ? "bg-sky/15 text-sky" : "bg-teal/15 text-teal"}`}>
+                    {a.managed_by === "external" ? "external" : "atomic-managed"}
+                  </span>
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-faint">{a.source_type}</span>
+                  {a.support_tier !== "production" && (
+                    <span className={`rounded px-2 py-0.5 text-xs ${
+                      a.support_tier === "experimental" ? "bg-amber/15 text-amber"
+                      : a.support_tier === "tested" ? "bg-sky/15 text-sky"
+                      : "bg-line/40 text-muted"}`}>
+                      {a.support_tier}
+                    </span>
+                  )}
+                  <span className={`rounded px-2 py-0.5 text-xs ${
+                    a.install.status === "installed" ? "bg-teal/15 text-teal"
+                    : a.install.status === "failed" ? "bg-rose/15 text-rose"
+                    : a.install.status === "downloading" ? "bg-amber/15 text-amber"
+                    : "bg-line/40 text-faint"}`}>
+                    {a.install.status.replaceAll("_", " ")}
+                  </span>
+                  {!a.enabled && (
+                    <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-faint">disabled</span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-faint">
+                  {a.artifact_id}
+                  {a.version ? ` · v${a.version}` : ""}
+                  {a.fmt ? ` · ${a.fmt}` : ""}
+                  {a.role ? ` · ${a.role}` : ""}
+                  {a.family ? ` · for ${a.family} bases` : ""}
+                  {a.content_sha256 ? ` · sha256 ${a.content_sha256.slice(0, 12)}…` : " · no checksum declared"}
+                </p>
+                {a.uri && (
+                  <p className="mt-0.5 break-all text-xs text-faint">{a.uri}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       {/* install confirmation — the approval gate, preflight-informed */}

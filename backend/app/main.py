@@ -192,6 +192,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 requeued = job_engine.reconcile_interrupted(s)
                 if requeued:
                     log.info("re-queued %d interrupted job(s)", requeued)
+                # U-1 — seed/refresh the universal artifact registry from
+                # the catalog and associate install rows. Read-only
+                # projection: model_installs stays authoritative.
+                from app.domain import model_artifacts
+                model_artifacts.sync_catalog(s)
+                model_artifacts.link_installs(s)
                 # Backup runs left 'running' by a crash are failed honestly.
                 from app.db.models import BackupRun
                 from sqlalchemy import select as _select
