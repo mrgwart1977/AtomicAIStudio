@@ -1153,6 +1153,32 @@ export interface ModelArtifact {
   install: { status: string } & Record<string, unknown>;
 }
 
+/** U-2a/U-2b-1 — authenticated artifact detail view: the only surface
+ * carrying `source_uri` (the user's original absolute path) and the
+ * full sanitized inspection report. Fetch lazily — never bulk-load. */
+export interface ModelArtifactDetail extends ModelArtifact {
+  source_uri: string | null;
+  imported_at: string | null;
+  import_report: {
+    fmt?: string;
+    suggested_arch?: string;
+    suggested_role?: string;
+    sha256?: string;
+    byte_size?: number;
+    hashed_at?: string;
+    tensor_count?: number;
+    metadata?: Record<string, unknown>;
+    warnings?: string[];
+    evidence?: Record<string, unknown>;
+  };
+}
+
+/** U-2a — enqueue response for a reference-only model import. */
+export interface ModelImportOut {
+  job_id: string;
+  status: string;
+}
+
 
 // ---------- C5-E: consolidated compatibility ----------
 

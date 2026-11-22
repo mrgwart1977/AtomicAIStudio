@@ -266,7 +266,8 @@ _MAX_ID_ATTEMPTS = 9  # base id + suffixes :2..:9
 
 def register_import(session: Session, *, source_uri: str, report: dict,
                     license_json: dict, family: str = "",
-                    role_hint: str = "") -> tuple[ModelArtifact, bool]:
+                    role_hint: str = "",
+                    display_name: str = "") -> tuple[ModelArtifact, bool]:
     """U-2a — transactional registration of one imported file.
 
     `report` is the sanitized inspection report (sha256, fmt, suggestions,
@@ -305,7 +306,7 @@ def register_import(session: Session, *, source_uri: str, report: dict,
             continue  # different source at this candidate — try next
         row = ModelArtifact(
             artifact_id=candidate,
-            display_name=f"Imported {Path(source_uri).name}",
+            display_name=display_name or f"Imported {Path(source_uri).name}",
             kind=kind, arch=arch, family=family,
             modality="image", fmt=fmt, role=role,
             version="", source_type="import",

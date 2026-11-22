@@ -12,6 +12,25 @@ import { ProvidersPage } from "./features/ProvidersPage";
 import { ProjectWorkspace } from "./features/workspace/ProjectWorkspace";
 import { useApp, type Page, type WorkspaceTab } from "./stores/appStore";
 
+/** Map an adapter_id to the UI job kind — WS job.progress payloads carry
+ * adapter_id but not `kind`, which only exists on the DB row. */
+export function jobKindFor(adapterId: string): string {
+  if (adapterId === "ops.model.download") return "model_download";
+  if (adapterId === "ops.model.benchmark") return "model_benchmark";
+  if (adapterId === "ops.model.import") return "model_import";
+  return "image";
+}
+
+/** R1 — on every authenticated WS (re)connect, hydrate app-level ops
+ * jobs from GET /api/jobs. After a backend restart a requeued import
+ * carries "re-queued after restart" — hydrating here surfaces it
+ * immediately rather than waiting for its next progress publish. */
+export function onWsStateChange(open: boolean): void {
+  const s = useApp.getState();
+  s.setWsConnected(open);
+  if (open) void s.hydrateJobs().catch(() => {});
+}
+
 export default function App() {
   const ready = useApp((s) => s.ready);
   const page = useApp((s) => s.page);
@@ -44,8 +63,7 @@ export default function App() {
                 id: e.resource_id,
                 project_id: e.project_id ?? null,
                 adapter_id: adapterId,
-                kind: adapterId === "ops.model.download" ? "model_download"
-                  : adapterId === "ops.model.benchmark" ? "model_benchmark" : "image",
+                kind: jobKindFor(adapterId),
                 resumable: true,
                 output_asset_id: null,
                 command_id: null,
@@ -66,7 +84,7 @@ export default function App() {
             if (e.payload.status === "succeeded" && e.project_id) void st.refreshProjectData();
           }
         },
-        (open) => useApp.getState().setWsConnected(open),
+        onWsStateChange,
       );
     })();
     return () => disposeWs?.();

@@ -18,6 +18,36 @@ import type {
   StoryboardScene,
 } from "../api/types";
 
+const TERMINAL_STATUSES = new Set<Job["status"]>(["succeeded", "failed", "cancelled"]);
+
+function jobRank(status: string): number {
+  return TERMINAL_STATUSES.has(status as Job["status"]) ? 2
+    : status === "running" ? 1 : 0;
+}
+
+/** U-2b-1 R1 — freshness merge for an authoritative (HTTP) job row
+ * against a possibly newer WS-derived entry. Monotonic per job:
+ * queued < running < terminal; equal rank → higher progress wins.
+ * cancel_requested is sticky — an older snapshot may not un-ask. */
+export function mergeJobEntry(existing: Job | undefined, incoming: Job): Job {
+  if (!existing) return incoming;
+  const ri = jobRank(incoming.status), re = jobRank(existing.status);
+  if (ri < re) return existing;
+  if (ri === re && incoming.progress < existing.progress) return existing;
+  return {
+    ...incoming,
+    cancel_requested:
+      Boolean(incoming.cancel_requested) || Boolean(existing.cancel_requested),
+  };
+}
+
+/** App-level ops jobs (imports, downloads, benchmarks) carry
+ * project_id === null — they are global and survive project switches. */
+function keepAppLevel(jobs: Record<string, Job>): Record<string, Job> {
+  return Object.fromEntries(
+    Object.entries(jobs).filter(([, j]) => j.project_id === null));
+}
+
 export type Page = "home" | "projects" | "models" | "providers" | "project";
 export type WorkspaceTab =
   | "first_film" | "overview" | "screenplay" | "storyboard" | "timeline" | "cast" | "worlds" | "locations"
@@ -60,6 +90,7 @@ interface AppState {
   applyCommitRevision: (projectId: string, revision: number) => void;
   setCurrentProject: (id: string | null) => void;
   upsertJob: (j: Job) => void;
+  hydrateJobs: () => Promise<void>;
   setPromptDraft: (t: string) => void;
   setAssetKindFilter: (k: string) => void;
   refreshProjects: () => Promise<void>;
@@ -132,15 +163,37 @@ export const useApp = create<AppState>((set, get) => ({
           : p),
     })),
   upsertJob: (j) => set((s) => ({ jobs: { ...s.jobs, [j.id]: j } })),
+  // R1 — authoritative hydration of app-level ops jobs (imports,
+  // downloads, benchmarks) from GET /api/jobs. Merge-only: it never
+  // removes entries and never regresses a fresher WS state, so a
+  // requeued import becomes visible on (re)connect instead of waiting
+  // for the backend's next progress publish. Project rows are left to
+  // refreshProjectData — project views own those.
+  hydrateJobs: async () => {
+    const jobs = await apiFetch<Job[]>("/api/jobs");
+    set((s) => {
+      let changed = false;
+      const next = { ...s.jobs };
+      for (const j of jobs) {
+        if (j.project_id !== null) continue;
+        const m = mergeJobEntry(next[j.id], j);
+        if (m !== next[j.id]) { next[j.id] = m; changed = true; }
+      }
+      return changed ? { jobs: next } : {};
+    });
+  },
   setPromptDraft: (promptDraft) => set({ promptDraft }),
   setAssetKindFilter: (assetKindFilter) => {
     set({ assetKindFilter });
     void get().refreshAssets();
   },
   setCurrentProject: (id) => {
-    set({
+    set((s) => ({
       currentProjectId: id,
-      jobs: {},
+      // R1 — switching views clears project-scoped state but app-level
+      // ops jobs are global; dropping them hid a running import until
+      // its next WS event.
+      jobs: keepAppLevel(s.jobs),
       assetsPage: null,
       entities: { character: [], world: [], location: [] },
       entityRevisions: {},
@@ -148,7 +201,7 @@ export const useApp = create<AppState>((set, get) => ({
       storyboard: [],
       entityAssets: [],
       promptDraft: "",
-    });
+    }));
     if (id) {
       void apiFetch<{ text: string }>(`/api/projects/${id}/prompt-draft`)
         .then((d) => set({ promptDraft: d.text }))
@@ -181,14 +234,21 @@ export const useApp = create<AppState>((set, get) => ({
       apiFetch<Job[]>(`/api/projects/${pid}/jobs`),
       apiFetch<Project>(`/api/projects/${pid}`),
     ]);
-    set((s) => ({
-      jobs: Object.fromEntries(jobs.map((j) => [j.id, j])),
-      // Same monotonic guard for the single-project GET: never let an
-      // older response overwrite a newer pinned revision.
-      projects: s.projects.map((p) => (p.id === pid
-        ? { ...p, ...proj, revision: Math.max(p.revision, proj.revision) }
-        : p)),
-    }));
+    set((s) => {
+      // R1 — rebuild: app-level entries are global and stay; this
+      // project's rows come fresh from the API but must not regress a
+      // newer WS event that landed while the fetch was in flight.
+      const next = keepAppLevel(s.jobs);
+      for (const j of jobs) next[j.id] = mergeJobEntry(s.jobs[j.id], j);
+      return {
+        jobs: next,
+        // Same monotonic guard for the single-project GET: never let an
+        // older response overwrite a newer pinned revision.
+        projects: s.projects.map((p) => (p.id === pid
+          ? { ...p, ...proj, revision: Math.max(p.revision, proj.revision) }
+          : p)),
+      };
+    });
     void get().refreshProjects();
   },
   refreshEntities: async (etype) => {

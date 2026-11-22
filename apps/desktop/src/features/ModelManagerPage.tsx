@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../api/client";
 import { useApp } from "../stores/appStore";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ImportModelDialog } from "./ImportModelDialog";
 import type {
   AvailabilityClass,
   AvailabilityReason,
   CompatModelEntry,
   CompatibilityReport,
   CompatStatus,
+  ModelArtifact,
+  ModelArtifactDetail,
   ModelCatalogEntry,
   ModelPreflight,
   ModelValidation,
@@ -81,6 +84,8 @@ export function ModelManagerPage() {
   const [preflight, setPreflight] = useState<ModelPreflight | null>(null);
   const [checks, setChecks] = useState<Record<string, ModelValidation | "loading" | null>>({});
   const [benchTarget, setBenchTarget] = useState<CompatModelEntry | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [detail, setDetail] = useState<Record<string, ModelArtifactDetail | "loading" | null>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -124,6 +129,30 @@ export function ModelManagerPage() {
   useEffect(() => {
     if (benchDone > 0) void refreshCompat();
   }, [benchDone]);
+
+  // U-2b-1 — refresh the artifact registry whenever a model-import job
+  // lands in a terminal state (registered OR reused → library reflects it).
+  const importJobs = useMemo(
+    () => Object.values(jobs).filter((j) => j.kind === "model_import"),
+    [jobs],
+  );
+  const importDone = importJobs.filter(
+    (j) => j.status !== "queued" && j.status !== "running").length;
+  useEffect(() => {
+    if (importDone > 0) void refreshModels();
+  }, [importDone, refreshModels]);
+
+  // Lazy provenance: source_uri + inspection report live ONLY on the
+  // authenticated detail endpoint — fetched on explicit expand, never in bulk.
+  async function toggleProvenance(a: ModelArtifact) {
+    const cur = detail[a.artifact_id];
+    if (cur !== undefined) { setDetail((d) => ({ ...d, [a.artifact_id]: null })); return; }
+    setDetail((d) => ({ ...d, [a.artifact_id]: "loading" }));
+    try {
+      const v = await apiFetch<ModelArtifactDetail>(`/api/models/artifacts/${a.artifact_id}`);
+      setDetail((d) => ({ ...d, [a.artifact_id]: v }));
+    } catch { setDetail((d) => ({ ...d, [a.artifact_id]: null })); }
+  }
 
   async function openPreflight(model: ModelCatalogEntry) {
     setInstallTarget(model);
@@ -591,7 +620,15 @@ export function ModelManagerPage() {
 
       {/* --- U-1: universal model library (read-only registry view) --- */}
       <section className="mt-6">
-        <h2 className="text-lg font-semibold">Universal Model Library</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Universal Model Library</h2>
+          <button
+            onClick={() => setImportOpen(true)}
+            className="rounded-md bg-action px-3 py-1.5 text-xs font-medium text-ink hover:bg-action-hi"
+          >
+            Import model file…
+          </button>
+        </div>
         <p className="mt-1 text-sm text-muted">
           The artifact registry — every model and adapter the app knows
           about, with where it came from and who manages it. This view is
@@ -599,7 +636,8 @@ export function ModelManagerPage() {
         </p>
         {artifacts.length === 0 ? (
           <div className="mt-3 rounded-lg border border-dashed border-line p-4 text-sm text-muted">
-            No artifacts registered yet.
+            No artifacts registered yet. Import a model file you already
+            have to add it here.
           </div>
         ) : (
           <ul className="mt-3 space-y-2">
@@ -609,13 +647,21 @@ export function ModelManagerPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-semibold text-fg">{a.display_name}</span>
                   <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.kind}</span>
-                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.arch}</span>
+                  <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">
+                    {a.arch}{a.source_type === "import" && a.arch !== "unknown" ? " (detected)" : ""}
+                  </span>
                   <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.modality}</span>
                   <span className={`rounded px-2 py-0.5 text-xs ${
                     a.managed_by === "external" ? "bg-sky/15 text-sky" : "bg-teal/15 text-teal"}`}>
                     {a.managed_by === "external" ? "external" : "atomic-managed"}
                   </span>
                   <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-faint">{a.source_type}</span>
+                  {a.source_type === "import" && (
+                    <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted"
+                          title="Registered for tracking — it can't be used for generation yet">
+                      library only
+                    </span>
+                  )}
                   {a.support_tier !== "production" && (
                     <span className={`rounded px-2 py-0.5 text-xs ${
                       a.support_tier === "experimental" ? "bg-amber/15 text-amber"
@@ -639,18 +685,77 @@ export function ModelManagerPage() {
                   {a.artifact_id}
                   {a.version ? ` · v${a.version}` : ""}
                   {a.fmt ? ` · ${a.fmt}` : ""}
-                  {a.role ? ` · ${a.role}` : ""}
-                  {a.family ? ` · for ${a.family} bases` : ""}
+                  {a.role ? ` · ${a.role}${
+                    a.source_type === "import"
+                      ? a.role === (a.meta?.suggestions as { role?: string } | undefined)?.role
+                        ? " (suggested)" : " (declared)"
+                      : ""}` : ""}
+                  {a.family ? ` · for ${a.family} bases${
+                    a.source_type === "import" ? " (declared)" : ""}` : ""}
                   {a.content_sha256 ? ` · sha256 ${a.content_sha256.slice(0, 12)}…` : " · no checksum declared"}
                 </p>
                 {a.uri && (
                   <p className="mt-0.5 break-all text-xs text-faint">{a.uri}</p>
+                )}
+                {a.source_type === "import" && (
+                  <>
+                    <button
+                      onClick={() => void toggleProvenance(a)}
+                      aria-expanded={detail[a.artifact_id] != null}
+                      className="mt-2 rounded-md border border-line px-2 py-1 text-xs text-muted hover:text-fg"
+                    >
+                      {detail[a.artifact_id] != null ? "Hide provenance" : "Provenance…"}
+                    </button>
+                    {detail[a.artifact_id] === "loading" && (
+                      <p className="mt-2 text-xs text-muted">Loading provenance…</p>
+                    )}
+                    {detail[a.artifact_id] != null && detail[a.artifact_id] !== "loading" && (
+                      <dl className="mt-2 space-y-1 rounded border border-line p-2 text-xs">
+                        <div className="flex justify-between gap-4">
+                          <dt className="text-faint">Original location</dt>
+                          <dd className="break-all text-right text-muted">{
+                            (detail[a.artifact_id] as ModelArtifactDetail).source_uri ?? "—"}</dd>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <dt className="text-faint">Inspected</dt>
+                          <dd className="text-muted">{
+                            (detail[a.artifact_id] as ModelArtifactDetail).import_report?.hashed_at
+                            ?? (detail[a.artifact_id] as ModelArtifactDetail).imported_at ?? "—"}
+                            <span className="text-faint"> (point in time)</span></dd>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <dt className="text-faint">Detected</dt>
+                          <dd className="text-muted">
+                            {(detail[a.artifact_id] as ModelArtifactDetail).import_report?.fmt ?? a.fmt}
+                            {` · arch ${(detail[a.artifact_id] as ModelArtifactDetail).import_report?.suggested_arch ?? "unknown"}`}
+                            {(detail[a.artifact_id] as ModelArtifactDetail).import_report?.suggested_role
+                              ? ` · role ${(detail[a.artifact_id] as ModelArtifactDetail).import_report?.suggested_role}`
+                              : ""}
+                            <span className="text-faint"> (heuristic, may be wrong)</span>
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <dt className="text-faint">Declared license</dt>
+                          <dd className="text-muted">
+                            {String(a.license?.name ?? "—")}
+                            {a.license?.commercial_ok ? " · commercial ok" : " · no commercial use declared"}
+                            <span className="text-faint"> (you declared this — unverified)</span>
+                          </dd>
+                        </div>
+                      </dl>
+                    )}
+                  </>
                 )}
               </li>
             ))}
           </ul>
         )}
       </section>
+      <ImportModelDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={() => void refreshModels()}
+      />
 
       {/* install confirmation — the approval gate, preflight-informed */}
       <ConfirmDialog

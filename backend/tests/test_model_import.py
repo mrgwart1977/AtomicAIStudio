@@ -791,3 +791,73 @@ def test_interrupted_job_requeues_and_completes(client, authed, tmp_path):
     done = _wait_job(client, job_id)
     assert done["status"] == "succeeded"
     assert done["result_json"]["artifact_id"].startswith("import:")
+
+
+# ---------------------------------------------------- U-2b-1 request fields
+
+def test_display_name_used_when_provided(client, authed, tmp_path):
+    """A user-supplied display_name replaces the basename-derived label."""
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    res = _import_ok(client, authed, src, display_name="My SD Model")
+    with client.app.state.session_factory() as s:
+        row = s.get(ModelArtifact, res["artifact_id"])
+        assert row.display_name == "My SD Model"
+
+
+def test_display_name_default_falls_back_to_basename(client, authed, tmp_path):
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    res = _import_ok(client, authed, src)
+    with client.app.state.session_factory() as s:
+        row = s.get(ModelArtifact, res["artifact_id"])
+        assert row.display_name == "Imported weights.safetensors"
+
+
+def test_display_name_too_long_refused(client, authed, tmp_path):
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    r = _import(client, authed, src, display_name="x" * 201)
+    assert r.status_code == 422
+    assert "display_name_too_long" in r.text
+    # boundary: exactly 200 is accepted
+    res = _import_ok(client, authed, src, display_name="y" * 200)
+    assert res["artifact_id"].startswith("import:")
+
+
+def test_display_name_control_chars_refused(client, authed, tmp_path):
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    r = _import(client, authed, src, display_name="line\nbreak")
+    assert r.status_code == 422
+    assert "display_name_invalid" in r.text
+
+
+def test_mode_managed_copy_rejected(client, authed, tmp_path):
+    """U-2b-1 implements reference-only; managed-copy is a later phase."""
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    r = _import(client, authed, src, mode="managed_copy")
+    assert r.status_code == 422
+    assert "mode_not_supported" in r.text
+    with client.app.state.session_factory() as s:
+        jobs = s.execute(select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.import")).scalars().all()
+        assert jobs == []  # refused before enqueue — no job, no artifact
+        assert s.execute(select(ModelArtifact).where(
+            ModelArtifact.source_type == "import")).scalars().all() == []
+
+
+def test_mode_reference_and_omitted_equivalent(client, authed, tmp_path):
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    res = _import_ok(client, authed, src, mode="reference")
+    assert res["status"] in ("registered", "reused")
+
+
+def test_request_json_carries_display_name_not_mode(client, authed, tmp_path):
+    """The persisted request holds the validated display_name for
+    execution/requeue; the source path stays private as before."""
+    src = _write(tmp_path, "weights.safetensors", _st_bytes())
+    res = _import_ok(client, authed, src, display_name="Pretty Name")
+    with client.app.state.session_factory() as s:
+        row = s.get(ModelArtifact, res["artifact_id"])
+        assert row.display_name == "Pretty Name"
+        job = s.execute(select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.import")).scalars().first()
+        assert job.request_json["display_name"] == "Pretty Name"
+        assert "mode" not in job.request_json  # reference-only: nothing to persist
