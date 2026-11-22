@@ -35,12 +35,13 @@ Ownership model:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import ModelArtifact, ModelInstall
+from app.db.models import ModelArtifact, ModelInstall, utcnow
 from app.domain import model_catalog
 from app.domain.model_catalog import ModelSpec
 
@@ -201,8 +202,9 @@ def link_installs(session: Session) -> int:
     return linked
 
 
-def artifact_to_dict(row: ModelArtifact, install: dict | None) -> dict:
-    return {
+def artifact_to_dict(row: ModelArtifact, install: dict | None, *,
+                     detail: bool = False) -> dict:
+    out = {
         "artifact_id": row.artifact_id,
         "display_name": row.display_name,
         "kind": row.kind,
@@ -227,6 +229,14 @@ def artifact_to_dict(row: ModelArtifact, install: dict | None) -> dict:
         # model_installs row — never stored on the artifact.
         "install": install or {"status": "not_installed"},
     }
+    if detail:
+        # source_uri only on the authenticated detail view — never in
+        # list responses, job events, or audit payloads (path privacy).
+        out["source_uri"] = row.source_uri
+        out["imported_at"] = (
+            row.imported_at.isoformat() if row.imported_at else None)
+        out["import_report"] = row.import_report_json or {}
+    return out
 
 
 def list_artifacts(session: Session) -> list[dict]:
@@ -243,8 +253,88 @@ def list_artifacts(session: Session) -> list[dict]:
             if inst:
                 inst = {k: v for k, v in inst.items()
                         if k != "disk_free_bytes"}
+        else:
+            # Non-catalog rows have no model_installs row — registration
+            # is the honest state, never "installed"/"verified".
+            inst = {"status": "registered", "managed_by": row.managed_by}
         out.append(artifact_to_dict(row, inst))
     return out
+
+
+_MAX_ID_ATTEMPTS = 9  # base id + suffixes :2..:9
+
+
+def register_import(session: Session, *, source_uri: str, report: dict,
+                    license_json: dict, family: str = "",
+                    role_hint: str = "") -> tuple[ModelArtifact, bool]:
+    """U-2a — transactional registration of one imported file.
+
+    `report` is the sanitized inspection report (sha256, fmt, suggestions,
+    registration_stat) — the job has ALREADY run the full-content hash
+    before this is called, so a matching (artifact_id candidate,
+    source_uri, content_sha256) triple is verified reuse, not a guess.
+
+    Returns (row, reused). Raises ImportRefused("identity_exhausted")
+    when every deterministic candidate is occupied by different sources —
+    never overwrites an existing artifact.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.domain.model_import import ImportRefused
+
+    sha = report["sha256"]
+    base_id = f"{PREFIX_IMPORT}{sha[:12]}"
+    fmt = report.get("fmt", "unknown")
+    kind = "adapter" if (role_hint == "lora"
+                         or report.get("suggested_role") == "lora") else "model"
+    role = role_hint or report.get("suggested_role") or ""
+    arch = report.get("suggested_arch", "unknown")
+
+    candidate = base_id
+    for attempt in range(_MAX_ID_ATTEMPTS):
+        if attempt:
+            candidate = f"{base_id}:{attempt + 1}"
+        existing = session.get(ModelArtifact, candidate)
+        if existing is not None:
+            # Verified reuse: same resolved source identity AND same
+            # full content hash (freshly computed by the job).
+            if (existing.source_type == "import"
+                    and existing.source_uri == source_uri
+                    and existing.content_sha256 == sha):
+                return existing, True
+            continue  # different source at this candidate — try next
+        row = ModelArtifact(
+            artifact_id=candidate,
+            display_name=f"Imported {Path(source_uri).name}",
+            kind=kind, arch=arch, family=family,
+            modality="image", fmt=fmt, role=role,
+            version="", source_type="import",
+            # uri stays NULL on imports — the list view must not expose
+            # the source path; it lives only in source_uri (detail view).
+            managed_by="external", uri=None,
+            content_sha256=sha,
+            byte_size=report.get("byte_size", 0),
+            license_json={**license_json, "declared_by": "user"},
+            support_tier="unknown", enabled=True, tags_json=[],
+            meta_json={"suggestions": {
+                "arch": report.get("suggested_arch"),
+                "role": report.get("suggested_role"),
+                "fmt": fmt,
+            }},
+            source_uri=source_uri,
+            imported_at=utcnow(),
+            import_report_json=report,
+        )
+        try:
+            with session.begin_nested():
+                session.add(row)
+            return row, False
+        except IntegrityError:
+            # PK raced us — savepoint rolled back cleanly; next suffix.
+            continue
+    raise ImportRefused(
+        "identity_exhausted",
+        "all deterministic artifact ids for this content are occupied")
 
 
 def register_external(session: Session, *, artifact_id: str, uri: str,
