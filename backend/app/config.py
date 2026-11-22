@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # Off by default — persistent inference is not yet validated (Phase
     # 2B). The subprocess-per-job adapter is unaffected.
     persistent_inference_enabled: bool = False
+    # U-2b-2a gate: enables mode="managed_copy" on /api/models/import.
+    # OFF by default — fail-closed at enqueue AND job execution until
+    # the U-2b-2b desktop surface is separately approved. Metadata-only
+    # release stays available either way so disabling can never strand
+    # a managed artifact. Env: ATOMIC_ENABLE_MANAGED_COPY=1.
+    enable_managed_copy: bool = False
 
     @property
     def db_path(self) -> Path:

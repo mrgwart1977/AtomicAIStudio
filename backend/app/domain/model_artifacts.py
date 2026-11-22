@@ -202,6 +202,24 @@ def link_installs(session: Session) -> int:
     return linked
 
 
+def managed_copy_summary(row: ModelArtifact) -> dict | None:
+    """Detail-view managed-copy block (U-2b-2a). The DB row asserts
+    OWNERSHIP, not existence — `present` is probed live from the
+    filesystem (missing file, disconnected volume → False)."""
+    if not (row.source_type == "import"
+            and row.managed_by == "atomic" and row.uri):
+        return None
+    cp = (row.import_report_json or {}).get("copy") or {}
+    try:
+        present = Path(row.uri).is_file()
+    except OSError:
+        present = False                      # unreachable/disconnected volume
+    return {"present": present,
+            "dest_rel": Path(row.uri).name,  # basename only — no abs path
+            "provenance": cp.get("provenance"),
+            "published_at": cp.get("published_at")}
+
+
 def artifact_to_dict(row: ModelArtifact, install: dict | None, *,
                      detail: bool = False) -> dict:
     out = {
@@ -236,6 +254,7 @@ def artifact_to_dict(row: ModelArtifact, install: dict | None, *,
         out["imported_at"] = (
             row.imported_at.isoformat() if row.imported_at else None)
         out["import_report"] = row.import_report_json or {}
+        out["managed_copy"] = managed_copy_summary(row)
     return out
 
 
@@ -267,13 +286,22 @@ _MAX_ID_ATTEMPTS = 9  # base id + suffixes :2..:9
 def register_import(session: Session, *, source_uri: str, report: dict,
                     license_json: dict, family: str = "",
                     role_hint: str = "",
-                    display_name: str = "") -> tuple[ModelArtifact, bool]:
-    """U-2a — transactional registration of one imported file.
+                    display_name: str = "",
+                    managed_uri: str | None = None) -> tuple[ModelArtifact, bool]:
+    """U-2a/U-2b-2a — transactional registration of one imported file.
 
     `report` is the sanitized inspection report (sha256, fmt, suggestions,
-    registration_stat) — the job has ALREADY run the full-content hash
-    before this is called, so a matching (artifact_id candidate,
-    source_uri, content_sha256) triple is verified reuse, not a guess.
+    registration_stat, and for managed copies a `copy` provenance block)
+    — the job has ALREADY run the full-content hash before this is
+    called, so a matching (artifact_id candidate, source_uri,
+    content_sha256) triple is verified reuse, not a guess.
+
+    `managed_uri` (U-2b-2a) is the verified canonical destination the job
+    published or adopted under models_root/imports/. It is app-owned
+    storage — safe in the list view — and flips the row to
+    managed_by="atomic". A verified-reuse row for the same source+content
+    is UPGRADED external→atomic in place: the artifact identity is the
+    source+content pair, and managed storage now genuinely backs it.
 
     Returns (row, reused). Raises ImportRefused("identity_exhausted")
     when every deterministic candidate is occupied by different sources —
@@ -302,6 +330,24 @@ def register_import(session: Session, *, source_uri: str, report: dict,
             if (existing.source_type == "import"
                     and existing.source_uri == source_uri
                     and existing.content_sha256 == sha):
+                if managed_uri is None:
+                    # Reference request — any management state satisfies
+                    # it (a managed row IS a valid artifact already).
+                    return existing, True
+                if existing.managed_by == "atomic":
+                    # Reuse only when the managed location matches —
+                    # a row pointing at a different managed root is a
+                    # different installation, not this copy.
+                    if existing.uri == managed_uri:
+                        return existing, True
+                    continue
+                # External verified-reuse row → upgrade to atomic in
+                # place: same identity, now genuinely managed.
+                existing.managed_by = "atomic"
+                existing.uri = managed_uri
+                rep = dict(existing.import_report_json or {})
+                rep["copy"] = report.get("copy")
+                existing.import_report_json = rep
                 return existing, True
             continue  # different source at this candidate — try next
         row = ModelArtifact(
@@ -310,9 +356,11 @@ def register_import(session: Session, *, source_uri: str, report: dict,
             kind=kind, arch=arch, family=family,
             modality="image", fmt=fmt, role=role,
             version="", source_type="import",
-            # uri stays NULL on imports — the list view must not expose
-            # the source path; it lives only in source_uri (detail view).
-            managed_by="external", uri=None,
+            # uri is NULL on reference imports (list view must not expose
+            # the source path) — a managed_uri is app-owned storage, safe
+            # in the list view and truthful for the managed state.
+            managed_by="atomic" if managed_uri else "external",
+            uri=managed_uri,
             content_sha256=sha,
             byte_size=report.get("byte_size", 0),
             license_json={**license_json, "declared_by": "user"},
@@ -336,6 +384,39 @@ def register_import(session: Session, *, source_uri: str, report: dict,
     raise ImportRefused(
         "identity_exhausted",
         "all deterministic artifact ids for this content are occupied")
+
+
+def release_managed_copy(session: Session, artifact_id: str) -> dict:
+    """U-2b-2a — synchronous metadata-only release of a managed import.
+
+    Detaches the artifact's managed `uri` and returns it to
+    managed_by="external" (reference-only state — source_uri provenance
+    is retained, so the artifact still truthfully names the original
+    user file). The managed bytes are NEVER touched: no canonical
+    managed-file deletion exists in this milestone.
+
+    Idempotent: an import artifact that is not currently managed is a
+    successful no-op (`already=True`). Non-import artifacts refuse —
+    their managed state follows model_installs, not this path.
+    """
+    row = session.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise LookupError("unknown artifact")
+    if row.source_type != "import":
+        raise ValueError("not a managed import artifact")
+    if row.managed_by != "atomic" or not row.uri:
+        return {"artifact_id": artifact_id, "released": True,
+                "already": True}
+    rep = dict(row.import_report_json or {})
+    rel = dict(rep.get("release") or {})
+    rel["managed_copy_released_at"] = utcnow().isoformat()
+    rel["last_uri_rel"] = Path(row.uri).name  # basename only — no abs path
+    rep["release"] = rel
+    row.import_report_json = rep
+    row.uri = None
+    row.managed_by = "external"
+    return {"artifact_id": artifact_id, "released": True,
+            "already": False}
 
 
 def register_external(session: Session, *, artifact_id: str, uri: str,
