@@ -113,8 +113,10 @@ describe("ImportModelDialog", () => {
       license: { name: "Apache-2.0", commercial_ok: true,
                  url: "https://example.test/lic" },
       family: "sdxl", role_hint: "lora",
-      display_name: "My Model", mode: "reference",
+      display_name: "My Model",
     });
+    // reference is implicit — the mode field is omitted entirely (U-2b-2b V1)
+    expect(lastBody()).not.toHaveProperty("mode");
     // tracked job (not yet in the store map) shows queued, never the form
     // again — guarding the POST→first-WS-event window against double submit
     await waitFor(() => screen.getByText("ops.model.import"));
@@ -294,7 +296,7 @@ describe("ImportModelDialog — U-2b-2b managed copy", () => {
     fillPath(); fillLicense();
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
-    expect(lastBody().mode).toBe("reference");
+    expect(lastBody()).not.toHaveProperty("mode");
   });
 
   it("C2 — enabled: radio appears with reference pre-selected; managed submits mode", async () => {

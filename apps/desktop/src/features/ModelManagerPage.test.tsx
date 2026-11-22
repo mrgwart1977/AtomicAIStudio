@@ -683,4 +683,37 @@ describe("ModelManagerPage — U-2b-2b managed-copy artifacts", () => {
     await expandProvenance();
     expect(screen.getByText("Stop managing this copy…")).toBeTruthy();
   });
+
+  it("V2 — collapse + re-expand REFETCHES detail; present updates live", async () => {
+    let detailCalls = 0;
+    apiFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === "/api/models/artifacts/import:m1") {
+        detailCalls += 1;
+        return Promise.resolve({
+          ...MANAGED_DETAIL,
+          managed_copy: { ...MANAGED_DETAIL.managed_copy,
+                          present: detailCalls === 1 },
+        });
+      }
+      if (path === "/api/models/import-capabilities")
+        return Promise.resolve(capsResponse);
+      if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+      if (path === "/api/models/dir")
+        return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
+      return Promise.resolve({});
+    });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    // first expand → present:true from the initial fetch
+    await expandProvenance();
+    expect(screen.getByText("present on disk")).toBeTruthy();
+    expect(detailCalls).toBe(1);
+    // collapse, file vanishes, re-expand → fresh fetch shows the truth
+    fireEvent.click(screen.getByText("Hide provenance"));
+    expect(screen.queryByText(/PRIVATE-SRC/)).toBeNull();
+    fireEvent.click(screen.getByText("Provenance…"));
+    await waitFor(() => screen.getByText("not present on disk"));
+    expect(detailCalls).toBe(2);
+    expect(screen.getByText("managed copy missing")).toBeTruthy();
+  });
 });

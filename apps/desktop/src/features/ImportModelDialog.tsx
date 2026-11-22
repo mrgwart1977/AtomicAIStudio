@@ -153,7 +153,10 @@ export function ImportModelDialog({
         body: JSON.stringify({
           path: path.trim(), license,
           family: family.trim(), role_hint: roleHint,
-          display_name: displayName.trim(), mode,
+          display_name: displayName.trim(),
+          // reference is the implicit default — only a managed request
+          // sends the mode field at all (per the approved contract).
+          ...(mode === "managed_copy" ? { mode } : {}),
         }),
       });
       setJobId(r.job_id); // track THIS job — never scan for an arbitrary one

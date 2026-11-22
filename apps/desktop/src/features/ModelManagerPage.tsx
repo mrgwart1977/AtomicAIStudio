@@ -183,7 +183,10 @@ export function ModelManagerPage() {
   // authenticated detail endpoint — fetched on explicit expand, never in bulk.
   async function toggleProvenance(a: ModelArtifact) {
     const cur = detail[a.artifact_id];
-    if (cur !== undefined) { setDetail((d) => ({ ...d, [a.artifact_id]: null })); return; }
+    // cur != null (not !== undefined): a collapsed/failed entry must
+    // REFETCH on re-expand — managed_copy.present is a live probe and
+    // stale presence must never persist behind a dead expand click.
+    if (cur != null) { setDetail((d) => ({ ...d, [a.artifact_id]: null })); return; }
     setDetail((d) => ({ ...d, [a.artifact_id]: "loading" }));
     try {
       const v = await apiFetch<ModelArtifactDetail>(`/api/models/artifacts/${a.artifact_id}`);
