@@ -698,6 +698,10 @@ export interface Job {
 }
 
 export interface JobProgressDetail {
+  /** U-2b-2b — adapter-defined pipeline stage for jobs that report one
+   * (model imports: "inspect" | "copy" | "register"). Absent on jobs
+   * that only report byte counters. */
+  stage?: string;
   bytes_done: number;
   bytes_total: number;
   current_file: string;
@@ -1170,13 +1174,45 @@ export interface ModelArtifactDetail extends ModelArtifact {
     metadata?: Record<string, unknown>;
     warnings?: string[];
     evidence?: Record<string, unknown>;
+    /** U-2b-2a — sanitized managed-copy provenance (basename-only
+     * dest_rel, never an absolute managed path). */
+    copy?: Record<string, unknown>;
+    /** U-2b-2a — stamped by the metadata-only release action. */
+    release?: {
+      managed_copy_released_at?: string;
+      last_uri_rel?: string;
+    };
   };
+  /** U-2b-2a — live managed-copy state; present only on managed import
+   * rows. `present` is an existence probe, NOT content verification. */
+  managed_copy?: {
+    present: boolean;
+    dest_rel: string | null;
+    provenance: "published" | "adopted" | null;
+    published_at: string | null;
+  } | null;
 }
 
 /** U-2a — enqueue response for a reference-only model import. */
 export interface ModelImportOut {
   job_id: string;
   status: string;
+}
+
+/** U-2b-2a — metadata-only release result. `already` marks the
+ * idempotent no-op; no managed bytes are ever deleted. */
+export interface ManagedCopyReleaseOut {
+  artifact_id: string;
+  released: boolean;
+  already: boolean;
+}
+
+/** U-2b-2b — read-only import-mode capability probe. Managed copy may
+ * be offered only when managed_copy_enabled is true AND modes contains
+ * "managed_copy"; every other shape fails closed to reference-only. */
+export interface ImportCapabilitiesOut {
+  managed_copy_enabled: boolean;
+  modes: string[];
 }
 
 

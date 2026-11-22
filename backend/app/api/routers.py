@@ -56,6 +56,7 @@ from app.schemas.api import (
     EntityRevisionOut,
     GpuSettingsOut,
     GpuSettingsUpdate,
+    ImportCapabilitiesOut,
     ResourceSettingsOut,
     ResourceSettingsUpdate,
     JobOut,
@@ -225,6 +226,20 @@ def release_managed_copy(artifact_id: str, request: Request,
         raise HTTPException(422, str(exc)) from None
     db.commit()
     return out
+
+
+@api_router.get("/api/models/import-capabilities",
+                response_model=ImportCapabilitiesOut)
+def import_capabilities(request: Request):
+    """U-2b-2b — read-only import-mode capability probe. Reports whether
+    the managed-copy gate is enabled so the desktop can offer (or hide)
+    the option honestly — never exposes filesystem paths, env vars, or
+    configuration details. Reference mode is always advertised."""
+    enabled = bool(getattr(request.app.state.settings,
+                         "enable_managed_copy", False))
+    return {"managed_copy_enabled": enabled,
+            "modes": ["reference", "managed_copy"] if enabled
+                     else ["reference"]}
 
 
 @api_router.post("/api/models/import", status_code=202,

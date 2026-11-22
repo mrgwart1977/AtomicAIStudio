@@ -861,3 +861,46 @@ def test_request_json_carries_display_name_not_mode(client, authed, tmp_path):
             GenerationJob.adapter_id == "ops.model.import")).scalars().first()
         assert job.request_json["display_name"] == "Pretty Name"
         assert "mode" not in job.request_json  # reference-only: nothing to persist
+
+
+# ------------------------------------------------------- U-2b-2b probe
+
+def test_import_capabilities_flag_off_default(client, authed):
+    """Gate OFF (default): reference is the only advertised mode."""
+    r = client.get("/api/models/import-capabilities", headers=authed)
+    assert r.status_code == 200
+    assert r.json() == {"managed_copy_enabled": False,
+                        "modes": ["reference"]}
+
+
+def test_import_capabilities_flag_on(client, authed):
+    """Gate ON: managed_copy joins the server-computed modes list."""
+    client.app.state.settings.enable_managed_copy = True
+    try:
+        r = client.get("/api/models/import-capabilities", headers=authed)
+        assert r.status_code == 200
+        assert r.json() == {"managed_copy_enabled": True,
+                            "modes": ["reference", "managed_copy"]}
+    finally:
+        client.app.state.settings.enable_managed_copy = False
+
+
+def test_import_capabilities_requires_auth(client):
+    r = client.get("/api/models/import-capabilities",
+                   headers={"X-Atomic-Token": "bogus"})
+    assert r.status_code == 401
+
+
+def test_import_capabilities_no_paths_or_config(client, authed):
+    """Privacy: the probe exposes only the flag + derived modes — never
+    a filesystem path, env var, or other configuration detail."""
+    client.app.state.settings.enable_managed_copy = True
+    try:
+        body = client.get("/api/models/import-capabilities",
+                          headers=authed).json()
+        assert set(body.keys()) == {"managed_copy_enabled", "modes"}
+        assert isinstance(body["managed_copy_enabled"], bool)
+        assert all(m in ("reference", "managed_copy")
+                   for m in body["modes"])
+    finally:
+        client.app.state.settings.enable_managed_copy = False
