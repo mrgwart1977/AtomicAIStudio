@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
@@ -207,7 +207,7 @@ def get_model_artifact(artifact_id: str, request: Request,
 @api_router.post("/api/models/artifacts/{artifact_id}/release-managed-copy",
                  response_model=ManagedCopyReleaseOut)
 def release_managed_copy(artifact_id: str, request: Request,
-                         db: Session = Depends(get_db)):
+                         db: Annotated[Session, Depends(get_db)]):
     """U-2b-2a — synchronous metadata-only release of a managed import.
 
     Detaches the artifact's managed uri (external/reference-only state,
