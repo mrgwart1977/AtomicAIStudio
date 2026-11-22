@@ -1215,6 +1215,56 @@ export interface ImportCapabilitiesOut {
   modes: string[];
 }
 
+// ---------- U-3 model discovery ----------
+
+/** U-3 — a user-approved scan root (management surface; the display
+ * path is the verbatim user-approved location). */
+export interface DiscoveryRoot {
+  root_id: string;
+  display_path: string;
+  enabled: boolean;
+  max_depth: number;
+  added_at: string;
+  archived_at: string | null;
+  last_scan_outcome: string | null;
+  last_code: string | null;
+  last_scan_at: string | null;
+  last_entries_seen: number | null;
+  last_candidates: number | null;
+  candidate_count: number;
+}
+
+/** U-3 — list payload. Contract: NO absolute paths — rel_path is
+ * anchored to the owning root, root_label is the root's basename. */
+export interface DiscoveryCandidate {
+  candidate_id: string;
+  name: string;
+  rel_path: string;
+  root_id: string;
+  root_label: string;
+  fmt_guess: string;
+  byte_size: number;
+  presence: "present" | "absent" | string;
+  linked_artifact_id: string | null;
+  seen_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+/** U-3 — authenticated detail view; the only surface carrying the
+ * absolute candidate path. */
+export interface DiscoveryCandidateDetail extends DiscoveryCandidate {
+  resolved_path: string;
+  mtime_ns: number;
+  root_display_path: string;
+  linked_at: string | null;
+}
+
+export interface DiscoveryScanOut {
+  job_id: string;
+  status: string;
+}
+
 
 // ---------- C5-E: consolidated compatibility ----------
 

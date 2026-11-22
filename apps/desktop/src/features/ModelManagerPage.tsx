@@ -3,6 +3,7 @@ import { apiFetch } from "../api/client";
 import { useApp } from "../stores/appStore";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ImportModelDialog } from "./ImportModelDialog";
+import { DiscoverySection } from "./DiscoverySection";
 import type {
   AvailabilityClass,
   AvailabilityReason,
@@ -101,6 +102,10 @@ export function ModelManagerPage() {
   const [checks, setChecks] = useState<Record<string, ModelValidation | "loading" | null>>({});
   const [benchTarget, setBenchTarget] = useState<CompatModelEntry | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // U-3 — candidate-driven import prefill; ephemeral, cleared by the
+  // dialog's own reset exactly like the picker/manual path.
+  const [importInitialPath, setImportInitialPath] = useState("");
+  const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
   const [detail, setDetail] = useState<Record<string, ModelArtifactDetail | "loading" | null>>({});
   const [importCaps, setImportCaps] = useState<ImportCapabilitiesOut | null>(null);
   const [releaseTarget, setReleaseTarget] = useState<ModelArtifact | null>(null);
@@ -909,10 +914,22 @@ export function ModelManagerPage() {
           </ul>
         )}
       </section>
+      <DiscoverySection
+        onImportCandidate={(p) => {
+          setImportInitialPath(p);
+          setImportOpen(true);
+        }}
+        refreshKey={discoveryRefresh}
+      />
       <ImportModelDialog
         open={importOpen}
-        onOpenChange={setImportOpen}
-        onImported={() => void refreshModels()}
+        onOpenChange={(o) => {
+          setImportOpen(o);
+          if (!o) setImportInitialPath("");   // U-3 — stale prefill
+        }}                                    //   must not leak
+        initialPath={importInitialPath}
+        onImported={() => { void refreshModels();
+          setDiscoveryRefresh((k) => k + 1); }}
         capabilities={importCaps}
         onModeUnsupported={() => void fetchImportCaps()}
       />

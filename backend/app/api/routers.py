@@ -57,6 +57,11 @@ from app.schemas.api import (
     GpuSettingsOut,
     GpuSettingsUpdate,
     ImportCapabilitiesOut,
+    DiscoveryCandidateDetailOut,
+    DiscoveryCandidateOut,
+    DiscoveryRootIn,
+    DiscoveryRootOut,
+    DiscoveryScanOut,
     ResourceSettingsOut,
     ResourceSettingsUpdate,
     JobOut,
@@ -240,6 +245,137 @@ def import_capabilities(request: Request):
     return {"managed_copy_enabled": enabled,
             "modes": ["reference", "managed_copy"] if enabled
                      else ["reference"]}
+
+
+# ---------- U-3 model discovery ----------
+
+def _root_out(request, db, r) -> DiscoveryRootOut:
+    from app.domain import model_discovery
+    return DiscoveryRootOut(
+        root_id=r.root_id, display_path=r.display_path,
+        enabled=r.enabled, max_depth=r.max_depth,
+        added_at=r.added_at, archived_at=r.archived_at,
+        last_scan_outcome=r.last_scan_outcome, last_code=r.last_code,
+        last_scan_at=r.last_scan_at,
+        last_entries_seen=r.last_entries_seen,
+        last_candidates=r.last_candidates,
+        candidate_count=model_discovery.candidate_count(db, r.root_id))
+
+
+@api_router.get("/api/models/discovery/roots",
+                response_model=list[DiscoveryRootOut])
+def discovery_roots(request: Request,
+                    db: Session = Depends(get_db)):  # noqa: B008
+    """U-3 — list approved discovery roots (management surface; the
+    display path is the verbatim user-approved location, same trust
+    boundary as the models_dir setting)."""
+    from app.domain import model_discovery
+    return [_root_out(request, db, r)
+            for r in model_discovery.list_roots(db)]
+
+
+@api_router.post("/api/models/discovery/roots",
+                 response_model=DiscoveryRootOut)
+def add_discovery_root(body: DiscoveryRootIn, request: Request,
+                       db: Session = Depends(get_db)):  # noqa: B008
+    """U-3 — approve (or idempotently re-approve) a scan root. Validates
+    to a canonical LOCAL directory: UNC/network, links, and
+    indeterminate drive types refuse closed. Sync validation only —
+    no enumeration runs here."""
+    from app.domain import model_discovery
+    try:
+        row, _created = model_discovery.add_root(
+            db, body.path, max_depth=body.max_depth,
+            settings=request.app.state.settings)
+    except model_discovery.DiscoveryRefused as e:
+        raise HTTPException(422, e.code) from None
+    db.commit()
+    return _root_out(request, db, row)
+
+
+@api_router.post("/api/models/discovery/roots/{root_id}/archive",
+                 response_model=DiscoveryRootOut)
+def archive_discovery_root(root_id: str, request: Request,
+                           db: Session = Depends(get_db)):  # noqa: B008
+    """U-3 — soft-archive: stops future scans, keeps all candidates and
+    provenance. There is no hard-delete path for roots or files."""
+    from app.domain import model_discovery
+    row = model_discovery.archive_root(db, root_id)
+    if row is None:
+        raise HTTPException(404, "not_found")
+    db.commit()
+    return _root_out(request, db, row)
+
+
+def _cand_out(c, r) -> DiscoveryCandidateOut:
+    from app.domain import model_discovery
+    return DiscoveryCandidateOut(
+        candidate_id=c.candidate_id, name=c.name,
+        rel_path=model_discovery.rel_path(c, r),
+        root_id=c.root_id,
+        root_label=Path(r.canonical_path).name or r.root_id,
+        fmt_guess=c.fmt_guess, byte_size=c.byte_size,
+        presence=c.presence, linked_artifact_id=c.linked_artifact_id,
+        seen_count=c.seen_count, first_seen_at=c.first_seen_at,
+        last_seen_at=c.last_seen_at)
+
+
+@api_router.get("/api/models/discovery/candidates",
+                response_model=list[DiscoveryCandidateOut])
+def discovery_candidates(request: Request,
+                         db: Session = Depends(get_db),  # noqa: B008
+                         root_id: str | None = None,
+                         presence: str | None = None,
+                         limit: int = 200, offset: int = 0):
+    """U-3 — paged candidate list. Contract: no absolute paths — only
+    root-relative `rel_path` and the root's basename label."""
+    from app.domain import model_discovery
+    return [_cand_out(c, r) for c, r in model_discovery.list_candidates(
+        db, root_id=root_id, presence=presence, limit=limit,
+        offset=offset)]
+
+
+@api_router.get("/api/models/discovery/candidates/{candidate_id}",
+                response_model=DiscoveryCandidateDetailOut)
+def discovery_candidate_detail(candidate_id: str, request: Request,
+                               db: Session = Depends(get_db)):  # noqa: B008
+    """U-3 — authenticated detail view: the ONLY surface exposing the
+    absolute candidate path (needed to prefill the import dialog)."""
+    from app.db.models import DiscoveryCandidate, DiscoveryRoot
+    row = db.get(DiscoveryCandidate, candidate_id)
+    if row is None:
+        raise HTTPException(404, "not_found")
+    root = db.get(DiscoveryRoot, row.root_id)
+    out = _cand_out(row, root)
+    return DiscoveryCandidateDetailOut(
+        **out.model_dump(), resolved_path=row.resolved_path,
+        mtime_ns=row.mtime_ns,
+        root_display_path=root.display_path if root else "",
+        linked_at=row.linked_at)
+
+
+@api_router.post("/api/models/discovery/scan", status_code=202,
+                 response_model=DiscoveryScanOut)
+def discovery_scan(request: Request,
+                   db: Session = Depends(get_db)):  # noqa: B008
+    """U-3 — enqueue a durable ops.model.discover job. One in flight at
+    a time on the ops lane; a queued/running scan returns 409."""
+    from app.db.models import GenerationJob
+    in_flight = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.discover",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().first()
+    if in_flight is not None:
+        raise HTTPException(409, "a discovery scan is already in progress")
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.discover",
+        kind="model_discovery", request={},
+        idempotency_key=f"modeldisc:{new_id()[:8]}")
+    db.commit()
+    request.app.state.job_engine.wake()
+    return {"job_id": job.id, "status": job.status}
 
 
 @api_router.post("/api/models/import", status_code=202,

@@ -70,6 +70,7 @@ export function ImportModelDialog({
   onImported,
   capabilities = null,
   onModeUnsupported,
+  initialPath = "",
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -81,6 +82,9 @@ export function ImportModelDialog({
   /** Called when a managed submit is refused with mode_not_supported —
    * the parent re-probes capabilities (flag may have flipped). */
   onModeUnsupported?: () => void;
+  /** U-3 — prefills the source path when opening via a discovery
+   * candidate's Import… action; lives only in ephemeral dialog state. */
+  initialPath?: string;
 }) {
   const jobs = useApp((s) => s.jobs);
   // --- sensitive: picker/manual path lives here and ONLY here ---
@@ -104,6 +108,11 @@ export function ImportModelDialog({
   const tracking = jobId !== null;
   const job: Job | undefined = jobId ? jobs[jobId] : undefined;
   const status = job?.status ?? "queued";
+
+  // U-3 — opening via a candidate's Import… prefills the path field.
+  useEffect(() => {
+    if (open && initialPath) setPath(initialPath);
+  }, [open, initialPath]);
 
   function reset() {
     setPath(""); setMode("reference");

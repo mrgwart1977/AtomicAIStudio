@@ -1196,4 +1196,66 @@ class TimelineCrossfade(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class DiscoveryRoot(Base):
+    """U-3 — a user-approved directory the model scanner may enumerate.
+
+    `canonical_path` (normcase + resolved, component-aware) is the
+    identity — `root_id` derives from it so re-adding the same path
+    resurfaces the same row with its history. Removal is soft-archive
+    only (`archived_at`): candidates and provenance are never erased
+    and no model file is ever touched by root lifecycle changes."""
+
+    __tablename__ = "discovery_roots"
+
+    root_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    canonical_path: Mapped[str] = mapped_column(Text, unique=True)
+    display_path: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_depth: Mapped[int] = mapped_column(Integer, default=4)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Per-root outcome of the LAST scan job that reached this root —
+    # absence evidence only when last_scan_job_id == that scan's job.
+    last_scan_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("generation_jobs.id", ondelete="SET NULL"),
+        nullable=True)
+    last_scan_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)  # complete|truncated|refused
+    last_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_entries_seen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_candidates: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class DiscoveryCandidate(Base):
+    """U-3 — an unverified file observed inside an approved root.
+
+    Identity is `resolved_path` (canonical absolute path — detail
+    endpoint only). `presence` (filesystem observation) is orthogonal
+    to `linked_artifact_id` (registration state); an import links the
+    candidate but scans can never unlink it."""
+
+    __tablename__ = "discovery_candidates"
+
+    candidate_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    resolved_path: Mapped[str] = mapped_column(Text, unique=True)
+    name: Mapped[str] = mapped_column(String(400), default="")
+    fmt_guess: Mapped[str] = mapped_column(String(30), default="unknown")
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    mtime_ns: Mapped[int] = mapped_column(Integer, default=0)          # scan-time snapshot
+    root_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("discovery_roots.root_id", ondelete="CASCADE"),
+        index=True)
+    presence: Mapped[str] = mapped_column(String(12), default="present", index=True)  # present|absent
+    seen_count: Mapped[int] = mapped_column(Integer, default=1)         # distinct jobs observing it
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_scan_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    linked_artifact_id: Mapped[str | None] = mapped_column(
+        String(120), ForeignKey("model_artifacts.artifact_id", ondelete="SET NULL"),
+        nullable=True, index=True)
+    linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    meta_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 project_children = relationship  # silence unused-import linters for future relationships
