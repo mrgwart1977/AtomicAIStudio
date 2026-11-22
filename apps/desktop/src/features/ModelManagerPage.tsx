@@ -9,6 +9,8 @@ import type {
   CompatModelEntry,
   CompatibilityReport,
   CompatStatus,
+  ImportCapabilitiesOut,
+  ManagedCopyReleaseOut,
   ModelArtifact,
   ModelArtifactDetail,
   ModelCatalogEntry,
@@ -24,6 +26,20 @@ import {
 function gb(bytes: number | null | undefined): string {
   if (bytes == null) return "unknown";
   return `${(bytes / 1e9).toFixed(1)} GB`;
+}
+
+/** Basename for managed URIs — absolute managed paths never render in
+ * ordinary library rows (U-2b-2b privacy contract). */
+function baseName(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
+/** Visible-list-only dedup note — never a global/system claim. */
+function sharedManagedCount(artifacts: ModelArtifact[], a: ModelArtifact): number {
+  if (a.managed_by !== "atomic" || !a.uri) return 0;
+  return artifacts.filter(
+    (b) => b.uri === a.uri && b.artifact_id !== a.artifact_id).length;
 }
 
 const COMPAT: Record<CompatStatus, { label: string; cls: string }> = {
@@ -86,16 +102,37 @@ export function ModelManagerPage() {
   const [benchTarget, setBenchTarget] = useState<CompatModelEntry | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [detail, setDetail] = useState<Record<string, ModelArtifactDetail | "loading" | null>>({});
+  const [importCaps, setImportCaps] = useState<ImportCapabilitiesOut | null>(null);
+  const [releaseTarget, setReleaseTarget] = useState<ModelArtifact | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const refreshCompat = () =>
     apiFetch<CompatibilityReport>("/api/compatibility").then(setCompat).catch(() => {});
 
+  // U-2b-2b — capability probe: only a well-formed flag-ON response may
+  // enable the managed option; loading/unavailable/unauthorized/
+  // malformed all resolve to null (fail closed, no footnote).
+  const fetchImportCaps = () =>
+    apiFetch<ImportCapabilitiesOut>("/api/models/import-capabilities")
+      .then((v) => {
+        const wellFormed = typeof v?.managed_copy_enabled === "boolean"
+          && Array.isArray(v?.modes)
+          && v.modes.every((m) => m === "reference" || m === "managed_copy");
+        setImportCaps(wellFormed ? {
+          managed_copy_enabled:
+            v.managed_copy_enabled === true
+            && v.modes.includes("managed_copy"),
+          modes: v.modes,
+        } : null);
+      })
+      .catch(() => setImportCaps(null));
+
   useEffect(() => {
     void refreshHw();
     void refreshModels();
     void refreshCompat();
+    void fetchImportCaps();
     void apiFetch<ModelsDir>("/api/models/dir").then(setModelsDir).catch(() => {});
   }, [refreshHw, refreshModels]);
 
@@ -146,12 +183,44 @@ export function ModelManagerPage() {
   // authenticated detail endpoint — fetched on explicit expand, never in bulk.
   async function toggleProvenance(a: ModelArtifact) {
     const cur = detail[a.artifact_id];
-    if (cur !== undefined) { setDetail((d) => ({ ...d, [a.artifact_id]: null })); return; }
+    // cur != null (not !== undefined): a collapsed/failed entry must
+    // REFETCH on re-expand — managed_copy.present is a live probe and
+    // stale presence must never persist behind a dead expand click.
+    if (cur != null) { setDetail((d) => ({ ...d, [a.artifact_id]: null })); return; }
     setDetail((d) => ({ ...d, [a.artifact_id]: "loading" }));
     try {
       const v = await apiFetch<ModelArtifactDetail>(`/api/models/artifacts/${a.artifact_id}`);
       setDetail((d) => ({ ...d, [a.artifact_id]: v }));
     } catch { setDetail((d) => ({ ...d, [a.artifact_id]: null })); }
+  }
+
+  // U-2b-2b — metadata-only release: detaches the artifact's managed
+  // association. NEVER deletes the managed file or frees disk space;
+  // available regardless of the managed-copy feature gate.
+  async function releaseManaged(a: ModelArtifact) {
+    setBusy(true); setErr(null);
+    try {
+      await apiFetch<ManagedCopyReleaseOut>(
+        `/api/models/artifacts/${a.artifact_id}/release-managed-copy`,
+        { method: "POST" });
+      // `already:true` is a successful no-op — same refresh path.
+      try {
+        const v = await apiFetch<ModelArtifactDetail>(
+          `/api/models/artifacts/${a.artifact_id}`);
+        setDetail((d) => ({ ...d, [a.artifact_id]: v }));
+      } catch { setDetail((d) => ({ ...d, [a.artifact_id]: null })); }
+      void refreshModels();
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      if (m.startsWith("404")) {
+        void refreshModels();
+        setErr("That artifact no longer exists — the library was refreshed.");
+      } else {
+        setErr("The copy couldn't be detached — try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function openPreflight(model: ModelCatalogEntry) {
@@ -641,7 +710,12 @@ export function ModelManagerPage() {
           </div>
         ) : (
           <ul className="mt-3 space-y-2">
-            {artifacts.map((a) => (
+            {artifacts.map((a) => {
+              const det = detail[a.artifact_id];
+              const detObj: ModelArtifactDetail | null =
+                det != null && det !== "loading" ? det : null;
+              const sharedN = sharedManagedCount(artifacts, a);
+              return (
               <li key={a.artifact_id}
                   className="rounded-lg border border-line bg-card p-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -653,8 +727,17 @@ export function ModelManagerPage() {
                   <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted">{a.modality}</span>
                   <span className={`rounded px-2 py-0.5 text-xs ${
                     a.managed_by === "external" ? "bg-sky/15 text-sky" : "bg-teal/15 text-teal"}`}>
-                    {a.managed_by === "external" ? "external" : "atomic-managed"}
+                    {a.managed_by === "external" ? "external"
+                      : a.source_type === "import" ? "managed copy"
+                      : "atomic-managed"}
                   </span>
+                  {a.managed_by === "atomic" && a.source_type === "import"
+                    && detObj?.managed_copy?.present === false && (
+                    <span className="rounded bg-amber/15 px-2 py-0.5 text-xs text-amber"
+                          title="The managed file isn't on disk — it may have been moved or the drive is unavailable. The record is intact.">
+                      managed copy missing
+                    </span>
+                  )}
                   <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-faint">{a.source_type}</span>
                   {a.source_type === "import" && (
                     <span className="rounded bg-line/40 px-2 py-0.5 text-xs text-muted"
@@ -695,7 +778,10 @@ export function ModelManagerPage() {
                   {a.content_sha256 ? ` · sha256 ${a.content_sha256.slice(0, 12)}…` : " · no checksum declared"}
                 </p>
                 {a.uri && (
-                  <p className="mt-0.5 break-all text-xs text-faint">{a.uri}</p>
+                  <p className="mt-0.5 break-all text-xs text-faint">
+                    {a.managed_by === "atomic"
+                      ? `managed: ${baseName(a.uri)}` : a.uri}
+                  </p>
                 )}
                 {a.source_type === "import" && (
                   <>
@@ -742,12 +828,84 @@ export function ModelManagerPage() {
                             <span className="text-faint"> (you declared this — unverified)</span>
                           </dd>
                         </div>
+                        {detObj?.managed_copy && (
+                          <>
+                            <div className="flex justify-between gap-4">
+                              <dt className="text-faint">Managed copy</dt>
+                              <dd className="text-muted">
+                                {detObj.managed_copy.present
+                                  ? "present on disk" : "not present on disk"}
+                                <span className="text-faint">
+                                  {" "}(existence only — not a content check)
+                                </span>
+                              </dd>
+                            </div>
+                            {detObj.managed_copy.dest_rel && (
+                              <div className="flex justify-between gap-4">
+                                <dt className="text-faint">Managed file</dt>
+                                <dd className="break-all text-right text-muted">
+                                  {detObj.managed_copy.dest_rel}</dd>
+                              </div>
+                            )}
+                            {detObj.managed_copy.provenance && (
+                              <div className="flex justify-between gap-4">
+                                <dt className="text-faint">Copy origin</dt>
+                                <dd className="text-muted">
+                                  {detObj.managed_copy.provenance === "adopted"
+                                    ? "adopted existing verified content"
+                                    : "copied by this import"}
+                                </dd>
+                              </div>
+                            )}
+                            {detObj.managed_copy.published_at && (
+                              <div className="flex justify-between gap-4">
+                                <dt className="text-faint">Copied at</dt>
+                                <dd className="text-muted">
+                                  {detObj.managed_copy.published_at}
+                                  <span className="text-faint">
+                                    {" "}(point in time — verified at copy)
+                                  </span>
+                                </dd>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {detObj?.import_report?.release?.managed_copy_released_at && (
+                          <div className="flex justify-between gap-4">
+                            <dt className="text-faint">Detached</dt>
+                            <dd className="text-muted">
+                              {detObj.import_report.release.managed_copy_released_at}
+                              <span className="text-faint">
+                                {detObj.import_report.release.last_uri_rel
+                                  ? ` — was ${detObj.import_report.release.last_uri_rel};`
+                                  : " —"}{" "}
+                                managed file left on disk
+                              </span>
+                            </dd>
+                          </div>
+                        )}
                       </dl>
+                    )}
+                    {detObj && sharedN > 0 && (
+                      <p className="mt-1 text-xs text-faint">
+                        Shares this verified managed copy with {sharedN}{" "}
+                        other {sharedN === 1 ? "artifact" : "artifacts"} in
+                        the loaded library list.
+                      </p>
+                    )}
+                    {detObj?.managed_by === "atomic" && (
+                      <button
+                        onClick={() => setReleaseTarget(a)}
+                        className="mt-2 rounded-md border border-amber/50 px-2 py-1 text-xs text-amber hover:text-fg"
+                      >
+                        Stop managing this copy…
+                      </button>
                     )}
                   </>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </section>
@@ -755,6 +913,22 @@ export function ModelManagerPage() {
         open={importOpen}
         onOpenChange={setImportOpen}
         onImported={() => void refreshModels()}
+        capabilities={importCaps}
+        onModeUnsupported={() => void fetchImportCaps()}
+      />
+      <ConfirmDialog
+        open={releaseTarget !== null}
+        onOpenChange={(o) => { if (!o) setReleaseTarget(null); }}
+        title="Stop managing copy"
+        body={"Stop managing this copy? The artifact record will retain its"
+          + " original source reference. The managed file will not be"
+          + " deleted, and no disk space will be freed. The original"
+          + " source file will not be changed. Its current availability"
+          + " is not guaranteed."}
+        confirmLabel="Stop managing"
+        onConfirm={() => {
+          if (releaseTarget) void releaseManaged(releaseTarget);
+        }}
       />
 
       {/* install confirmation — the approval gate, preflight-informed */}

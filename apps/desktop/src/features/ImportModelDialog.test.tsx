@@ -113,8 +113,10 @@ describe("ImportModelDialog", () => {
       license: { name: "Apache-2.0", commercial_ok: true,
                  url: "https://example.test/lic" },
       family: "sdxl", role_hint: "lora",
-      display_name: "My Model", mode: "reference",
+      display_name: "My Model",
     });
+    // reference is implicit — the mode field is omitted entirely (U-2b-2b V1)
+    expect(lastBody()).not.toHaveProperty("mode");
     // tracked job (not yet in the store map) shows queued, never the form
     // again — guarding the POST→first-WS-event window against double submit
     await waitFor(() => screen.getByText("ops.model.import"));
@@ -247,5 +249,198 @@ describe("ImportModelDialog", () => {
     openDialog();
     expect(screen.getByText(/What you declare — the app does not verify/)).toBeTruthy();
     expect(screen.getByText(/detected format is checked separately/)).toBeTruthy();
+  });
+});
+
+// ------------------------------------------------------------------ //
+// U-2b-2b — managed-copy mode: capability gating, storage selection,  //
+// stage-accurate progress, honest cancellation, provenance wording.   //
+// ------------------------------------------------------------------ //
+
+const CAPS_ON = { managed_copy_enabled: true,
+                  modes: ["reference", "managed_copy"] };
+const CAPS_OFF = { managed_copy_enabled: false, modes: ["reference"] };
+
+function openDialogCaps(
+  caps: unknown,
+  onModeUnsupported = vi.fn(),
+  onImported = vi.fn(),
+) {
+  const onOpenChange = vi.fn();
+  const r = render(
+    <ImportModelDialog open onOpenChange={onOpenChange}
+      onImported={onImported}
+      capabilities={caps as never}
+      onModeUnsupported={onModeUnsupported} />);
+  return {
+    onOpenChange, onImported, onModeUnsupported,
+    rerender: (c: unknown = caps) => r.rerender(
+      <ImportModelDialog open onOpenChange={onOpenChange}
+        onImported={onImported}
+        capabilities={c as never}
+        onModeUnsupported={onModeUnsupported} />),
+  };
+}
+
+describe("ImportModelDialog — U-2b-2b managed copy", () => {
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset(); pickFile.mockReset();
+    for (const k of Object.keys(mockJobs)) delete mockJobs[k];
+  });
+
+  it("C1 — no capability (loading): reference-only, no selector, no footnote", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    openDialogCaps(null);
+    expect(screen.queryByLabelText(/Copy into app-managed storage/)).toBeNull();
+    expect(screen.queryByText(/Managed copies are disabled/)).toBeNull();
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    expect(lastBody()).not.toHaveProperty("mode");
+  });
+
+  it("C2 — enabled: radio appears with reference pre-selected; managed submits mode", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    openDialogCaps(CAPS_ON);
+    const ref = screen.getByLabelText(/Track in place/) as HTMLInputElement;
+    const mgd = screen.getByLabelText(/Copy into app-managed storage/) as HTMLInputElement;
+    expect(ref.checked).toBe(true);
+    expect(mgd.checked).toBe(false);
+    expect(screen.getByText(/original is never moved, changed, or deleted/)).toBeTruthy();
+    fireEvent.click(mgd);
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    expect(lastBody().mode).toBe("managed_copy");
+  });
+
+  it("C3 — disabled capability: footnote, no selector", () => {
+    openDialogCaps(CAPS_OFF);
+    expect(screen.getByText(/Managed copies are disabled/)).toBeTruthy();
+    expect(screen.queryByLabelText(/Copy into app-managed storage/)).toBeNull();
+  });
+
+  it("C3 — malformed/unavailable capability: silent reference-only", () => {
+    openDialogCaps({ managed_copy_enabled: "yes", modes: null });
+    expect(screen.queryByLabelText(/Copy into app-managed storage/)).toBeNull();
+    expect(screen.queryByText(/Managed copies are disabled/)).toBeNull();
+  });
+
+  it("C4 — mode_not_supported: friendly error + capability refresh + reset", async () => {
+    const onModeUnsupported = vi.fn();
+    apiFetch.mockRejectedValueOnce(
+      new Error('422: {"detail":"mode_not_supported"}'));
+    openDialogCaps(CAPS_ON, onModeUnsupported);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => screen.getByRole("alert"));
+    expect(screen.getByRole("alert").textContent)
+      .toMatch(/isn't available/);
+    expect(onModeUnsupported).toHaveBeenCalled();
+    // failed submit → mode reset to reference for the next attempt
+    expect((screen.getByLabelText(/Track in place/) as HTMLInputElement).checked)
+      .toBe(true);
+  });
+
+  it("C5 — stage labels map from progress_json.stage", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    const { rerender } = openDialogCaps(CAPS_ON);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => screen.getByText("ops.model.import"));
+    mockJobs.j1 = { ...RUNNING, progress: 0.02,
+                    progress_json: { stage: "inspect" } };
+    rerender();
+    await waitFor(() => screen.getByText("Inspecting source file…"));
+    mockJobs.j1 = { ...RUNNING, progress: 0.35,
+                    message: "copying to managed storage",
+                    progress_json: { stage: "copy" } };
+    rerender();
+    await waitFor(() => screen.getByText("copying to managed storage"));
+    // byte totals only appear once actually present in the payload
+    mockJobs.j1 = { ...RUNNING, progress: 0.85,
+                    message: "verifying managed copy",
+                    progress_json: { stage: "copy", bytes_done: 214e6,
+                                     bytes_total: 842e6 } };
+    rerender();
+    await waitFor(() =>
+      screen.getByText(/verifying managed copy — 214\.0 MB of 842\.0 MB/));
+    mockJobs.j1 = { ...RUNNING, progress: 0.9,
+                    message: "registering artifact",
+                    progress_json: { stage: "register" } };
+    rerender();
+    await waitFor(() => screen.getByText("Registering artifact…"));
+  });
+
+  it("C6 — cancelled managed import points at 'Stop managing copy'", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    const { rerender } = openDialogCaps(CAPS_ON);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => screen.getByText("ops.model.import"));
+    mockJobs.j1 = { ...RUNNING, status: "cancelled" };
+    rerender();
+    await waitFor(() =>
+      screen.getByText(/it can be detached with 'Stop managing copy'/));
+  });
+
+  it("C7 — managed success: adopted vs published provenance copy", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    const { onImported, rerender } = openDialogCaps(CAPS_ON);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => screen.getByText("ops.model.import"));
+    mockJobs.j1 = { ...RUNNING, status: "succeeded", progress: 1,
+                    result_json: { managed: { provenance: "adopted" } } };
+    rerender();
+    await waitFor(() =>
+      screen.getByText(/identical verified copy already exists/));
+    expect(onImported).toHaveBeenCalled();
+    mockJobs.j1 = { ...RUNNING, status: "succeeded", progress: 1,
+                    result_json: { managed: { provenance: "published" } } };
+    rerender();
+    await waitFor(() =>
+      screen.getByText(/a verified copy is managed by the app/));
+    // library-only framing still present
+    expect(screen.getByText(/can't be used for generation/)).toBeTruthy();
+  });
+
+  it("C8 — managed-copy taxonomy codes map to friendly text", async () => {
+    apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
+    const { rerender } = openDialogCaps(CAPS_ON);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    fillPath(); fillLicense();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => screen.getByText("ops.model.import"));
+    for (const [code, re] of [
+      ["managed_copy_unsupported", /aren't supported in this installation/],
+      ["managed_dest_corrupt", /doesn't match — it was left untouched/],
+      ["disk_full", /Not enough free space/],
+      ["copy_mismatch", /didn't match the source/],
+    ] as const) {
+      mockJobs.j1 = { ...RUNNING, status: "failed", error: code };
+      rerender();
+      await waitFor(() => screen.getByText(re));
+    }
+  });
+
+  it("C15 — reopen resets mode to reference (ephemeral state)", () => {
+    const onOpenChange = vi.fn();
+    const { unmount } = render(
+      <ImportModelDialog open onOpenChange={onOpenChange}
+        onImported={vi.fn()} capabilities={CAPS_ON} />);
+    fireEvent.click(screen.getByLabelText(/Copy into app-managed storage/));
+    expect((screen.getByLabelText(/Copy into app-managed storage/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    unmount();
+    render(<ImportModelDialog open onOpenChange={vi.fn()}
+      onImported={vi.fn()} capabilities={CAPS_ON} />);
+    expect((screen.getByLabelText(/Track in place/) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText(/Copy into app-managed storage/) as HTMLInputElement).checked).toBe(false);
   });
 });

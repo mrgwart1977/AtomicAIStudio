@@ -730,6 +730,17 @@ class ManagedCopyReleaseOut(BaseModel):
     already: bool
 
 
+class ImportCapabilitiesOut(BaseModel):
+    """U-2b-2b — read-only import-mode capability probe for the desktop.
+    `managed_copy_enabled` mirrors the server-side feature gate; `modes`
+    is the server-computed list of accepted ModelImportRequest.mode
+    values ("reference" is always present). No filesystem paths, env
+    vars, or configuration details are exposed — the desktop uses this
+    only to decide whether the managed-copy option may be offered."""
+    managed_copy_enabled: bool
+    modes: list[str]
+
+
 class ModelsDirOut(BaseModel):
     dir: str
     source: str  # "app setting" | "built-in default"

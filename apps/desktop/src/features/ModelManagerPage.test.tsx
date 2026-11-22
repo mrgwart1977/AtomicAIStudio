@@ -140,8 +140,14 @@ vi.mock("../api/commands", () => ({
   pickFile: (...a: unknown[]) => pickFile(...a),
 }));
 
+// U-2b-2b — mutable probe response; default is MALFORMED so the managed
+// option fails closed unless a test opts in with a well-formed payload.
+let capsResponse: unknown = {};
+
 function mockApi() {
   apiFetch.mockImplementation((path: string) => {
+    if (path === "/api/models/import-capabilities")
+      return Promise.resolve(capsResponse);
     if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
     if (path === "/api/models/dir") return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
     if (path.endsWith("/preflight")) return Promise.resolve(PREFLIGHT);
@@ -406,5 +412,308 @@ describe("ModelManagerPage — U-2b-1 imported artifacts", () => {
     };
     render(<ModelManagerPage />);
     await waitFor(() => expect(refreshModels).toHaveBeenCalled());
+  });
+});
+
+// ------------------------------------------------------------------ //
+// U-2b-2b — managed-copy artifacts: badges, basename-only display,    //
+// missing-file honesty, shared-copy note, and the metadata-only        //
+// "Stop managing copy" release.                                        //
+// ------------------------------------------------------------------ //
+
+const MANAGED_ART = {
+  artifact_id: "import:m1", display_name: "Managed Model",
+  kind: "model", arch: "sdxl", family: "sdxl", modality: "image",
+  fmt: "safetensors", role: "diffusion", version: "",
+  source_type: "import", managed_by: "atomic",
+  uri: "C:\\data\\models\\imports\\abcdef0123.safetensors",
+  content_sha256: "ab".repeat(32), byte_size: 4e9,
+  license: { name: "Apache-2.0", commercial_ok: true, declared_by: "user" },
+  support_tier: "unknown", enabled: true, tags: [],
+  meta: { suggestions: {} },
+  install_id: null, install: { status: "registered" },
+};
+
+const MANAGED_DETAIL = {
+  ...MANAGED_ART,
+  source_uri: "D:\\PRIVATE-SRC\\weights.safetensors",
+  imported_at: "2026-11-22T09:00:00",
+  import_report: {
+    fmt: "safetensors", hashed_at: "2026-11-22T09:00:00",
+    metadata: {}, warnings: [], evidence: {},
+  },
+  managed_copy: {
+    present: true, dest_rel: "abcdef0123.safetensors",
+    provenance: "published", published_at: "2026-11-22T09:05:00",
+  },
+};
+
+const RELEASED_DETAIL = {
+  ...MANAGED_DETAIL,
+  managed_by: "external", uri: null, managed_copy: null,
+  import_report: {
+    ...MANAGED_DETAIL.import_report,
+    release: {
+      managed_copy_released_at: "2026-11-23T10:00:00",
+      last_uri_rel: "abcdef0123.safetensors",
+    },
+  },
+};
+
+const CAPS_ON = { managed_copy_enabled: true,
+                  modes: ["reference", "managed_copy"] };
+const CAPS_OFF = { managed_copy_enabled: false, modes: ["reference"] };
+
+/** Full api mock for this describe — artifact detail, release POST,
+ *  capability probe, and the standard mounts. */
+function mockApiManaged(
+  detail: unknown = MANAGED_DETAIL,
+  release: unknown = { artifact_id: "import:m1", released: true, already: false },
+) {
+  apiFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+    if (path === "/api/models/artifacts/import:m1/release-managed-copy"
+        && opts?.method === "POST")
+      return Promise.resolve(release);
+    if (path === "/api/models/artifacts/import:m1")
+      return Promise.resolve(detail);
+    if (path === "/api/models/import-capabilities")
+      return Promise.resolve(capsResponse);
+    if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+    if (path === "/api/models/dir")
+      return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
+    return Promise.resolve({});
+  });
+}
+
+async function expandProvenance() {
+  fireEvent.click(screen.getAllByText("Provenance…")[0]);
+  await waitFor(() => screen.getByText(/PRIVATE-SRC/));
+}
+
+describe("ModelManagerPage — U-2b-2b managed-copy artifacts", () => {
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset();
+    mockState.models = MODELS; mockState.artifacts = [MANAGED_ART];
+    mockState.jobs = {}; refreshModels.mockClear();
+    capsResponse = {};
+    mockApiManaged();
+  });
+
+  it("capability probe runs on mount; malformed/off fail closed (C1/C3)", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith("/api/models/import-capabilities"));
+    // default capsResponse {} is malformed → no selector in the dialog
+    fireEvent.click(screen.getByText("Import model file…"));
+    await waitFor(() => screen.getByText("Import a model file"));
+    expect(screen.queryByLabelText(/Copy into app-managed storage/)).toBeNull();
+    expect(screen.queryByText(/Managed copies are disabled/)).toBeNull();
+    cleanup();
+    // explicit disabled → footnote, still no selector
+    capsResponse = CAPS_OFF;
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Import model file…"));
+    fireEvent.click(screen.getByText("Import model file…"));
+    await waitFor(() => screen.getByText(/Managed copies are disabled/));
+    expect(screen.queryByLabelText(/Copy into app-managed storage/)).toBeNull();
+  });
+
+  it("enabled capability exposes the managed option (C2)", async () => {
+    capsResponse = CAPS_ON;
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Import model file…"));
+    fireEvent.click(screen.getByText("Import model file…"));
+    await waitFor(() =>
+      screen.getByLabelText(/Copy into app-managed storage/));
+    expect(screen.getByLabelText(/Track in place/)).toBeTruthy();
+  });
+
+  it("managed rows badge honestly and render basename only (C9/C14)", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    expect(screen.getByText("managed copy")).toBeTruthy();
+    expect(screen.getByText("library only")).toBeTruthy();
+    // basename only — the absolute managed path must never render
+    expect(screen.getByText("managed: abcdef0123.safetensors")).toBeTruthy();
+    expect(document.body.innerHTML).not.toContain("C:\\data\\models\\imports");
+    expect(document.body.innerHTML).not.toContain("PRIVATE-SRC");
+  });
+
+  it("provenance drawer shows presence, basename, origin, copied-at (C9)", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    expect(screen.getByText("present on disk")).toBeTruthy();
+    expect(screen.getByText(/existence only — not a content check/)).toBeTruthy();
+    expect(screen.getByText("abcdef0123.safetensors")).toBeTruthy();
+    expect(screen.getByText("copied by this import")).toBeTruthy();
+    expect(screen.getByText(/verified at copy/)).toBeTruthy();
+    // adopted wording differs — collapse is terminal in the current
+    // toggle, so the adopted case mounts a fresh tree
+    cleanup();
+    mockApiManaged({
+      ...MANAGED_DETAIL,
+      managed_copy: { ...MANAGED_DETAIL.managed_copy,
+                      provenance: "adopted" },
+    });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    expect(screen.getByText("adopted existing verified content")).toBeTruthy();
+  });
+
+  it("missing managed file: amber badge + honest note, release still offered (C10)", async () => {
+    mockApiManaged({
+      ...MANAGED_DETAIL,
+      managed_copy: { ...MANAGED_DETAIL.managed_copy, present: false },
+    });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    expect(screen.getByText("managed copy missing")).toBeTruthy();
+    expect(screen.getByText("not present on disk")).toBeTruthy();
+    // presence says existence, never "corrupt"/"verified"
+    expect(screen.queryByText(/corrupt/i)).toBeNull();
+    expect(screen.getByText("Stop managing this copy…")).toBeTruthy();
+  });
+
+  it("two managed artifacts sharing a uri show the loaded-list note (C13)", async () => {
+    mockState.artifacts = [
+      MANAGED_ART,
+      { ...MANAGED_ART, artifact_id: "import:m2",
+        display_name: "Managed Twin" },
+    ];
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Twin"));
+    await expandProvenance();
+    expect(screen.getByText(
+      /with 1 other artifact in the loaded library list/)).toBeTruthy();
+    // never a global claim
+    expect(screen.queryByText(/system-wide|globally/)).toBeNull();
+  });
+
+  it("Stop managing copy: verbatim disclosure → POST → refresh (C11)", async () => {
+    mockApiManaged(MANAGED_DETAIL,
+      { artifact_id: "import:m1", released: true, already: false });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    fireEvent.click(screen.getByText("Stop managing this copy…"));
+    await waitFor(() => screen.getByText("Stop managing copy"));
+    expect(screen.getByText(
+      "Stop managing this copy? The artifact record will retain its original"
+      + " source reference. The managed file will not be deleted, and no disk"
+      + " space will be freed. The original source file will not be changed."
+      + " Its current availability is not guaranteed.")).toBeTruthy();
+    // detail refetch now returns the released row
+    apiFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === "/api/models/artifacts/import:m1/release-managed-copy"
+          && opts?.method === "POST")
+        return Promise.resolve({ artifact_id: "import:m1",
+                                 released: true, already: false });
+      if (path === "/api/models/artifacts/import:m1")
+        return Promise.resolve(RELEASED_DETAIL);
+      if (path === "/api/models/import-capabilities")
+        return Promise.resolve(capsResponse);
+      if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+      if (path === "/api/models/dir")
+        return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
+      return Promise.resolve({});
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop managing" }));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        "/api/models/artifacts/import:m1/release-managed-copy",
+        expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(refreshModels).toHaveBeenCalled());
+    // released detail renders the detach stamp + no delete affordance
+    await waitFor(() => screen.getByText(/managed file left on disk/));
+    expect(screen.queryByText("Stop managing this copy…")).toBeNull();
+    expect(screen.queryByText(/Delete managed file|Reclaim space|Cleanup/))
+      .toBeNull();
+  });
+
+  it("idempotent release (already:true) follows the same success path (C11)", async () => {
+    mockApiManaged(MANAGED_DETAIL,
+      { artifact_id: "import:m1", released: true, already: true });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    fireEvent.click(screen.getByText("Stop managing this copy…"));
+    await waitFor(() =>
+      screen.getByRole("button", { name: "Stop managing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop managing" }));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        "/api/models/artifacts/import:m1/release-managed-copy",
+        expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(refreshModels).toHaveBeenCalled());
+  });
+
+  it("release 404 refreshes the library with a friendly note (C12)", async () => {
+    apiFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === "/api/models/artifacts/import:m1/release-managed-copy"
+          && opts?.method === "POST")
+        return Promise.reject(new Error("404: unknown artifact"));
+      if (path === "/api/models/artifacts/import:m1")
+        return Promise.resolve(MANAGED_DETAIL);
+      if (path === "/api/models/import-capabilities")
+        return Promise.resolve(capsResponse);
+      if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+      if (path === "/api/models/dir")
+        return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
+      return Promise.resolve({});
+    });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    fireEvent.click(screen.getByText("Stop managing this copy…"));
+    await waitFor(() =>
+      screen.getByRole("button", { name: "Stop managing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop managing" }));
+    await waitFor(() =>
+      screen.getByText(/no longer exists — the library was refreshed/));
+    expect(refreshModels).toHaveBeenCalled();
+  });
+
+  it("release stays available while the feature gate is off (C11)", async () => {
+    capsResponse = CAPS_OFF; // disabled — release must still be offered
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    await expandProvenance();
+    expect(screen.getByText("Stop managing this copy…")).toBeTruthy();
+  });
+
+  it("V2 — collapse + re-expand REFETCHES detail; present updates live", async () => {
+    let detailCalls = 0;
+    apiFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === "/api/models/artifacts/import:m1") {
+        detailCalls += 1;
+        return Promise.resolve({
+          ...MANAGED_DETAIL,
+          managed_copy: { ...MANAGED_DETAIL.managed_copy,
+                          present: detailCalls === 1 },
+        });
+      }
+      if (path === "/api/models/import-capabilities")
+        return Promise.resolve(capsResponse);
+      if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+      if (path === "/api/models/dir")
+        return Promise.resolve({ dir: "M:\\models", free_bytes: 40e9 });
+      return Promise.resolve({});
+    });
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("Managed Model"));
+    // first expand → present:true from the initial fetch
+    await expandProvenance();
+    expect(screen.getByText("present on disk")).toBeTruthy();
+    expect(detailCalls).toBe(1);
+    // collapse, file vanishes, re-expand → fresh fetch shows the truth
+    fireEvent.click(screen.getByText("Hide provenance"));
+    expect(screen.queryByText(/PRIVATE-SRC/)).toBeNull();
+    fireEvent.click(screen.getByText("Provenance…"));
+    await waitFor(() => screen.getByText("not present on disk"));
+    expect(detailCalls).toBe(2);
+    expect(screen.getByText("managed copy missing")).toBeTruthy();
   });
 });

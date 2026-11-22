@@ -3,16 +3,19 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { apiFetch } from "../api/client";
 import { pickFile } from "../api/commands";
 import { useApp } from "../stores/appStore";
-import type { Job, ModelImportOut } from "../api/types";
+import type { ImportCapabilitiesOut, Job, ModelImportOut } from "../api/types";
 
 /**
- * U-2b-1 — reference-only model file import.
+ * U-2b-1 — reference-only model file import; U-2b-2b adds an optional
+ * managed-copy mode, shown ONLY when the backend capability probe
+ * confirms the feature gate is enabled.
  *
  * Privacy contract: the user-selected absolute path lives ONLY in this
  * component's local state (cleared on close/success) — never in the
  * global store, never persisted, never rendered outside the dialog.
- * The backend inspects + registers the file in place; nothing is
- * copied, moved, or modified (managed-copy is a later phase).
+ * Reference mode inspects + registers the file in place; managed-copy
+ * additionally publishes a verified copy into app-managed storage —
+ * the original is never moved, changed, or deleted either way.
  */
 
 // Beginner-facing text for the sanitized backend taxonomy codes —
@@ -34,6 +37,14 @@ const ERR_TEXT: Record<string, string> = {
   display_name_too_long: "Display name is too long (200 characters max).",
   display_name_invalid: "Display name can't contain control characters.",
   duplicate_in_flight: "An import of this file is already in progress.",
+  managed_copy_unsupported:
+    "Managed copies aren't supported in this installation or on this drive.",
+  managed_dest_corrupt:
+    "The existing managed copy doesn't match — it was left untouched and the import was refused.",
+  disk_full:
+    "Not enough free space in the app's models folder for a managed copy.",
+  copy_mismatch:
+    "The managed copy didn't match the source — nothing was registered.",
 };
 
 function friendlyError(raw: string): string {
@@ -49,18 +60,32 @@ const inputCls =
   "mt-1 w-full rounded-md border border-line bg-card px-3 py-2 text-sm text-fg";
 const labelCls = "block text-sm text-muted";
 
+function fmtBytes(n: number): string {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`;
+}
+
 export function ImportModelDialog({
   open,
   onOpenChange,
   onImported,
+  capabilities = null,
+  onModeUnsupported,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onImported: () => void;
+  /** U-2b-2b — probed import capabilities; null (loading/unavailable/
+   * malformed) fails closed to reference-only, no footnote. A resolved
+   * disabled response shows the quiet "disabled" footnote. */
+  capabilities?: ImportCapabilitiesOut | null;
+  /** Called when a managed submit is refused with mode_not_supported —
+   * the parent re-probes capabilities (flag may have flipped). */
+  onModeUnsupported?: () => void;
 }) {
   const jobs = useApp((s) => s.jobs);
   // --- sensitive: picker/manual path lives here and ONLY here ---
   const [path, setPath] = useState("");
+  const [mode, setMode] = useState<"reference" | "managed_copy">("reference");
   const [licenseName, setLicenseName] = useState("");
   const [licenseUrl, setLicenseUrl] = useState("");
   const [commercialOk, setCommercialOk] = useState(false);
@@ -81,7 +106,8 @@ export function ImportModelDialog({
   const status = job?.status ?? "queued";
 
   function reset() {
-    setPath(""); setLicenseName(""); setLicenseUrl(""); setCommercialOk(false);
+    setPath(""); setMode("reference");
+    setLicenseName(""); setLicenseUrl(""); setCommercialOk(false);
     setLicenseNotes(""); setFamily(""); setRoleHint(""); setDisplayName("");
     setJobId(null); setErr(null); setSubmitting(false);
     doneRef.current = false;
@@ -127,12 +153,22 @@ export function ImportModelDialog({
         body: JSON.stringify({
           path: path.trim(), license,
           family: family.trim(), role_hint: roleHint,
-          display_name: displayName.trim(), mode: "reference",
+          display_name: displayName.trim(),
+          // reference is the implicit default — only a managed request
+          // sends the mode field at all (per the approved contract).
+          ...(mode === "managed_copy" ? { mode } : {}),
         }),
       });
       setJobId(r.job_id); // track THIS job — never scan for an arbitrary one
     } catch (e) {
-      setErr(friendlyError(e instanceof Error ? e.message : String(e)));
+      const m = e instanceof Error ? e.message : String(e);
+      if (m.includes("mode_not_supported")) {
+        // Gate flipped between capability probe and submit — fail back
+        // to reference and let the parent re-probe.
+        setMode("reference");
+        onModeUnsupported?.();
+      }
+      setErr(friendlyError(m));
     } finally {
       setSubmitting(false);
     }
@@ -153,6 +189,30 @@ export function ImportModelDialog({
   const succeeded = status === "succeeded";
   const failed = status === "failed";
 
+  // U-2b-2b — managed-copy is offered ONLY on an explicit enabled probe;
+  // every other capability state (loading/disabled/unavailable/
+  // unauthorized/malformed) fails closed to reference-only.
+  const managedAvailable = capabilities?.managed_copy_enabled === true;
+
+  // Stage labels come from progress_json.stage (merged adapter detail);
+  // byte totals are shown only when actually present in the payload —
+  // the backend emits them once, at the post-copy verify yield.
+  const stage = job?.progress_json?.stage;
+  const pj = job?.progress_json;
+  const copyBytes = stage === "copy"
+    && typeof pj?.bytes_done === "number"
+    && typeof pj?.bytes_total === "number" && pj.bytes_total > 1
+    ? ` — ${fmtBytes(pj.bytes_done)} of ${fmtBytes(pj.bytes_total)}`
+    : "";
+  const stageText =
+    stage === "inspect" ? "Inspecting source file…"
+    : stage === "copy"
+      ? `${job?.message || "Copying to managed storage"}${copyBytes}`
+      : stage === "register" ? "Registering artifact…"
+      : null;
+  const managedProv = (job?.result_json?.managed as
+    { provenance?: string } | undefined)?.provenance;
+
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
       <Dialog.Portal>
@@ -163,11 +223,51 @@ export function ImportModelDialog({
         >
           <Dialog.Title className="text-lg font-semibold">Import a model file</Dialog.Title>
           <p id="import-model-desc" className="mt-1 text-sm text-muted">
-            Registers one model or LoRA file you already have. The file is
-            inspected where it sits — nothing is copied, moved, or changed.
-            It is added to the library for tracking only; it cannot generate
+            Registers one model or LoRA file you already have.{" "}
+            {managedAvailable
+              ? "The file is inspected where it sits — your original is never moved, changed, or deleted, whichever storage option you choose."
+              : "The file is inspected where it sits — nothing is copied, moved, or changed."}
+            {" "}It is added to the library for tracking only; it cannot generate
             anything yet.
           </p>
+
+          {!tracking && managedAvailable && (
+            <fieldset className="mt-4 rounded-md border border-line p-3">
+              <legend className="px-1 text-xs font-semibold text-muted">
+                Storage — original files are never touched
+              </legend>
+              <label className="flex items-start gap-2 text-sm text-muted">
+                <input
+                  type="radio" name="import-mode" value="reference"
+                  checked={mode === "reference"}
+                  onChange={() => setMode("reference")}
+                  className="mt-1 h-4 w-4"
+                />
+                <span>
+                  <span className="text-fg">Track in place</span> — the file
+                  stays where it is; nothing is copied.
+                </span>
+              </label>
+              <label className="mt-2 flex items-start gap-2 text-sm text-muted">
+                <input
+                  type="radio" name="import-mode" value="managed_copy"
+                  checked={mode === "managed_copy"}
+                  onChange={() => setMode("managed_copy")}
+                  className="mt-1 h-4 w-4"
+                />
+                <span>
+                  <span className="text-fg">Copy into app-managed storage</span>{" "}
+                  — a verified copy is placed in the app's models folder.
+                </span>
+              </label>
+            </fieldset>
+          )}
+          {!tracking && capabilities != null
+            && !capabilities.managed_copy_enabled && (
+            <p className="mt-3 text-xs text-faint">
+              Managed copies are disabled in this installation.
+            </p>
+          )}
 
           {!tracking && (
             <>
@@ -293,10 +393,14 @@ export function ImportModelDialog({
               </div>
               <p className={`mt-1.5 text-xs ${failed ? "text-rose" : "text-muted"}`}>
                 {succeeded
-                  ? "Registered — it now appears in the library below."
+                  ? mode === "managed_copy"
+                    ? managedProv === "adopted"
+                      ? "Registered — an identical verified copy already exists in managed storage; nothing was duplicated."
+                      : "Registered — a verified copy is managed by the app."
+                    : "Registered — it now appears in the library below."
                   : failed
                     ? friendlyError(job?.error ?? "")
-                    : job?.message || job?.error ||
+                    : stageText || job?.message || job?.error ||
                       (status === "queued" ? "queued" : "inspecting file…")}
               </p>
               {succeeded && (
@@ -307,8 +411,9 @@ export function ImportModelDialog({
               )}
               {status === "cancelled" && (
                 <p className="mt-1 text-xs text-muted">
-                  Cancelled. If the artifact was already committed it stays
-                  registered — cancelling never removes a completed import.
+                  {mode === "managed_copy"
+                    ? "Cancelled — anything already registered stays in the library; it can be detached with 'Stop managing copy'."
+                    : "Cancelled. If the artifact was already committed it stays registered — cancelling never removes a completed import."}
                 </p>
               )}
             </div>
