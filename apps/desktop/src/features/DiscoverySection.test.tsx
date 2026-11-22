@@ -21,9 +21,9 @@ vi.mock("../api/commands", () => ({
   pickDirectory: () => apiMock.pickDirectory(),
 }));
 
+let jobsObj: Record<string, unknown> = {};
 vi.mock("../stores/appStore", () => ({
-  useApp: (sel: (s: unknown) => unknown) =>
-    sel({ jobs: {} as Record<string, unknown> }),
+  useApp: (sel: (s: unknown) => unknown) => sel({ jobs: jobsObj }),
 }));
 
 import { DiscoverySection } from "./DiscoverySection";
@@ -77,6 +77,7 @@ function mockApi({
 }
 
 beforeEach(() => {
+  jobsObj = {};
   mockApi();
 });
 afterEach(() => {
@@ -192,6 +193,83 @@ describe("DiscoverySection", () => {
     await screen.findByText("weights.safetensors");
     expect(screen.queryByText("Import…")).toBeNull();
     expect(screen.getByText("imported")).toBeTruthy();
+  });
+
+  it("C2 — successful reconciliation renders done + count", async () => {
+    jobsObj = {
+      j1: { id: "j1", status: "succeeded",
+            result_json: { absent_reconcile: "done", absent_marked: 3 } },
+    };
+    render(<DiscoverySection onImportCandidate={() => {}} />);
+    await screen.findByText("weights.safetensors");
+    fireEvent.click(screen.getByText("Scan now"));
+    await waitFor(() => screen.getByText(/Scan complete/));
+    expect(screen.getByText(/3 file\(s\) absent/)).toBeTruthy();
+    // terminal card persists — does not auto-unmount
+    expect(screen.getByRole("status")).toBeTruthy();
+  });
+
+  it("C2 — reconcile failure warns, never claims missing files", async () => {
+    jobsObj = {
+      j1: { id: "j1", status: "succeeded",
+            result_json: { absent_reconcile: "failed", absent_marked: 0 } },
+    };
+    render(<DiscoverySection onImportCandidate={() => {}} />);
+    await screen.findByText("weights.safetensors");
+    fireEvent.click(screen.getByText("Scan now"));
+    expect(await screen.findByText(
+      /absence verification could not finish/i)).toBeTruthy();
+    expect(screen.getByText(
+      /no files were newly marked missing/i)).toBeTruthy();
+    expect(screen.queryByText(/file\(s\) absent/)).toBeNull();
+  });
+
+  it("C2 — cancelled scan shows distinct state", async () => {
+    jobsObj = { j1: { id: "j1", status: "cancelled",
+                     result_json: null } };
+    render(<DiscoverySection onImportCandidate={() => {}} />);
+    await screen.findByText("weights.safetensors");
+    fireEvent.click(screen.getByText("Scan now"));
+    expect(await screen.findByText(
+      /Scan cancelled — partial results are kept/i)).toBeTruthy();
+    expect(screen.getByText(/nothing was marked missing/i)).toBeTruthy();
+  });
+
+  it("C2 — Dismiss clears the terminal card", async () => {
+    jobsObj = {
+      j1: { id: "j1", status: "succeeded",
+            result_json: { absent_reconcile: "done", absent_marked: 0 } },
+    };
+    render(<DiscoverySection onImportCandidate={() => {}} />);
+    await screen.findByText("weights.safetensors");
+    fireEvent.click(screen.getByText("Scan now"));
+    await screen.findByText(/Scan complete/);
+    fireEvent.click(screen.getByText("Dismiss"));
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("C2 — a new scan replaces the terminal card", async () => {
+    jobsObj = {
+      j1: { id: "j1", status: "succeeded",
+            result_json: { absent_reconcile: "done", absent_marked: 0 } },
+    };
+    render(<DiscoverySection onImportCandidate={() => {}} />);
+    await screen.findByText("weights.safetensors");
+    fireEvent.click(screen.getByText("Scan now"));
+    await screen.findByText(/Scan complete/);
+    jobsObj = {
+      j2: { id: "j2", status: "running",
+            progress_json: { roots_done: 1, roots_total: 2,
+                             candidates_found: 4, stage: "scan" } },
+    };
+    apiMock.post.mockImplementation((p: string) =>
+      p === "/api/models/discovery/scan"
+        ? Promise.resolve({ job_id: "j2", status: "queued" })
+        : Promise.resolve({}));
+    fireEvent.click(screen.getByText("Scan now"));
+    expect(await screen.findByText(/Scanning approved folders/))
+      .toBeTruthy();
+    expect(screen.queryByText(/Scan complete/)).toBeNull();
   });
 
   it("surfaces add-root failures without a path leak", async () => {

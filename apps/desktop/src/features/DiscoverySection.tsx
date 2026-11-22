@@ -75,12 +75,11 @@ export function DiscoverySection({
 
   useEffect(() => { void refreshAll(); }, [refreshKey]);
 
-  // Refresh roots + candidates when our scan job lands terminal.
+  // Refresh roots + candidates when our scan job lands terminal — the
+  // card itself stays visible (result persists until dismissed or the
+  // next scan replaces it).
   useEffect(() => {
-    if (scanJob && !scanning) {
-      void refreshAll();
-      setScanJobId(null);
-    }
+    if (scanJob && !scanning) void refreshAll();
   }, [scanJob?.status]);
 
   async function addRoot(path: string) {
@@ -154,6 +153,11 @@ export function DiscoverySection({
     roots_done?: number; roots_total?: number;
     candidates_found?: number; stage?: string;
   };
+  // U-3 — reconcile outcome from the durable job result; "failed" is a
+  // distinct partial-success state, never rendered as clean success.
+  const scanResult = (scanJob?.result_json ?? {}) as {
+    absent_reconcile?: string; absent_marked?: number;
+  };
 
   return (
     <section className="mt-6" aria-label="Discover models">
@@ -175,10 +179,12 @@ export function DiscoverySection({
       </p>
       {err && <p role="alert" className="mt-2 text-xs text-rose">{err}</p>}
 
-      {/* scan progress — counts only, never paths */}
+      {/* scan progress — counts only, never paths. Terminal result
+       * persists until dismissed or the next scan replaces it. */}
       {scanJob && (
         <div role="status"
-             className="mt-3 rounded-md border border-line bg-card p-3 text-xs text-muted">
+             className="mt-3 flex items-center gap-3 rounded-md border border-line bg-card p-3 text-xs text-muted">
+          <span className="flex-1">
           {scanning ? (
             <>Scanning approved folders — root{" "}
               {scanDetail.roots_done ?? "…"} of{" "}
@@ -188,9 +194,27 @@ export function DiscoverySection({
             <>Scan cancelled — partial results are kept; nothing was
               marked missing.</>
           ) : scanJob.status === "succeeded" ? (
-            <>Scan complete.</>
+            scanResult.absent_reconcile === "failed" ? (
+              <span className="text-amber">
+                Scan complete, but absence verification could not
+                finish — no files were newly marked missing by that
+                scan.
+              </span>
+            ) : (
+              <>Scan complete{scanResult.absent_marked
+                ? ` — ${scanResult.absent_marked} file(s) absent since`
+                  + " the last complete scan"
+                : ""}.</>
+            )
           ) : (
             <>Scan failed: {scanJob.error ?? "unknown"}</>
+          )}
+          </span>
+          {!scanning && (
+            <button className={btnCls}
+                    onClick={() => setScanJobId(null)}>
+              Dismiss
+            </button>
           )}
         </div>
       )}

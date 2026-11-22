@@ -151,11 +151,21 @@ def enabled_roots(session: Session) -> list[DiscoveryRoot]:
 
 
 def add_root(session: Session, path_str: str,
-             max_depth: int | None = None) -> tuple[DiscoveryRoot, bool]:
+             max_depth: int | None = None,
+             settings=None) -> tuple[DiscoveryRoot, bool]:
     """Upsert an approved root keyed on canonical path. Re-adding an
     existing path resurfaces the same row/history (idempotent, not a
     duplicate). Returns (row, created)."""
     rp = validate_root(path_str)
+    # Approval-time gate: a root equal to or beneath managed app storage
+    # (models_root/imports, .staging) is refused — the same rule the
+    # scanner enforces at run time for roots that drift later.
+    if settings is not None:
+        for ex in managed_exclusions(session, settings):
+            if _depth_of(rp, Path(ex)) is not None:
+                raise DiscoveryRefused(
+                    "managed_excluded",
+                    "app-managed model storage cannot be a scan root")
     canon = _norm(rp)
     existing = session.execute(
         select(DiscoveryRoot).where(DiscoveryRoot.canonical_path == canon)
@@ -284,6 +294,13 @@ def scan_root_fs(root: DiscoveryRoot, *, cancel_check,
     if _is_reparse(rootp) or not rootp.is_dir():
         out["outcome"], out["code"] = "refused", "path_not_found"
         return out
+    # The ROOT itself must not be (or live inside) managed app storage —
+    # approving models/imports directly cannot bypass the exclusion that
+    # guards nested dirs below. Component-aware, same check as add_root.
+    for ex in exclude:
+        if _depth_of(rootp, Path(ex)) is not None:
+            out["outcome"], out["code"] = "refused", "managed_excluded"
+            return out
     stack: list[tuple[Path, int]] = [(rootp, 0)]
     # Cycle guard keyed on normalized resolved paths — st_ino is 0 on
     # some Windows filesystems, which would silently dedupe every dir.

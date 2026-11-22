@@ -681,6 +681,91 @@ def test_D37_completed_reconcile_reports_done(client, authed, tmp_path):
     assert res["absent_marked"] == 1
 
 
+# ==================================================== C1 managed exclusion
+
+def _mk_root_row(client, path, *, root_id=None):
+    """Insert a root row directly — bypasses the approval-time gate so
+    the SCAN-TIME enforcement can be tested in isolation."""
+    canon = model_discovery._norm(path.resolve())
+    with _sess(client) as s:
+        row = DiscoveryRoot(
+            root_id=root_id or model_discovery.root_id_for(canon),
+            canonical_path=canon, display_path=str(path), enabled=True,
+            max_depth=4, added_at=__import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc))
+        s.add(row)
+        s.commit()
+        return row.root_id
+
+
+def test_C1_root_equal_imports_refused_add_and_scan(client, authed,
+                                                    settings):
+    import pathlib
+    imports = pathlib.Path(settings.data_dir) / "models" / "imports"
+    imports.mkdir(parents=True)
+    # approval-time refusal
+    r = _add_root(client, authed, str(imports))
+    assert r.status_code == 422 and r.json()["detail"] == "managed_excluded"
+    # scan-time refusal (root row that predates/dodges the gate)
+    _mk_root_row(client, imports)
+    res = _scan_ok(client, authed)
+    assert "refused" in res["root_outcomes"].values()
+    with _sess(client) as s:
+        row = s.execute(select(DiscoveryRoot)).scalars().one()
+        assert row.last_code == "managed_excluded"
+
+
+def test_C1_child_of_imports_refused(client, authed, settings):
+    import pathlib
+    child = (pathlib.Path(settings.data_dir)
+             / "models" / "imports" / "nested")
+    child.mkdir(parents=True)
+    assert _add_root(client, authed, str(child)
+                     ).json()["detail"] == "managed_excluded"
+    _mk_root_row(client, child)
+    res = _scan_ok(client, authed)
+    assert "refused" in res["root_outcomes"].values()
+
+
+def test_C1_staging_and_staging_child_refused(client, authed, settings):
+    import pathlib
+    staging = pathlib.Path(settings.data_dir) / "models" / ".staging"
+    (staging / "job123").mkdir(parents=True)
+    assert _add_root(client, authed, str(staging)
+                     ).json()["detail"] == "managed_excluded"
+    assert _add_root(client, authed, str(staging / "job123")
+                     ).json()["detail"] == "managed_excluded"
+
+
+def test_C1_sibling_dir_remains_eligible(client, authed, settings,
+                                         tmp_path):
+    """A similarly named sibling ('imports2') is legitimate user storage
+    and must stay approvable + scannable."""
+    import pathlib
+    sib = pathlib.Path(settings.data_dir) / "models" / "imports2"
+    sib.mkdir(parents=True)
+    _write(sib, "m.safetensors", _st_bytes())
+    r = _add_root(client, authed, str(sib))
+    assert r.status_code == 200, r.text
+    res = _scan_ok(client, authed)
+    assert "complete" in res["root_outcomes"].values()
+    assert res["candidates_found"] == 1
+
+
+def test_C1_parent_root_cannot_traverse_managed(client, authed, settings):
+    """A root ABOVE managed storage still cannot enumerate into it —
+    the walk-level exclusion guards nested dirs at every depth."""
+    import pathlib
+    mroot = pathlib.Path(settings.data_dir) / "models"
+    (mroot / "imports").mkdir(parents=True)
+    _write(mroot / "imports", "pub.safetensors", _st_bytes())
+    _write(pathlib.Path(settings.data_dir), "user.safetensors",
+           _st_bytes())
+    _add_root(client, authed, str(settings.data_dir))
+    _scan_ok(client, authed)
+    assert [c["name"] for c in _cands(client)] == ["user.safetensors"]
+
+
 def test_seen_count_distinct_jobs_only(client, authed, tmp_path):
     _write(tmp_path, "m.safetensors", _st_bytes())
     _add_root(client, authed, tmp_path)

@@ -285,7 +285,8 @@ def add_discovery_root(body: DiscoveryRootIn, request: Request,
     from app.domain import model_discovery
     try:
         row, _created = model_discovery.add_root(
-            db, body.path, max_depth=body.max_depth)
+            db, body.path, max_depth=body.max_depth,
+            settings=request.app.state.settings)
     except model_discovery.DiscoveryRefused as e:
         raise HTTPException(422, e.code) from None
     db.commit()
