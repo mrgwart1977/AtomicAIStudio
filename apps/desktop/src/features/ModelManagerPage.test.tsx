@@ -120,17 +120,24 @@ const VALIDATION = {
   ],
 };
 
-const mockState: { models: unknown[]; artifacts: unknown[] } =
-  { models: MODELS, artifacts: [] };
+const refreshModels = vi.fn(() => Promise.resolve());
+
+const mockState: { models: unknown[]; artifacts: unknown[]; jobs: Record<string, unknown> } =
+  { models: MODELS, artifacts: [], jobs: {} };
 
 vi.mock("../stores/appStore", () => ({
   useApp: (sel: (s: unknown) => unknown) => sel({
     hardware: null, adapters: [], models: mockState.models, gpuState: null,
     artifacts: mockState.artifacts,
-    jobs: {},
+    jobs: mockState.jobs,
     refreshHardware: () => Promise.resolve(),
-    refreshModels: () => Promise.resolve(),
+    refreshModels: () => refreshModels(),
   }),
+}));
+
+const pickFile = vi.fn();
+vi.mock("../api/commands", () => ({
+  pickFile: (...a: unknown[]) => pickFile(...a),
 }));
 
 function mockApi() {
@@ -269,10 +276,36 @@ describe("ModelManagerPage — B-3a LoRA adapters section", () => {
   });
 });
 
+const IMPORT_ARTIFACT = {
+  artifact_id: "import:ab12", display_name: "User Model",
+  kind: "model", arch: "sdxl", family: "sdxl", modality: "image",
+  fmt: "safetensors", role: "diffusion", version: "",
+  source_type: "import", managed_by: "external",
+  // U-2a truth: uri is always NULL on imports — the user path lives in
+  // source_uri on the authenticated detail view only.
+  uri: null, content_sha256: "cd".repeat(32), byte_size: 4e9,
+  license: { name: "CC-BY-NC-4.0", commercial_ok: false, declared_by: "user" },
+  support_tier: "unknown", enabled: true, tags: [],
+  meta: { suggestions: { arch: "sdxl", role: "diffusion", fmt: "safetensors" } },
+  install_id: null, install: { status: "registered" },
+};
+
+const IMPORT_DETAIL = {
+  ...IMPORT_ARTIFACT,
+  source_uri: "D:\\PRIVATE-DIR\\custom.safetensors",
+  imported_at: "2026-11-21T10:00:00",
+  import_report: {
+    fmt: "safetensors", suggested_arch: "sdxl", suggested_role: "diffusion",
+    sha256: "cd".repeat(32), byte_size: 4e9, hashed_at: "2026-11-21T10:00:00",
+    tensor_count: 3, metadata: {}, warnings: [], evidence: {},
+  },
+};
+
 describe("ModelManagerPage — U-1 universal model library", () => {
   beforeEach(() => {
     cleanup(); apiFetch.mockReset(); mockApi();
-    mockState.models = MODELS; mockState.artifacts = [];
+    mockState.models = MODELS; mockState.artifacts = []; mockState.jobs = {};
+    refreshModels.mockClear();
   });
 
   it("renders a read-only registry view with an honest empty state", async () => {
@@ -292,25 +325,86 @@ describe("ModelManagerPage — U-1 universal model library", () => {
       license: {}, support_tier: "production", enabled: true,
       tags: [], meta: {}, install_id: "i1",
       install: { status: "installed" },
-    }, {
-      artifact_id: "import:ext1", display_name: "User Model",
-      kind: "model", arch: "sdxl", family: "", modality: "image",
-      fmt: "gguf", role: "diffusion", version: "", source_type: "import",
-      managed_by: "external", uri: "E:/lib/custom.gguf",
-      content_sha256: null, byte_size: 0, license: {},
-      support_tier: "unknown", enabled: true, tags: [], meta: {},
-      install_id: null, install: { status: "not_installed" },
-    }];
+    }, IMPORT_ARTIFACT];
     render(<ModelManagerPage />);
     await waitFor(() => screen.getByText("User Model"));
     expect(screen.getByText("SD 1.5 fp16")).toBeTruthy();
     expect(screen.getByText("atomic-managed")).toBeTruthy();
     expect(screen.getByText("external")).toBeTruthy();
     expect(screen.getByText("installed")).toBeTruthy();
-    expect(screen.getByText("not installed")).toBeTruthy();
-    expect(screen.getByText(/no checksum declared/)).toBeTruthy();
-    // registry rows expose no install/download actions of their own
+    expect(screen.getByText("registered")).toBeTruthy();
+    // catalog artifact rows expose no install/download actions of their own
     const section = screen.getByText("Universal Model Library").closest("section");
-    expect(section?.querySelector("button")).toBeNull();
+    const catalogLi = screen.getByText("SD 1.5 fp16").closest("li");
+    expect(catalogLi?.querySelector("button")).toBeNull();
+    // the only section actions: import entry point + provenance on import rows
+    expect(section?.querySelectorAll("button").length).toBe(2);
+  });
+});
+
+describe("ModelManagerPage — U-2b-1 imported artifacts", () => {
+  beforeEach(() => {
+    cleanup(); apiFetch.mockReset(); mockApi();
+    mockState.models = MODELS; mockState.artifacts = [IMPORT_ARTIFACT];
+    mockState.jobs = {}; refreshModels.mockClear();
+  });
+
+  it("import rows are marked library-only, never runnable", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("User Model"));
+    expect(screen.getByText("library only")).toBeTruthy();
+    expect(screen.getByText("registered")).toBeTruthy();
+    expect(screen.getByText("import")).toBeTruthy();
+    // detected arch is labelled as detected, not conflated with declarations
+    expect(screen.getByText("sdxl (detected)")).toBeTruthy();
+  });
+
+  it("suggested vs declared metadata stay visually distinct", async () => {
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("User Model"));
+    // role matches the suggestion → "(suggested)"; family is declared
+    expect(screen.getByText(/diffusion \(suggested\)/)).toBeTruthy();
+    expect(screen.getByText(/for sdxl bases \(declared\)/)).toBeTruthy();
+  });
+
+  it("provenance is fetched lazily and only on explicit expand", async () => {
+    apiFetch.mockImplementation((path: string) => {
+      if (path === "/api/models/artifacts/import:ab12")
+        return Promise.resolve(IMPORT_DETAIL);
+      return mockApiPath(path);
+    });
+    function mockApiPath(path: string) {
+      if (path === "/api/compatibility") return Promise.resolve(COMPAT_REPORT);
+      if (path === "/api/models/dir") return Promise.resolve({ dir: "M:\models", free_bytes: 40e9 });
+      return Promise.resolve({});
+    }
+    render(<ModelManagerPage />);
+    await waitFor(() => screen.getByText("User Model"));
+    // not fetched until expanded — the source path never enters list UI
+    expect(apiFetch).not.toHaveBeenCalledWith("/api/models/artifacts/import:ab12");
+    expect(screen.queryByText(/PRIVATE-DIR/)).toBeNull();
+    const btn = screen.getByText("Provenance…");
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(btn);
+    await waitFor(() => screen.getByText(/PRIVATE-DIR/));
+    expect(screen.getByText(/point in time/)).toBeTruthy();
+    expect(screen.getByText(/heuristic, may be wrong/)).toBeTruthy();
+    expect(screen.getByText(/you declared this — unverified/)).toBeTruthy();
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    // collapse hides it again
+    fireEvent.click(screen.getByText("Hide provenance"));
+    expect(screen.queryByText(/PRIVATE-DIR/)).toBeNull();
+  });
+
+  it("a terminal model_import job refreshes the artifact list", async () => {
+    mockState.jobs = {
+      jimp: {
+        id: "jimp", kind: "model_import", status: "succeeded",
+        adapter_id: "ops.model.import", progress: 1, message: "done",
+        error: null, output_asset_id: null, project_id: null,
+      },
+    };
+    render(<ModelManagerPage />);
+    await waitFor(() => expect(refreshModels).toHaveBeenCalled());
   });
 });

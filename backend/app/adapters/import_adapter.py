@@ -58,6 +58,11 @@ class ModelImportAdapter:
         lic = request.get("license") or {}
         if not (lic.get("name") or "").strip():
             return ["license_required"]
+        name = request.get("display_name") or ""
+        if len(name) > 200:
+            return ["display_name_too_long"]
+        if any(ord(ch) < 0x20 for ch in name):
+            return ["display_name_invalid"]
         return []
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
@@ -88,7 +93,8 @@ class ModelImportAdapter:
                     s, source_uri=source_uri, report=report.to_json(),
                     license_json=lic,
                     family=req.get("family") or "",
-                    role_hint=req.get("role_hint") or "")
+                    role_hint=req.get("role_hint") or "",
+                    display_name=req.get("display_name") or "")
                 # Audit without the path — artifact_id is the durable ref.
                 from app.db.models import AuditEvent, new_id
                 s.add(AuditEvent(

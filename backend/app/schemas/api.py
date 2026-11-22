@@ -690,11 +690,15 @@ class ModelArtifactOut(BaseModel):
 class ModelImportRequest(BaseModel):
     """U-2a — reference-only import of ONE user-owned file. The path is
     retained only in job.request_json for execution/crash recovery —
-    JobOut never serializes it."""
+    JobOut never serializes it. U-2b-1 adds presentation-only fields:
+    `display_name` (bounded label) and `mode` ("reference" is the only
+    implemented mode — managed-copy is a later phase)."""
     path: str
     license: dict[str, Any] = {}
     family: str = ""
     role_hint: str = ""
+    display_name: str = ""
+    mode: str = "reference"
 
 
 class ModelImportOut(BaseModel):

@@ -214,8 +214,15 @@ def import_model(body: ModelImportRequest, request: Request,
     request shape + cheap path classification (no content reads)."""
     from app.domain.model_import import ImportRefused, validate_source_path
 
+    if body.mode != "reference":
+        raise HTTPException(422, "mode_not_supported")
     if not (body.license or {}).get("name", "").strip():
         raise HTTPException(422, "license_required")
+    display_name = (body.display_name or "").strip()
+    if len(display_name) > 200:
+        raise HTTPException(422, "display_name_too_long")
+    if any(ord(ch) < 0x20 for ch in display_name):
+        raise HTTPException(422, "display_name_invalid")
     try:
         rp = validate_source_path(body.path)
     except ImportRefused as e:
@@ -239,7 +246,8 @@ def import_model(body: ModelImportRequest, request: Request,
         request={"source_path": resolved,
                  "license": body.license,
                  "family": body.family,
-                 "role_hint": body.role_hint},
+                 "role_hint": body.role_hint,
+                 "display_name": display_name},
         idempotency_key=f"modelimp:{new_id()[:8]}",
     )
     db.commit()
