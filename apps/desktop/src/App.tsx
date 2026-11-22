@@ -21,6 +21,16 @@ export function jobKindFor(adapterId: string): string {
   return "image";
 }
 
+/** R1 — on every authenticated WS (re)connect, hydrate app-level ops
+ * jobs from GET /api/jobs. After a backend restart a requeued import
+ * carries "re-queued after restart" — hydrating here surfaces it
+ * immediately rather than waiting for its next progress publish. */
+export function onWsStateChange(open: boolean): void {
+  const s = useApp.getState();
+  s.setWsConnected(open);
+  if (open) void s.hydrateJobs().catch(() => {});
+}
+
 export default function App() {
   const ready = useApp((s) => s.ready);
   const page = useApp((s) => s.page);
@@ -74,7 +84,7 @@ export default function App() {
             if (e.payload.status === "succeeded" && e.project_id) void st.refreshProjectData();
           }
         },
-        (open) => useApp.getState().setWsConnected(open),
+        onWsStateChange,
       );
     })();
     return () => disposeWs?.();

@@ -99,10 +99,16 @@ export function ImportModelDialog({
   const running = status === "queued" || status === "running";
 
   async function browse() {
-    const picked = await pickFile("Import model file", [
-      { name: "Model weights", extensions: ["safetensors", "gguf"] },
-    ]);
-    if (picked) setPath(picked);
+    try {
+      const picked = await pickFile("Import model file", [
+        { name: "Model weights", extensions: ["safetensors", "gguf"] },
+      ]);
+      if (picked) setPath(picked);
+    } catch {
+      // R3 — plugin rejection is not a user error; offer the manual
+      // fallback without echoing raw exception or path content.
+      setErr("The file picker couldn't be opened — type the path above instead.");
+    }
   }
 
   async function submit() {

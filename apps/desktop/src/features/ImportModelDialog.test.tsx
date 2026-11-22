@@ -81,6 +81,17 @@ describe("ImportModelDialog", () => {
       .toBe("C:\\m\\x.safetensors");
   });
 
+  it("a rejected picker shows a safe fallback, never the raw error (R3)", async () => {
+    pickFile.mockRejectedValue(new Error("plugin panic at D:\\SECRET\\dir"));
+    openDialog();
+    fireEvent.click(screen.getByText("Browse…"));
+    await waitFor(() => screen.getByRole("alert"));
+    const msg = screen.getByRole("alert").textContent ?? "";
+    expect(msg).toContain("picker couldn't be opened");
+    expect(msg).not.toContain("SECRET");
+    expect(msg).not.toContain("plugin panic");
+  });
+
   it("submits reference-mode body with declarations and tracks the exact job_id", async () => {
     apiFetch.mockResolvedValue({ job_id: "j1", status: "queued" });
     openDialog();
