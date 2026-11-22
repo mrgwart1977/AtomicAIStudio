@@ -229,6 +229,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if engine is not None:
                 engine.dispose()
+            # U-2b-2a — lazily-acquired custom models-root locks ride the
+            # same shutdown boundary as the data-dir lock.
+            try:
+                from app.domain import model_copy
+                model_copy.release_managed_locks()
+            except OSError:
+                log.warning("managed models-root lock release failed",
+                            exc_info=True)
             lock.release()
 
     app = FastAPI(title="Atomic Dream Engine Backend", version="0.1.0", lifespan=lifespan)

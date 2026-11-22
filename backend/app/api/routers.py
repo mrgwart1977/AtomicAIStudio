@@ -61,6 +61,7 @@ from app.schemas.api import (
     JobOut,
     LoraPreviewOut,
     LoraPreviewRequest,
+    ManagedCopyReleaseOut,
     ModelArtifactDetailOut,
     ModelArtifactOut,
     ModelCatalogEntryOut,
@@ -203,6 +204,29 @@ def get_model_artifact(artifact_id: str, request: Request,
     return model_artifacts.artifact_to_dict(row, inst, detail=True)
 
 
+@api_router.post("/api/models/artifacts/{artifact_id}/release-managed-copy",
+                 response_model=ManagedCopyReleaseOut)
+def release_managed_copy(artifact_id: str, request: Request,
+                         db: Session = Depends(get_db)):
+    """U-2b-2a — synchronous metadata-only release of a managed import.
+
+    Detaches the artifact's managed uri (external/reference-only state,
+    source provenance retained). The managed bytes are NEVER touched —
+    physical managed-file deletion does not exist in this milestone.
+    Deliberately NOT feature-gated: disabling new managed copies must
+    not strand existing managed artifacts.
+    """
+    from app.domain import model_artifacts
+    try:
+        out = model_artifacts.release_managed_copy(db, artifact_id)
+    except LookupError:
+        raise HTTPException(404, "unknown artifact") from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    db.commit()
+    return out
+
+
 @api_router.post("/api/models/import", status_code=202,
                  response_model=ModelImportOut)
 def import_model(body: ModelImportRequest, request: Request,
@@ -214,7 +238,13 @@ def import_model(body: ModelImportRequest, request: Request,
     request shape + cheap path classification (no content reads)."""
     from app.domain.model_import import ImportRefused, validate_source_path
 
-    if body.mode != "reference":
+    if body.mode == "managed_copy":
+        # U-2b-2a gate — fail closed unless the feature flag is enabled;
+        # the adapter re-checks at claim and execution time.
+        if not getattr(request.app.state.settings,
+                       "enable_managed_copy", False):
+            raise HTTPException(422, "mode_not_supported")
+    elif body.mode != "reference":
         raise HTTPException(422, "mode_not_supported")
     if not (body.license or {}).get("name", "").strip():
         raise HTTPException(422, "license_required")
@@ -247,7 +277,12 @@ def import_model(body: ModelImportRequest, request: Request,
                  "license": body.license,
                  "family": body.family,
                  "role_hint": body.role_hint,
-                 "display_name": display_name},
+                 "display_name": display_name,
+                 # mode persisted ONLY for managed copies — the job needs
+                 # it for execution and crash requeue; reference stays
+                 # unset (default) exactly as before.
+                 **({"mode": "managed_copy"}
+                    if body.mode == "managed_copy" else {})},
         idempotency_key=f"modelimp:{new_id()[:8]}",
     )
     db.commit()

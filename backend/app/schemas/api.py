@@ -691,8 +691,10 @@ class ModelImportRequest(BaseModel):
     """U-2a — reference-only import of ONE user-owned file. The path is
     retained only in job.request_json for execution/crash recovery —
     JobOut never serializes it. U-2b-1 adds presentation-only fields:
-    `display_name` (bounded label) and `mode` ("reference" is the only
-    implemented mode — managed-copy is a later phase)."""
+    `display_name` (bounded label) and `mode`. U-2b-2a: "managed_copy"
+    is accepted only behind the ATOMIC_ENABLE_MANAGED_COPY feature gate
+    — the route, claim-time validation, and execution all fail closed
+    with mode_not_supported when the gate is off."""
     path: str
     license: dict[str, Any] = {}
     family: str = ""
@@ -708,10 +710,24 @@ class ModelImportOut(BaseModel):
 
 class ModelArtifactDetailOut(ModelArtifactOut):
     """Authenticated detail view — the only surface that carries
-    source_uri and the full inspection report (local trust boundary)."""
+    source_uri and the full inspection report (local trust boundary).
+    `managed_copy` (U-2b-2a) is present only for managed import rows —
+    it reports live filesystem presence plus publication provenance
+    (basename-only dest_rel, never an absolute managed path)."""
     source_uri: str | None = None
     imported_at: str | None = None
     import_report: dict[str, Any] = {}
+    managed_copy: dict[str, Any] | None = None
+
+
+class ManagedCopyReleaseOut(BaseModel):
+    """U-2b-2a — synchronous metadata-only release result. `released`
+    reports the request succeeded; `already` marks the idempotent no-op
+    for an import artifact that was not currently managed. No managed
+    bytes are ever deleted by this operation."""
+    artifact_id: str
+    released: bool
+    already: bool
 
 
 class ModelsDirOut(BaseModel):
