@@ -26,7 +26,28 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.adapters.base import CapabilityProfile, JobHandle
-from app.domain import model_artifacts, model_import
+from app.domain import model_artifacts, model_discovery, model_import
+
+
+def _link_discovery_candidate(session, source_uri: str,
+                              artifact_id: str) -> None:
+    """U-3 — annotate a discovery candidate with the artifact its own
+    import produced. Savepoint-isolated: any linkage failure rolls back
+    ONLY the savepoint and can never invalidate the registration's
+    outer transaction. Best-effort annotation, never a gate."""
+    import logging
+    try:
+        with session.begin_nested():
+            model_discovery.link_candidate(session, source_uri,
+                                           artifact_id)
+    except model_discovery.LinkageConflict:
+        logging.getLogger(__name__).warning(
+            "discovery linkage conflict — candidate already linked to a "
+            "different artifact; link left unchanged")
+    except Exception:   # noqa: BLE001 — linkage is best-effort; any
+        logging.getLogger(__name__).warning(
+            "discovery linkage failed — candidate left unlinked; "
+            "import result unaffected")
 
 
 class ModelImportAdapter:
@@ -155,6 +176,7 @@ class ModelImportAdapter:
                     display_name=req.get("display_name") or "",
                     managed_uri=copy_prov["dest_abs"]
                     if copy_prov is not None else None)
+                _link_discovery_candidate(s, source_uri, row.artifact_id)
                 # Audit without the path — artifact_id is the durable ref.
                 from app.db.models import AuditEvent, new_id
                 s.add(AuditEvent(

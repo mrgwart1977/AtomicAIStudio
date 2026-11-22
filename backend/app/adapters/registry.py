@@ -113,6 +113,10 @@ class AdapterRegistry:
             self.register(ModelDownloadAdapter(session_factory, settings))
             self.register(ModelBenchmarkAdapter(session_factory, settings))
             self.register(ModelImportAdapter(session_factory, settings))
+            # U-3 — read-only discovery enumeration (user-approved roots
+            # only; registration still requires ops.model.import).
+            from app.adapters.discovery_adapter import ModelDiscoveryAdapter
+            self.register(ModelDiscoveryAdapter(session_factory, settings))
             # M4.1 Phase 2A — real persistent sd-server worker. Registered
             # only behind ATOMIC_PERSISTENT_INFERENCE_ENABLED=1:
             # unvalidated persistent inference is not selectable by default.

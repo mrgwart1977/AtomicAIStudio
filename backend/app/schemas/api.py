@@ -741,6 +741,64 @@ class ImportCapabilitiesOut(BaseModel):
     modes: list[str]
 
 
+# ---------- U-3 model discovery ----------
+
+class DiscoveryRootIn(BaseModel):
+    """Approve (or re-approve) a scan root. `path` is validated to a
+    canonical local directory; `max_depth` clamps to 0..8."""
+    path: str
+    max_depth: int | None = None
+
+
+class DiscoveryRootOut(BaseModel):
+    """Root-management surface — `display_path` is the verbatim path the
+    user approved (same trust boundary as models_dir settings)."""
+    root_id: str
+    display_path: str
+    enabled: bool
+    max_depth: int
+    added_at: datetime
+    archived_at: datetime | None
+    last_scan_outcome: str | None
+    last_code: str | None
+    last_scan_at: datetime | None
+    last_entries_seen: int | None
+    last_candidates: int | None
+    candidate_count: int
+
+
+class DiscoveryCandidateOut(BaseModel):
+    """List payload — NO absolute paths by contract. `rel_path` is
+    anchored to the candidate's owning (first-discovering) root;
+    `root_label` is that root's basename for disambiguation."""
+    candidate_id: str
+    name: str
+    rel_path: str
+    root_id: str
+    root_label: str
+    fmt_guess: str
+    byte_size: int
+    presence: str
+    linked_artifact_id: str | None
+    seen_count: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+class DiscoveryCandidateDetailOut(DiscoveryCandidateOut):
+    """Authenticated detail — the ONLY surface carrying the absolute
+    candidate path (plus the owning root's display path)."""
+    resolved_path: str
+    mtime_ns: int
+    root_display_path: str
+    linked_at: datetime | None
+
+
+class DiscoveryScanOut(BaseModel):
+    job_id: str
+    status: str
+
+
 class ModelsDirOut(BaseModel):
     dir: str
     source: str  # "app setting" | "built-in default"
