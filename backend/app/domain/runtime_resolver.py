@@ -92,8 +92,17 @@ class ResolverContext:
     adapters: dict[str, AdapterEvidence]          # registered only
     catalog: CatalogBinding | None
     workflow: WorkflowDef
-    inspection_ok: bool                           # C3: domain_levels
-    # inspection>0 for import artifacts; catalog rows pass True
+    # C3 inspection evidence — the U-4 `domain_levels.inspection`
+    # semantics verbatim. V1 = a completed U-2 import report with a
+    # recognized container/format. It is RECOGNITION evidence only —
+    # it is never a claim of cryptographic integrity verification, and
+    # nothing in this module may assert one. Catalog rows legitimately
+    # score 0 (their files were never inspected) and take no penalty;
+    # only `requires_inspection` (import-sourced) rows with level 0
+    # carry `integrity_evidence_missing` — the record that attests a
+    # real file was opened and its format recognized is absent.
+    inspection_level: int                         # 0 | 1 (U-4 V1 cap)
+    requires_inspection: bool                     # source_type=="import"
 
 
 @dataclass(frozen=True)
@@ -174,16 +183,20 @@ def _findings(view_fam: str, view_kind: str, v: VerdictView | None,
                 v.arch_confidence in ("documented", "unverified")
                 or v.confidence in ("documented", "unverified")):
             f.append(Finding("limited", ("runtime_path_unverified",)))
-        # C3 — import artifacts lacking inspection evidence are limited;
-        # catalog rows (inspection legitimately 0) take no penalty.
-        if not ctx.inspection_ok:
-            f.append(Finding("limited", ("integrity_evidence_missing",)))
 
     # F6b — a PLANNED runtime is blocked on static decl evidence alone;
     # it does not need a verdict to be ruled out (covers the
     # missing-verdict + planned-runtime case).
     if decl is not None and decl.planned:
         f.append(Finding("block", ("runtime_planned",)))
+
+    # C3 — inspection evidence is an independent artifact condition:
+    # an import-sourced artifact whose V1 inspection record is absent
+    # is limited regardless of verdict presence. Catalog rows score 0
+    # legitimately and are never penalized for it. `inspection_level`
+    # encodes format recognition only — never integrity verification.
+    if ctx.requires_inspection and ctx.inspection_level < 1:
+        f.append(Finding("limited", ("integrity_evidence_missing",)))
 
     # F10/F11 — adapter implementation evidence (independent of axes)
     if adapter_id is None or adapter is None or not adapter.registered:

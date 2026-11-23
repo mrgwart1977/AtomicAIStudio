@@ -541,18 +541,22 @@ def artifact_runtime_candidates(
                 runtime_key=spec.runtime_key,
                 compatible_adapters=tuple(spec.compatible_adapters))
 
-    # C3 — inspection evidence is an artifact property: an import row
-    # whose report lacks a recognized fmt carries
-    # `integrity_evidence_missing` (limited); catalog rows legitimately
-    # score inspection=0 and take no penalty.
+    # C3 — inspection evidence uses U-4's `_domain_levels` formula
+    # verbatim: V1 = an import-sourced row with a completed U-2 report
+    # whose fmt is recognized. That is container/format RECOGNITION —
+    # U-4 deliberately encodes no file-integrity verification claim
+    # ("family identification does NOT imply file-integrity
+    # verification"), and this endpoint asserts nothing stronger.
     report = row.import_report_json or {}
-    inspection_ok = not (
-        row.source_type == "import"
-        and report.get("fmt") in (None, "", "unknown"))
+    inspection_level = 1 if (
+        row.source_type == "import" and report
+        and report.get("fmt") not in (None, "", "unknown")) else 0
 
     ctx = runtime_resolver.ResolverContext(
         decls=dict(runtime_caps.RUNTIME_CAPS), adapters=adapters,
-        catalog=catalog, workflow=wdef, inspection_ok=inspection_ok)
+        catalog=catalog, workflow=wdef,
+        inspection_level=inspection_level,
+        requires_inspection=row.source_type == "import")
 
     family_id = row.family or None
     candidates = runtime_resolver.resolve_candidates(
@@ -560,10 +564,12 @@ def artifact_runtime_candidates(
         kind=row.kind or "model", verdicts=verdict_views, ctx=ctx)
 
     out = []
+    stale_omitted = 0
     for i, c in enumerate(candidates):
         if not include_stale and c.verdict_stale \
                 and c.state != runtime_resolver.BLOCKED:
-            continue   # stale optimistic claims filtered — blocks never
+            stale_omitted += 1     # stale optimism filtered — never a
+            continue               # stale block, never a missing verdict
         out.append({
             "runtime_key": c.runtime_key, "adapter_id": c.adapter_id,
             "binding_kind": c.binding_kind, "state": c.state, "rank": i,
@@ -573,6 +579,7 @@ def artifact_runtime_candidates(
             "verdict": verdict_payloads.get(c.runtime_key),
         })
     return {"artifact_id": artifact_id, "workflow_key": workflow,
+            "stale_candidates_omitted": stale_omitted,
             "candidates": out}
 
 

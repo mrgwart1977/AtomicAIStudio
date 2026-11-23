@@ -916,6 +916,12 @@ class RuntimeCandidateOut(BaseModel):
 class RuntimeCandidatesOut(BaseModel):
     artifact_id: str
     workflow_key: str
+    # Typed completeness indicator for include_stale=false: how many
+    # stale-verdict candidates were omitted from `candidates`. Omitted
+    # entries are never presented as fresh, and blocked candidates are
+    # never omitted — so a nonzero count always means stale optimistic
+    # claims were hidden, nothing else.
+    stale_candidates_omitted: int
     candidates: list[RuntimeCandidateOut]
 
 

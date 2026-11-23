@@ -42,11 +42,14 @@ def vview(**kw):
     return rr.VerdictView(**base)
 
 
-def ctx(catalog=None, workflow=WF_T2I, adapters=None, inspection_ok=True):
+def ctx(catalog=None, workflow=WF_T2I, adapters=None,
+        inspection_level=0, requires_inspection=False):
     return rr.ResolverContext(
         decls=dict(RUNTIME_CAPS),
         adapters=dict(ADAPTERS) if adapters is None else adapters,
-        catalog=catalog, workflow=workflow, inspection_ok=inspection_ok)
+        catalog=catalog, workflow=workflow,
+        inspection_level=inspection_level,
+        requires_inspection=requires_inspection)
 
 
 SDXL_CAT = rr.CatalogBinding(
@@ -310,15 +313,51 @@ def test_deterministic_repeated_resolution():
 
 
 def test_integrity_evidence_missing_limited_for_import():
-    c = resolve([vview()], inspection_ok=False)[0]
+    """Import-sourced artifact whose V1 inspection record is absent —
+    limited, never blocked (it's an evidence gap, not a prohibition)."""
+    c = resolve([vview()], requires_inspection=True,
+                inspection_level=0)[0]
     assert c.state == rr.LIMITED
     assert "integrity_evidence_missing" in c.reasons
+
+
+def test_import_with_inspection_v1_no_integrity_finding():
+    """An import artifact WITH a completed recognized-format report
+    (inspection_level=1) carries no integrity finding."""
+    c = resolve([vview()], requires_inspection=True,
+                inspection_level=1)[0]
+    assert c.state == rr.COMPATIBLE_STATIC
+    assert "integrity_evidence_missing" not in c.reasons
+
+
+def test_integrity_finding_evaluated_independent_of_verdict():
+    """The inspection condition applies even when no verdict exists —
+    every applicable condition is evaluated (C1)."""
+    c = resolve([], requires_inspection=True, inspection_level=0)[0]
+    assert c.state == rr.UNKNOWN          # verdict_missing dominates
+    assert "verdict_missing" in c.reasons
+    assert "integrity_evidence_missing" in c.reasons
+
+
+def test_inspection_v1_never_claims_integrity_verification():
+    """V1 is container/format RECOGNITION only — the emitted reason
+    vocabulary can express integrity only as an ABSENCE
+    (`integrity_evidence_missing`), never as an affirmative claim."""
+    for level in (0, 1):
+        cands = resolve([vview()], requires_inspection=True,
+                        inspection_level=level)
+        for c in cands:
+            for r in c.reasons:
+                assert not ("integrity" in r and "missing" not in r), (
+                    f"reason '{r}' would assert integrity verification "
+                    "beyond U-4's V1 format-recognition evidence")
 
 
 def test_catalog_artifact_no_inspection_penalty():
     """Catalog rows legitimately score domain_levels.inspection=0 —
     that alone must never block a fully static candidate."""
-    c = resolve([vview()], inspection_ok=True)[0]
+    c = resolve([vview()], requires_inspection=False,
+                inspection_level=0)[0]
     assert c.state == rr.COMPATIBLE_STATIC
 
 
@@ -450,6 +489,7 @@ def test_candidates_endpoint_shape_and_order(client):
     body = r.json()
     assert body["artifact_id"] == aid
     assert body["workflow_key"] == "text2image"
+    assert body["stale_candidates_omitted"] == 0
     cands = body["candidates"]
     assert cands and cands[0]["state"] == "candidate_compatible_static"
     assert cands[0]["binding_kind"] == "catalog_default"
@@ -494,13 +534,83 @@ def test_include_stale_false_keeps_blocks_filters_optimism(client):
     assert ("comfyui", "candidate_blocked") in states
     assert ("sdcpp", "candidate_limited") not in states
     assert ("sdcpp", "candidate_compatible_static") not in states
+    # completeness is explicit in the response contract
+    assert body["stale_candidates_omitted"] == 1
     # with include_stale=true the stale flag stays explicit
     url2 = (f"/api/models/artifacts/{aid}/runtime-candidates"
             "?workflow=text2video&include_stale=true")
-    cands2 = client.get(url2).json()["candidates"]
-    sdcpp = next(c for c in cands2 if c["runtime_key"] == "sdcpp")
+    body2 = client.get(url2).json()
+    assert body2["stale_candidates_omitted"] == 0
+    sdcpp = next(c for c in body2["candidates"]
+                 if c["runtime_key"] == "sdcpp")
     assert sdcpp["verdict_stale"] is True
     assert sdcpp["state"] == "candidate_limited"
+
+
+def test_mixed_fresh_and_stale_candidate_sets(client):
+    """wan21 artifact: FRESH clean sdcpp verdict (static catalog
+    default) + STALE comfyui verdict (blocked) + one stale-limited —
+    the omission count reflects only the filtered optimism."""
+    aid = WAN_AID
+    _verdict(client, aid, stale=False)                 # fresh static
+    _verdict(client, aid, runtime_key="comfyui",
+             runtime_axis="planned", overall="blocked",
+             reasons_json=["runtime_planned"])          # stale block
+    base = (f"/api/models/artifacts/{aid}/runtime-candidates"
+            "?workflow=text2video")
+    body = client.get(base + "&include_stale=false").json()
+    states = {(c["runtime_key"], c["state"]) for c in body["candidates"]}
+    assert ("sdcpp", "candidate_compatible_static") in states
+    assert ("comfyui", "candidate_blocked") in states
+    assert body["stale_candidates_omitted"] == 0
+
+
+def test_stale_policy_block_never_filtered(client):
+    """A stale verdict carrying a policy hold is still a block — the
+    filter must not hide policy restrictions."""
+    aid = SDXL_AID
+    _verdict(client, aid, policy_axis="blocked", overall="blocked",
+             reasons_json=["hold_gated"])               # stale block
+    base = f"/api/models/artifacts/{aid}/runtime-candidates"
+    for setting in ("true", "false"):
+        body = client.get(base + f"?include_stale={setting}").json()
+        sdcpp = next(c for c in body["candidates"]
+                     if c["runtime_key"] == "sdcpp")
+        assert sdcpp["state"] == "candidate_blocked"
+        assert "hold_gated" in sdcpp["reasons"]
+        assert sdcpp["verdict_stale"] is True
+        assert body["stale_candidates_omitted"] == 0
+
+
+def test_missing_verdict_never_filtered_as_stale(client):
+    """Missing verdicts are UNKNOWN, not stale — include_stale=false
+    must not remove them (they are gaps, not expired claims)."""
+    aid = SDXL_AID
+    base = f"/api/models/artifacts/{aid}/runtime-candidates"
+    for setting in ("true", "false"):
+        body = client.get(base + f"?include_stale={setting}").json()
+        sdcpp = next(c for c in body["candidates"]
+                     if c["runtime_key"] == "sdcpp")
+        assert sdcpp["state"] == "candidate_unknown"
+        assert sdcpp["verdict_stale"] is False
+        assert body["stale_candidates_omitted"] == 0
+
+
+def test_planned_runtime_visible_under_both_filter_settings(client):
+    """A planned-runtime block is static decl evidence — always shown,
+    stale or fresh, filtered or not."""
+    aid = WAN_AID
+    _verdict(client, aid, runtime_key="comfyui",
+             runtime_axis="planned", overall="blocked",
+             reasons_json=["runtime_planned"], stale=False)
+    base = (f"/api/models/artifacts/{aid}/runtime-candidates"
+            "?workflow=text2video")
+    for setting in ("true", "false"):
+        body = client.get(base + f"&include_stale={setting}").json()
+        comfy = next(c for c in body["candidates"]
+                     if c["runtime_key"] == "comfyui")
+        assert comfy["state"] == "candidate_blocked"
+        assert "runtime_planned" in comfy["reasons"]
 
 
 def test_missing_verdict_endpoint_unknown_not_compatible(client):
