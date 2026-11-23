@@ -53,6 +53,7 @@ from app.schemas.api import (
     CommandProposalOut,
     CompatEvalOut,
     CompatRulesetOut,
+    DependencyPlanOut,
     EntityAssetLinkOut,
     ReferenceSetOut,
     EntityOut,
@@ -581,6 +582,285 @@ def artifact_runtime_candidates(
     return {"artifact_id": artifact_id, "workflow_key": workflow,
             "stale_candidates_omitted": stale_omitted,
             "candidates": out}
+
+
+@api_router.get(
+    "/api/projects/{project_id}/models/artifacts/{artifact_id}/"
+    "dependency-plan",
+    response_model=DependencyPlanOut)
+def artifact_dependency_plan(
+        artifact_id: str, request: Request,
+        project: Project = Depends(get_project),   # noqa: B008
+        workflow: str = "text2image",
+        runtime_key: str = "",
+        shot_id: str | None = None,
+        character_ids: str | None = None,
+        select_params: list[str] = Query(         # noqa: B008
+            default=[], alias="select"),
+        include_stale: bool = True,
+        db: Session = Depends(get_db)):             # noqa: B008
+    """U-5b — advisory dependency plan for one root artifact +
+    workflow + requested runtime. READ-ONLY stored evidence — never
+    writes, never evaluates a verdict, never touches the filesystem,
+    never emits execution authorization.
+
+    Fill precedence per slot: explicit selector > root-bundle manifest
+    > independently registered candidates > advisory suggestions.
+    Ambiguity is reported, never silently resolved. Cast context is
+    project-scoped: cross-project references 404 without disclosure;
+    character_ids without shot context can never imply identity-LoRA
+    admission."""
+    import hashlib
+    import json
+
+    from app.db.models import Character, CompatVerdict, ModelArtifact, ModelInstall, Shot, ShotCharacter
+    from app.domain import (
+        cast_state,
+        compat_verdicts,
+        dep_graph,
+        dep_resolve,
+        hardware,
+        lora_resolve,
+        model_catalog,
+        model_families,
+        runtime_caps,
+        runtime_resolver,
+        workflow_defs,
+    )
+
+    row = db.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise HTTPException(404, "unknown artifact")
+    wdef = workflow_defs.get_workflow(workflow)
+    if wdef is None:
+        raise HTTPException(400, f"workflow_unknown:{workflow}")
+    cap = runtime_caps.RUNTIME_CAPS.get(runtime_key)
+    if cap is None:
+        raise HTTPException(400, f"runtime_unknown:{runtime_key}")
+
+    # Request selectors — explicit fill precedence, validated not trusted.
+    selectors: dict[str, str] = {}
+    if len(select_params) > dep_graph.MAX_SELECTORS:
+        raise HTTPException(400, "too_many_selectors")
+    for s in select_params:
+        role, _, aid = s.partition(":")
+        if not role or not aid or role not in dep_graph.COMPONENT_ROLES:
+            raise HTTPException(400, f"bad_selector:{s}")
+        selectors[role] = aid
+
+    # ---- C5 cast context: project-scoped, no cross-project disclosure
+    shot = None
+    if shot_id:
+        shot = db.get(Shot, shot_id)
+        if shot is None or shot.project_id != project.id:
+            raise HTTPException(404, "shot not found")
+    req_chars = sorted({c.strip() for c in (character_ids or "")
+                        .split(",") if c.strip()})
+    for cid in req_chars:
+        ch = db.get(Character, cid)
+        if ch is None or ch.project_id != project.id:
+            raise HTTPException(404, "character not found")
+    if shot is not None:
+        effective = lora_resolve.shot_cast_ids(db, shot)
+        if any(c not in effective for c in req_chars):
+            raise HTTPException(422, "character_not_in_cast")
+        cast_chars = tuple(req_chars) if req_chars \
+            else tuple(sorted(effective))
+    else:
+        cast_chars = tuple(req_chars)
+    bindings = []
+    if shot is not None and cast_chars:
+        for r in db.execute(select(ShotCharacter).where(
+                ShotCharacter.shot_id == shot.id,
+                ShotCharacter.character_id.in_(cast_chars))).scalars():
+            digest = hashlib.sha256(
+                json.dumps(r.lora_json or [], sort_keys=True,
+                           separators=(",", ":")).encode()).hexdigest()
+            for k in sorted(cast_state.lora_keys(r.lora_json)):
+                bindings.append(dep_resolve.CastBinding(
+                    character_id=r.character_id, lora_key=k,
+                    updated_at=str(r.updated_at or ""), digest=digest))
+    cast = dep_resolve.CastContext(has_shot=shot is not None,
+                                   character_ids=cast_chars,
+                                   bindings=tuple(bindings))
+
+    # ---- stored-evidence pool: every artifact gets a view + verdict
+    hw = hardware.probe()
+    prefs = compat_verdicts.gpu_prefs(db)
+    verdict_rows = {(v.artifact_id, v.runtime_key): v for v in
+                    db.execute(select(CompatVerdict)).scalars()}
+
+    def _view(a):
+        man = dep_graph.canonical_manifest(
+            (a.meta_json or {}).get("files") or [])
+        rep = a.import_report_json or {}
+        ilvl = 1 if (a.source_type == "import" and rep
+                     and rep.get("fmt") not in (None, "", "unknown")) \
+            else 0
+        inst = db.get(ModelInstall, a.install_id) if a.install_id else None
+        return dep_resolve.view_from_row(
+            a, man,
+            install_status=inst.status if inst else "",
+            install_verified=bool(inst and inst.verified),
+            install_sha256=inst.sha256 if inst else "",
+            inspection_level=ilvl,
+            requires_inspection=a.source_type == "import")
+
+    def _stale(a, v) -> bool:
+        return compat_verdicts.fingerprint_for_runtime(
+            db, a, v.runtime_key, hw, prefs) != v.inputs_fingerprint
+
+    def _confidence(v, stale) -> str:
+        c = (v.confidence or "missing") if v else "missing"
+        if stale and c in ("tested", "documented"):
+            return "unverified"      # stale optimism can never attest
+        return c                     # more than unverified evidence
+
+    root = _view(row)
+    pool: dict[str, dep_resolve.CompEntry] = {}
+    for a in db.execute(select(ModelArtifact)).scalars():
+        v = verdict_rows.get((a.artifact_id, runtime_key))
+        stale = _stale(a, v) if v is not None else False
+        pool[a.artifact_id] = dep_resolve.CompEntry(
+            view=_view(a),
+            verdict_confidence=_confidence(v, stale),
+            verdict_reasons=tuple(v.reasons_json or []) if v else (),
+            policy_axis=v.policy_axis if v else "eligible",
+            stale=stale)
+    root_v = verdict_rows.get((artifact_id, runtime_key))
+    root_stale = _stale(row, root_v) if root_v is not None else False
+    root_confidence = _confidence(root_v, root_stale)
+
+    # ---- runtime axis via the U-5a resolver (unchanged semantics)
+    vrows = [v for (aid, _), v in sorted(verdict_rows.items())
+             if aid == artifact_id]
+    verdict_views = []
+    for v in vrows:
+        verdict_views.append(runtime_resolver.VerdictView(
+            runtime_key=v.runtime_key, arch_axis=v.arch_axis,
+            arch_confidence=v.arch_confidence,
+            runtime_axis=v.runtime_axis, hardware_axis=v.hardware_axis,
+            policy_axis=v.policy_axis, confidence=v.confidence,
+            reasons=tuple(v.reasons_json or []),
+            missing=tuple(v.missing_json or []),
+            stale=_stale(row, v),
+            domain_levels=dict(v.domain_levels_json or {})))
+    adapters = {
+        p["adapter_id"]: runtime_resolver.AdapterEvidence(
+            adapter_id=p["adapter_id"], registered=True,
+            tasks=tuple(p.get("tasks") or ()))
+        for p in request.app.state.adapter_registry.list_profiles()
+    }
+    catalog = None
+    if artifact_id.startswith("catalog:"):
+        spec0 = model_catalog.get(artifact_id.split(":", 1)[1])
+        if spec0 is not None:
+            catalog = runtime_resolver.CatalogBinding(
+                adapter_id=spec0.adapter_id,
+                runtime_key=spec0.runtime_key,
+                compatible_adapters=tuple(spec0.compatible_adapters))
+    report = row.import_report_json or {}
+    ctx = runtime_resolver.ResolverContext(
+        decls=dict(runtime_caps.RUNTIME_CAPS), adapters=adapters,
+        catalog=catalog, workflow=wdef,
+        inspection_level=1 if (row.source_type == "import" and report
+                               and report.get("fmt") not in
+                               (None, "", "unknown")) else 0,
+        requires_inspection=row.source_type == "import")
+    cands = runtime_resolver.resolve_candidates(
+        artifact_id=artifact_id, family_id=row.family or None,
+        kind=row.kind or "model", verdicts=verdict_views, ctx=ctx)
+    runtime_state = "unevaluated"
+    stale_omitted = 0
+    for c in cands:
+        if c.runtime_key != runtime_key:
+            continue
+        if c.verdict_stale and not include_stale \
+                and c.state != runtime_resolver.BLOCKED:
+            stale_omitted += 1
+            continue
+        runtime_state = c.state
+        break
+
+    fam_spec = model_families.FAMILIES.get(row.family or "")
+    fingerprint_inputs = {
+        "ruleset": [dep_graph.DEP_RULESET_VERSION,
+                    workflow_defs.WORKFLOW_DEFS_VERSION,
+                    runtime_caps.CAPS_SCHEMA_VERSION,
+                    model_families.FAMILIES_VERSION],
+        "root": [row.artifact_id, row.content_sha256,
+                 str(row.updated_at or "")],
+        "root_manifest": [
+            [m.file_name, m.role, m.sha256, m.size_bytes]
+            for m in dep_graph.canonical_manifest(
+                (row.meta_json or {}).get("files") or [])],
+        "runtime": [runtime_key,
+                    root_v.inputs_fingerprint if root_v else "",
+                    root_stale],
+        "selectors": sorted(selectors.items()),
+        "cast": [shot_id or "", list(cast_chars),
+                 [(b.character_id, b.lora_key, b.updated_at, b.digest)
+                  for b in bindings]],
+        "policy": [bool(cast.bindings or cast.character_ids)],
+        "request": [workflow, runtime_key, include_stale],
+    }
+    plan = dep_resolve.resolve_plan(
+        root=root, root_confidence=root_confidence, root_verdict=root_v,
+        workflow=wdef, fam_spec=fam_spec, cap=cap,
+        runtime_key=runtime_key, root_runtime_state=runtime_state,
+        pool=pool, cast=cast, selectors=selectors,
+        key_to_artifact={
+            b.lora_key: f"catalog:{b.lora_key}"
+            for b in bindings
+            if model_catalog.get(b.lora_key) is not None},
+        spec_role=lambda k: ((model_catalog.get(k).capabilities or {})
+                             .get("lora_role") or "")
+        if model_catalog.get(k) is not None else "",
+        fam_spec_for=lambda aid: model_families.FAMILIES.get(
+            pool[aid].view.family) if aid in pool else None,
+        lora_policy_held=True,            # G1/B-2/B-3e-2 holds active
+        include_stale=include_stale,
+        fingerprint_inputs=fingerprint_inputs)
+
+    return {
+        "artifact_id": plan.artifact_id, "workflow_key": plan.workflow_key,
+        "runtime_key": plan.runtime_key,
+        "structural_state": plan.structural_state,
+        "runtime_state": plan.runtime_state,
+        "policy_state": plan.policy_state,
+        "capacity_state": plan.capacity_state,
+        "evidence_state": plan.evidence_state,
+        "advisory_state": plan.advisory_state,
+        "limitations": list(plan.limitations),
+        "reasons": list(plan.reasons),
+        "requirements": [
+            {"requirement_id": s.requirement.requirement_id,
+             "role": s.requirement.role,
+             "required": s.requirement.required,
+             "source": s.requirement.source,
+             "binds_character_id": s.requirement.binds_character_id or None,
+             "outcome": s.outcome,
+             "fills": [{"component_key": f.component_key,
+                        "artifact_id": f.artifact_id, "role": f.role,
+                        "file_name": f.file_name,
+                        "provenance": f.provenance,
+                        "confidence": f.confidence,
+                        "file_integrity": f.file_integrity,
+                        "reasons": list(f.reasons)} for f in s.fills],
+             "candidates": [{"artifact_id": c.artifact_id,
+                             "outcome": c.outcome,
+                             "reasons": list(c.reasons)}
+                            for c in s.candidates],
+             "reasons": list(s.reasons), "limits": list(s.limits),
+             "cycle_path": list(s.cycle_path)}
+            for s in plan.requirements],
+        "stale_candidates_omitted": stale_omitted,
+        "limits": plan.limits,
+        "limits_exceeded": list(plan.limits_exceeded),
+        "suggestions": list(plan.suggestions),
+        "resolution_version": plan.resolution_version,
+        "advisory": plan.advisory,
+    }
 
 
 @api_router.get("/api/models/import-capabilities",

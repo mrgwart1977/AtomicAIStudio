@@ -98,6 +98,7 @@ FAMILIES: dict[str, ModelFamilySpec] = {
             arch_aliases=("flux", "flux1-schnell", "flux1-dev"),
             st_sig_all=("double_blocks", "img_in", "txt_in"),
             metadata_arch_values=("flux1-dev", "flux1-schnell", "flux"),
+            component_roles=("diffusion",),
             modes=("text2image",),
             requirements_profile={"min_vram_bytes": 12 * 1024**3},
         ),
@@ -124,6 +125,7 @@ FAMILIES: dict[str, ModelFamilySpec] = {
             arch_aliases=("ltx", "ltxv"),
             st_sig_all=("patchify_proj",),
             metadata_arch_values=("ltxv", "ltx-video"),
+            component_roles=("diffusion", "vae", "text_encoder"),
             modes=("text2video", "image2video"),
         ),
         ModelFamilySpec(
@@ -134,6 +136,7 @@ FAMILIES: dict[str, ModelFamilySpec] = {
             arch_aliases=("hunyuan", "hunyuanvideo"),
             st_sig_all=("double_blocks", "img_attn"),
             metadata_arch_values=("hunyuan-video", "hunyuanvideo"),
+            component_roles=("diffusion", "vae", "text_encoder"),
             modes=("text2video",),
         ),
         ModelFamilySpec(
@@ -144,6 +147,7 @@ FAMILIES: dict[str, ModelFamilySpec] = {
             arch_aliases=("qwen", "qwen-image"),
             st_sig_all=("transformer_blocks", "img_mlp"),
             metadata_arch_values=("qwen-image",),
+            component_roles=("diffusion", "vae", "text_encoder"),
             modes=("text2image",),
         ),
         # ------------------------------------------------- language (GGUF)
