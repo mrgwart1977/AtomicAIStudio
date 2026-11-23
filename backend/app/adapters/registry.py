@@ -117,6 +117,10 @@ class AdapterRegistry:
             # only; registration still requires ops.model.import).
             from app.adapters.discovery_adapter import ModelDiscoveryAdapter
             self.register(ModelDiscoveryAdapter(session_factory, settings))
+            # U-4b — serialized compat_verdicts writer; stored evidence
+            # only, never model I/O or runtime execution.
+            from app.adapters.compat_eval_adapter import ModelCompatEvalAdapter
+            self.register(ModelCompatEvalAdapter(session_factory, settings))
             # M4.1 Phase 2A — real persistent sd-server worker. Registered
             # only behind ATOMIC_PERSISTENT_INFERENCE_ENABLED=1:
             # unvalidated persistent inference is not selectable by default.

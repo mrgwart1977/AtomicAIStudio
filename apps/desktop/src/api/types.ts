@@ -1266,6 +1266,74 @@ export interface DiscoveryScanOut {
 }
 
 
+// ---------- U-4 five-axis compatibility verdicts ----------
+
+/** U-4b — one persisted verdict for (artifact, runtime). Axes are
+ * INDEPENDENT: a missing runtime never masquerades as architecture
+ * incompatibility. `stale` is computed live on read (inputs-fingerprint
+ * drift), never stored. Carries no absolute paths or provider data.
+ * `level` is 0..4 — V5 does not exist. */
+export interface CompatVerdict {
+  artifact_id: string;
+  runtime_key: string;
+  arch_axis: "supported" | "unsupported" | "unknown";
+  arch_confidence: "tested" | "documented" | "unverified" | null;
+  runtime_axis:
+    | "operational" | "installed_unverified" | "not_installed"
+    | "planned" | "unknown";
+  hardware_axis: "fits" | "limited" | "insufficient" | "unknown";
+  policy_axis: "eligible" | "restricted" | "blocked";
+  level: number;
+  domain_levels: Record<string, number>;
+  overall:
+    | "compatible" | "limited" | "blocked" | "incompatible" | "unknown";
+  blocking_axes: string[];
+  confidence: string;          // tested | documented | unverified | none
+  reasons: string[];
+  warnings: string[];
+  missing: string[];
+  hardware_limits: string[];
+  actions: string[];
+  stale: boolean;
+  ruleset_version: string;
+  evaluated_at: string | null;
+}
+
+export interface ArtifactCompatOut {
+  artifact_id: string;
+  verdicts: CompatVerdict[];
+}
+
+/** Both U-4b eval POSTs return a durable ops-lane job handle —
+ * evaluation is NEVER synchronous; success is only claimable after
+ * the job's terminal "succeeded" lands via the jobs store. */
+export interface CompatEvalOut {
+  job_id: string;
+  status: string;
+}
+
+export interface CompatRuntimeDecl {
+  runtime_key: string;
+  display_name: string;
+  caps_version: number;
+  planned: boolean;
+  backends: string[];
+  validated_versions: string[];
+  families: Record<string, Record<string, unknown>>;
+}
+
+/** Read-only description of the active compat ruleset — no install
+ * state, no paths. `max_verification_level` is always 4 (V5 deferred). */
+export interface CompatRuleset {
+  ruleset_version: string;
+  families_version: number;
+  caps_schema_version: number;
+  max_verification_level: number;
+  axes: Record<string, string[]>;
+  runtimes: CompatRuntimeDecl[];
+}
+
+
 // ---------- C5-E: consolidated compatibility ----------
 
 export type AvailabilityClass =

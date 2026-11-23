@@ -870,6 +870,55 @@ class ModelArtifact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class CompatVerdict(Base):
+    """U-4b — latest compatibility verdict for one (artifact, runtime)
+    pair. Written ONLY by the serialized ops.model.compat_eval job —
+    the API surface never writes verdicts synchronously.
+
+    Axes are independent: a missing runtime never downgrades the
+    architecture axis, and insufficient VRAM never downgrades it either.
+    `level` is a domain summary (max of domain_levels_json), never a
+    bare "verified" claim; V5 does not exist in U-4.
+    """
+
+    __tablename__ = "compat_verdicts"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "runtime_key",
+                         name="uq_compat_artifact_runtime"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    artifact_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey("model_artifacts.artifact_id", ondelete="CASCADE"),
+        index=True)
+    runtime_key: Mapped[str] = mapped_column(String(80))
+    arch_axis: Mapped[str] = mapped_column(String(20))          # supported|unsupported|unknown
+    arch_confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    runtime_axis: Mapped[str] = mapped_column(String(24))       # operational|installed_unverified|not_installed|planned|unknown
+    hardware_axis: Mapped[str] = mapped_column(String(20))      # fits|limited|insufficient|unknown
+    policy_axis: Mapped[str] = mapped_column(String(20))        # eligible|restricted|blocked
+    level: Mapped[int] = mapped_column(Integer, default=0)      # ≤4 — V5 deferred
+    domain_levels_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    overall: Mapped[str] = mapped_column(String(20), index=True)  # compatible|limited|blocked|incompatible|unknown
+    blocking_axes_json: Mapped[list] = mapped_column(JSON, default=list)
+    confidence: Mapped[str] = mapped_column(String(20), default="unknown")
+    reasons_json: Mapped[list] = mapped_column(JSON, default=list)
+    warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    missing_json: Mapped[list] = mapped_column(JSON, default=list)
+    hardware_limits_json: Mapped[list] = mapped_column(JSON, default=list)
+    actions_json: Mapped[list] = mapped_column(JSON, default=list)
+    # Point-in-time evaluation evidence (probe samples recorded, never
+    # consulted for staleness — that is inputs_fingerprint's job).
+    evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    inputs_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    ruleset_version: Mapped[str] = mapped_column(String(40), default="")
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class AppSetting(Base):
     """Durable app-level key/value settings (backup default dir, etc.).
     Not project-scoped — survives restarts and migrations."""

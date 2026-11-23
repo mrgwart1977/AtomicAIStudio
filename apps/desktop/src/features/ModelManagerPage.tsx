@@ -4,6 +4,7 @@ import { useApp } from "../stores/appStore";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ImportModelDialog } from "./ImportModelDialog";
 import { DiscoverySection } from "./DiscoverySection";
+import { CompatSection } from "./ArtifactCompatSection";
 import type {
   AvailabilityClass,
   AvailabilityReason,
@@ -914,6 +915,10 @@ export function ModelManagerPage() {
           </ul>
         )}
       </section>
+      {/* U-4c — five-axis compatibility: selected-artifact panel +
+          evaluate-all; its own <section> so the library's frozen button
+          inventory is untouched. */}
+      <CompatSection artifacts={artifacts} />
       <DiscoverySection
         onImportCandidate={(p) => {
           setImportInitialPath(p);

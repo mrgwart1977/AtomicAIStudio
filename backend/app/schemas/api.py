@@ -809,6 +809,69 @@ class ModelsDirOut(BaseModel):
     used_bytes: int
 
 
+# ---------- U-4b model compatibility verdicts ----------
+
+class CompatVerdictOut(BaseModel):
+    """One persisted verdict for (artifact, runtime). Axes are
+    independent — a missing runtime never masquerades as architecture
+    incompatibility. `stale` is computed live on read (inputs
+    fingerprint drift), never stored. No paths or provider data."""
+    artifact_id: str
+    runtime_key: str
+    arch_axis: str            # supported | unsupported | unknown
+    arch_confidence: str | None  # tested | documented | unverified
+    runtime_axis: str         # operational | installed_unverified |
+                              # not_installed | planned | unknown
+    hardware_axis: str        # fits | limited | insufficient | unknown
+    policy_axis: str          # eligible | restricted | blocked
+    level: int                # 0..4 — V5 does not exist
+    domain_levels: dict[str, int]
+    overall: str              # compatible | limited | blocked |
+                              # incompatible | unknown
+    blocking_axes: list[str]
+    confidence: str
+    reasons: list[str]
+    warnings: list[str]
+    missing: list[str]
+    hardware_limits: list[str]
+    actions: list[str]
+    stale: bool
+    ruleset_version: str
+    evaluated_at: datetime | None
+
+
+class ArtifactCompatOut(BaseModel):
+    artifact_id: str
+    verdicts: list[CompatVerdictOut]
+
+
+class CompatEvalOut(BaseModel):
+    job_id: str
+    status: str
+
+
+class CompatRuntimeDeclOut(BaseModel):
+    runtime_key: str
+    display_name: str
+    caps_version: int
+    planned: bool
+    backends: list[str]
+    validated_versions: list[str]
+    families: dict[str, dict[str, Any]]
+
+
+class CompatRulesetOut(BaseModel):
+    """Read-only description of the active compat ruleset — which
+    families and runtime claims the verdict engine knows, at what
+    versions. No install state, no paths."""
+    ruleset_version: str
+    families_version: int
+    caps_schema_version: int
+    max_verification_level: int  # always 4 — V5 deferred
+    axes: dict[str, list[str]]
+    runtimes: list[CompatRuntimeDeclOut]
+
+
 class GpuSettingsOut(BaseModel):
     mode: str  # auto | manual
     preferred_gpu: int | None
