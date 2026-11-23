@@ -302,7 +302,7 @@ def _compat_enqueue(request: Request, db: Session, *,
 @api_router.get("/api/models/artifacts/{artifact_id}/compat",
                 response_model=ArtifactCompatOut)
 def get_artifact_compat(artifact_id: str, request: Request,
-                        db: Session = Depends(get_db)):
+                        db: Session = Depends(get_db)):  # noqa: B008
     """U-4b — stored verdicts for one artifact + LIVE stale flags.
 
     Read-only: recomputes each verdict's input fingerprint and reports
@@ -352,7 +352,7 @@ def get_artifact_compat(artifact_id: str, request: Request,
 @api_router.post("/api/models/artifacts/{artifact_id}/compat/evaluate",
                  status_code=202, response_model=CompatEvalOut)
 def evaluate_artifact_compat(artifact_id: str, request: Request,
-                             db: Session = Depends(get_db)):
+                             db: Session = Depends(get_db)):  # noqa: B008
     """U-4b — enqueue scope=artifact evaluation. Always 202 + job; all
     verdict writes happen inside the serialized ops lane."""
     from app.db.models import ModelArtifact
@@ -372,7 +372,7 @@ def evaluate_artifact_compat(artifact_id: str, request: Request,
 @api_router.post("/api/models/compat/evaluate-all",
                  status_code=202, response_model=CompatEvalOut)
 def evaluate_all_compat(request: Request,
-                        db: Session = Depends(get_db)):
+                        db: Session = Depends(get_db)):  # noqa: B008
     """U-4b — enqueue scope=all evaluation over every registered
     artifact. Explicitly user-triggered; no automatic evaluate-all."""
     from app.db.models import ModelArtifact
