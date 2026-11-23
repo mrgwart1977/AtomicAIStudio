@@ -40,6 +40,7 @@ from app.domain.backup import PackageError, read_manifest
 from app.schemas.api import (
     AdapterProfileOut,
     AppBackupDirUpdate,
+    ArtifactCompatOut,
     AssetOut,
     AssetPageOut,
     AssetVersionOut,
@@ -50,6 +51,8 @@ from app.schemas.api import (
     CommandOut,
     CommandPreviewRequest,
     CommandProposalOut,
+    CompatEvalOut,
+    CompatRulesetOut,
     EntityAssetLinkOut,
     ReferenceSetOut,
     EntityOut,
@@ -231,6 +234,204 @@ def release_managed_copy(artifact_id: str, request: Request,
         raise HTTPException(422, str(exc)) from None
     db.commit()
     return out
+
+
+# ---------- U-4b compatibility verdicts ----------
+
+def _compat_in_flight(db: Session):
+    """Live ops.model.compat_eval jobs — the only verdict writers."""
+    return db.execute(
+        select(GenerationJob).where(
+            GenerationJob.adapter_id == "ops.model.compat_eval",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+    ).scalars().all()
+
+
+def _compat_enqueue(request: Request, db: Session, *,
+                    scope: str, scope_key: str,
+                    request_payload: dict, fp: str):
+    """One deterministic enqueue contract for both compat-eval scopes.
+
+    Same scope key + same inputs-fingerprint → the SAME durable job
+    (idempotency_key dedupes), whether queued, running, or succeeded.
+    Same scope key + different fingerprint while in flight → 409 with
+    the existing job reference. A failed/cancelled job for identical
+    inputs gets a deterministic retry suffix so evaluation can never
+    strand. No synchronous verdict write exists anywhere.
+    """
+    base = f"compat_eval:{scope}:{scope_key}:{fp[:16]}"
+    for j in _compat_in_flight(db):
+        r = j.request_json or {}
+        same_scope = r.get("scope") == scope and (
+            (r.get("artifact_id") if scope == "artifact" else scope)
+            == scope_key)
+        if not same_scope:
+            continue
+        if j.idempotency_key == base or \
+                j.idempotency_key.startswith(base + ":retry"):
+            return j                       # identical request → handle
+        raise HTTPException(409, {
+            "code": "compat_eval_in_flight",
+            "job_id": j.id,
+            "message": "a compatibility evaluation with different "
+                       "inputs is already in progress"})
+    prior_jobs = db.execute(
+        select(GenerationJob).where(
+            GenerationJob.idempotency_key.like(base + "%"))
+    ).scalars().all()
+    same = [j for j in prior_jobs
+            if j.idempotency_key == base
+            or j.idempotency_key.startswith(base + ":retry")]
+    done = next((j for j in same if j.status == "succeeded"), None)
+    if done is not None:
+        return done                        # identical inputs → same job
+    # All prior attempts (if any) terminated failed/cancelled — derive
+    # the next deterministic retry key so identical inputs can never
+    # strand behind a dead job handle.
+    key = f"{base}:retry{len(same)}" if same else base
+    job = request.app.state.job_engine.enqueue(
+        db, project_id=None, adapter_id="ops.model.compat_eval",
+        kind="model_compat_eval", request=request_payload,
+        idempotency_key=key)
+    db.commit()
+    request.app.state.job_engine.wake()
+    return job
+
+
+@api_router.get("/api/models/artifacts/{artifact_id}/compat",
+                response_model=ArtifactCompatOut)
+def get_artifact_compat(artifact_id: str, request: Request,
+                        db: Session = Depends(get_db)):
+    """U-4b — stored verdicts for one artifact + LIVE stale flags.
+
+    Read-only: recomputes each verdict's input fingerprint and reports
+    staleness — never writes, never rewrites verdicts on read.
+    """
+    from app.db.models import CompatVerdict, ModelArtifact
+    from app.domain import compat_verdicts, hardware
+    row = db.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise HTTPException(404, "unknown artifact")
+    rows = db.execute(
+        select(CompatVerdict).where(
+            CompatVerdict.artifact_id == artifact_id)
+        .order_by(CompatVerdict.runtime_key)
+    ).scalars().all()
+    hw = hardware.probe()
+    prefs = compat_verdicts.gpu_prefs(db)
+    verdicts = []
+    for v in rows:
+        live = compat_verdicts.fingerprint_for_runtime(
+            db, row, v.runtime_key, hw, prefs)
+        verdicts.append({
+            "artifact_id": v.artifact_id,
+            "runtime_key": v.runtime_key,
+            "arch_axis": v.arch_axis,
+            "arch_confidence": v.arch_confidence,
+            "runtime_axis": v.runtime_axis,
+            "hardware_axis": v.hardware_axis,
+            "policy_axis": v.policy_axis,
+            "level": v.level,
+            "domain_levels": v.domain_levels_json or {},
+            "overall": v.overall,
+            "blocking_axes": v.blocking_axes_json or [],
+            "confidence": v.confidence,
+            "reasons": v.reasons_json or [],
+            "warnings": v.warnings_json or [],
+            "missing": v.missing_json or [],
+            "hardware_limits": v.hardware_limits_json or [],
+            "actions": v.actions_json or [],
+            "stale": live != v.inputs_fingerprint,
+            "ruleset_version": v.ruleset_version,
+            "evaluated_at": v.evaluated_at,
+        })
+    return {"artifact_id": artifact_id, "verdicts": verdicts}
+
+
+@api_router.post("/api/models/artifacts/{artifact_id}/compat/evaluate",
+                 status_code=202, response_model=CompatEvalOut)
+def evaluate_artifact_compat(artifact_id: str, request: Request,
+                             db: Session = Depends(get_db)):
+    """U-4b — enqueue scope=artifact evaluation. Always 202 + job; all
+    verdict writes happen inside the serialized ops lane."""
+    from app.db.models import ModelArtifact
+    from app.domain import compat_verdicts, hardware
+    row = db.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise HTTPException(404, "unknown artifact")
+    fp = compat_verdicts.artifact_fingerprint(
+        db, row, hardware.probe(), compat_verdicts.gpu_prefs(db))
+    job = _compat_enqueue(
+        request, db, scope="artifact", scope_key=artifact_id,
+        request_payload={"scope": "artifact", "artifact_id": artifact_id},
+        fp=fp)
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.post("/api/models/compat/evaluate-all",
+                 status_code=202, response_model=CompatEvalOut)
+def evaluate_all_compat(request: Request,
+                        db: Session = Depends(get_db)):
+    """U-4b — enqueue scope=all evaluation over every registered
+    artifact. Explicitly user-triggered; no automatic evaluate-all."""
+    from app.db.models import ModelArtifact
+    from app.domain import compat_verdicts, hardware
+    hw = hardware.probe()
+    prefs = compat_verdicts.gpu_prefs(db)
+    fps = sorted(
+        compat_verdicts.artifact_fingerprint(db, r, hw, prefs) or ""
+        for r in db.execute(select(ModelArtifact)).scalars())
+    import hashlib
+    fp_all = hashlib.sha256("|".join(fps).encode()).hexdigest()
+    job = _compat_enqueue(
+        request, db, scope="all", scope_key="all",
+        request_payload={"scope": "all"}, fp=fp_all)
+    return {"job_id": job.id, "status": job.status}
+
+
+@api_router.get("/api/compat/ruleset", response_model=CompatRulesetOut)
+def compat_ruleset(request: Request):
+    """U-4b — read-only description of the active ruleset: family
+    registry + runtime capability declarations at their versions."""
+    from app.domain import compat_verdicts, model_families, runtime_caps
+    return {
+        "ruleset_version": runtime_caps.ruleset_version(),
+        "families_version": model_families.FAMILIES_VERSION,
+        "caps_schema_version": runtime_caps.CAPS_SCHEMA_VERSION,
+        "max_verification_level": compat_verdicts.MAX_LEVEL,
+        "axes": {
+            "arch": list(compat_verdicts.ARCH_AXES),
+            "runtime": list(compat_verdicts.RUNTIME_AXES),
+            "hardware": list(compat_verdicts.HARDWARE_AXES),
+            "policy": list(compat_verdicts.POLICY_AXES),
+            "overall": list(compat_verdicts.OVERALLS),
+        },
+        "runtimes": [
+            {
+                "runtime_key": d.runtime_key,
+                "display_name": d.display_name,
+                "caps_version": d.caps_version,
+                "planned": d.planned,
+                "backends": list(d.backends),
+                "validated_versions": list(d.validated_versions),
+                "families": {
+                    k: {
+                        "grade": f.grade,
+                        "fmts_tested": list(f.fmts_tested),
+                        "fmts_documented": list(f.fmts_documented),
+                        "modes": list(f.modes),
+                        "dtypes_tested": list(f.dtypes_tested),
+                        "components_required":
+                            list(f.components_required),
+                        "policy_gated": f.policy_gated,
+                    }
+                    for k, f in d.families.items()
+                },
+            }
+            for d in runtime_caps.decl_catalog()
+        ],
+    }
 
 
 @api_router.get("/api/models/import-capabilities",
