@@ -925,6 +925,76 @@ class RuntimeCandidatesOut(BaseModel):
     candidates: list[RuntimeCandidateOut]
 
 
+class DepFillOut(BaseModel):
+    """One resolved fill for a requirement slot. `component_key` is the
+    stable C1 identity (`artifact_id` for whole-artifact fills,
+    `artifact_id::member_key` inside a bundle). `provenance` records
+    WHERE the fill came from; `confidence` is the independent U-4
+    evidence grade — never conflated. `file_integrity` is a recorded
+    fact only: verified_at_install | recorded_at_import | declared |
+    missing — never implied coverage."""
+    component_key: str
+    artifact_id: str
+    role: str
+    file_name: str | None
+    provenance: str
+    confidence: str
+    file_integrity: str
+    reasons: list[str]
+
+
+class DepCandidateOut(BaseModel):
+    artifact_id: str
+    outcome: str             # eligible | ineligible | ambiguous_member
+    reasons: list[str]
+
+
+class DepSlotOut(BaseModel):
+    """One requirement slot and its resolution outcome."""
+    requirement_id: str
+    role: str
+    required: bool
+    source: str              # workflow_def|family_spec|family_cap|
+                             # cast_binding|request
+    binds_character_id: str | None
+    outcome: str             # resolved|ambiguous|missing|
+                             # no_fill_evidence|conflicted|
+                             # selector_refused|dep_limit_exceeded|
+                             # needs_shot_context
+    fills: list[DepFillOut]
+    candidates: list[DepCandidateOut]
+    reasons: list[str]
+    limits: list[str]
+    cycle_path: list[str]
+
+
+class DependencyPlanOut(BaseModel):
+    """U-5b — advisory dependency plan for one root artifact +
+    workflow + runtime. Five INDEPENDENT axes aggregate into
+    `advisory_state` (plan_complete|plan_incomplete|plan_blocked) —
+    advisory is NEVER execution authorization."""
+    artifact_id: str
+    workflow_key: str
+    runtime_key: str
+    structural_state: str    # complete|incomplete_missing|ambiguous|
+                             # conflicted|unknown
+    runtime_state: str       # U-5a candidate_* state | unevaluated
+    policy_state: str        # clear|held|restricted|blocked
+    capacity_state: str      # within_capacity|exceeds_capacity|
+                             # not_applicable|unknown
+    evidence_state: str      # tested|documented|unverified|missing
+    advisory_state: str
+    limitations: list[str]
+    reasons: list[str]
+    requirements: list[DepSlotOut]
+    stale_candidates_omitted: int
+    limits: dict[str, int]
+    limits_exceeded: list[str]
+    suggestions: list[str]
+    resolution_version: str  # "dep:v1:" + fingerprint
+    advisory: bool = True
+
+
 class GpuSettingsOut(BaseModel):
     mode: str  # auto | manual
     preferred_gpu: int | None
