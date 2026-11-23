@@ -995,6 +995,176 @@ class DependencyPlanOut(BaseModel):
     advisory: bool = True
 
 
+# ---------- U-5c — execution-plan preview ----------
+
+class HwBackendEvidenceOut(BaseModel):
+    available: bool
+    measured: bool
+
+
+class HwDeviceOut(BaseModel):
+    """One GPU in the evidence snapshot. Every quantity is labeled by
+    provenance: vram_bytes / vram_free_bytes are MEASURED (driver /
+    registry / WMI), usable_* are derived estimates, reserved_* are
+    scheduler bookkeeping (never physical memory), and the planning
+    budget is a derived, conservative figure — not a guarantee of
+    physically available VRAM."""
+    index: int
+    name: str | None
+    vendor: str | None
+    vram_bytes: int | None                 # physical total
+    vram_source: str | None                # registry|nvidia-smi|wmi|wmi_capped
+    vram_capped_at_4gb: bool
+    vram_free_bytes: int | None            # driver-reported free
+    driver_version: str | None
+    usable_bytes: int | None               # derived (free | 85%·total | None)
+    vram_headroom_bytes: int
+    usable_after_headroom_bytes: int | None
+    reserved_bytes: int                    # scheduler claims — bookkeeping
+    conservative_planning_budget_bytes: int | None
+    optimistic_bound_bytes: int | None
+    reservation_overlap_possible: bool
+    present: bool
+    index_stability: str                   # "per_boot"
+
+
+class HwLostDeviceOut(BaseModel):
+    index: int
+    reserved_bytes: int                    # bookkeeping retained as evidence
+
+
+class HwSnapshotOut(BaseModel):
+    """U-5c — fingerprinted point-in-time hardware + scheduler evidence.
+    The fingerprint covers canonical EVIDENCE only (timestamps excluded),
+    so identical evidence yields an identical snapshot_id."""
+    snapshot_id: str                       # "hw:v1:" + hash
+    snapshot_schema_version: int
+    captured_at: float | None
+    age_s: float | None
+    stale: bool                            # age beyond one probe bucket
+    simulated: bool
+    devices: list[HwDeviceOut]
+    devices_total: int
+    lost_devices: list[HwLostDeviceOut]
+    backends: dict[str, HwBackendEvidenceOut]
+    cpu: dict[str, Any]
+    memory: dict[str, Any]
+    reservations_captured: bool
+    unknowns: list[str]
+
+
+class DeviceAlternativeOut(BaseModel):
+    """One device evaluated against the single generation stage.
+    `fit_class`: fits_with_headroom | fits_tight | insufficient |
+    unmeasurable | estimate_unknown | insufficient_evidence |
+    device_backend_mismatch | backend_evidence_unknown |
+    device_not_present. `backend_evidence` grades each runtime-declared
+    backend per device: measured | inferred | unknown | mismatch — a
+    machine-wide Vulkan/DirectML flag is never measured per-device
+    support."""
+    index: int | None
+    name: str | None
+    vendor: str | None
+    eligible: bool
+    outcome: str
+    fit_class: str
+    backend_evidence: dict[str, str]
+    est_vram_bytes: int | None
+    budget_bytes: int | None
+    reservation_overlap_possible: bool
+    reasons: list[str]
+    limitations: list[str]
+
+
+class CpuLaneOut(BaseModel):
+    """The CPU alternative — explicit only, never a silent fallback."""
+    permitted: bool
+    explicitly_requested: bool
+    outcome: str                           # cpu_lane_ok | cpu_lane_blocked |
+                                           # cpu_fallback_unsupported
+    est_ram_bytes: int | None
+    ram_decision: str | None               # ok | warn | block
+    ram_decision_reason: str = ""
+    reasons: list[str]
+    limitations: list[str]
+
+
+class StageComponentOut(BaseModel):
+    component_key: str
+    artifact_id: str
+    role: str
+    file_name: str | None
+    provenance: str
+    declared_size_bytes: int | None        # manifest-declared member size
+
+
+class EstimateOut(BaseModel):
+    """basis: heuristic (catalog anchors) | partial (declared weights,
+    unknown activation) | unknown."""
+    bytes: int | None
+    basis: str
+
+
+class OffloadAlternativeOut(BaseModel):
+    """A secondary residency-mode estimate — advisory; requires the named
+    catalog capability AND the runtime's residency contract
+    (`requires_capability` is null for the capability-free 'gpu' mode)."""
+    residency_mode: str
+    est_vram_bytes: int | None
+    basis: str
+    requires_capability: str | None
+
+
+class ExecStageOut(BaseModel):
+    """Exactly one genuine generation stage (U-5c-1). No fabricated
+    pipeline steps, no parallelism, no pooled devices."""
+    stage_id: str
+    kind: str
+    workflow_key: str
+    runtime_key: str
+    residency_mode: str                    # gpu default; explicit request
+    residency_basis: str                   # explicit | default
+    residency_notes: list[str]             # e.g. vae_expected_on_cpu
+    components: list[StageComponentOut]
+    lora_applications: int
+    est_vram: EstimateOut
+    est_ram: EstimateOut
+    runtime_overhead_basis: str            # included_in_anchor | unknown
+    offload_alternatives: list[OffloadAlternativeOut]
+
+
+class ExecutionPreviewOut(BaseModel):
+    """U-5c-1 — advisory-only execution-plan preview. `advisory` is always
+    True: nothing here is execution authorization, no GPU is reserved,
+    and GpuScheduler remains the sole execution-time authority."""
+    advisory: bool = True
+    advisory_state: str                    # preview_ready_advisory |
+                                         # preview_incomplete | preview_blocked
+    plan_fingerprint: str                  # "plan:v1:" + hash
+    artifact_id: str
+    workflow_key: str
+    runtime_key: str
+    dependency_plan_ref: str               # U-5b resolution_version
+    snapshot: HwSnapshotOut
+    snapshot_stale: bool
+    stage: ExecStageOut
+    device_alternatives: list[DeviceAlternativeOut]
+    devices_total: int
+    device_alternatives_truncated: bool
+    cpu_lane: CpuLaneOut | None
+    dependency_state: str
+    runtime_state: str
+    policy_state: str
+    capacity_state: str
+    hardware_state: str
+    ram_state: str
+    evidence_state: str
+    limitations: list[str]
+    reasons: list[str]
+    limits_exceeded: list[str]
+    limits: dict[str, int]
+
+
 class GpuSettingsOut(BaseModel):
     mode: str  # auto | manual
     preferred_gpu: int | None
