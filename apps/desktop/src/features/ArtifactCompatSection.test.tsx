@@ -206,7 +206,34 @@ describe("ArtifactCompatSection", () => {
     expect(screen.getByText("Installed — version not validated"))
       .toBeTruthy();
     expect(screen.getByText(/not in the validated set/)).toBeTruthy();
-    expect(screen.getByText(/0\.0\.1/)).toBeTruthy(); // validated list
+    expect(screen.getByText(/Validated runtime versions:/)).toBeTruthy();
+    expect(screen.getByText(/0\.0\.1/)).toBeTruthy();
+  });
+
+  it("C4 — evaluated vs validated versions are distinct, never conflated", async () => {
+    render(<ArtifactCompatSection artifactId="a1" />);
+    await screen.findByText("Compatible — static evaluation");
+    // The evaluated version is not part of the read contract — the row
+    // is labeled honestly, and "0.0.1" appears ONLY as a declared
+    // validated version, never as the evaluated one.
+    expect(screen.getByText(/Evaluated version:/)).toBeTruthy();
+    expect(screen.getByText("unavailable")).toBeTruthy();
+    expect(screen.getByText(/Validated runtime versions:/)).toBeTruthy();
+    const evalRow = screen.getByText(/Evaluated version:/).parentElement!;
+    expect(evalRow.textContent).not.toContain("0.0.1");
+  });
+
+  it("C4 — unavailable evaluated version is labeled, not inferred", async () => {
+    mockApi({
+      verdicts: [{ ...BASE, runtime_axis: "installed_unverified",
+        reasons: ["runtime_version_unverified"] }],
+    });
+    render(<ArtifactCompatSection artifactId="a1" />);
+    await screen.findByText("Installed — version not validated");
+    // even when the axis is about version state, the evaluated version
+    // is still reported unavailable — never guessed from the ruleset
+    expect(screen.getByText("unavailable")).toBeTruthy();
+    expect(screen.queryByText(/Evaluated version: 0\.0\.1/)).toBeNull();
   });
 
   it("C6.9 — planned runtime → planned, never claimable", async () => {

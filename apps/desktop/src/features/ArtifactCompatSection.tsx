@@ -104,6 +104,13 @@ function runtimeName(v: CompatVerdict, ruleset: CompatRuleset | null): string {
     ?.display_name ?? v.runtime_key;
 }
 
+/** The validated-version set is a DECLARED ruleset property — it is
+ * never the version that was evaluated. The evaluated runtime version
+ * is not present in CompatVerdictOut (it lives only in the persisted
+ * evidence sample, which the read contract deliberately does not
+ * expose). Deferred backend contract improvement: a structured
+ * `evaluated_runtime_version` field. Until then the panel reports it
+ * honestly as unavailable rather than inferring it from the ruleset. */
 function validatedVersions(v: CompatVerdict, ruleset: CompatRuleset | null): string[] {
   return ruleset?.runtimes.find((r) => r.runtime_key === v.runtime_key)
     ?.validated_versions ?? [];
@@ -261,8 +268,10 @@ export function ArtifactCompatSection({ artifactId }: { artifactId: string }) {
                     {`V${v.level}`}
                     {v.confidence && v.confidence !== "none"
                       ? ` · ${v.confidence}` : ""}</dd></div>
+                <div><dt className="inline text-faint">Evaluated version: </dt>
+                  <dd className="inline text-muted">unavailable</dd></div>
                 {versions.length > 0 && (
-                  <div><dt className="inline text-faint">Validated versions: </dt>
+                  <div><dt className="inline text-faint">Validated runtime versions: </dt>
                     <dd className="inline text-muted">{versions.join(", ")}</dd></div>
                 )}
               </dl>
