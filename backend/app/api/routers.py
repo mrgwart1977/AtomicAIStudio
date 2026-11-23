@@ -54,6 +54,7 @@ from app.schemas.api import (
     CompatEvalOut,
     CompatRulesetOut,
     DependencyPlanOut,
+    ExecutionPreviewOut,
     EntityAssetLinkOut,
     ReferenceSetOut,
     EntityOut,
@@ -584,32 +585,16 @@ def artifact_runtime_candidates(
             "candidates": out}
 
 
-@api_router.get(
-    "/api/projects/{project_id}/models/artifacts/{artifact_id}/"
-    "dependency-plan",
-    response_model=DependencyPlanOut)
-def artifact_dependency_plan(
-        artifact_id: str, request: Request,
-        project: Project = Depends(get_project),   # noqa: B008
-        workflow: str = "text2image",
-        runtime_key: str = "",
-        shot_id: str | None = None,
-        character_ids: str | None = None,
-        select_params: list[str] = Query(         # noqa: B008
-            default=[], alias="select"),
-        include_stale: bool = True,
-        db: Session = Depends(get_db)):             # noqa: B008
-    """U-5b — advisory dependency plan for one root artifact +
-    workflow + requested runtime. READ-ONLY stored evidence — never
-    writes, never evaluates a verdict, never touches the filesystem,
-    never emits execution authorization.
+def _dep_plan_assembly(db, request, project, artifact_id, workflow,
+                       runtime_key, shot_id, character_ids,
+                       select_params, include_stale):
+    """Shared U-5b/U-5c-1 assembly: stored evidence → DepPlan.
 
-    Fill precedence per slot: explicit selector > root-bundle manifest
-    > independently registered candidates > advisory suggestions.
-    Ambiguity is reported, never silently resolved. Cast context is
-    project-scoped: cross-project references 404 without disclosure;
-    character_ids without shot context can never imply identity-LoRA
-    admission."""
+    Returns (plan, ctx) where ctx carries the root row, the candidate
+    pool, the runtime decl, the resolved catalog spec (if any), the
+    probe report already read, the runtime candidate state, and the
+    stale-omitted count — everything the preview surfaces need without
+    re-running the evidence walk."""
     import hashlib
     import json
 
@@ -752,9 +737,9 @@ def artifact_dependency_plan(
         for p in request.app.state.adapter_registry.list_profiles()
     }
     catalog = None
-    if artifact_id.startswith("catalog:"):
-        spec0 = model_catalog.get(artifact_id.split(":", 1)[1])
-        if spec0 is not None:
+    spec0 = (model_catalog.get(artifact_id.split(":", 1)[1])
+             if artifact_id.startswith("catalog:") else None)
+    if spec0 is not None:
             catalog = runtime_resolver.CatalogBinding(
                 adapter_id=spec0.adapter_id,
                 runtime_key=spec0.runtime_key,
@@ -822,6 +807,41 @@ def artifact_dependency_plan(
         include_stale=include_stale,
         fingerprint_inputs=fingerprint_inputs)
 
+    return plan, {"row": row, "pool": pool, "cap": cap, "wdef": wdef,
+                  "spec": spec0, "hw": hw,
+                  "stale_omitted": stale_omitted}
+
+
+@api_router.get(
+    "/api/projects/{project_id}/models/artifacts/{artifact_id}/"
+    "dependency-plan",
+    response_model=DependencyPlanOut)
+def artifact_dependency_plan(
+        artifact_id: str, request: Request,
+        project: Project = Depends(get_project),   # noqa: B008
+        workflow: str = "text2image",
+        runtime_key: str = "",
+        shot_id: str | None = None,
+        character_ids: str | None = None,
+        select_params: list[str] = Query(         # noqa: B008
+            default=[], alias="select"),
+        include_stale: bool = True,
+        db: Session = Depends(get_db)):             # noqa: B008
+    """U-5b — advisory dependency plan for one root artifact +
+    workflow + requested runtime. READ-ONLY stored evidence — never
+    writes, never evaluates a verdict, never touches the filesystem,
+    never emits execution authorization.
+
+    Fill precedence per slot: explicit selector > root-bundle manifest
+    > independently registered candidates > advisory suggestions.
+    Ambiguity is reported, never silently resolved. Cast context is
+    project-scoped: cross-project references 404 without disclosure;
+    character_ids without shot context can never imply identity-LoRA
+    admission."""
+    plan, ctx = _dep_plan_assembly(
+        db, request, project, artifact_id, workflow, runtime_key,
+        shot_id, character_ids, select_params, include_stale)
+    stale_omitted = ctx["stale_omitted"]
     return {
         "artifact_id": plan.artifact_id, "workflow_key": plan.workflow_key,
         "runtime_key": plan.runtime_key,
@@ -861,6 +881,132 @@ def artifact_dependency_plan(
         "resolution_version": plan.resolution_version,
         "advisory": plan.advisory,
     }
+
+
+@api_router.get(
+    "/api/projects/{project_id}/models/artifacts/{artifact_id}/"
+    "execution-preview",
+    response_model=ExecutionPreviewOut)
+def artifact_execution_preview(
+        artifact_id: str, request: Request,
+        project: Project = Depends(get_project),   # noqa: B008
+        workflow: str = "text2image",
+        runtime_key: str = "",
+        width: int = 512, height: int = 512, batch: int = 1,
+        device: str = "auto", residency_mode: str | None = None,
+        shot_id: str | None = None,
+        character_ids: str | None = None,
+        select_params: list[str] = Query(         # noqa: B008
+            default=[], alias="select"),
+        include_stale: bool = True,
+        db: Session = Depends(get_db)):             # noqa: B008
+    """U-5c-1 — single-stage hardware-aware execution-plan preview.
+
+    READ-ONLY and advisory only: consumes the existing cached
+    hardware.probe() report (standard ~5-minute cadence — this endpoint
+    never forces a refresh and adds no probing) and the scheduler's
+    state() view as evidence. It never calls GpuScheduler.acquire(),
+    never creates a job, never reserves VRAM, never loads or runs a
+    model. Exactly one genuine generation stage is evaluated against
+    each eligible device independently — no pooled VRAM, sharding, or
+    parallelism."""
+    from app.domain import dep_graph, hw_snapshot, plan_preview, resources
+
+    if not runtime_key:
+        raise HTTPException(400, "runtime_key is required")
+    if not 1 <= width <= 4096 or not 1 <= height <= 4096:
+        raise HTTPException(400, "width/height must be within 1..4096")
+    if not 1 <= batch <= 8:
+        raise HTTPException(400, "batch must be within 1..8")
+    residency_basis = "explicit" if residency_mode else "default"
+    residency_mode = residency_mode or "gpu"
+    if residency_mode not in plan_preview.RESIDENCY_MODES:
+        raise HTTPException(400, f"residency_mode_unknown:{residency_mode}")
+    device_sel, selected_index = "auto", None
+    if device == "cpu":
+        device_sel = "cpu"
+    elif device != "auto":
+        try:
+            selected_index = int(device)
+        except ValueError:
+            raise HTTPException(400, "device must be auto|cpu|<index>") from None
+        if selected_index < 0:
+            raise HTTPException(400, "device index must be >= 0")
+        device_sel = "index"
+
+    plan, ctx = _dep_plan_assembly(
+        db, request, project, artifact_id, workflow, runtime_key,
+        shot_id, character_ids, select_params, include_stale)
+    row, pool, cap, spec, hw = (ctx["row"], ctx["pool"], ctx["cap"],
+                                ctx["spec"], ctx["hw"])
+
+    # Gate 6 — residency must sit inside BOTH the runtime's execution
+    # contract AND a declared catalog capability; 'gpu' is the default.
+    permitted, res_reason = plan_preview.residency_evidence(
+        runtime_key, spec, residency_mode)
+    if not permitted:
+        raise HTTPException(422, res_reason)
+
+    margins = resources.safety_margins(resources.settings_overrides(db))
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    snapshot = hw_snapshot.build_snapshot(
+        hw, sched.state() if sched else None, margins)
+
+    if device_sel == "index":
+        known = {d["index"] for d in snapshot["devices"]} | {
+            d["index"] for d in snapshot["lost_devices"]}
+        if selected_index not in known:
+            raise HTTPException(
+                422, f"no GPU with index {selected_index} in this "
+                     "hardware snapshot")
+
+    # Stage components — dep fills + their declared manifest member
+    # sizes (display evidence only; the estimate never sums them a
+    # second time over estimate_vram's own anchors).
+    components: list[dict] = []
+    lora_apps = 0
+    for s in plan.requirements:
+        for f in s.fills:
+            if f.role in ("lora", "lora_identity", "lora_style"):
+                lora_apps += 1
+            ent = pool.get(f.artifact_id)
+            size = None
+            if ent is not None:
+                man = ent.view.manifest
+                if f.file_name:
+                    size = next((m.size_bytes or None for m in man
+                                 if m.file_name == f.file_name), None)
+                elif man and all(m.size_bytes for m in man):
+                    size = sum(m.size_bytes for m in man)
+            components.append({
+                "component_key": f.component_key,
+                "artifact_id": f.artifact_id, "role": f.role,
+                "file_name": f.file_name, "provenance": f.provenance,
+                "declared_size_bytes": size})
+
+    # Declared-weights floor for imported artifacts (no catalog anchors).
+    root_man = dep_graph.canonical_manifest(
+        (row.meta_json or {}).get("files") or [])
+    weights_declared = (sum(m.size_bytes for m in root_man)
+                        if root_man and all(m.size_bytes for m in root_man)
+                        else None)
+
+    ram_known = spec is not None
+    preview = plan_preview.build_preview(
+        plan=plan, spec=spec, runtime_key=runtime_key,
+        runtime_decl_backends=tuple(cap.backends or ()),
+        runtime_planned=bool(getattr(cap, "planned", False)),
+        snapshot=snapshot, components=components, lora_apps=lora_apps,
+        weights_declared=weights_declared,
+        residency=residency_mode,
+        residency_basis=residency_basis,
+        device_sel=device_sel, selected_index=selected_index,
+        width=width, height=height, batch=batch,
+        workflow_key=workflow, include_stale=include_stale,
+        preflight=lambda est, known: resources.preflight_memory_check(
+            est, known=known, margins=margins),
+        ram_known=ram_known, margins=margins)
+    return preview
 
 
 @api_router.get("/api/models/import-capabilities",
