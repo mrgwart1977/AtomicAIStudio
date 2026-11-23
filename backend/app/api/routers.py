@@ -85,6 +85,7 @@ from app.schemas.api import (
     ProjectOut,
     ProjectRevisionOut,
     PromptDraftOut,
+    RuntimeCandidatesOut,
     RuntimeOut,
     SharedAssetOut,
     StorageLocationCreate,
@@ -94,6 +95,7 @@ from app.schemas.api import (
     TimelineDetailOut,
     TimelineOut,
     TimelineRevisionOut,
+    WorkflowDefsOut,
 )
 
 # /health stays token-free so the desktop shell can poll readiness.
@@ -432,6 +434,153 @@ def compat_ruleset(request: Request):
             for d in runtime_caps.decl_catalog()
         ],
     }
+
+
+# ---------- U-5a workflow contracts + runtime candidates ----------
+
+
+@api_router.get("/api/workflows/defs", response_model=WorkflowDefsOut)
+def workflow_definitions(request: Request):
+    """U-5a — the declarative workflow requirement registry. `status`
+    is a static audited declaration; a workflow being "implemented"
+    says nothing about any model's compatibility."""
+    from app.domain import workflow_defs
+    return {
+        "workflow_defs_version": workflow_defs.WORKFLOW_DEFS_VERSION,
+        "defs": [
+            {
+                "workflow_key": d.workflow_key,
+                "display_name": d.display_name,
+                "required_modes": list(d.required_modes),
+                "required_components": list(d.required_components),
+                "optional_components": list(d.optional_components),
+                "min_level": d.min_level,
+                "policy": d.policy,
+                "status": d.status,
+                "notes": d.notes,
+            }
+            for d in workflow_defs.workflow_catalog()
+        ],
+    }
+
+
+@api_router.get("/api/models/artifacts/{artifact_id}/runtime-candidates",
+                response_model=RuntimeCandidatesOut)
+def artifact_runtime_candidates(
+        artifact_id: str, request: Request,
+        workflow: str = "text2image", include_stale: bool = True,
+        db: Session = Depends(get_db)):  # noqa: B008
+    """U-5a — ranked static runtime candidates for one artifact +
+    workflow. READ-ONLY: never writes, never evaluates a verdict —
+    stored U-4 verdicts are the evidence, live-computed staleness the
+    marker. `include_stale=false` filters stale-derived candidates but
+    NEVER hides a blocked candidate — a policy block is always shown.
+    Advisory only: a candidate is not execution authorization."""
+    from app.db.models import CompatVerdict, ModelArtifact
+    from app.domain import compat_verdicts, hardware, runtime_caps, runtime_resolver, workflow_defs
+
+    row = db.get(ModelArtifact, artifact_id)
+    if row is None:
+        raise HTTPException(404, "unknown artifact")
+    wdef = workflow_defs.get_workflow(workflow)
+    if wdef is None:
+        raise HTTPException(400, f"workflow_unknown:{workflow}")
+
+    # Stored verdicts + live staleness (identical check to GET /compat).
+    vrows = db.execute(
+        select(CompatVerdict).where(CompatVerdict.artifact_id == artifact_id)
+        .order_by(CompatVerdict.runtime_key)
+    ).scalars().all()
+    hw = hardware.probe()
+    prefs = compat_verdicts.gpu_prefs(db)
+    verdict_views = []
+    verdict_payloads: dict[str, dict] = {}
+    for v in vrows:
+        stale = compat_verdicts.fingerprint_for_runtime(
+            db, row, v.runtime_key, hw, prefs) != v.inputs_fingerprint
+        verdict_views.append(runtime_resolver.VerdictView(
+            runtime_key=v.runtime_key, arch_axis=v.arch_axis,
+            arch_confidence=v.arch_confidence,
+            runtime_axis=v.runtime_axis, hardware_axis=v.hardware_axis,
+            policy_axis=v.policy_axis, confidence=v.confidence,
+            reasons=tuple(v.reasons_json or []),
+            missing=tuple(v.missing_json or []), stale=stale,
+            domain_levels=dict(v.domain_levels_json or {})))
+        verdict_payloads[v.runtime_key] = {
+            "artifact_id": v.artifact_id, "runtime_key": v.runtime_key,
+            "arch_axis": v.arch_axis, "arch_confidence": v.arch_confidence,
+            "runtime_axis": v.runtime_axis,
+            "hardware_axis": v.hardware_axis, "policy_axis": v.policy_axis,
+            "level": v.level, "domain_levels": v.domain_levels_json or {},
+            "overall": v.overall,
+            "blocking_axes": v.blocking_axes_json or [],
+            "confidence": v.confidence, "reasons": v.reasons_json or [],
+            "warnings": v.warnings_json or [],
+            "missing": v.missing_json or [],
+            "hardware_limits": v.hardware_limits_json or [],
+            "actions": v.actions_json or [], "stale": stale,
+            "ruleset_version": v.ruleset_version,
+            "evaluated_at": v.evaluated_at,
+        }
+
+    # Registered adapters → evidence view (identity + task support only).
+    adapters = {
+        p["adapter_id"]: runtime_resolver.AdapterEvidence(
+            adapter_id=p["adapter_id"], registered=True,
+            tasks=tuple(p.get("tasks") or ()))
+        for p in request.app.state.adapter_registry.list_profiles()
+    }
+
+    # Catalog default binding — catalog-sourced artifacts only.
+    catalog = None
+    if artifact_id.startswith("catalog:"):
+        spec = model_catalog.get(artifact_id.split(":", 1)[1])
+        if spec is not None:
+            catalog = runtime_resolver.CatalogBinding(
+                adapter_id=spec.adapter_id,
+                runtime_key=spec.runtime_key,
+                compatible_adapters=tuple(spec.compatible_adapters))
+
+    # C3 — inspection evidence uses U-4's `_domain_levels` formula
+    # verbatim: V1 = an import-sourced row with a completed U-2 report
+    # whose fmt is recognized. That is container/format RECOGNITION —
+    # U-4 deliberately encodes no file-integrity verification claim
+    # ("family identification does NOT imply file-integrity
+    # verification"), and this endpoint asserts nothing stronger.
+    report = row.import_report_json or {}
+    inspection_level = 1 if (
+        row.source_type == "import" and report
+        and report.get("fmt") not in (None, "", "unknown")) else 0
+
+    ctx = runtime_resolver.ResolverContext(
+        decls=dict(runtime_caps.RUNTIME_CAPS), adapters=adapters,
+        catalog=catalog, workflow=wdef,
+        inspection_level=inspection_level,
+        requires_inspection=row.source_type == "import")
+
+    family_id = row.family or None
+    candidates = runtime_resolver.resolve_candidates(
+        artifact_id=artifact_id, family_id=family_id,
+        kind=row.kind or "model", verdicts=verdict_views, ctx=ctx)
+
+    out = []
+    stale_omitted = 0
+    for i, c in enumerate(candidates):
+        if not include_stale and c.verdict_stale \
+                and c.state != runtime_resolver.BLOCKED:
+            stale_omitted += 1     # stale optimism filtered — never a
+            continue               # stale block, never a missing verdict
+        out.append({
+            "runtime_key": c.runtime_key, "adapter_id": c.adapter_id,
+            "binding_kind": c.binding_kind, "state": c.state, "rank": i,
+            "verdict_stale": c.verdict_stale,
+            "has_verdict": c.has_verdict, "reasons": list(c.reasons),
+            "missing": list(c.missing),
+            "verdict": verdict_payloads.get(c.runtime_key),
+        })
+    return {"artifact_id": artifact_id, "workflow_key": workflow,
+            "stale_candidates_omitted": stale_omitted,
+            "candidates": out}
 
 
 @api_router.get("/api/models/import-capabilities",

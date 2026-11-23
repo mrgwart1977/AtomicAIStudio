@@ -872,6 +872,59 @@ class CompatRulesetOut(BaseModel):
     runtimes: list[CompatRuntimeDeclOut]
 
 
+# ---------- U-5a workflow contracts + runtime candidates ----------
+
+class WorkflowDefOut(BaseModel):
+    """One declarative workflow requirement contract. `status` is a
+    static audited declaration — never derived at request time."""
+    workflow_key: str
+    display_name: str
+    required_modes: list[str]
+    required_components: list[str]
+    optional_components: list[str]
+    min_level: int
+    policy: str
+    status: str          # implemented | partial | missing | held
+    notes: str
+
+
+class WorkflowDefsOut(BaseModel):
+    workflow_defs_version: int
+    defs: list[WorkflowDefOut]
+
+
+class RuntimeCandidateOut(BaseModel):
+    """One (runtime, adapter) candidacy — a STATIC evidence claim for
+    plan review, never an execution offer. `state` is exactly one of
+    candidate_compatible_static | candidate_limited |
+    candidate_unknown | candidate_blocked. `verdict_stale` is a
+    separate marker — it never weakens or overrides a block.
+    `verdict` embeds the stored U-4 verdict when one exists."""
+    runtime_key: str
+    adapter_id: str | None
+    binding_kind: str    # catalog_default | compatible_adapter |
+                         # alternate_runtime
+    state: str
+    rank: int
+    verdict_stale: bool
+    has_verdict: bool
+    reasons: list[str]
+    missing: list[str]
+    verdict: CompatVerdictOut | None
+
+
+class RuntimeCandidatesOut(BaseModel):
+    artifact_id: str
+    workflow_key: str
+    # Typed completeness indicator for include_stale=false: how many
+    # stale-verdict candidates were omitted from `candidates`. Omitted
+    # entries are never presented as fresh, and blocked candidates are
+    # never omitted — so a nonzero count always means stale optimistic
+    # claims were hidden, nothing else.
+    stale_candidates_omitted: int
+    candidates: list[RuntimeCandidateOut]
+
+
 class GpuSettingsOut(BaseModel):
     mode: str  # auto | manual
     preferred_gpu: int | None
