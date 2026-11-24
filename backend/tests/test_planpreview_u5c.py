@@ -61,7 +61,13 @@ def probe_report(gpus=None, backends=None, simulated=False, probed_at=None,
                           "logical_cores": 16},
         "memory": memory or {"total_bytes": 32 * GIB,
                              "available_bytes": 24 * GIB,
-                             "commit_headroom_bytes": 30 * GIB},
+                             "commit_limit_bytes": 44 * GIB,
+                             "commit_charge_bytes": 14 * GIB,
+                             "commit_headroom_bytes": 30 * GIB,
+                             "commit_source": "get_performance_info",
+                             "commit_scope": "system_wide",
+                             "commit_confidence": "measured",
+                             "commit_unavailable_reason": None},
         "gpus": gpus or [], "disks": [],
         "backends": backends or {
             "cpu": {"available": True, "measured": True},
@@ -892,16 +898,18 @@ def test_ep_wan_gpu_default_and_offload(client, sim_gpu):
     off = [a["residency_mode"]
            for a in b["stage"]["offload_alternatives"]]
     assert off == ["cpu_offload"]                  # declared alt shown
-    # explicit offload path fits — but the cached probe memory never
-    # carries commit-headroom evidence (psutil physical only), which the
-    # execution-preflight contract requires → honest incomplete, never
-    # READY on absent commit evidence.
+    # explicit offload path fits — U-5c-1b: the published evidence now
+    # carries qualified measured system-wide commit headroom, so the
+    # full endpoint contract reaches advisory READY. (Pre-U-5c-1b this
+    # was preview_incomplete/ram_unknown — see the preserved negative
+    # cases below for missing/unqualified commit evidence.)
     r2 = client.get(_purl(pid, WAN_AID, runtime_key="sdcpp",
                           workflow="text2video", width=832, height=480,
                           residency_mode="cpu_offload"))
     b2 = r2.json()
-    assert b2["advisory_state"] == "preview_incomplete"
-    assert "ram_unknown" in b2["reasons"]
+    assert b2["advisory_state"] == "preview_ready_advisory"
+    assert b2["ram_eval"]["fully_evaluated"] is True
+    assert b2["ram_eval"]["checks"]["commit_headroom"] == "ok"
     assert b2["device_alternatives"][0]["fit_class"] \
         == "fits_with_headroom"
     assert b2["stage"]["residency_basis"] == "explicit"
@@ -968,7 +976,7 @@ def test_ep_snapshot_labels_and_freshness(client, sim_gpu):
     assert dev["vram_free_bytes"] == 6 * GIB       # driver measured
     assert dev["usable_bytes"] == 6 * GIB          # derived
     assert dev["index_stability"] == "per_boot"
-    assert b["snapshot"]["snapshot_id"].startswith("hw:v1:")
+    assert b["snapshot"]["snapshot_id"].startswith("hw:v2:")
     assert b["snapshot"]["captured_at"] is not None
 
 

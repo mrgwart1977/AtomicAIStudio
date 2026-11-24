@@ -28,7 +28,7 @@ import time
 
 from app.domain import compatibility
 
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2   # v2 — memory evidence gains qualified commit fields
 # hardware.probe() caches per ~5-minute bucket — a snapshot older than
 # one bucket is reported stale (disclosed, never hidden).
 STALE_SNAPSHOT_SECONDS = 300.0
@@ -189,14 +189,29 @@ def build_snapshot(probe: dict, sched_state: dict | None,
         "backends": sorted((k, v["available"], v["measured"])
                            for k, v in backends.items()),
         "cpu": [cpu.get("physical_cores"), cpu.get("logical_cores")],
-        "memory": [mem.get("total_bytes"), mem.get("available_bytes")],
+        # Memory canon carries every material commit-evidence attribute —
+        # a bare number is NOT equivalent to qualified measured evidence.
+        "memory": [mem.get("total_bytes"), mem.get("available_bytes"),
+                   mem.get("commit_limit_bytes"),
+                   mem.get("commit_charge_bytes"),
+                   mem.get("commit_headroom_bytes"),
+                   mem.get("commit_source"), mem.get("commit_scope"),
+                   mem.get("commit_confidence"),
+                   mem.get("commit_unavailable_reason")],
         "simulated": simulated,
     }
-    snapshot_id = "hw:v1:" + hashlib.sha256(
+    snapshot_id = "hw:v2:" + hashlib.sha256(
         _canon(canon).encode()).hexdigest()[:16]
 
     captured = probe.get("probed_at")
     captured_mono = probe.get("probed_monotonic")
+    # Memory is sampled at the START of collection — its own monotonic
+    # predates the report's, so staleness ages from the OLDEST relevant
+    # sample rather than the newest (conservative direction only).
+    mem_mono = mem.get("sampled_monotonic")
+    if isinstance(mem_mono, (int, float)):
+        captured_mono = (mem_mono if captured_mono is None
+                         else min(captured_mono, mem_mono))
     age_s = (max(0.0, now - captured) if captured is not None else None)
     # Freshness is a monotonic measurement — immune to wall-clock jumps.
     # The wall-clock fallback serves reports collected before the
@@ -220,7 +235,15 @@ def build_snapshot(probe: dict, sched_state: dict | None,
                 "physical_cores": cpu.get("physical_cores"),
                 "logical_cores": cpu.get("logical_cores")},
         "memory": {"total_bytes": mem.get("total_bytes"),
-                   "available_bytes": mem.get("available_bytes")},
+                   "available_bytes": mem.get("available_bytes"),
+                   "commit_limit_bytes": mem.get("commit_limit_bytes"),
+                   "commit_charge_bytes": mem.get("commit_charge_bytes"),
+                   "commit_headroom_bytes": mem.get("commit_headroom_bytes"),
+                   "commit_source": mem.get("commit_source"),
+                   "commit_scope": mem.get("commit_scope"),
+                   "commit_confidence": mem.get("commit_confidence"),
+                   "commit_unavailable_reason":
+                       mem.get("commit_unavailable_reason")},
         "reservations_captured": reservations_captured,
         "unknowns": unknowns,
     }

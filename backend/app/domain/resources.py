@@ -27,6 +27,98 @@ if _IS_WINDOWS:
         ]
 
 
+# Documented GetPerformanceInfo layout — DWORD cb, eleven SIZE_T
+# page/size counts (pointer-width: c_size_t stays correct on 32- and
+# 64-bit), then three DWORD counters. Commit*/Physical* are in PAGES,
+# not bytes. The structure itself is platform-independent — only its
+# USE is Windows-gated (defining it is not a DLL access).
+class PERFORMANCE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_uint32),
+        ("CommitTotal", ctypes.c_size_t),
+        ("CommitLimit", ctypes.c_size_t),
+        ("CommitPeak", ctypes.c_size_t),
+        ("PhysicalTotal", ctypes.c_size_t),
+        ("PhysicalAvailable", ctypes.c_size_t),
+        ("SystemCache", ctypes.c_size_t),
+        ("KernelTotal", ctypes.c_size_t),
+        ("KernelPaged", ctypes.c_size_t),
+        ("KernelNonpaged", ctypes.c_size_t),
+        ("PageSize", ctypes.c_size_t),
+        ("HandleCount", ctypes.c_uint32),
+        ("ProcessCount", ctypes.c_uint32),
+        ("ThreadCount", ctypes.c_uint32),
+    ]
+
+
+def _gpi_call(info) -> bool:
+    """psapi GetPerformanceInfo — the ONLY system-wide commit source.
+
+    Isolated so tests can substitute the call without touching a DLL;
+    unreachable on non-Windows platforms."""
+    return bool(ctypes.windll.psapi.GetPerformanceInfo(
+        ctypes.byref(info), ctypes.sizeof(info)))
+
+
+def commit_evidence() -> dict:
+    """U-5c-1b — measured SYSTEM-WIDE commit evidence for cached reports.
+
+    Windows: GetPerformanceInfo CommitLimit/CommitTotal are page counts —
+    bytes require an explicit multiply by the reported PageSize (never a
+    4096 assumption). headroom = (limit - charge) x PageSize.
+    Non-Windows: honestly unavailable — no POSIX approximation is
+    presented as commit evidence in this milestone.
+
+    Scope is strictly system-wide: process-specific and job-object
+    limits are outside this contract, and a positive headroom is never
+    a guarantee that any single worker's allocation will succeed.
+    Absent/invalid measurements produce Nones with a stable reason —
+    never fabricated zeros; a MEASURED zero stays zero. This function
+    performs no OS calls on import and none at all off Windows."""
+    out = {"commit_limit_bytes": None, "commit_charge_bytes": None,
+           "commit_headroom_bytes": None,
+           "commit_source": "unavailable", "commit_scope": "unavailable",
+           "commit_confidence": "unavailable",
+           "commit_unavailable_reason": None}
+    if not _IS_WINDOWS:
+        return {**out, "commit_unavailable_reason": "unsupported_platform"}
+    # Attempted measurement — provenance describes the attempt; the
+    # confidence field separately records whether it produced evidence.
+    attempted = {"commit_source": "get_performance_info",
+                 "commit_scope": "system_wide"}
+    try:
+        info = PERFORMANCE_INFORMATION()
+        info.cb = ctypes.sizeof(info)
+        ok = _gpi_call(info)
+    except (OSError, AttributeError, TypeError, ValueError,
+            RuntimeError, ctypes.ArgumentError):
+        return {**out, **attempted,
+                "commit_unavailable_reason": "api_unavailable"}
+    if not ok:
+        return {**out, **attempted,
+                "commit_unavailable_reason": "api_failure"}
+    page = int(info.PageSize)
+    limit_p, charge_p = int(info.CommitLimit), int(info.CommitTotal)
+    if page <= 0:
+        return {**out, **attempted,
+                "commit_unavailable_reason": "invalid_page_size"}
+    if limit_p <= 0:
+        return {**out, **attempted,
+                "commit_unavailable_reason": "invalid_commit_limit"}
+    if charge_p < 0 or charge_p > limit_p:
+        # charge > limit is internally inconsistent — an attempted
+        # measurement that yields unusable values stays unavailable.
+        return {**out, **attempted,
+                "commit_unavailable_reason": "inconsistent_measurements"}
+    return {"commit_limit_bytes": limit_p * page,
+            "commit_charge_bytes": charge_p * page,
+            "commit_headroom_bytes": (limit_p - charge_p) * page,
+            "commit_source": "get_performance_info",
+            "commit_scope": "system_wide",
+            "commit_confidence": "measured",
+            "commit_unavailable_reason": None}
+
+
 def system_memory() -> dict[str, Any]:
     """Snapshot of physical RAM + commit charge. Values in bytes."""
     if _IS_WINDOWS:
@@ -170,9 +262,11 @@ def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
     psutil or any other OS query: absent evidence is reported as
     "unknown", never measured and never fabricated.
 
-    The cached hardware report carries only physical total/available
-    (psutil), so `commit_headroom_bytes` is normally absent — the commit
-    check then reads "unknown" and the result is not fully evaluated.
+    A bare `commit_headroom_bytes` number is NOT usable evidence — the
+    commit check additionally requires the U-5c-1b provenance
+    (commit_confidence="measured" AND commit_scope="system_wide"), so
+    legacy, approximate, process-capped or malformed commit values all
+    degrade honestly to "unknown".
     `decision`: block > warn > unknown > ok; `fully_evaluated` is False
     whenever a required check is unknown. An "ok" or "warn" without full
     evaluation must not establish advisory readiness."""
@@ -211,12 +305,25 @@ def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
         else:
             checks["phys_avail"] = "ok"
         commit = mem.get("commit_headroom_bytes")
-        if commit is None:
-            # Required by the execution-preflight contract but not
-            # collectible from the cached report — honest unknown.
+        # R3 evidence qualification: a bare number never counts — only
+        # measured system-wide provenance may establish the commit check.
+        # Legacy reports, approximations, process-capped values and
+        # malformed evidence all degrade to honest unknown.
+        commit_qualified = (
+            mem.get("commit_confidence") == "measured"
+            and mem.get("commit_scope") == "system_wide")
+        if commit is None or not commit_qualified:
+            # Required by the execution-preflight contract but absent or
+            # unqualified in the cached report — honest unknown.
             checks["commit_headroom"] = "unknown"
-            reasons.append("commit headroom not present in cached memory "
-                           "evidence")
+            if commit is None:
+                reasons.append("commit headroom not present in cached "
+                               "memory evidence")
+            else:
+                checks["commit_evidence"] = "unqualified"
+                reasons.append("commit evidence lacks measured "
+                               "system-wide provenance — not usable "
+                               "for readiness")
         else:
             commit_after = int(commit) - est
             snap["commit_after_bytes"] = commit_after

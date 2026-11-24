@@ -1356,3 +1356,21 @@ def test_cd9dup_shared_helper_and_verdict_agree_on_zero():
     g = _gpu4(vram_free_bytes=0)
     assert compatibility.usable_vram(g) == 0
     assert compat_verdicts._usable_vram(g, fresh_sample=True) == 0
+
+
+def test_u5c1b_measured_zero_available_ram_warns_ram_tight():
+    # U-5c-1a disclosed test debt: a measured available_bytes=0 is a real
+    # ram_tight warning, not absent evidence (zero-versus-None class).
+    hw = _hw(mem_avail=0)
+    view = _catalog_view(meta={
+        "requirements": {"min_vram_bytes": 4 * _GIB4,
+                         "min_ram_bytes": 16 * _GIB4,
+                         "backends": ["cuda"]}})
+    _, _, warnings, _ = compat_verdicts._hardware_eval(
+        view, classify_artifact(view), get_decl("sdcpp"), hw, {})
+    assert "ram_tight" in warnings
+    # An absent sample stays on the honest no-warning path.
+    hw2 = _hw(mem_avail=None)
+    _, _, warnings2, _ = compat_verdicts._hardware_eval(
+        view, classify_artifact(view), get_decl("sdcpp"), hw2, {})
+    assert "ram_tight" not in warnings2
