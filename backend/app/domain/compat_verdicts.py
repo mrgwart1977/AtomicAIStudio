@@ -296,7 +296,9 @@ def _requirements(view: ArtifactView, cls: Classification) -> dict:
 
 def _usable_vram(g: dict, *, fresh_sample: bool) -> int | None:
     free = g.get("vram_free_bytes")
-    if free and fresh_sample:
+    if free is not None and fresh_sample:
+        # A measured zero is real evidence — only an ABSENT sample may
+        # fall back to the total-VRAM estimate (CD-9 parity).
         return int(free)
     total = g.get("vram_bytes")
     if total:
@@ -363,9 +365,12 @@ def _hardware_eval(view: ArtifactView, cls: Classification,
                 axis = "limited"
                 limits.append("vram_headroom_tight")
             if fresh_sample:
+                # Zero is a real minimum — only absent samples are
+                # excluded from the aggregation (CD-9 parity).
                 free_min = min(
                     (g["vram_free_bytes"] for g in gpus
-                     if g.get("vram_free_bytes")), default=None)
+                     if g.get("vram_free_bytes") is not None),
+                    default=None)
                 if free_min is not None and free_min < min_vram:
                     warnings.append("vram_tight")
     total_ram = (hw.get("memory") or {}).get("total_bytes")
@@ -374,7 +379,9 @@ def _hardware_eval(view: ArtifactView, cls: Classification,
             axis = "limited"
         limits.append("ram_below_min")
     avail = (hw.get("memory") or {}).get("available_bytes")
-    if avail and min_ram and avail < min_ram:
+    if avail is not None and min_ram and avail < min_ram:
+        # Same zero-versus-None class: a measured 0-byte availability
+        # is a real ram_tight warning, not missing evidence.
         warnings.append("ram_tight")
     return axis, [], warnings, limits
 
