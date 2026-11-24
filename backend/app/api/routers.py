@@ -82,6 +82,8 @@ from app.schemas.api import (
     ModelsDirOut,
     PackageImportRequest,
     PackagePreviewOut,
+    PipelineDescribeOut,
+    PipelineListOut,
     ProjectCardOut,
     ProjectCreate,
     ProjectOut,
@@ -1007,6 +1009,62 @@ def artifact_execution_preview(
             est, known=known, margins=margins),
         ram_known=ram_known, margins=margins)
     return preview
+
+
+# ---------- U-5c-2a declarative pipeline contracts ----------
+
+def _pipeline_evidence(request):
+    """Injected static evidence for pipeline describe/validation —
+    the live JOB_COMMANDS table, registered adapter profiles,
+    workflow declarations and runtime declarations. In-memory static
+    data only: no probe, no DB, no filesystem, no scheduler."""
+    from app.domain import commands, pipeline_defs, runtime_caps, workflow_defs
+    profiles = {
+        p["adapter_id"]: (("adapter_kind", p["adapter_kind"]),
+                          ("notes", p.get("notes") or ""))
+        for p in request.app.state.adapter_registry.list_profiles()
+    }
+    return pipeline_defs.EvidenceContext(
+        command_table=tuple(commands.JOB_COMMANDS.items()),
+        adapter_profiles=tuple(profiles.items()),
+        workflows=tuple(
+            pipeline_defs.WorkflowEvidence(
+                workflow_key=w.workflow_key, status=w.status,
+                policy=w.policy,
+                required_components=w.required_components,
+                optional_components=w.optional_components,
+                defs_version=workflow_defs.WORKFLOW_DEFS_VERSION)
+            for w in workflow_defs.workflow_catalog()),
+        runtime_planned=tuple(
+            (k, bool(d.planned)) for k, d in
+            sorted(runtime_caps.RUNTIME_CAPS.items())))
+
+
+@api_router.get("/api/pipelines", response_model=PipelineListOut)
+def list_pipelines(request: Request):
+    """U-5c-2a — list declared pipeline templates. Static definitions
+    only: validation status is structural, never operational."""
+    from app.domain import pipeline_defs
+    ctx = _pipeline_evidence(request)
+    return {"pipelines": [
+        pipeline_defs.pipeline_summary(pipeline_defs.PIPELINE_DEFS[k], ctx)
+        for k in sorted(pipeline_defs.PIPELINE_DEFS)]}
+
+
+@api_router.get("/api/pipelines/{pipeline_key}",
+                response_model=PipelineDescribeOut)
+def describe_pipeline(pipeline_key: str, request: Request):
+    """U-5c-2a — describe one declared pipeline: typed nodes, edges,
+    parameter bindings, derived static classifications, validation
+    findings, potential concurrency pairs and both fingerprints.
+    `operational_readiness` is always "not_evaluated" — this surface
+    performs no probes, no DB reads, no execution, no job creation."""
+    from app.domain import pipeline_defs
+    defn = pipeline_defs.get_pipeline(pipeline_key)
+    if defn is None:
+        raise HTTPException(404, "unknown_pipeline")
+    return pipeline_defs.describe_pipeline(
+        defn, _pipeline_evidence(request))
 
 
 @api_router.get("/api/models/import-capabilities",
