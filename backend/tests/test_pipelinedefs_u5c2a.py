@@ -1318,3 +1318,172 @@ def test_g9_def_fp_param_constraint_change():
         for x in T1.external_params))
     assert pd.definition_fingerprint(bad) != \
         pd.definition_fingerprint(T1)
+
+
+# ==================================================================
+# F1 — registry findings propagate to list/describe surfaces
+# ==================================================================
+
+
+def test_f1_duplicate_identical_flags_describe_and_summary(
+        monkeypatch):
+    monkeypatch.setattr(pd, "_PIPELINE_DECLS", (T1, T1))
+    d = pd.describe_pipeline(T1, CTX)
+    assert d["validation"]["structural"] == "invalid"
+    codes = [f["code"] for f in d["validation"]["findings"]]
+    assert "duplicate_pipeline_key" in codes
+    assert d["concurrency_pairs"] == []
+    assert pd.pipeline_summary(T1, CTX)["structural"] == "invalid"
+
+
+def test_f1_duplicate_conflicting_flags_surfaces(monkeypatch):
+    twin = _replace(T1, display_name="Twin", description="other")
+    monkeypatch.setattr(pd, "_PIPELINE_DECLS", (T1, twin))
+    d = pd.describe_pipeline(T1, CTX)
+    assert d["validation"]["structural"] == "invalid"
+    codes = [f["code"] for f in d["validation"]["findings"]]
+    assert "duplicate_pipeline_key" in codes
+    assert pd.pipeline_summary(T1, CTX)["structural"] == "invalid"
+
+
+def test_f1_oversized_registry_flags_every_def(monkeypatch):
+    decls = tuple(_replace(T1, pipeline_key=f"pipe_{i:02d}")
+                  for i in range(65)) + (T1,)
+    monkeypatch.setattr(pd, "_PIPELINE_DECLS", decls)
+    d = pd.describe_pipeline(T1, CTX)
+    assert d["validation"]["structural"] == "invalid"
+    codes = [f["code"] for f in d["validation"]["findings"]]
+    assert "limit_exceeded" in codes
+    assert pd.pipeline_summary(T1, CTX)["structural"] == "invalid"
+
+
+def test_f1_other_keys_duplicate_does_not_taint_t1(monkeypatch):
+    other = _replace(T1, pipeline_key="other_chain")
+    monkeypatch.setattr(pd, "_PIPELINE_DECLS", (T1, other, other))
+    d = pd.describe_pipeline(T1, CTX)
+    assert d["validation"]["structural"] == "valid"
+    s, f = pd.pipeline_registry(CTX)
+    assert s == "invalid"
+    assert "duplicate_pipeline_key" in _codes(f)
+
+
+def test_f1_clean_registry_unaffected():
+    d = pd.describe_pipeline(T1, CTX)
+    assert d["validation"]["structural"] == "valid"
+    assert pd.pipeline_summary(T1, CTX)["structural"] == "valid"
+
+
+def test_f1_api_list_never_advertises_duplicate_valid(
+        client, monkeypatch):
+    monkeypatch.setattr(pd, "_PIPELINE_DECLS", (T1, T1))
+    monkeypatch.setattr(pd, "PIPELINE_DEFS",
+                        pd._build_registry((T1, T1)))
+    r = client.get("/api/pipelines")
+    assert r.status_code == 200
+    p = r.json()["pipelines"][0]
+    assert p["structural"] == "invalid"
+
+
+# ==================================================================
+# F2 — effective constraint intersection across ALL layers
+# ==================================================================
+
+
+def test_f2_choices_vs_pattern_empty():
+    """A: external choices 'cat','dog' + binding pattern '^bird$'."""
+    layers = ((pd.Constraint("choices", ("cat", "dog")),),
+            (pd.Constraint("pattern", "^bird$"),))
+    assert pd._effective_domain_empty("string", list(layers))
+
+
+def test_f2_three_layer_bounds_choices_empty():
+    """B: external 1-10, binding 5-15, command choices (2,12)."""
+    layers = ((pd.Constraint("min", 1), pd.Constraint("max", 10)),
+              (pd.Constraint("min", 5), pd.Constraint("max", 15)),
+              (pd.Constraint("choices", (2, 12)),))
+    assert pd._effective_domain_empty("int", list(layers))
+
+
+def test_f2_choices_excluded_by_combined_bounds():
+    """C: external choices (1,2,3) all below binding min 10."""
+    layers = ((pd.Constraint("choices", (1, 2, 3)),),
+              (pd.Constraint("min", 10),))
+    assert pd._effective_domain_empty("int", list(layers))
+
+
+def test_f2_choices_excluded_by_length():
+    """D: finite choices ('a','bb') all shorter than min_len 3."""
+    layers = ((pd.Constraint("choices", ("a", "bb")),),
+              (pd.Constraint("min_len", 3),))
+    assert pd._effective_domain_empty("string", list(layers))
+
+
+def test_f2_compatible_numeric_bounds():
+    layers = ((pd.Constraint("min", 1), pd.Constraint("max", 10)),
+              (pd.Constraint("min", 5),))
+    assert not pd._effective_domain_empty("int", list(layers))
+
+
+def test_f2_compatible_choices_and_pattern():
+    layers = ((pd.Constraint("choices", ("cat", "bird")),),
+              (pd.Constraint("pattern", "^(cat|bird)$"),))
+    assert not pd._effective_domain_empty("string", list(layers))
+
+
+def test_f2_compatible_choices_and_length():
+    layers = ((pd.Constraint("choices", ("abc", "de")),),
+              (pd.Constraint("min_len", 2),
+               pd.Constraint("max_len", 3)))
+    assert not pd._effective_domain_empty("string", list(layers))
+
+
+def test_f2_nonempty_three_layer_intersection():
+    """External 1-10 ∩ binding 3-8 ∩ command choices (4,20) = {4}."""
+    layers = ((pd.Constraint("min", 1), pd.Constraint("max", 10)),
+              (pd.Constraint("min", 3), pd.Constraint("max", 8)),
+              (pd.Constraint("choices", (4, 20)),))
+    assert not pd._effective_domain_empty("int", list(layers))
+
+
+def test_f2_int_interval_semantics():
+    """int ptype: [1.2, 1.8] holds no integer — empty."""
+    layers = ((pd.Constraint("min", 1.2), pd.Constraint("max", 1.8)),)
+    assert pd._effective_domain_empty("int", list(layers))
+    layers_f = ((pd.Constraint("min", 1.2), pd.Constraint("max", 1.8)),)
+    assert not pd._effective_domain_empty("float", list(layers_f))
+
+
+def test_f2_integration_choices_pattern_conflict():
+    """End-to-end: external choices + binding pattern -> invalid."""
+    p = pd.ParamDecl("s", "string", required=True,
+                     constraints=(pd.Constraint("choices",
+                                                ("cat", "dog")),))
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "prompt"]
+    keep.append(pd.ParamBinding("prompt", "external", external_key="s",
+                                constraints=(pd.Constraint(
+                                    "pattern", "^bird$"),)))
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=tuple(keep)),
+                   external_params=T1.external_params + (p,))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "conflicting_constraints" in codes
+
+
+def test_f2_integration_choices_bound_out():
+    """End-to-end: external choices all excluded by binding min."""
+    p = pd.ParamDecl("w", "int", required=True,
+                     constraints=(pd.Constraint("choices",
+                                                (1, 2, 3)),))
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "width"]
+    keep.append(pd.ParamBinding("width", "external", external_key="w",
+                                constraints=(pd.Constraint(
+                                    "min", 10),)))
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=tuple(keep)),
+                   external_params=T1.external_params + (p,))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "conflicting_constraints" in codes

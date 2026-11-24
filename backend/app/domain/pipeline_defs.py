@@ -560,35 +560,62 @@ def _constraint_findings(subj: str, ptype: str,
     return out
 
 
-def _domain_overlap_findings(subj_a: str, ca: tuple[Constraint, ...],
-                             subj_b: str, cb: tuple[Constraint, ...],
-                             out_subj: str) -> list[Finding]:
-    """Effective-domain intersection across two constraint layers (D8):
-    an empty min/max or choices intersection means NO value can ever
-    satisfy the bound argument."""
-    if not ca or not cb:
-        return []
+def _effective_domain_empty(ptype: str,
+                            layers: list[tuple[Constraint, ...]]
+                            ) -> bool:
+    """Effective allowed-value domain across ALL applicable constraint
+    layers (F2) — external-param declarations, binding-level and
+    contract-arg constraints COMBINED, not pairwise. Returns True when
+    no value can satisfy the combination:
 
-    def _mm(cs):
-        return (next((c.value for c in cs if c.kind == "min"), None),
-                next((c.value for c in cs if c.kind == "max"), None),
-                next((c.value for c in cs if c.kind == "choices"), None))
+    - numeric: every 'min' raises the bound, every 'max' lowers it;
+      int ptypes additionally require an integer inside the interval
+    - string: combined min_len/max_len bounds
+    - choices: the intersection of every declared choice set, with
+      each survivor re-checked against EVERY layer's constraints
+    Domains without choices are unbounded elsewhere — pattern/length
+    intersections over infinite string domains cannot be proven empty
+    (a documented restriction of the supported constraint language)."""
+    lo = hi = None
+    lo_len = hi_len = None
+    choice_sets: list[set] = []
+    for cs in layers:
+        for c in cs:
+            v = c.value
+            if c.kind == "min" and _numeric(v):
+                lo = v if lo is None else max(lo, v)
+            elif c.kind == "max" and _numeric(v):
+                hi = v if hi is None else min(hi, v)
+            elif c.kind == "min_len" and isinstance(v, int) \
+                    and not isinstance(v, bool):
+                lo_len = v if lo_len is None else max(lo_len, v)
+            elif c.kind == "max_len" and isinstance(v, int) \
+                    and not isinstance(v, bool):
+                hi_len = v if hi_len is None else min(hi_len, v)
+            elif c.kind == "choices" and isinstance(v, tuple):
+                choice_sets.append(set(v))
+    if lo is not None and hi is not None:
+        if ptype == "int":
+            if math.ceil(lo) > math.floor(hi):
+                return True
+        elif lo > hi:
+            return True
+    if lo_len is not None and hi_len is not None and lo_len > hi_len:
+        return True
+    if choice_sets:
+        survivors = set.intersection(*choice_sets)
+        for cs in layers:
+            survivors = {v for v in survivors
+                         if _value_meets(ptype, v, cs)}
+        if not survivors:
+            return True
+    return False
 
-    alo, ahi, ach = _mm(ca)
-    blo, bhi, bch = _mm(cb)
-    if alo is not None and bhi is not None and alo > bhi:
-        return [Finding("conflicting_constraints", out_subj,
-                        f"{subj_a} min {alo} exceeds "
-                        f"{subj_b} max {bhi}")]
-    if blo is not None and ahi is not None and blo > ahi:
-        return [Finding("conflicting_constraints", out_subj,
-                        f"{subj_b} min {blo} exceeds "
-                        f"{subj_a} max {ahi}")]
-    if ach is not None and bch is not None \
-            and not (set(ach) & set(bch)):
-        return [Finding("conflicting_constraints", out_subj,
-                        f"{subj_a} choices disjoint from {subj_b}")]
-    return []
+
+def _numeric(v) -> bool:
+    return (isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v))
 
 
 def _value_meets(ptype: str, value,
@@ -856,27 +883,14 @@ def validate_pipeline(defn: PipelineDefinition,
                                      "for pipeline binding"))
                 f.extend(_constraint_findings(
                     b.request_key, carg.ptype, b.constraints))
-                f.extend(_domain_overlap_findings(
-                    f"{b.request_key} binding", b.constraints,
-                    f"{n.command_key}.{b.request_key}",
-                    carg.constraints, n.node_id))
             bound_args[b.request_key] = b.source
+            ep = param_by_key.get(b.external_key or "") \
+                if b.source == "external" else None
             if b.source == "external":
-                ep = param_by_key.get(b.external_key or "")
                 if ep is None:
                     f.append(Finding("missing_external_param", n.node_id,
                                      f"{b.request_key} -> "
                                      f"{b.external_key}"))
-                else:
-                    if carg is not None:
-                        f.extend(_domain_overlap_findings(
-                            f"external {ep.param_key}", ep.constraints,
-                            f"{n.command_key}.{b.request_key}",
-                            carg.constraints, n.node_id))
-                    f.extend(_domain_overlap_findings(
-                        f"{b.request_key} binding", b.constraints,
-                        f"external {ep.param_key}", ep.constraints,
-                        n.node_id))
             elif b.source == "edge":
                 e = edge_by_id.get(b.edge_id or "")
                 if e is None:
@@ -916,6 +930,23 @@ def validate_pipeline(defn: PipelineDefinition,
                                      n.node_id,
                                      f"{b.request_key} constant is "
                                      "mutable"))
+            # Effective-domain intersection across ALL applicable
+            # layers (F2): external-decl, binding-level and
+            # contract-arg constraints combined — an empty domain
+            # can never produce a legal bound value.
+            domain_layers = [b.constraints]
+            if carg is not None:
+                domain_layers.append(carg.constraints)
+            if ep is not None:
+                domain_layers.append(ep.constraints)
+            dom_ptype = carg.ptype if carg is not None else (
+                ep.ptype if ep is not None else None)
+            if dom_ptype is not None and \
+                    _effective_domain_empty(dom_ptype, domain_layers):
+                f.append(Finding("conflicting_constraints", n.node_id,
+                                 f"{b.request_key}: no value satisfies "
+                                 "the combined external, binding and "
+                                 "command constraints"))
         # Pipeline single-output contract (D1): when the command
         # declares an output-count argument, the PIPELINE pins it to
         # exactly one integer constant 1. The real command's wider
@@ -1321,6 +1352,13 @@ def contract_evidence_fingerprint(defn: PipelineDefinition,
 def describe_pipeline(defn: PipelineDefinition,
                       ctx: EvidenceContext) -> dict[str, Any]:
     structural, findings = validate_pipeline(defn, ctx)
+    # Registry-level errors stay authoritative (F1): a duplicate or
+    # over-limit registry must surface in describe output and flip the
+    # structural verdict — never masked by first-wins deduplication.
+    reg = _applicable_registry_findings(defn.pipeline_key)
+    if reg:
+        findings = reg + list(findings)
+        structural = "invalid"
     return {
         "pipeline_key": defn.pipeline_key,
         "display_name": defn.display_name,
@@ -1358,6 +1396,10 @@ def describe_pipeline(defn: PipelineDefinition,
 def pipeline_summary(defn: PipelineDefinition,
                      ctx: EvidenceContext) -> dict[str, Any]:
     structural, _ = validate_pipeline(defn, ctx)
+    # Same F1 propagation on the list surface — a retained first-wins
+    # duplicate is never advertised as structurally valid.
+    if _applicable_registry_findings(defn.pipeline_key):
+        structural = "invalid"
     return {
         "pipeline_key": defn.pipeline_key,
         "display_name": defn.display_name,
@@ -1521,6 +1563,36 @@ def get_pipeline(key: str | None) -> PipelineDefinition | None:
     return PIPELINE_DEFS.get(key)
 
 
+def _registry_level_findings(
+        decls: tuple[PipelineDefinition, ...] | None = None
+) -> list[Finding]:
+    """Registry-scope findings over the ORDERED declaration source —
+    count bound and duplicate keys flagged BEFORE any deduplication."""
+    decls = _PIPELINE_DECLS if decls is None else tuple(decls)
+    out: list[Finding] = []
+    if len(decls) > LIMITS["max_pipelines"]:
+        out.append(Finding("limit_exceeded", "registry",
+                           f"pipeline declarations {len(decls)} > "
+                           f"{LIMITS['max_pipelines']}"))
+    keys = [d.pipeline_key for d in decls]
+    for k in sorted({k for k in keys if keys.count(k) > 1}):
+        # Subject is the affected KEY (not 'registry') so the finding
+        # applies only to that definition's surfaces (F1).
+        out.append(Finding("duplicate_pipeline_key", k,
+                           "pipeline_key declared more than once"))
+    return out
+
+
+def _applicable_registry_findings(
+        pipeline_key: str,
+        decls: tuple[PipelineDefinition, ...] | None = None
+) -> list[Finding]:
+    """Registry findings that apply to ONE definition — global errors
+    (subject 'registry') plus this key's duplicates (F1)."""
+    return [fd for fd in _registry_level_findings(decls)
+            if fd.subject in ("registry", pipeline_key)]
+
+
 def pipeline_registry(
         ctx: EvidenceContext,
         declarations: tuple[PipelineDefinition, ...] | None = None
@@ -1530,14 +1602,7 @@ def pipeline_registry(
     a duplicate declaration is a finding, never a silent drop."""
     decls = _PIPELINE_DECLS if declarations is None \
         else tuple(declarations)
-    f: list[Finding] = []
-    if len(decls) > LIMITS["max_pipelines"]:
-        f.append(Finding("limit_exceeded", "registry",
-                         f"pipeline declarations {len(decls)} > "
-                         f"{LIMITS['max_pipelines']}"))
-    keys = [d.pipeline_key for d in decls]
-    for k in sorted({k for k in keys if keys.count(k) > 1}):
-        f.append(Finding("duplicate_pipeline_key", "registry", k))
+    f: list[Finding] = _registry_level_findings(decls)
     for d in decls:
         _, findings = validate_pipeline(d, ctx)
         f.extend(findings)
