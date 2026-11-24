@@ -281,6 +281,39 @@ def test_invalid_ptype():
     assert "invalid_ptype" in codes
 
 
+def test_default_violates_constraint():
+    p = pd.ParamDecl("n", "int", required=False,
+                     has_default=True, default=99,
+                     constraints=(pd.Constraint("max", 64),))
+    bad = _replace(T1, external_params=T1.external_params + (p,))
+    _, codes = _valid(bad)
+    assert "constraint_violation" in codes
+
+
+def test_constant_violates_constraint():
+    img = T1.nodes[0]
+    bindings = tuple(
+        dataclasses.replace(
+            b, constraints=(pd.Constraint("max", 0),))
+        if b.request_key == "batch" else b
+        for b in img.param_bindings)
+    bad = _replace_node(T1, "img", param_bindings=bindings)
+    _, codes = _valid(bad)
+    assert "constraint_violation" in codes
+
+
+def test_binding_constraint_invalid_kind():
+    img = T1.nodes[0]
+    bindings = tuple(
+        dataclasses.replace(
+            b, constraints=(pd.Constraint("bogus", 1),))
+        if b.request_key == "batch" else b
+        for b in img.param_bindings)
+    bad = _replace_node(T1, "img", param_bindings=bindings)
+    _, codes = _valid(bad)
+    assert "invalid_constraint" in codes
+
+
 def test_duplicate_external_param():
     dup = T1.external_params[0]
     bad = _replace(T1, external_params=T1.external_params + (dup,))

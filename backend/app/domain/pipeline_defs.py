@@ -557,6 +557,11 @@ def validate_pipeline(defn: PipelineDefinition,
             f.append(Finding("default_type_mismatch", p.param_key,
                              f"default {p.default!r} is not "
                              f"{p.ptype}"))
+        elif p.has_default and p.constraints and not \
+                _value_meets(p.ptype, p.default, p.constraints):
+            f.append(Finding("constraint_violation", p.param_key,
+                             f"default {p.default!r} violates declared "
+                             "constraints"))
         f.extend(_constraint_findings(p.param_key, p.ptype,
                                     p.constraints))
 
@@ -718,6 +723,8 @@ def validate_pipeline(defn: PipelineDefinition,
                     f.append(Finding("refused_arg", n.node_id,
                                      f"{b.request_key} is refused by "
                                      f"{n.command_key}"))
+                f.extend(_constraint_findings(
+                    b.request_key, carg.ptype, b.constraints))
             bound_args[b.request_key] = b.source
             if b.source == "external":
                 ep = param_by_key.get(b.external_key or "")
@@ -752,6 +759,13 @@ def validate_pipeline(defn: PipelineDefinition,
                                      f"{b.request_key} constant "
                                      f"{b.constant!r} is not "
                                      f"{carg.ptype}"))
+                elif carg is not None and b.constraints and not \
+                        _value_meets(carg.ptype, b.constant,
+                                     b.constraints):
+                    f.append(Finding("constraint_violation", n.node_id,
+                                     f"{b.request_key} constant "
+                                     f"{b.constant!r} violates declared "
+                                     "constraints"))
                 if not _deep_immutable(b.constant):
                     f.append(Finding("mutable_definition_field",
                                      n.node_id,
