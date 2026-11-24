@@ -332,7 +332,9 @@ def test_evaluate_ram_unqualified_commit_is_unknown_not_ok():
 
 
 def test_evaluate_ram_block_warn_ok_levels():
-    base = {"total_bytes": 32 * GIB, "commit_headroom_bytes": 30 * GIB,
+    base = {"total_bytes": 32 * GIB, "commit_limit_bytes": 44 * GIB,
+            "commit_charge_bytes": 14 * GIB,
+            "commit_headroom_bytes": 30 * GIB,
             **_COMMIT_PROV}
     block = resources.evaluate_ram(
         24 * GIB, known=True,

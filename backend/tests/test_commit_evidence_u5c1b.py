@@ -82,6 +82,45 @@ def test_structure_is_import_safe_everywhere():
     assert info.cb == 0
 
 
+def test_structure_layout_matches_documented_offsets():
+    # Independently specified Win32 ABI constants — literal expected
+    # values, NOT derived from the declaration under test.
+    # x64: sizeof=104, CommitTotal@8, PageSize@80, HandleCount@88.
+    # x86: sizeof=56,  CommitTotal@4, PageSize@40, HandleCount@44.
+    pi = resources.PERFORMANCE_INFORMATION
+    exp = {8: {"size": 104, "commit": 8, "page": 80, "handle": 88},
+           4: {"size": 56, "commit": 4, "page": 40, "handle": 44},
+           }[ctypes.sizeof(ctypes.c_void_p)]
+    assert ctypes.sizeof(pi) == exp["size"]
+    assert pi.cb.offset == 0
+    assert pi.CommitTotal.offset == exp["commit"]
+    assert pi.PageSize.offset == exp["page"]
+    assert pi.HandleCount.offset == exp["handle"]
+    assert pi.ThreadCount.offset == exp["handle"] + 8
+
+
+def test_documented_x86_layout_synthetic_model():
+    # Synthetic 32-bit model of the DOCUMENTED structure (c_uint32
+    # standing in for pointer-width SIZE_T). This is modeled
+    # verification of the expected x86 layout — this environment does
+    # not execute native x86 and none is claimed.
+    class P32(ctypes.Structure):
+        _fields_ = ([("cb", ctypes.c_uint32)]
+                    + [(n, ctypes.c_uint32) for n in (
+                        "CommitTotal", "CommitLimit", "CommitPeak",
+                        "PhysicalTotal", "PhysicalAvailable",
+                        "SystemCache", "KernelTotal", "KernelPaged",
+                        "KernelNonpaged", "PageSize")]
+                    + [("HandleCount", ctypes.c_uint32),
+                       ("ProcessCount", ctypes.c_uint32),
+                       ("ThreadCount", ctypes.c_uint32)])
+    assert ctypes.sizeof(P32) == 56
+    assert P32.CommitTotal.offset == 4
+    assert P32.PageSize.offset == 40
+    assert P32.HandleCount.offset == 44
+    assert P32.ThreadCount.offset == 52
+
+
 def test_cb_initialized_to_sizeof(monkeypatch):
     _win(monkeypatch)
     seen = {}
@@ -340,6 +379,37 @@ def test_memory_sampled_monotonic_drives_staleness(monkeypatch):
     assert s2["stale"] is False
 
 
+def test_memory_sample_ts_never_later_than_report_ts(monkeypatch):
+    # Design-A structural guarantee: t_mem is taken BEFORE the physical
+    # RAM read AND the commit call, so the memory instant can only be
+    # <= the report's collection timestamp — the shared timestamp never
+    # presents memory as fresher than it was.
+    _stub_collection(monkeypatch)
+    rep = hardware.probe()
+    assert rep["memory"]["sampled_monotonic"] \
+        <= rep["probed_monotonic"]
+
+
+def test_cache_reads_never_renew_memory_timestamp(monkeypatch):
+    _stub_collection(monkeypatch)
+    hardware.probe()
+    m1 = hardware.probe_cached()["report"]["memory"]["sampled_monotonic"]
+    m2 = hardware.probe_cached()["report"]["memory"]["sampled_monotonic"]
+    assert m1 == m2
+
+
+def test_slow_collection_still_ages_from_memory_sample(monkeypatch):
+    # Slow collection must not let the report timestamp mask an old
+    # memory sample: staleness uses min(probed_mono, mem_mono).
+    old = time.monotonic() - hs.STALE_SNAPSHOT_SECONDS - 30
+    rep = t1a.probe_report(probed_at=time.time(),
+                           probed_monotonic=time.monotonic())
+    rep["memory"]["sampled_monotonic"] = old
+    s = hs.build_snapshot(rep, sched_state(), MARGINS,
+                          now=time.time(), monotonic_now=time.monotonic())
+    assert s["stale"] is True
+
+
 # --------------------------------------------- hw:v2 fingerprint canon
 
 
@@ -444,9 +514,12 @@ def test_unqualified_commit_never_satisfies(provenance):
 
 
 def test_measured_zero_commit_blocks():
+    # Consistent measured zero: charge == limit → headroom 0 is REAL
+    # qualified evidence and blocks under the existing commit rule.
     out = resources.evaluate_ram(
         4 * GIB, known=True,
-        mem={**_MEM_BASE, "commit_headroom_bytes": 0, **_QUAL},
+        mem={**_MEM_BASE, "commit_charge_bytes": 44 * GIB,
+             "commit_headroom_bytes": 0, **_QUAL},
         margins=MARGINS)
     assert out["checks"]["commit_headroom"] == "block"
     assert out["decision"] == "block"
@@ -461,6 +534,100 @@ def test_measured_sufficient_commit_evaluates_ok():
     assert out["checks"]["commit_headroom"] == "ok"
     assert out["decision"] == "ok"
     assert out["fully_evaluated"] is True
+
+
+# --- Q1 full-combination qualification (source refs: _commit_evidence_qualified)
+
+_QUAL_MEM = {**_MEM_BASE, "commit_headroom_bytes": 30 * GIB, **_QUAL,
+             "commit_unavailable_reason": None}
+
+
+def test_complete_measured_combination_qualifies():
+    # A: every contract element holds together → qualified.
+    assert resources._commit_evidence_qualified(_QUAL_MEM) is True
+
+
+@pytest.mark.parametrize("bad", [
+    {"commit_source": None},                          # missing source
+    {"commit_source": "global_memory_status_ex"},     # unknown source
+    {"commit_scope": "process_capped"},               # process-capped
+    {"commit_confidence": "approximation"},           # approximation
+    {"commit_limit_bytes": None},                     # missing limit
+    {"commit_charge_bytes": None},                    # missing charge
+    {"commit_limit_bytes": -44 * GIB},                # negative limit
+    {"commit_charge_bytes": -1},                      # negative charge
+    {"commit_headroom_bytes": -1},                    # negative headroom
+    {"commit_limit_bytes": True},                     # bool limit
+    {"commit_charge_bytes": False},                   # bool charge
+    {"commit_headroom_bytes": True},                  # bool headroom
+    {"commit_limit_bytes": 44.0 * GIB},               # float limit
+    {"commit_headroom_bytes": 30.5 * GIB},            # float headroom
+    {"commit_headroom_bytes": str(30 * GIB)},         # string headroom
+    {"commit_limit_bytes": 0, "commit_charge_bytes": 0,
+     "commit_headroom_bytes": 0},                     # zero limit
+    {"commit_charge_bytes": 45 * GIB,
+     "commit_headroom_bytes": 1},                     # charge > limit
+    {"commit_headroom_bytes": 29 * GIB},              # headroom != L-C
+    {"commit_unavailable_reason": "api_failure"},     # contradictory reason
+])
+def test_unqualified_combination_never_satisfies(bad):
+    # B–O: any single contract violation — cached, legacy, injected or
+    # malformed evidence degrades to honest unknown in BOTH directions.
+    mem = {**_QUAL_MEM, **bad}
+    assert resources._commit_evidence_qualified(mem) is False
+    out = resources.evaluate_ram(
+        4 * GIB, known=True, mem=mem, margins=MARGINS)
+    assert out["checks"]["commit_headroom"] == "unknown"
+    assert out["fully_evaluated"] is False
+    if mem["commit_headroom_bytes"] is not None:
+        assert out["checks"]["commit_evidence"] == "unqualified"
+
+
+def test_missing_headroom_is_unknown_not_measured_zero():
+    # H: absent headroom is unavailable evidence — never coerced to a
+    # measured zero (which would BLOCK).
+    mem = {k: v for k, v in _QUAL_MEM.items()
+           if k != "commit_headroom_bytes"}
+    out = resources.evaluate_ram(
+        4 * GIB, known=True, mem=mem, margins=MARGINS)
+    assert out["checks"]["commit_headroom"] == "unknown"
+    assert out["decision"] == "unknown"
+
+
+def test_measured_zero_headroom_qualifies_and_blocks():
+    # P: consistent measured zero (charge == limit) is real evidence.
+    mem = {**_QUAL_MEM, "commit_charge_bytes": 44 * GIB,
+           "commit_headroom_bytes": 0}
+    assert resources._commit_evidence_qualified(mem) is True
+    out = resources.evaluate_ram(
+        4 * GIB, known=True, mem=mem, margins=MARGINS)
+    assert out["checks"]["commit_headroom"] == "block"
+    assert out["decision"] == "block"
+
+
+def test_unqualified_unfavorable_is_unknown_never_block():
+    # R: a zero-looking headroom WITHOUT provenance cannot establish a
+    # definitive commit-memory blocker.
+    mem = {**_QUAL_MEM, "commit_source": "legacy_helper",
+           "commit_charge_bytes": 44 * GIB,
+           "commit_headroom_bytes": 0}
+    out = resources.evaluate_ram(
+        4 * GIB, known=True, mem=mem, margins=MARGINS)
+    assert out["checks"]["commit_headroom"] == "unknown"
+    assert out["checks"]["commit_evidence"] == "unqualified"
+    assert out["decision"] == "unknown"
+
+
+def test_independent_physical_block_outlives_unqualified_commit():
+    # S: an authoritative physical-RAM block is unaffected by
+    # unqualified commit evidence — precedence preserved.
+    mem = {**_QUAL_MEM, "available_bytes": 4 * GIB + GIB // 2,
+           "commit_source": "legacy_helper"}
+    out = resources.evaluate_ram(
+        4 * GIB, known=True, mem=mem, margins=MARGINS)
+    assert out["checks"]["phys_avail"] == "block"
+    assert out["checks"]["commit_headroom"] == "unknown"
+    assert out["decision"] == "block"
 
 
 # --------------------------------------------------------- endpoint path
@@ -556,7 +723,8 @@ def test_ep_partial_commit_failure_never_ready(client, pub):
 
 def test_ep_zero_commit_blocks(client, pub):
     pid = t5c._project(client)
-    rep = pub({**_FULL_MEM, "commit_headroom_bytes": 0})
+    rep = pub({**_FULL_MEM, "commit_charge_bytes": 44 * GIB,
+               "commit_headroom_bytes": 0})
     t5c._verdict(client, t5c.WAN_AID, hw=rep)
     r = client.get(t5c._purl(pid, t5c.WAN_AID, runtime_key="sdcpp",
                            workflow="text2video",
@@ -564,6 +732,56 @@ def test_ep_zero_commit_blocks(client, pub):
     b = r.json()
     assert b["advisory_state"] == "preview_blocked"
     assert "ram_insufficient" in b["reasons"]
+
+
+def test_ep_unqualified_zero_commit_stays_incomplete(client, pub):
+    # R: an unqualified "zero" headroom must not become a definitive
+    # commit-memory blocker — evidence stays honestly incomplete.
+    pid = t5c._project(client)
+    rep = pub({**_FULL_MEM, "commit_source": "legacy_helper",
+               "commit_charge_bytes": 44 * GIB,
+               "commit_headroom_bytes": 0})
+    t5c._verdict(client, t5c.WAN_AID, hw=rep)
+    r = client.get(t5c._purl(pid, t5c.WAN_AID, runtime_key="sdcpp",
+                           workflow="text2video",
+                           residency_mode="cpu_offload"))
+    b = r.json()
+    assert b["advisory_state"] == "preview_incomplete"
+    assert b["ram_eval"]["checks"]["commit_evidence"] == "unqualified"
+    assert "ram_insufficient" not in b["reasons"]
+
+
+def test_ep_authoritative_blocker_beats_unqualified_evidence(client, pub):
+    # S: runtime_planned dominates even when commit evidence is
+    # unqualified — Group-1 precedence is not weakened.
+    pid = t5c._project(client)
+    rep = pub(_UNQUAL_MEM)
+    t5c._verdict(client, t5c.WAN_AID, hw=rep)
+    r = client.get(t5c._purl(pid, t5c.WAN_AID, runtime_key="comfyui",
+                           workflow="text2video"))
+    b = r.json()
+    assert b["advisory_state"] == "preview_blocked"
+    assert "runtime_planned" in b["reasons"]
+
+
+def test_ep_stale_memory_is_incomplete_not_blocked(client, pub):
+    # C+D: memory evidence older than the freshness threshold can
+    # neither establish READY nor a definitive CURRENT commit block —
+    # even when the numbers would otherwise be a measured-zero block.
+    pid = t5c._project(client)
+    mem = {**_FULL_MEM, "commit_charge_bytes": 44 * GIB,
+           "commit_headroom_bytes": 0,
+           "sampled_monotonic": (time.monotonic()
+                                 - hs.STALE_SNAPSHOT_SECONDS - 60)}
+    rep = pub(mem)
+    t5c._verdict(client, t5c.WAN_AID, hw=rep)
+    r = client.get(t5c._purl(pid, t5c.WAN_AID, runtime_key="sdcpp",
+                           workflow="text2video",
+                           residency_mode="cpu_offload"))
+    b = r.json()
+    assert b["advisory_state"] == "preview_incomplete"
+    assert "stale_evidence" in b["reasons"]
+    assert "ram_insufficient" not in b["reasons"]
 
 
 def test_ep_never_live_collects(monkeypatch, client, pub):

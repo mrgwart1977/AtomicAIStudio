@@ -27,7 +27,7 @@ if _IS_WINDOWS:
         ]
 
 
-# Documented GetPerformanceInfo layout — DWORD cb, eleven SIZE_T
+# Documented GetPerformanceInfo layout — DWORD cb, ten SIZE_T
 # page/size counts (pointer-width: c_size_t stays correct on 32- and
 # 64-bit), then three DWORD counters. Commit*/Physical* are in PAGES,
 # not bytes. The structure itself is platform-independent — only its
@@ -251,6 +251,35 @@ def pressure_state() -> str:
     return "ok"
 
 
+def _commit_evidence_qualified(mem: dict) -> bool:
+    """Advisory-side qualification of cached commit evidence (U-5c-1b).
+
+    Collector-side validation alone is not trusted — cached, legacy,
+    injected or malformed evidence reaches this function through paths
+    that never ran the collector. Every element of the measured
+    system-wide contract must hold TOGETHER:
+    correct source/scope/confidence provenance, no contradictory
+    unavailable reason, strict integers (bool is not an int here),
+    positive limit, nonnegative charge and headroom, charge <= limit
+    and headroom == limit - charge. Strings, floats, bools and partial
+    measurements are never coerced — unqualified evidence degrades to
+    honest unknown, in BOTH directions: it can neither prove headroom
+    exists nor prove it is absent."""
+    if (mem.get("commit_source") != "get_performance_info"
+            or mem.get("commit_scope") != "system_wide"
+            or mem.get("commit_confidence") != "measured"
+            or mem.get("commit_unavailable_reason") is not None):
+        return False
+    limit = mem.get("commit_limit_bytes")
+    charge = mem.get("commit_charge_bytes")
+    headroom = mem.get("commit_headroom_bytes")
+    for v in (limit, charge, headroom):
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+    return (limit > 0 and charge >= 0 and headroom >= 0
+            and charge <= limit and headroom == limit - charge)
+
+
 def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
                  mem: dict | None, margins: dict | None = None
                  ) -> dict[str, Any]:
@@ -263,10 +292,10 @@ def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
     "unknown", never measured and never fabricated.
 
     A bare `commit_headroom_bytes` number is NOT usable evidence — the
-    commit check additionally requires the U-5c-1b provenance
-    (commit_confidence="measured" AND commit_scope="system_wide"), so
-    legacy, approximate, process-capped or malformed commit values all
-    degrade honestly to "unknown".
+    commit check additionally requires the complete U-5c-1b measured
+    system-wide contract (_commit_evidence_qualified), so legacy,
+    approximate, process-capped, malformed or internally inconsistent
+    commit values all degrade honestly to "unknown".
     `decision`: block > warn > unknown > ok; `fully_evaluated` is False
     whenever a required check is unknown. An "ok" or "warn" without full
     evaluation must not establish advisory readiness."""
@@ -309,9 +338,7 @@ def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
         # measured system-wide provenance may establish the commit check.
         # Legacy reports, approximations, process-capped values and
         # malformed evidence all degrade to honest unknown.
-        commit_qualified = (
-            mem.get("commit_confidence") == "measured"
-            and mem.get("commit_scope") == "system_wide")
+        commit_qualified = _commit_evidence_qualified(mem)
         if commit is None or not commit_qualified:
             # Required by the execution-preflight contract but absent or
             # unqualified in the cached report — honest unknown.
