@@ -205,6 +205,39 @@ def test_probe_cached_no_os_or_fs_access(monkeypatch, published):
     assert hardware.probe_cached() is not None
 
 
+def test_equal_identity_identical_republish_is_idempotent():
+    rep = probe_report(probed_monotonic=500.0)
+    hardware._publish(rep)
+    hardware._publish(dict(rep))                # same identity, same evidence
+    rec = hardware.probe_cached()
+    assert rec["probed_monotonic"] == 500.0
+
+
+def test_equal_identity_conflicting_evidence_cannot_overwrite():
+    # Same collection monotonic carrying different evidence is a
+    # conflict — the published record must not silently change hands.
+    first = probe_report(probed_monotonic=500.0,
+                         memory={"total_bytes": 32 * GIB})
+    conflict = probe_report(probed_monotonic=500.0,
+                            memory={"total_bytes": 1})
+    hardware._publish(first)
+    hardware._publish(conflict)
+    rec = hardware.probe_cached()
+    assert rec["report"]["memory"]["total_bytes"] == 32 * GIB
+
+
+def test_equal_identity_conflicting_simulation_cannot_overwrite():
+    # Equal identity + flipped simulation classification = conflict —
+    # simulated evidence can never silently acquire real-machine status
+    # (or vice versa) at the same collection identity.
+    first = probe_report(probed_monotonic=500.0, simulated=True)
+    conflict = probe_report(probed_monotonic=500.0, simulated=False)
+    hardware._publish(first)
+    hardware._publish(conflict)
+    rec = hardware.probe_cached()
+    assert rec["simulated"] is True
+
+
 def test_concurrent_publish_newest_collection_wins():
     # Two discoveries race; the one collected LATER must win regardless
     # of which publish lands last.
@@ -510,6 +543,25 @@ def test_result_fingerprint_blocker_change():
     clear = _result_fp(snapshot=s)
     held = _result_fp(planned=True, snapshot=s)
     assert clear != held
+
+
+def test_result_fingerprint_ram_evidence_change_same_state():
+    # A RAM evidence change with an unchanged advisory classification
+    # must still move the result identity (material evidence, not just
+    # outcome).
+    s = snap(gpus=[gpu(free=6 * GIB)], probed_at=1.0)
+    a = _result_fp(snapshot=s, evaluate_fn=t5c.evaluate("ok"))
+    b = _result_fp(snapshot=s, evaluate_fn=t5c.evaluate(
+        "warn", reason="job may leave the system low on memory",
+        checks={"phys_avail": "warn"}))
+    assert a != b
+
+
+def test_result_fingerprint_verdict_staleness_change():
+    s = snap(gpus=[gpu(free=6 * GIB)], probed_at=1.0)
+    a = _result_fp(snapshot=s, staleness={})
+    b = _result_fp(snapshot=s, staleness={"stale": 2, "current": 1})
+    assert a != b
 
 
 # ------------------------------ endpoint transitive guards (Gate 11)

@@ -296,7 +296,13 @@ def _publish(report: dict) -> None:
         current_key = ((_PUBLISHED or {}).get("probed_monotonic"))
         current_key = current_key if isinstance(
             current_key, (int, float)) else -1.0
-        if key >= current_key:
+        # Newer collection always wins. An EQUAL collection identity may
+        # only republish identical evidence — a same-key record carrying
+        # different evidence or a different simulation classification is
+        # a conflict and must not silently replace what was published.
+        if key > current_key or (
+                key == current_key
+                and _PUBLISHED["report"] == report):
             record["_order"] = key
             _PUBLISHED = record
 

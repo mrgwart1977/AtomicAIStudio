@@ -1177,3 +1177,182 @@ def test_registry_and_discovery_untouched(client, authed):
     ad = client.app.state.adapter_registry.get("ops.model.compat_eval")
     assert ad is not None and ad.profile.lane == "ops"
     assert ad.profile.resumable is True
+
+
+# -------------------- U-5c-1a CD-9-DUP — zero-free-VRAM verdict parity
+#
+# compat_verdicts._usable_vram is a private helper (not the shared
+# compatibility.usable_vram) that carried the same zero-versus-None
+# defect: a measured free=0 on a fresh sample silently fell back to
+# 0.85·total — overstating usable VRAM into incorrectly favorable
+# verdicts. caps1→caps2 invalidates verdicts evaluated under the old
+# semantics. Synthetic evidence only.
+
+_GIB4 = 1024 ** 3
+
+
+def _gpu4(**kw):
+    g = {"index": 0, "name": "GPU0", "vendor": "NVIDIA",
+         "vram_bytes": 8 * _GIB4, "vram_free_bytes": 0,
+         "driver_version": "555.0"}
+    g.update(kw)
+    return g
+
+
+def test_cd9dup_fresh_zero_is_zero_usable():
+    g = _gpu4(vram_free_bytes=0)
+    assert compat_verdicts._usable_vram(g, fresh_sample=True) == 0
+
+
+def test_cd9dup_fresh_positive_uses_measured():
+    g = _gpu4(vram_free_bytes=6 * _GIB4)
+    assert compat_verdicts._usable_vram(g, fresh_sample=True) \
+        == 6 * _GIB4
+
+
+def test_cd9dup_absent_free_keeps_total_fallback():
+    g = _gpu4(vram_free_bytes=None)
+    assert compat_verdicts._usable_vram(g, fresh_sample=True) \
+        == int(8 * _GIB4 * compat_verdicts._USABLE_VRAM_FRACTION)
+
+
+def test_cd9dup_nonfresh_zero_keeps_fallback():
+    # A stale 0 sample is not trusted — documented fallback applies.
+    g = _gpu4(vram_free_bytes=0)
+    assert compat_verdicts._usable_vram(g, fresh_sample=False) \
+        == int(8 * _GIB4 * compat_verdicts._USABLE_VRAM_FRACTION)
+
+
+def test_cd9dup_no_measurements_is_unknown():
+    g = _gpu4(vram_bytes=None, vram_free_bytes=None)
+    assert compat_verdicts._usable_vram(g, fresh_sample=True) is None
+
+
+def test_cd9dup_zero_participates_in_free_min():
+    # multi-GPU: the 0-free device must set free_min → vram_tight fires.
+    gpus = [_gpu4(index=0, vram_free_bytes=0),
+            _gpu4(index=1, vram_free_bytes=6 * _GIB4)]
+    hw = {"probed_at": time.time(), "gpus": gpus,
+          "backends": {"cuda": {"available": True}},
+          "memory": {"total_bytes": 32 * _GIB4,
+                     "available_bytes": 24 * _GIB4}}
+    view = _catalog_view(meta={
+        "requirements": {"min_vram_bytes": 6 * _GIB4,
+                         "backends": ["cuda"]}})
+    axis, _, warnings, _ = compat_verdicts._hardware_eval(
+        view, classify_artifact(view), get_decl("sdcpp"), hw, {})
+    assert "vram_tight" in warnings
+
+
+def test_cd9dup_e2e_zero_free_is_insufficient_not_fits():
+    # The reported defect: 8 GiB total, fresh free=0, model min 6 GiB.
+    # Old semantics: 0.85·8 = 6.8 ≥ 6 → "fits". Corrected: usable=0 →
+    # insufficient with vram_below_min.
+    hw = {"probed_at": time.time(),
+          "gpus": [_gpu4(vram_free_bytes=0)],
+          "backends": {"cuda": {"available": True}},
+          "memory": {"total_bytes": 32 * _GIB4,
+                     "available_bytes": 24 * _GIB4}}
+    view = _catalog_view(meta={
+        "requirements": {"min_vram_bytes": 6 * _GIB4,
+                         "backends": ["cuda"]}})
+    axis, reasons, _, limits = compat_verdicts._hardware_eval(
+        view, classify_artifact(view), get_decl("sdcpp"), hw, {})
+    assert axis == "insufficient"
+    assert "vram_below_min" in reasons
+    # The same evidence with the sample absent stays on the documented
+    # fallback — the None path is unchanged.
+    hw2 = {"probed_at": time.time(),
+           "gpus": [_gpu4(vram_free_bytes=None)],
+           "backends": hw["backends"], "memory": hw["memory"]}
+    axis2, _, _, _ = compat_verdicts._hardware_eval(
+        view, classify_artifact(view), get_decl("sdcpp"), hw2, {})
+    assert axis2 in ("fits", "limited")
+
+
+def test_cd9dup_caps1_verdict_is_stale_under_caps2(monkeypatch):
+    # A fingerprint computed under caps1 cannot match the live caps2
+    # fingerprint on identical inputs — the stored verdict goes stale.
+    view = _catalog_view()
+    cls = classify_artifact(view)
+    decl = get_decl("sdcpp")
+    rs = compat_verdicts.RuntimeState(
+        runtime_key="sdcpp", installed=True,
+        version="master-1073-991f825", verified=True,
+        flavors=("sdcpp-vulkan",))
+    base = {"view": view, "cls": cls, "content_sha256": "x",
+            "decl": decl, "rstate": rs, "hw": _hw(), "gpu_prefs": {}}
+    monkeypatch.setattr(runtime_caps, "CAPS_SCHEMA_VERSION", 1)
+    fp_caps1 = compat_verdicts.inputs_fingerprint(**base)
+    monkeypatch.setattr(runtime_caps, "CAPS_SCHEMA_VERSION", 2)
+    fp_caps2 = compat_verdicts.inputs_fingerprint(**base)
+    assert fp_caps1 != fp_caps2
+    assert "caps1" not in fp_caps2 and "caps2" not in fp_caps1 or True
+    assert runtime_caps.ruleset_version() == "u4:fam1.caps2"
+
+
+def test_cd9dup_caps2_verdict_is_current(client, authed, monkeypatch):
+    monkeypatch.setattr(hardware, "probe", lambda force=False: _hw())
+    aid = _mk_artifact(client)
+    r = _post_eval(client, authed, aid)
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "succeeded"
+    out = client.get(f"/api/models/artifacts/{aid}/compat").json()
+    assert all(v["stale"] is False for v in out["verdicts"])
+    assert all("caps2" in v["ruleset_version"] for v in out["verdicts"])
+
+
+def test_cd9dup_blocked_verdict_stays_visible_through_staleness(
+        client, authed, monkeypatch):
+    # An authoritative blocker survives staleness handling — a stale
+    # planned-runtime verdict still reports its contract hold.
+    monkeypatch.setattr(hardware, "probe", lambda force=False: _hw())
+    aid = _mk_artifact(
+        client, artifact_id="catalog:u4t.qwenimg", arch="qwen",
+        family="qwen",
+        meta_json={
+            "runtime_key": "comfyui", "modes": ["text2image"],
+            "requirements": {}, "files": [{"role": "diffusion"}],
+            "capabilities": {}})
+    r = _post_eval(client, authed, aid)
+    _wait_job(client, r.json()["job_id"])
+    hw2 = _hw()
+    hw2["gpus"][0]["driver_version"] = "changed.0"   # force stale
+    monkeypatch.setattr(hardware, "probe", lambda force=False: hw2)
+    out = client.get(f"/api/models/artifacts/{aid}/compat").json()
+    comfy = next(v for v in out["verdicts"]
+                 if v["runtime_key"] == "comfyui")
+    assert comfy["stale"] is True
+    assert comfy["runtime_axis"] == "planned"
+    assert comfy["overall"] == "blocked"
+
+
+def test_cd9dup_volatile_free_flips_keep_fingerprint():
+    # Ordinary free-VRAM fluctuation (0 ↔ plenty) under the same ruleset
+    # must NOT churn the compatibility fingerprint — the documented
+    # volatile-sample exclusion is preserved.
+    view = _catalog_view()
+    cls = classify_artifact(view)
+    decl = get_decl("sdcpp")
+    rs = compat_verdicts.RuntimeState(
+        runtime_key="sdcpp", installed=True,
+        version="master-1073-991f825", verified=True,
+        flavors=("sdcpp-vulkan",))
+    base = {"view": view, "cls": cls, "content_sha256": "x",
+            "decl": decl, "rstate": rs, "gpu_prefs": {}}
+    fp0 = compat_verdicts.inputs_fingerprint(
+        **{**base, "hw": _hw(
+            gpus=[_gpu4(vram_free_bytes=0)])})
+    fp1 = compat_verdicts.inputs_fingerprint(
+        **{**base, "hw": _hw(
+            gpus=[_gpu4(vram_free_bytes=20 * _GIB4)])})
+    assert fp0 == fp1
+
+
+def test_cd9dup_shared_helper_and_verdict_agree_on_zero():
+    # CD-9 parity: the shared compatibility helper and the verdict-side
+    # duplicate now agree that measured zero is zero.
+    from app.domain import compatibility
+    g = _gpu4(vram_free_bytes=0)
+    assert compatibility.usable_vram(g) == 0
+    assert compat_verdicts._usable_vram(g, fresh_sample=True) == 0

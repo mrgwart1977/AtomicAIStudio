@@ -48,9 +48,11 @@ from dataclasses import dataclass
 
 from app.domain.model_families import FAMILIES_VERSION
 
-# Bump on ANY declaration change — feeds the U-4b verdict fingerprint so
-# a capability change correctly invalidates stored verdicts.
-CAPS_SCHEMA_VERSION = 1
+# Bump on ANY declaration OR evaluation-semantics change — feeds the
+# U-4b verdict fingerprint so a capability/evaluation change correctly
+# invalidates stored verdicts. caps2: CD-9-DUP — measured vram_free=0 is
+# real evidence (was treated as absent → 0.85·total fallback).
+CAPS_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
