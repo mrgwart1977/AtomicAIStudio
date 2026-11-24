@@ -84,7 +84,8 @@ def device_backend_evidence(device: dict, machine_backends: dict,
 
 
 def build_snapshot(probe: dict, sched_state: dict | None,
-                   margins: dict, *, now: float | None = None) -> dict:
+                   margins: dict, *, now: float | None = None,
+                   monotonic_now: float | None = None) -> dict:
     """Canonicalize probe + scheduler views into one evidence snapshot.
 
     probe — the report dict from hardware.probe() (already measured; this
@@ -97,6 +98,8 @@ def build_snapshot(probe: dict, sched_state: dict | None,
         in fit classification by the planner — never in this budget.
     """
     now = time.time() if now is None else now
+    monotonic_now = (time.monotonic() if monotonic_now is None
+                     else monotonic_now)
     headroom = int((margins or {}).get("vram_headroom_bytes") or 0)
 
     slots: dict[int, dict] = {}
@@ -193,13 +196,21 @@ def build_snapshot(probe: dict, sched_state: dict | None,
         _canon(canon).encode()).hexdigest()[:16]
 
     captured = probe.get("probed_at")
+    captured_mono = probe.get("probed_monotonic")
     age_s = (max(0.0, now - captured) if captured is not None else None)
+    # Freshness is a monotonic measurement — immune to wall-clock jumps.
+    # The wall-clock fallback serves reports collected before the
+    # monotonic field existed (e.g. older recorded/simulated evidence).
+    if captured_mono is not None:
+        stale = bool(monotonic_now - captured_mono > STALE_SNAPSHOT_SECONDS)
+    else:
+        stale = bool(age_s is not None and age_s > STALE_SNAPSHOT_SECONDS)
     return {
         "snapshot_id": snapshot_id,
         "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
         "captured_at": captured,
         "age_s": age_s,
-        "stale": bool(age_s is not None and age_s > STALE_SNAPSHOT_SECONDS),
+        "stale": stale,
         "simulated": simulated,
         "devices": devices,
         "devices_total": len(devices),

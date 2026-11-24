@@ -5,6 +5,7 @@ All project data is scoped through get_project — no unscoped reads."""
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -587,9 +588,19 @@ def artifact_runtime_candidates(
             "candidates": out}
 
 
+# U-5c-1a — explicit hardware-evidence injection for the shared
+# dependency assembly. _HW_ACQUIRE preserves the U-5b-1 default
+# (hardware.probe()); an injected evidence dict supplies cached
+# evidence; HW_UNAVAILABLE means "explicitly no evidence" and must
+# never fall back to discovery.
+_HW_ACQUIRE = object()
+HW_UNAVAILABLE = "hw_evidence_unavailable"
+
+
 def _dep_plan_assembly(db, request, project, artifact_id, workflow,
                        runtime_key, shot_id, character_ids,
-                       select_params, include_stale):
+                       select_params, include_stale,
+                       hw_evidence=_HW_ACQUIRE):
     """Shared U-5b/U-5c-1 assembly: stored evidence → DepPlan.
 
     Returns (plan, ctx) where ctx carries the root row, the candidate
@@ -607,6 +618,7 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
         dep_graph,
         dep_resolve,
         hardware,
+        hw_snapshot,
         lora_resolve,
         model_catalog,
         model_families,
@@ -672,7 +684,22 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
                                    bindings=tuple(bindings))
 
     # ---- stored-evidence pool: every artifact gets a view + verdict
-    hw = hardware.probe()
+    strict_hw = hw_evidence is not _HW_ACQUIRE
+    if hw_evidence is _HW_ACQUIRE:
+        hw = hardware.probe()          # default U-5b-1 behavior unchanged
+        hw_fresh = True                # legacy: freshness untracked
+        hw_simulated = bool(hw.get("simulated"))
+    elif hw_evidence is HW_UNAVAILABLE:
+        hw = None                      # explicit — never a probe fallback
+        hw_fresh = False
+        hw_simulated = False
+    else:
+        hw = hw_evidence.get("report")
+        mono = hw_evidence.get("probed_monotonic")
+        hw_fresh = (mono is not None
+                    and (time.monotonic() - mono)
+                    <= hw_snapshot.STALE_SNAPSHOT_SECONDS)
+        hw_simulated = bool(hw_evidence.get("simulated"))
     prefs = compat_verdicts.gpu_prefs(db)
     verdict_rows = {(v.artifact_id, v.runtime_key): v for v in
                     db.execute(select(CompatVerdict)).scalars()}
@@ -693,9 +720,28 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
             inspection_level=ilvl,
             requires_inspection=a.source_type == "import")
 
+    def _staleness(a, v) -> str:
+        """current | stale | unevaluable | simulated — a fingerprint
+        match establishes 'current' only on fresh, non-simulated,
+        real evidence. Under the default _HW_ACQUIRE path this
+        reduces to the legacy mismatch->stale semantics."""
+        if hw is None:
+            return "unevaluable"
+        if compat_verdicts.fingerprint_for_runtime(
+                db, a, v.runtime_key, hw, prefs) != v.inputs_fingerprint:
+            return "stale"
+        if strict_hw and hw_simulated:
+            return "simulated"
+        if strict_hw and not hw_fresh:
+            return "stale"           # match on stale evidence ≠ current
+        return "current"
+
+    staleness_counts: dict[str, int] = {}
+
     def _stale(a, v) -> bool:
-        return compat_verdicts.fingerprint_for_runtime(
-            db, a, v.runtime_key, hw, prefs) != v.inputs_fingerprint
+        state = _staleness(a, v)
+        staleness_counts[state] = staleness_counts.get(state, 0) + 1
+        return state != "current"
 
     def _confidence(v, stale) -> str:
         c = (v.confidence or "missing") if v else "missing"
@@ -715,7 +761,9 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
             policy_axis=v.policy_axis if v else "eligible",
             stale=stale)
     root_v = verdict_rows.get((artifact_id, runtime_key))
-    root_stale = _stale(row, root_v) if root_v is not None else False
+    root_staleness = (_staleness(row, root_v)
+                      if root_v is not None else None)
+    root_stale = root_staleness not in (None, "current")
     root_confidence = _confidence(root_v, root_stale)
 
     # ---- runtime axis via the U-5a resolver (unchanged semantics)
@@ -730,7 +778,7 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
             policy_axis=v.policy_axis, confidence=v.confidence,
             reasons=tuple(v.reasons_json or []),
             missing=tuple(v.missing_json or []),
-            stale=_stale(row, v),
+            stale=_staleness(row, v) != "current",
             domain_levels=dict(v.domain_levels_json or {})))
     adapters = {
         p["adapter_id"]: runtime_resolver.AdapterEvidence(
@@ -811,6 +859,14 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
 
     return plan, {"row": row, "pool": pool, "cap": cap, "wdef": wdef,
                   "spec": spec0, "hw": hw,
+                  "hw_fresh": hw_fresh, "hw_simulated": hw_simulated,
+                  "verdict_staleness": {
+                      "root": root_staleness,
+                      "counts": staleness_counts},
+                  "runtime_blocked_authoritative": bool(
+                      root_v is not None
+                      and root_v.policy_axis not in (None, "", "eligible")),
+                  "root_verdict": root_v,
                   "stale_omitted": stale_omitted}
 
 
@@ -904,13 +960,16 @@ def artifact_execution_preview(
         db: Session = Depends(get_db)):             # noqa: B008
     """U-5c-1 — single-stage hardware-aware execution-plan preview.
 
-    READ-ONLY and advisory only: consumes the existing cached
-    hardware.probe() report (standard ~5-minute cadence — this endpoint
-    never forces a refresh and adds no probing) and the scheduler's
-    state() view as evidence. It never calls GpuScheduler.acquire(),
-    never creates a job, never reserves VRAM, never loads or runs a
-    model. Exactly one genuine generation stage is evaluated against
-    each eligible device independently — no pooled VRAM, sharding, or
+    READ-ONLY and advisory only: consumes the last published hardware
+    evidence via hardware.probe_cached() — a strictly cache-only
+    accessor that NEVER triggers discovery, refresh, OS queries,
+    subprocesses or simulation-source reads — and the scheduler's
+    state_for() observational view, which never invokes the probe
+    callback. It never calls GpuScheduler.acquire(), never creates a
+    job, never reserves VRAM, never loads or runs a model. Cold cache
+    is reported as unavailable evidence, never as zero capacity.
+    Exactly one genuine generation stage is evaluated against each
+    eligible device independently — no pooled VRAM, sharding, or
     parallelism."""
     from app.domain import dep_graph, hw_snapshot, plan_preview, resources
 
@@ -936,11 +995,17 @@ def artifact_execution_preview(
             raise HTTPException(400, "device index must be >= 0")
         device_sel = "index"
 
+    # Cache-only hardware evidence — the published record or the
+    # explicit unavailable marker; _dep_plan_assembly never falls back
+    # to hardware.probe() on this path.
+    ev = hardware.probe_cached()
     plan, ctx = _dep_plan_assembly(
         db, request, project, artifact_id, workflow, runtime_key,
-        shot_id, character_ids, select_params, include_stale)
+        shot_id, character_ids, select_params, include_stale,
+        hw_evidence=ev if ev is not None else HW_UNAVAILABLE)
     row, pool, cap, spec, hw = (ctx["row"], ctx["pool"], ctx["cap"],
                                 ctx["spec"], ctx["hw"])
+    wdef = ctx["wdef"]
 
     # Gate 6 — residency must sit inside BOTH the runtime's execution
     # contract AND a declared catalog capability; 'gpu' is the default.
@@ -951,16 +1016,44 @@ def artifact_execution_preview(
 
     margins = resources.safety_margins(resources.settings_overrides(db))
     sched = getattr(request.app.state, "gpu_scheduler", None)
-    snapshot = hw_snapshot.build_snapshot(
-        hw, sched.state() if sched else None, margins)
+    # Pure reservation observation against the published inventory —
+    # state_for() never calls the probe callback. On cold cache no
+    # inventory exists to correlate, so reservations read unavailable.
+    sched_state = (sched.state_for(hw.get("gpus") or [],
+                                   simulated=ctx["hw_simulated"])
+                   if (sched is not None and hw is not None) else None)
+    snapshot = (hw_snapshot.build_snapshot(hw, sched_state, margins)
+                if hw is not None else None)
+    freshness = ("unavailable" if snapshot is None
+                 else "stale" if snapshot["stale"] else "fresh")
+    simulated = bool(snapshot and snapshot.get("simulated"))
 
-    if device_sel == "index":
+    # Absence-based 422 only when absence is actually established —
+    # a fresh, complete, real inventory. Stale/simulated/unavailable
+    # evidence cannot turn a valid selector into device_not_present.
+    if device_sel == "index" and freshness == "fresh" and not simulated:
         known = {d["index"] for d in snapshot["devices"]} | {
             d["index"] for d in snapshot["lost_devices"]}
         if selected_index not in known:
             raise HTTPException(
                 422, f"no GPU with index {selected_index} in this "
                      "hardware snapshot")
+
+    # CPU capability evidence — catalog + runtime + adapter + command
+    # contracts (all static; operational evidence does not exist).
+    profiles = request.app.state.adapter_registry.list_profiles()
+    modes = set(getattr(wdef, "required_modes", ()) or ())
+    adapter_cpu = next(
+        ((p.get("supports") or {}).get("cpu_fallback")
+         for p in profiles
+         if p["adapter_id"] in tuple(getattr(cap, "adapter_ids", ()) or ())
+         and modes & set(p.get("tasks") or ())), None)
+    command_cpu = (False if any("video" in m for m in modes)
+                   else (bool((spec.capabilities or {}).get("cpu_fallback"))
+                         if spec is not None else None))
+    cpu_ev = plan_preview.cpu_evidence_class(
+        spec, tuple(cap.backends or ()), adapter_cpu, command_cpu)
+    snap_mem = (snapshot or {}).get("memory")
 
     # Stage components — dep fills + their declared manifest member
     # sizes (display evidence only; the estimate never sums them a
@@ -1005,9 +1098,13 @@ def artifact_execution_preview(
         device_sel=device_sel, selected_index=selected_index,
         width=width, height=height, batch=batch,
         workflow_key=workflow, include_stale=include_stale,
-        preflight=lambda est, known: resources.preflight_memory_check(
-            est, known=known, margins=margins),
-        ram_known=ram_known, margins=margins)
+        evaluate_ram=lambda est, known: resources.evaluate_ram(
+            est, known=known, mem=snap_mem, margins=margins),
+        ram_known=ram_known, margins=margins,
+        freshness=freshness, simulated=simulated,
+        cpu_evidence=cpu_ev,
+        runtime_blocked_authoritative=ctx["runtime_blocked_authoritative"],
+        verdict_staleness=ctx["verdict_staleness"])
     return preview
 
 

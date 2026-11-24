@@ -52,13 +52,16 @@ def gpu(index=0, name="GPU0", vendor="NVIDIA", total=8 * GIB,
 
 
 def probe_report(gpus=None, backends=None, simulated=False, probed_at=None,
-                 memory=None):
+                 memory=None, probed_monotonic=None):
     return {
         "probed_at": time.time() if probed_at is None else probed_at,
+        "probed_monotonic": (time.monotonic() if probed_monotonic is None
+                             else probed_monotonic),
         "os": {}, "cpu": {"name": "cpu", "physical_cores": 8,
                           "logical_cores": 16},
         "memory": memory or {"total_bytes": 32 * GIB,
-                             "available_bytes": 24 * GIB},
+                             "available_bytes": 24 * GIB,
+                             "commit_headroom_bytes": 30 * GIB},
         "gpus": gpus or [], "disks": [],
         "backends": backends or {
             "cpu": {"available": True, "measured": True},
@@ -132,16 +135,27 @@ _SCHED = object()
 
 def snap(gpus=None, sched=_SCHED, margins=None, now=None, probed_at=None,
          backends=None, simulated=False):
+    # Tests driving wall-clock probed_at/now get the same semantics on
+    # the monotonic path: mirror the values so staleness stays
+    # controllable.
     return hs.build_snapshot(
         probe_report(gpus=gpus, backends=backends, simulated=simulated,
-                     probed_at=probed_at),
+                     probed_at=probed_at, probed_monotonic=probed_at),
         sched_state() if sched is _SCHED else sched,
-        margins or MARGINS, now=now)
+        margins or MARGINS, now=now, monotonic_now=now)
 
 
-def preflight(decision="ok", reason=""):
-    return lambda est, known: {"decision": decision, "reason": reason,
-                               "snapshot": {}}
+def evaluate(decision="ok", reason="", fully_evaluated=True, checks=None):
+    """Canned resources.evaluate_ram-shaped result — injected, never
+    measured. An unknown estimate degrades to 'unknown' like the real
+    evaluator."""
+    def _e(est, known):
+        d = decision if known else "unknown"
+        return {"decision": d,
+                "reason": reason if known else "estimate unknown",
+                "fully_evaluated": fully_evaluated and known,
+                "checks": checks or {}, "snapshot": {}}
+    return _e
 
 
 def preview(*, plan=None, spec=SPEC_WAN, runtime_key="sdcpp",
@@ -149,7 +163,10 @@ def preview(*, plan=None, spec=SPEC_WAN, runtime_key="sdcpp",
             components=None, lora_apps=0, weights_declared=None,
             residency="gpu", device_sel="auto", selected_index=None,
             width=832, height=480, batch=1, wf="text2video",
-            preflight_fn=None, ram_known=True, margins=None):
+            evaluate_fn=None, ram_known=True, margins=None,
+            freshness="fresh", simulated=False, cpu_evidence=None,
+            adapter_cpu=True, command_cpu=True,
+            blocked_authoritative=False, staleness=None):
     return pp.build_preview(
         plan=plan or dep_plan(), spec=spec, runtime_key=runtime_key,
         runtime_decl_backends=(
@@ -164,8 +181,16 @@ def preview(*, plan=None, spec=SPEC_WAN, runtime_key="sdcpp",
         residency_basis="explicit", device_sel=device_sel,
         selected_index=selected_index, width=width, height=height,
         batch=batch, workflow_key=wf, include_stale=True,
-        preflight=preflight_fn or preflight(), ram_known=ram_known,
-        margins=margins or MARGINS)
+        evaluate_ram=evaluate_fn or evaluate(),
+        ram_known=ram_known, margins=margins or MARGINS,
+        freshness=freshness, simulated=simulated,
+        cpu_evidence=(cpu_evidence if cpu_evidence is not None else
+                      pp.cpu_evidence_class(
+                          spec, tuple(decl_backends if decl_backends
+                                      is not None else SDCPP.backends),
+                          adapter_cpu, command_cpu)),
+        runtime_blocked_authoritative=blocked_authoritative,
+        verdict_staleness=staleness or {})
 
 
 # ====================================================== hw_snapshot
@@ -401,10 +426,11 @@ def test_fit_unmeasurable_and_estimate_unknown():
     fit = pp.evaluate_device(s1["devices"][0], backends, ("vulkan",),
                              None, int(1 * GIB))
     assert fit["fit_class"] == "insufficient_evidence"
-    # declared weights alone exceeding budget proves insufficiency
+    # declared file bytes exceeding budget is insufficient EVIDENCE —
+    # resident weights under the residency contract are unverified
     fit = pp.evaluate_device(s1["devices"][0], backends, ("vulkan",),
                              None, int(4 * GIB))
-    assert fit["fit_class"] == "insufficient"
+    assert fit["fit_class"] == "insufficient_evidence"
 
 
 def test_device_backend_mismatch_and_lost_device():
@@ -438,32 +464,36 @@ def test_headroom_applied_once_not_twice():
 # ------------------------------------------------------------- cpu lane
 
 def test_cpu_lane_requires_declared_support():
-    lane = pp.cpu_lane(declared_cap=True, cpu_backend_declared=True,
+    lane = pp.cpu_lane(evidence_class=pp.CPU_COMMAND_CONSISTENT,
                        explicitly_requested=False, est_ram=3 * GIB,
-                       ram_known=True, preflight=preflight())
-    assert lane["permitted"] and lane["outcome"] == "cpu_lane_ok"
-    lane = pp.cpu_lane(declared_cap=False, cpu_backend_declared=True,
+                       ram_known=True, evaluate=evaluate())
+    # Statically supported but operationally unverified — never ok.
+    assert lane["permitted"] and lane["outcome"] == "cpu_lane_unverified"
+    lane = pp.cpu_lane(evidence_class=pp.CPU_UNSUPPORTED,
                        explicitly_requested=True, est_ram=None,
-                       ram_known=True, preflight=preflight())
+                       ram_known=True, evaluate=evaluate())
     assert lane["permitted"] is False
     assert lane["outcome"] == "cpu_fallback_unsupported"
-    lane = pp.cpu_lane(declared_cap=True, cpu_backend_declared=False,
+    lane = pp.cpu_lane(evidence_class=pp.CPU_DECLARED,
                        explicitly_requested=False, est_ram=GIB,
-                       ram_known=True, preflight=preflight())
+                       ram_known=True, evaluate=evaluate())
     assert lane["permitted"] is False
+    assert lane["outcome"] == "cpu_lane_unverified"
 
 
 def test_cpu_lane_ram_decisions_propagate():
-    lane = pp.cpu_lane(declared_cap=True, cpu_backend_declared=True,
+    lane = pp.cpu_lane(evidence_class=pp.CPU_COMMAND_CONSISTENT,
                        explicitly_requested=False, est_ram=40 * GIB,
-                       ram_known=True, preflight=preflight("block", "low"))
+                       ram_known=True,
+                       evaluate=evaluate("block", "low"))
     assert lane["outcome"] == "cpu_lane_blocked"
     assert lane["ram_decision"] == "block"
-    lane = pp.cpu_lane(declared_cap=True, cpu_backend_declared=True,
+    lane = pp.cpu_lane(evidence_class=pp.CPU_COMMAND_CONSISTENT,
                        explicitly_requested=False, est_ram=10 * GIB,
                        ram_known=False,
-                       preflight=preflight("warn", "unknown"))
+                       evaluate=evaluate("warn", "unknown"))
     assert "ram_estimate_unknown" in lane["limitations"]
+    assert lane["outcome"] == "cpu_lane_unverified"
 
 
 # ------------------------------------------------- aggregation (F3)
@@ -514,7 +544,7 @@ def test_ram_block_is_blocked_not_incomplete():
     s = snap(gpus=[gpu(free=6 * GIB)], sched=sched_state([slot()]),
              probed_at=1.0, now=2.0)
     p = preview(snapshot=s, residency="cpu_offload",
-                preflight_fn=preflight("block", "insufficient system RAM"))
+                evaluate_fn=evaluate("block", "insufficient system RAM"))
     assert p["advisory_state"] == "preview_blocked"
     assert "ram_insufficient" in p["reasons"]
 
@@ -523,8 +553,15 @@ def test_all_devices_insufficient_is_blocked():
     s = snap(gpus=[gpu(free=2 * GIB)], sched=sched_state([slot()]),
              probed_at=1.0, now=2.0)
     p = preview(snapshot=s, residency="cpu_offload",
-                preflight_fn=preflight("block", "ram"))
+                cpu_evidence=pp.CPU_UNSUPPORTED)
     assert p["advisory_state"] == "preview_blocked"
+    assert "hardware_insufficient" in p["reasons"]
+    # A permitted-but-unverified CPU lane is UNKNOWN, not a failure —
+    # it converts the result to honest incomplete rather than blocked.
+    p2 = preview(snapshot=s, residency="cpu_offload",
+                 cpu_evidence=pp.CPU_COMMAND_CONSISTENT)
+    assert p2["advisory_state"] == "preview_incomplete"
+    assert "cpu_lane_unverified" in p2["reasons"]
 
 
 def test_unmeasurable_never_upgraded_to_ready():
@@ -569,14 +606,17 @@ def test_device_index_scoping_and_proven_mismatch():
 
 
 def test_device_cpu_explicit_lane():
+    # Statically supported (adapter + command contracts) but never
+    # operationally verified → unverified lane → incomplete.
     s = snap(gpus=[gpu()], sched=sched_state([slot()]),
              probed_at=1.0, now=2.0)
     p = preview(spec=SPEC_SD15, snapshot=s, device_sel="cpu",
                 width=512, height=512)
     assert p["cpu_lane"]["permitted"] is True
-    assert p["cpu_lane"]["outcome"] == "cpu_lane_ok"
+    assert p["cpu_lane"]["outcome"] == "cpu_lane_unverified"
+    assert p["cpu_lane"]["evidence_class"] == "cpu_command_consistent"
     assert p["device_alternatives"] == []      # cpu lane only
-    assert p["advisory_state"] == "preview_ready_advisory"
+    assert p["advisory_state"] == "preview_incomplete"
 
 
 def test_device_cpu_without_fallback_is_blocked():
@@ -598,11 +638,12 @@ def test_mixed_device_outcomes_ready_via_better_device():
     assert p["device_alternatives"][0]["index"] == 1  # best first
 
 
-def test_stale_snapshot_is_limitation_not_state_change():
+def test_stale_snapshot_is_limitation_and_incomplete():
     s = snap(gpus=[gpu(free=6 * GIB)], sched=sched_state([slot()]),
              probed_at=0.0, now=1000.0)
-    p = preview(snapshot=s, residency="cpu_offload")
-    assert p["advisory_state"] == "preview_ready_advisory"
+    p = preview(snapshot=s, residency="cpu_offload", freshness="stale")
+    assert p["advisory_state"] == "preview_incomplete"
+    assert "stale_evidence" in p["reasons"]
     assert "snapshot_stale" in p["limitations"]
     assert p["snapshot_stale"] is True
 
@@ -610,7 +651,9 @@ def test_stale_snapshot_is_limitation_not_state_change():
 def test_simulated_hardware_flagged():
     s = snap(gpus=[gpu(free=6 * GIB)], sched=sched_state([slot()]),
              probed_at=1.0, now=2.0, simulated=True)
-    p = preview(snapshot=s, residency="cpu_offload")
+    p = preview(snapshot=s, residency="cpu_offload", simulated=True)
+    assert p["advisory_state"] == "preview_incomplete"
+    assert "simulated_evidence" in p["reasons"]
     assert "simulated_hardware" in p["limitations"]
 
 
@@ -628,12 +671,18 @@ def test_imported_artifact_incomplete_not_ready():
     assert "partial_estimate" in p["limitations"]
 
 
-def test_imported_weights_alone_can_prove_insufficient():
+def test_imported_weights_alone_is_insufficient_evidence():
+    # Declared file bytes > budget is NOT a proven capacity failure —
+    # resident weight size under the residency contract is unverified.
     s = snap(gpus=[gpu(free=2 * GIB)], sched=sched_state([slot()]),
              probed_at=1.0, now=2.0)
     p = preview(spec=None, weights_declared=int(4.1 * GIB),
                 residency="gpu", snapshot=s, ram_known=False)
-    assert p["advisory_state"] == "preview_blocked"
+    assert p["advisory_state"] == "preview_incomplete"
+    assert p["device_alternatives"][0]["fit_class"] == \
+        "insufficient_evidence"
+    assert "imported_residency_unverified" in \
+        p["device_alternatives"][0]["limitations"]
 
 
 def test_wan_offload_alternative_present_sd15_none():
@@ -690,7 +739,7 @@ def test_fingerprint_stable_time_only_change():
                               probed_at=400.0, now=410.0),
                 residency="cpu_offload")
     assert a["plan_fingerprint"] == b["plan_fingerprint"]
-    assert a["plan_fingerprint"].startswith("plan:v1:")
+    assert a["plan_fingerprint"].startswith("plan:v2:")
 
 
 def test_fingerprint_changes_on_reservation_change():
@@ -770,14 +819,19 @@ def _purl(pid, aid, **q):
 
 @pytest.fixture()
 def sim_gpu(request, client, monkeypatch):
-    """Simulated hardware for the endpoint: patch the probe AND swap the
-    app's scheduler for one built on the same canned report."""
+    """Simulated hardware for the endpoint: publish the canned report
+    through the real publication contract (probe_cached reads it) and
+    swap the scheduler for one carrying the same canned inventory."""
+    from app.domain import hardware
     gpus = [gpu(0, free=6 * GIB)]
     rep = probe_report(gpus=gpus)
     monkeypatch.setattr("app.domain.hardware.probe", lambda **kw: rep)
+    hardware._reset_published()
+    hardware._publish(rep)
     sched = GpuScheduler(lambda: rep, {})
     monkeypatch.setattr(client.app.state, "gpu_scheduler", sched)
-    return rep, sched
+    yield rep, sched
+    hardware._reset_published()
 
 
 def test_ep_404s(client, sim_gpu):
@@ -826,20 +880,28 @@ def test_ep_wan_gpu_default_and_offload(client, sim_gpu):
     assert b["stage"]["residency_mode"] == "gpu"
     assert b["stage"]["residency_basis"] == "default"
     # gpu residency: weights+act ≈ 9.4 GiB → device alternative
-    # insufficient on 6 GiB; the DECLARED cpu_fallback lane satisfies —
-    # an explicit honest alternative, never a silent fallback.
+    # insufficient on 6 GiB; the wan catalog declares cpu_fallback but
+    # the gen.video.sdcpp adapter does not — declared-only evidence is
+    # unverified and can never rescue the proven GPU failure.
     assert b["device_alternatives"][0]["fit_class"] == "insufficient"
-    assert b["cpu_lane"]["outcome"] == "cpu_lane_ok"
-    assert b["advisory_state"] == "preview_ready_advisory"
+    assert b["cpu_lane"]["outcome"] == "cpu_lane_unverified"
+    assert b["cpu_lane"]["evidence_class"] == "cpu_declared"
+    assert b["cpu_lane"]["permitted"] is False
+    assert b["advisory_state"] == "preview_blocked"
+    assert "hardware_insufficient" in b["reasons"]
     off = [a["residency_mode"]
            for a in b["stage"]["offload_alternatives"]]
     assert off == ["cpu_offload"]                  # declared alt shown
-    # explicit offload path fits
+    # explicit offload path fits — but the cached probe memory never
+    # carries commit-headroom evidence (psutil physical only), which the
+    # execution-preflight contract requires → honest incomplete, never
+    # READY on absent commit evidence.
     r2 = client.get(_purl(pid, WAN_AID, runtime_key="sdcpp",
                           workflow="text2video", width=832, height=480,
                           residency_mode="cpu_offload"))
     b2 = r2.json()
-    assert b2["advisory_state"] == "preview_ready_advisory"
+    assert b2["advisory_state"] == "preview_incomplete"
+    assert "ram_unknown" in b2["reasons"]
     assert b2["device_alternatives"][0]["fit_class"] \
         == "fits_with_headroom"
     assert b2["stage"]["residency_basis"] == "explicit"
@@ -853,9 +915,13 @@ def test_ep_sd15_cpu_lane(client, sim_gpu):
                          workflow="text2image", device="cpu"))
     b = r.json()
     assert b["cpu_lane"]["permitted"] is True
-    assert b["cpu_lane"]["est_ram_bytes"] == int(0.3 * SD15_FILES
-                                               + 2 * GIB)
+    assert b["cpu_lane"]["outcome"] == "cpu_lane_unverified"
+    # CPU-only host residency: ALL weights + activation + host overhead,
+    # never the GPU staging formula.
+    est_v = compatibility.estimate_vram(SPEC_SD15, 512, 512, 1, "gpu")
+    assert b["cpu_lane"]["est_ram_bytes"] == est_v + 2 * GIB
     assert b["device_alternatives"] == []
+    assert b["advisory_state"] == "preview_incomplete"
 
 
 def test_ep_device_index_evaluation(client, sim_gpu):
@@ -952,19 +1018,27 @@ def test_ep_no_paths_in_response(client, sim_gpu):
         assert token not in body
 
 
-def test_ep_read_only_probe_never_forced(client, monkeypatch):
-    """The endpoint must consume the standard cached probe — probe()
-    is never invoked with force=True."""
+def test_ep_read_only_never_probes(client, monkeypatch):
+    """The endpoint consumes only published evidence — probe() and the
+    discovery cache are never invoked at all, forced or not."""
+    from app.domain import hardware
     calls = []
     rep = probe_report(gpus=[gpu()])
     monkeypatch.setattr("app.domain.hardware.probe",
                         lambda **kw: (calls.append(kw), rep)[1])
+    monkeypatch.setattr("app.domain.hardware._cached_probe",
+                        lambda bucket: (_ for _ in ()).throw(
+                            AssertionError("discovery attempted")))
+    hardware._reset_published()
+    hardware._publish(rep)
     monkeypatch.setattr(client.app.state, "gpu_scheduler",
                         GpuScheduler(lambda: rep, {}))
     pid = _project(client)
     _verdict(client, WAN_AID, hw=rep)
-    client.get(_purl(pid, WAN_AID, runtime_key="sdcpp"))
-    assert all(kw.get("force") is not True for kw in calls)
+    r = client.get(_purl(pid, WAN_AID, runtime_key="sdcpp"))
+    assert r.status_code == 200, r.text
+    assert calls == []                     # probe() never invoked
+    hardware._reset_published()
 
 
 def test_ep_fingerprint_repeatable(client, sim_gpu):

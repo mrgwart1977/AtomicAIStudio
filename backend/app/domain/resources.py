@@ -159,6 +159,92 @@ def pressure_state() -> str:
     return "ok"
 
 
+def evaluate_ram(estimated_ram_bytes: int | None, *, known: bool,
+                 mem: dict | None, margins: dict | None = None
+                 ) -> dict[str, Any]:
+    """Pure advisory RAM evaluation against SUPPLIED memory evidence.
+
+    `mem` is a previously collected memory view —
+    {"total_bytes","available_bytes","commit_headroom_bytes"?} — or None.
+    This function NEVER calls system_memory(), GlobalMemoryStatusEx,
+    psutil or any other OS query: absent evidence is reported as
+    "unknown", never measured and never fabricated.
+
+    The cached hardware report carries only physical total/available
+    (psutil), so `commit_headroom_bytes` is normally absent — the commit
+    check then reads "unknown" and the result is not fully evaluated.
+    `decision`: block > warn > unknown > ok; `fully_evaluated` is False
+    whenever a required check is unknown. An "ok" or "warn" without full
+    evaluation must not establish advisory readiness."""
+    margins = margins or safety_margins()
+    mem = mem or {}
+    snap = {"estimated_ram_bytes": estimated_ram_bytes,
+            "total_phys_bytes": mem.get("total_bytes"),
+            "avail_phys_bytes": mem.get("available_bytes"),
+            "commit_headroom_bytes": mem.get("commit_headroom_bytes"),
+            "estimate_known": known}
+    if mem.get("available_bytes") is None:
+        return {"decision": "unknown", "fully_evaluated": False,
+                "checks": {"memory_evidence": "unavailable"},
+                "reason": "memory evidence unavailable — RAM cannot be "
+                          "evaluated",
+                "snapshot": snap}
+    avail = int(mem["available_bytes"])
+    checks: dict[str, str] = {}
+    reasons: list[str] = []
+    if not known or estimated_ram_bytes is None:
+        checks["estimate"] = "unknown"
+    else:
+        est = int(estimated_ram_bytes)
+        headroom_after = avail - est
+        snap["headroom_after_bytes"] = headroom_after
+        if headroom_after < margins["critical_avail_phys_bytes"]:
+            checks["phys_avail"] = "block"
+            reasons.append(
+                f"insufficient system RAM: job needs ~{est / GIB:.1f} GiB, "
+                f"only ~{avail / GIB:.1f} GiB free")
+        elif headroom_after < margins["os_headroom_bytes"]:
+            checks["phys_avail"] = "warn"
+            reasons.append(
+                f"job may leave the system low on memory "
+                f"(~{headroom_after / GIB:.1f} GiB free afterward)")
+        else:
+            checks["phys_avail"] = "ok"
+        commit = mem.get("commit_headroom_bytes")
+        if commit is None:
+            # Required by the execution-preflight contract but not
+            # collectible from the cached report — honest unknown.
+            checks["commit_headroom"] = "unknown"
+            reasons.append("commit headroom not present in cached memory "
+                           "evidence")
+        else:
+            commit_after = int(commit) - est
+            snap["commit_after_bytes"] = commit_after
+            if commit_after < margins["critical_commit_headroom_bytes"]:
+                checks["commit_headroom"] = "block"
+                reasons.append(
+                    f"insufficient commit headroom: job needs ~"
+                    f"{est / GIB:.1f} GiB committed, only "
+                    f"~{int(commit) / GIB:.1f} GiB of commit limit free")
+            else:
+                checks["commit_headroom"] = "ok"
+    vals = set(checks.values())
+    fully_evaluated = bool(checks) and "unknown" not in vals
+    if "block" in vals:
+        decision = "block"
+    elif "warn" in vals:
+        decision = "warn"
+    elif "unknown" in vals:
+        decision = "unknown"
+        if not reasons:
+            reasons.append("required memory evidence is unknown")
+    else:
+        decision = "ok"
+    return {"decision": decision, "fully_evaluated": fully_evaluated,
+            "checks": checks, "reason": "; ".join(reasons),
+            "snapshot": snap}
+
+
 def preflight_memory_check(estimated_ram_bytes: int, *, known: bool,
                            margins: dict | None = None) -> dict[str, Any]:
     """Decide whether a job may launch given its RAM estimate.

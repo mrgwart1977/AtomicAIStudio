@@ -138,10 +138,11 @@ class GpuScheduler:
         with self._lock:
             return self._slots_locked()
 
-    def _slots_locked(self) -> list[dict]:
-        present = {g.get("index", i) for i, g in enumerate(self.gpus())}
+    def _slots_locked(self, inventory: list[dict] | None = None) -> list[dict]:
+        gpus = self.gpus() if inventory is None else list(inventory)
+        present = {g.get("index", i) for i, g in enumerate(gpus)}
         out = []
-        for i, g in enumerate(self.gpus()):
+        for i, g in enumerate(gpus):
             idx = g.get("index", i)
             jobs = dict(self._reserved.get(idx, {}))
             usable = self._usable(g)
@@ -358,4 +359,30 @@ class GpuScheduler:
                 # Simulated inventories are never mistaken for measured
                 # hardware — every scheduling surface carries the flag.
                 "simulated": bool(self._hw().get("simulated")),
+            }
+
+    def state_for(self, inventory: list[dict] | None,
+                  *, simulated: bool = False) -> dict:
+        """Strictly observational view built against a CALLER-SUPPLIED
+        device inventory — the advisory path's cache-only boundary.
+
+        Never calls _hw()/the probe callback and never acquires or
+        releases reservations; the single RLock hold makes the
+        reservation observation coherent. Hardware collection and this
+        reservation observation are NOT atomic — the caller's inventory
+        may predate in-flight claims."""
+        inv = list(inventory or [])
+        with self._lock:
+            present = {g.get("index", i) for i, g in enumerate(inv)}
+            slots = self._slots_locked(inv)
+            return {
+                "gpu_count": len(inv),
+                "free": sum(1 for s in slots
+                            if s["present"] and not s["jobs"]),
+                "slots": slots,
+                "lost_devices": sorted(
+                    idx for idx, jobs in self._reserved.items()
+                    if idx not in present and jobs),
+                "prefs": self._prefs(),
+                "simulated": bool(simulated),
             }

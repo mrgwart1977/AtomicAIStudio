@@ -105,7 +105,9 @@ def usable_vram(gpu: dict) -> int | None:
     """Best honest usable-VRAM figure for a GPU: measured free memory if
     the driver reports it, else 85% of measured total, else None."""
     free = gpu.get("vram_free_bytes")
-    if free:
+    if free is not None:
+        # A measured 0 is a real measurement — never fall back to the
+        # 85%-of-total estimate for a genuinely exhausted device.
         return free
     total = gpu.get("vram_bytes")
     if total:

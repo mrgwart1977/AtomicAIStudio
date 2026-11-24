@@ -11,10 +11,12 @@ guessed.
 
 from __future__ import annotations
 
+import copy
 import json
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from functools import lru_cache
 from importlib.util import find_spec
@@ -224,6 +226,9 @@ def _cached_probe(_bucket: int) -> dict:
     gpus = _query_gpus(devinfo)
     return {
         "probed_at": time.time(),
+        # Monotonic companion — collected at the actual discovery moment;
+        # freshness classification must not depend on wall-clock jumps.
+        "probed_monotonic": time.monotonic(),
         "os": {"system": platform.system(), "release": platform.release(), "version": platform.version()},
         "cpu": {
             "name": platform.processor() or "unknown",
@@ -262,6 +267,67 @@ def _simulated_report() -> dict | None:
             return None
 
 
+# ---------------------------------------------------------------- publication
+#
+# The last-successfully-published evidence record — the ONLY thing the
+# strictly cache-only accessor may read. Publication happens exclusively
+# inside probe(): cold start is honestly "unavailable", an expired record
+# is still available as stale evidence, and a failed or in-flight refresh
+# never disturbs the previous complete record.
+
+_PUBLISH_LOCK = threading.Lock()
+_PUBLISHED: dict | None = None
+
+
+def _publish(report: dict) -> None:
+    """Atomically publish a complete probe report. A private deep copy is
+    stored; the ordering key is the report's own collection monotonic so
+    an older discovery finishing late can never overwrite newer evidence."""
+    global _PUBLISHED
+    record = {
+        "report": copy.deepcopy(report),
+        "probed_at": report.get("probed_at"),
+        "probed_monotonic": report.get("probed_monotonic"),
+        "simulated": bool(report.get("simulated")),
+    }
+    key = record["probed_monotonic"]
+    key = key if isinstance(key, (int, float)) else -1.0
+    with _PUBLISH_LOCK:
+        current_key = ((_PUBLISHED or {}).get("probed_monotonic"))
+        current_key = current_key if isinstance(
+            current_key, (int, float)) else -1.0
+        if key >= current_key:
+            record["_order"] = key
+            _PUBLISHED = record
+
+
+def probe_cached() -> dict | None:
+    """Strictly cache-only evidence access — returns the last published
+    complete report plus its collection metadata, or None when nothing has
+    ever been published. NEVER touches the discovery cache, simulation
+    sources, the OS, the filesystem or any subprocess; never refreshes
+    expired evidence and never rewrites collection timestamps."""
+    with _PUBLISH_LOCK:
+        rec = _PUBLISHED
+    if rec is None:
+        return None
+    return {
+        # Defensive deep copy — callers can never mutate published state.
+        "report": copy.deepcopy(rec["report"]),
+        "probed_at": rec["probed_at"],
+        "probed_monotonic": rec["probed_monotonic"],
+        "simulated": rec["simulated"],
+        "order": rec["_order"],
+    }
+
+
+def _reset_published() -> None:
+    """Test-only hook: drop the published record (cold-cache state)."""
+    global _PUBLISHED
+    with _PUBLISH_LOCK:
+        _PUBLISHED = None
+
+
 def probe(force: bool = False) -> dict:
     if force:
         _cached_probe.cache_clear()
@@ -272,4 +338,5 @@ def probe(force: bool = False) -> dict:
     sim = _simulated_report()
     if sim:
         report = {**report, **sim, "simulated": True}
+    _publish(report)
     return report

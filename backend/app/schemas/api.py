@@ -1077,13 +1077,20 @@ class DeviceAlternativeOut(BaseModel):
 
 
 class CpuLaneOut(BaseModel):
-    """The CPU alternative — explicit only, never a silent fallback."""
+    """The CPU alternative — explicit only, never a silent fallback.
+    `evidence_class` is the static CPU-capability ladder:
+    cpu_unsupported | cpu_declared | cpu_adapter_contract |
+    cpu_command_consistent | cpu_operational (the last requires
+    verified execution evidence — never produced today, so
+    cpu_lane_ok is unreachable under current contracts)."""
     permitted: bool
     explicitly_requested: bool
     outcome: str                           # cpu_lane_ok | cpu_lane_blocked |
+                                           # cpu_lane_unverified |
                                            # cpu_fallback_unsupported
+    evidence_class: str = "cpu_unsupported"
     est_ram_bytes: int | None
-    ram_decision: str | None               # ok | warn | block
+    ram_decision: str | None               # ok | warn | block | unknown
     ram_decision_reason: str = ""
     reasons: list[str]
     limitations: list[str]
@@ -1140,13 +1147,24 @@ class ExecutionPreviewOut(BaseModel):
     advisory: bool = True
     advisory_state: str                    # preview_ready_advisory |
                                          # preview_incomplete | preview_blocked
-    plan_fingerprint: str                  # "plan:v1:" + hash
+    plan_fingerprint: str                  # "plan:v2:" + hash
+    plan_result_fingerprint: str = ""      # "planresult:v1:" + hash —
+                                         # material outcome identity
     artifact_id: str
     workflow_key: str
     runtime_key: str
     dependency_plan_ref: str               # U-5b resolution_version
-    snapshot: HwSnapshotOut
+    snapshot: HwSnapshotOut | None         # null = hardware evidence
+                                         # unavailable (cold cache)
     snapshot_stale: bool
+    snapshot_freshness: str = "unavailable"  # fresh | stale | unavailable —
+                                           # independent of simulated
+    snapshot_simulated: bool = False
+    verdict_staleness: dict[str, Any] = {}   # root state + pool counts:
+                                           # current|stale|unevaluable|simulated
+    ram_eval: dict[str, Any] = {}            # evaluate_ram: decision,
+                                             # fully_evaluated, checks
+    cpu_evidence: str = "cpu_unsupported"
     stage: ExecStageOut
     device_alternatives: list[DeviceAlternativeOut]
     devices_total: int
