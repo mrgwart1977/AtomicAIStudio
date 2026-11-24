@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -34,7 +35,7 @@ from typing import Any
 PIPELINE_SCHEMA_VERSION = 1
 PIPELINE_DEFS_VERSION = 1
 # Bump when the audited static command contract changes.
-COMMAND_CONTRACTS_VERSION = 1
+COMMAND_CONTRACTS_VERSION = 2
 
 LIMITS = {
     "max_pipelines": 64,
@@ -222,6 +223,18 @@ class CommandArg:
     has_default: bool = False
     default: object = None
     constraints: tuple[Constraint, ...] = ()
+    # How completely the static contract models this argument for
+    # PIPELINE BINDING — distinct from what the real command accepts:
+    #   full        — real contract fully represented; bindings OK
+    #   partial     — real contract is richer (e.g. device also takes an
+    #                 int GPU index); bindings allowed within the
+    #                 modeled value space only
+    #   unsupported — real arg exists but cannot be safely modeled
+    #                 (paired dims, selection lists); bindings rejected
+    binding_support: str = "full"
+    note: str = ""                # audit note — documents the gap
+                                 # between real support and modeled
+                                 # binding support
 
 
 @dataclass(frozen=True)
@@ -232,10 +245,15 @@ class CommandContract:
     args: tuple[CommandArg, ...]
     conditional_groups: tuple[tuple[str, ...], ...]
     output_kind: str                      # primary output asset kind
-    output_origin: str                    # e.g. "generated"
+    output_origin: str                    # literal persisted asset origin
+                                          # (adapters emit "generation";
+                                          # jobs.py defaults "generated")
     extra_outputs_possible: bool          # batch>1 -> extra_assets
-    notes: tuple[str, ...]
-    audited_from: str                     # source citation
+    output_count_arg: str | None = None   # request arg multiplying the
+                                          # primary output ("batch") —
+                                          # pipelines pin it to 1
+    notes: tuple[str, ...] = ()
+    audited_from: str = ""                # source citation
 
     def arg(self, name: str) -> CommandArg | None:
         return next((a for a in self.args if a.name == name), None)
@@ -265,13 +283,26 @@ COMMAND_CONTRACTS: dict[str, CommandContract] = {
             CommandArg("sampler", "string"),
             CommandArg("batch", "int", has_default=True, default=1,
                        constraints=(Constraint("min", 1),
-                                    Constraint("max", 4))),
+                                    Constraint("max", 4)),
+                       note=("real command accepts 1–4 "
+                             "(adapter limits.max_batch); the PIPELINE "
+                             "single-output contract pins it to 1 via "
+                             "output_count_arg")),
+            # commands.py:3076-3080 — device also accepts an int GPU
+            # index >=0; only the string modes are modeled for binding.
             CommandArg("device", "string",
-                       has_default=True, default="auto"),
+                       has_default=True, default="auto",
+                       binding_support="partial",
+                       note="real contract: 'auto'|'cpu'|int>=0"),
             CommandArg("runtime_flavor", "string"),
             CommandArg("residency_mode", "string"),
-            CommandArg("loras", "string"),   # policy-held selections —
-                                             # binds are subject to holds
+            # commands.py:6015-6032 — real contract takes a selections
+            # list resolved through check_loras + prompt guard; the
+            # scalar-string model cannot represent it, and all LoRA
+            # selections remain subject to existing authorization holds.
+            CommandArg("loras", "string",
+                       binding_support="unsupported",
+                       note="real contract: resolved selections list"),
             CommandArg("shot_id", "string"),
             CommandArg("scene_id", "string"),
             CommandArg("set_thumbnail", "bool",
@@ -282,12 +313,18 @@ COMMAND_CONTRACTS: dict[str, CommandContract] = {
             CommandArg("local_adapter_id", "string"),
             CommandArg("est_vram_bytes", "int", computed=True),
             CommandArg("allow_cpu", "bool", computed=True),
-            CommandArg("runtime_prompt_sha256", "string", computed=True),
+            # commands.py:6058-6060 — accepted as passthrough when no
+            # loras are bound, engine-computed when they are; either
+            # way it is not a pipeline-bindable argument.
+            CommandArg("runtime_prompt_sha256", "string", computed=True,
+                       note="conditional passthrough in the real "
+                            "contract; unbindable"),
         ),
         conditional_groups=(),
         output_kind="image",
-        output_origin="generated",
+        output_origin="generation",
         extra_outputs_possible=True,        # batch>1 -> extra_assets
+        output_count_arg="batch",
         notes=(("local sd.cpp subprocess adapter; batch N yields N "
                 "images — primary output plus extra_assets"),),
         audited_from="commands.py:_job_request generate.image + "
@@ -310,36 +347,49 @@ COMMAND_CONTRACTS: dict[str, CommandContract] = {
                        is_asset_arg=True),
             CommandArg("negative_prompt", "string",
                        has_default=True, default=""),
+            # commands.py:3166-3184 — width/height are a PAIRED argument
+            # (both or neither) bounded to 64–2048 or the model's
+            # catalog preset table, with i2v aspect resolution when
+            # absent. Not modeled for pipeline binding in U-5c-2a.
             CommandArg("width", "int",
-                       constraints=(Constraint("min", 1),
-                                    Constraint("max", 4096))),
+                       binding_support="unsupported",
+                       note="paired w/ height; model presets|64-2048"),
             CommandArg("height", "int",
-                       constraints=(Constraint("min", 1),
-                                    Constraint("max", 4096))),
-            CommandArg("frames", "int", has_default=True, default=33),
-            CommandArg("fps", "int", has_default=True, default=24),
+                       binding_support="unsupported",
+                       note="paired w/ width; model presets|64-2048"),
+            CommandArg("frames", "int", has_default=True, default=33,
+                       note="catalog capabilities bounds at commit"),
+            CommandArg("fps", "int", has_default=True, default=24,
+                       note="catalog capabilities bounds at commit"),
             CommandArg("steps", "int", has_default=True, default=30),
             CommandArg("cfg", "float", has_default=True, default=7.0),
             CommandArg("seed", "int", has_default=True, default=-1),
             CommandArg("sampler", "string"),
             CommandArg("device", "string",
-                       has_default=True, default="auto"),
+                       has_default=True, default="auto",
+                       binding_support="partial",
+                       note="real contract: 'auto'|'cpu'|int>=0"),
             CommandArg("runtime_flavor", "string"),
             CommandArg("residency_mode", "string"),
             CommandArg("max_vram_gib", "int"),
-            CommandArg("loras", "string", refused=True),
+            # commands.py:3113-3118 + 6412-6417 — refused twice
+            # (validate + request builder); selections list anyway.
+            CommandArg("loras", "string", refused=True,
+                       note="refused by the real command"),
             CommandArg("shot_id", "string"),
             CommandArg("scene_id", "string"),
             CommandArg("memory_risk_acknowledged", "bool",
                        has_default=True, default=False),
             CommandArg("est_vram_bytes", "int", computed=True),
+            # hard-coded False in the builder — never caller input.
             CommandArg("allow_cpu", "bool", computed=True),
+            # resolved from image_asset_id at commit (commands.py:6455-6463)
             CommandArg("image_path", "string", computed=True),
             CommandArg("source_sha256", "string", computed=True),
         ),
         conditional_groups=(("prompt", "image_asset_id"),),
         output_kind="video",
-        output_origin="generated",
+        output_origin="generation",
         extra_outputs_possible=False,
         notes=(("prompt OR image_asset_id satisfies the video-source "
                 "requirement — command-level optionality does NOT relax "
@@ -423,13 +473,16 @@ class Finding:
 
 
 def _ptype_ok(ptype: str, value) -> bool:
+    """Type check for declared values — int excludes bool, float
+    excludes bool and ALL non-finite values (D2)."""
     if ptype == "string":
         return isinstance(value, str)
     if ptype == "int":
         return isinstance(value, int) and not isinstance(value, bool)
     if ptype == "float":
         return (isinstance(value, (int, float))
-                and not isinstance(value, bool))
+                and not isinstance(value, bool)
+                and math.isfinite(value))
     if ptype == "bool":
         return isinstance(value, bool)
     return False
@@ -437,38 +490,105 @@ def _ptype_ok(ptype: str, value) -> bool:
 
 def _constraint_findings(subj: str, ptype: str,
                          constraints: tuple[Constraint, ...]) -> list[Finding]:
+    """Validate the constraint DECLARATION itself (D8) — kinds, value
+    types, immutability, finiteness, duplicates and internal
+    contradictions — independent of any default or bound value."""
     out: list[Finding] = []
+    seen: set[str] = set()
+    bounds: dict[str, object] = {}
     for c in constraints:
         if c.kind not in CONSTRAINT_KINDS:
             out.append(Finding("invalid_constraint", subj,
                                f"unsupported constraint kind '{c.kind}'"))
             continue
+        if c.kind in seen:
+            out.append(Finding("invalid_constraint", subj,
+                               f"duplicate constraint kind '{c.kind}'"))
+        seen.add(c.kind)
         if not _deep_immutable(c.value):
             out.append(Finding("invalid_constraint", subj,
                                f"constraint '{c.kind}' value is mutable"))
             continue
         if c.kind in ("min", "max"):
-            if ptype not in ("int", "float") or \
-                    not isinstance(c.value, (int, float)) or \
-                    isinstance(c.value, bool):
+            if (ptype not in ("int", "float")
+                    or not isinstance(c.value, (int, float))
+                    or isinstance(c.value, bool)):
                 out.append(Finding("invalid_constraint", subj,
                                    f"'{c.kind}' requires a numeric value "
                                    f"and numeric ptype (got {ptype!r})"))
+            elif not math.isfinite(c.value):
+                out.append(Finding("invalid_constraint", subj,
+                                   f"'{c.kind}' value is not finite"))
+            else:
+                bounds[c.kind] = c.value
         elif c.kind == "choices":
             if not isinstance(c.value, tuple) or not c.value:
                 out.append(Finding("invalid_constraint", subj,
                                    "'choices' requires a non-empty tuple"))
+            elif not all(_ptype_ok(ptype, v) for v in c.value):
+                out.append(Finding("invalid_constraint", subj,
+                                   "'choices' elements must match "
+                                   f"ptype {ptype!r}"))
         elif c.kind in ("min_len", "max_len"):
-            if ptype != "string" or not isinstance(c.value, int):
+            if (ptype != "string" or not isinstance(c.value, int)
+                    or isinstance(c.value, bool)):
                 out.append(Finding("invalid_constraint", subj,
                                    f"'{c.kind}' requires an int value and "
                                    "string ptype"))
-        elif c.kind == "pattern" and \
-                (ptype != "string" or not isinstance(c.value, str)):
-            out.append(Finding("invalid_constraint", subj,
-                               "'pattern' requires a string value and "
-                               "string ptype"))
+            else:
+                bounds[c.kind] = c.value
+        elif c.kind == "pattern":
+            if ptype != "string" or not isinstance(c.value, str):
+                out.append(Finding("invalid_constraint", subj,
+                                   "'pattern' requires a string value and "
+                                   "string ptype"))
+            else:
+                try:
+                    re.compile(c.value)
+                except re.error:
+                    out.append(Finding("invalid_constraint", subj,
+                                       "'pattern' does not compile"))
+    if ("min" in bounds and "max" in bounds
+            and bounds["min"] > bounds["max"]):
+        out.append(Finding("invalid_constraint", subj,
+                           f"min {bounds['min']} > max {bounds['max']}"))
+    if ("min_len" in bounds and "max_len" in bounds
+            and bounds["min_len"] > bounds["max_len"]):
+        out.append(Finding("invalid_constraint", subj,
+                           f"min_len {bounds['min_len']} > "
+                           f"max_len {bounds['max_len']}"))
     return out
+
+
+def _domain_overlap_findings(subj_a: str, ca: tuple[Constraint, ...],
+                             subj_b: str, cb: tuple[Constraint, ...],
+                             out_subj: str) -> list[Finding]:
+    """Effective-domain intersection across two constraint layers (D8):
+    an empty min/max or choices intersection means NO value can ever
+    satisfy the bound argument."""
+    if not ca or not cb:
+        return []
+
+    def _mm(cs):
+        return (next((c.value for c in cs if c.kind == "min"), None),
+                next((c.value for c in cs if c.kind == "max"), None),
+                next((c.value for c in cs if c.kind == "choices"), None))
+
+    alo, ahi, ach = _mm(ca)
+    blo, bhi, bch = _mm(cb)
+    if alo is not None and bhi is not None and alo > bhi:
+        return [Finding("conflicting_constraints", out_subj,
+                        f"{subj_a} min {alo} exceeds "
+                        f"{subj_b} max {bhi}")]
+    if blo is not None and ahi is not None and blo > ahi:
+        return [Finding("conflicting_constraints", out_subj,
+                        f"{subj_b} min {blo} exceeds "
+                        f"{subj_a} max {ahi}")]
+    if ach is not None and bch is not None \
+            and not (set(ach) & set(bch)):
+        return [Finding("conflicting_constraints", out_subj,
+                        f"{subj_a} choices disjoint from {subj_b}")]
+    return []
 
 
 def _value_meets(ptype: str, value,
@@ -685,6 +805,12 @@ def validate_pipeline(defn: PipelineDefinition,
                         f.append(Finding("refused_arg", n.node_id,
                                          f"in-port {p.port_key} arg "
                                          f"{p.command_arg} is refused"))
+                    if carg.binding_support == "unsupported":
+                        f.append(Finding("unsupported_binding_target",
+                                         n.node_id,
+                                         f"in-port {p.port_key} arg "
+                                         f"{p.command_arg} is not "
+                                         "modeled for pipeline binding"))
         # Bindings vs contract + externals + edges.
         bound_args: dict[str, str] = {}
         for b in n.param_bindings:
@@ -723,8 +849,17 @@ def validate_pipeline(defn: PipelineDefinition,
                     f.append(Finding("refused_arg", n.node_id,
                                      f"{b.request_key} is refused by "
                                      f"{n.command_key}"))
+                if carg.binding_support == "unsupported":
+                    f.append(Finding("unsupported_binding_target",
+                                     n.node_id,
+                                     f"{b.request_key} is not modeled "
+                                     "for pipeline binding"))
                 f.extend(_constraint_findings(
                     b.request_key, carg.ptype, b.constraints))
+                f.extend(_domain_overlap_findings(
+                    f"{b.request_key} binding", b.constraints,
+                    f"{n.command_key}.{b.request_key}",
+                    carg.constraints, n.node_id))
             bound_args[b.request_key] = b.source
             if b.source == "external":
                 ep = param_by_key.get(b.external_key or "")
@@ -732,6 +867,16 @@ def validate_pipeline(defn: PipelineDefinition,
                     f.append(Finding("missing_external_param", n.node_id,
                                      f"{b.request_key} -> "
                                      f"{b.external_key}"))
+                else:
+                    if carg is not None:
+                        f.extend(_domain_overlap_findings(
+                            f"external {ep.param_key}", ep.constraints,
+                            f"{n.command_key}.{b.request_key}",
+                            carg.constraints, n.node_id))
+                    f.extend(_domain_overlap_findings(
+                        f"{b.request_key} binding", b.constraints,
+                        f"external {ep.param_key}", ep.constraints,
+                        n.node_id))
             elif b.source == "edge":
                 e = edge_by_id.get(b.edge_id or "")
                 if e is None:
@@ -771,6 +916,22 @@ def validate_pipeline(defn: PipelineDefinition,
                                      n.node_id,
                                      f"{b.request_key} constant is "
                                      "mutable"))
+        # Pipeline single-output contract (D1): when the command
+        # declares an output-count argument, the PIPELINE pins it to
+        # exactly one integer constant 1. The real command's wider
+        # range (generate.image batch 1–4) is preserved intact — the
+        # restriction is scoped to pipeline declarations only.
+        if contract is not None and contract.output_count_arg:
+            oca = contract.output_count_arg
+            pins = [b for b in n.param_bindings if b.request_key == oca]
+            if len(pins) != 1 or pins[0].source != "constant" \
+                    or not _ptype_ok("int", pins[0].constant) \
+                    or pins[0].constant != 1:
+                f.append(Finding("cardinality_pin_violation",
+                                 n.node_id,
+                                 f"{oca} must be bound exactly once, "
+                                 "to integer constant 1 (single-output "
+                                 "pipeline contract)"))
         # Mandatory + conditional argument coverage.
         if contract is not None:
             for a in contract.args:
@@ -1008,15 +1169,25 @@ def _port_out(p: PortDecl) -> dict[str, Any]:
             "output_contract": p.output_contract}
 
 
+def _json_safe(v: Any) -> Any:
+    """Non-finite floats -> None in describe output — invalid
+    definitions can carry NaN/inf and must never leak them into API
+    JSON (the validation finding still reports the repr)."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, tuple):
+        return [_json_safe(x) for x in v]
+    return v
+
+
 def _constraint_out(c: Constraint) -> dict[str, Any]:
-    v = list(c.value) if isinstance(c.value, tuple) else c.value
-    return {"kind": c.kind, "value": v}
+    return {"kind": c.kind, "value": _json_safe(c.value)}
 
 
 def _binding_out(b: ParamBinding) -> dict[str, Any]:
     return {"request_key": b.request_key, "source": b.source,
             "external_key": b.external_key, "edge_id": b.edge_id,
-            "constant": b.constant,
+            "constant": _json_safe(b.constant),
             "constraints": [_constraint_out(c)
                             for c in b.constraints]}
 
@@ -1024,7 +1195,8 @@ def _binding_out(b: ParamBinding) -> dict[str, Any]:
 def _param_out(p: ParamDecl) -> dict[str, Any]:
     return {"param_key": p.param_key, "ptype": p.ptype,
             "required": p.required, "has_default": p.has_default,
-            "default": p.default, "description": p.description,
+            "default": _json_safe(p.default),
+            "description": p.description,
             "constraints": [_constraint_out(c)
                             for c in p.constraints]}
 
@@ -1061,7 +1233,11 @@ def _static_assessment(defn: PipelineDefinition,
 def _canon(v) -> Any:
     """Deterministic canonicalization; declaration order is preserved
     where ordering is semantically significant (nodes, edges, ports,
-    bindings) — only key-order inside dicts is normalized."""
+    bindings) — only key-order inside dicts is normalized. Non-finite
+    floats serialize as their repr string so the canonical JSON stays
+    strict and deterministic even for invalid definitions (D2)."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return repr(v)
     if isinstance(v, (list, tuple)):
         return [_canon(x) for x in v]
     if isinstance(v, dict):
@@ -1166,7 +1342,11 @@ def describe_pipeline(defn: PipelineDefinition,
                           "severity": fd.severity, "detail": fd.detail}
                          for fd in findings],
         },
-        "concurrency_pairs": concurrency_pairs(defn),
+        # Concurrency analysis runs ONLY on valid bounded graphs (D7):
+        # invalid or over-limit definitions return findings and make
+        # no concurrency claims.
+        "concurrency_pairs": (concurrency_pairs(defn)
+                              if structural == "valid" else []),
         "static_assessment": _static_assessment(defn, ctx),
         "operational_readiness": "not_evaluated",
         "definition_fingerprint": definition_fingerprint(defn),
@@ -1316,9 +1496,23 @@ IMG2VID_CHAIN = PipelineDefinition(
     ),
 )
 
-PIPELINE_DEFS: dict[str, PipelineDefinition] = {
-    d.pipeline_key: d for d in (IMG2VID_CHAIN,)
-}
+# Ordered declaration source (D6) — duplicates are PRESERVED here so
+# pipeline_registry can flag them before any deduplication. The dict
+# below is a lookup convenience built after validation, first-wins.
+_PIPELINE_DECLS: tuple[PipelineDefinition, ...] = (IMG2VID_CHAIN,)
+
+
+def _build_registry(
+        decls: tuple[PipelineDefinition, ...]
+) -> dict[str, PipelineDefinition]:
+    out: dict[str, PipelineDefinition] = {}
+    for d in decls:
+        out.setdefault(d.pipeline_key, d)
+    return out
+
+
+PIPELINE_DEFS: dict[str, PipelineDefinition] = \
+    _build_registry(_PIPELINE_DECLS)
 
 
 def get_pipeline(key: str | None) -> PipelineDefinition | None:
@@ -1327,17 +1521,25 @@ def get_pipeline(key: str | None) -> PipelineDefinition | None:
     return PIPELINE_DEFS.get(key)
 
 
-def pipeline_registry(ctx: EvidenceContext) -> tuple[str, list[Finding]]:
-    """Registry-level checks — duplicate keys, pipeline-count bound —
-    then per-definition validation."""
+def pipeline_registry(
+        ctx: EvidenceContext,
+        declarations: tuple[PipelineDefinition, ...] | None = None
+) -> tuple[str, list[Finding]]:
+    """Registry-level checks over the ORDERED declaration source:
+    count bound and duplicate keys flagged BEFORE any deduplication —
+    a duplicate declaration is a finding, never a silent drop."""
+    decls = _PIPELINE_DECLS if declarations is None \
+        else tuple(declarations)
     f: list[Finding] = []
-    if len(PIPELINE_DEFS) > LIMITS["max_pipelines"]:
+    if len(decls) > LIMITS["max_pipelines"]:
         f.append(Finding("limit_exceeded", "registry",
-                         f"pipelines {len(PIPELINE_DEFS)} > "
+                         f"pipeline declarations {len(decls)} > "
                          f"{LIMITS['max_pipelines']}"))
-    worst: list[Finding] = []
-    for key in sorted(PIPELINE_DEFS):
-        _, findings = validate_pipeline(PIPELINE_DEFS[key], ctx)
-        worst.extend(findings)
-    return ("valid" if not (f or worst) else "invalid"), \
-        sorted(f + worst, key=lambda x: (x.code, x.subject))
+    keys = [d.pipeline_key for d in decls]
+    for k in sorted({k for k in keys if keys.count(k) > 1}):
+        f.append(Finding("duplicate_pipeline_key", "registry", k))
+    for d in decls:
+        _, findings = validate_pipeline(d, ctx)
+        f.extend(findings)
+    return ("valid" if not f else "invalid"), \
+        sorted(f, key=lambda x: (x.code, x.subject))

@@ -9,6 +9,7 @@ concurrency derivation, both fingerprints, and read-only API guards.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 from app.domain import pipeline_defs as pd
 
@@ -783,3 +784,537 @@ def test_audit_fields_present():
         assert c.audited_from
         assert c.output_kind in pd.ASSET_KINDS
         assert c.output_origin
+
+
+# ==================================================================
+# D1 — fixed batch=1 pipeline pin (scoped to the pipeline contract,
+#      the real generate.image batch range 1-4 stays intact)
+# ==================================================================
+
+
+def _img_bindings(*, batch_binding=None, drop_batch=False):
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "batch" or not drop_batch]
+    if batch_binding is not None:
+        keep = [b for b in keep if b.request_key != "batch"]
+        keep.append(batch_binding)
+    return tuple(keep)
+
+
+def test_d1_command_batch_range_preserved():
+    """The audited command contract still documents the REAL batch
+    range — the pin is a pipeline rule, not a command redefinition."""
+    a = pd.COMMAND_CONTRACTS["generate.image"].arg("batch")
+    mm = {c.kind: c.value for c in a.constraints}
+    assert mm == {"min": 1, "max": 4}
+    assert pd.COMMAND_CONTRACTS["generate.image"].output_count_arg \
+        == "batch"
+
+
+def test_d1_shipped_t1_remains_valid():
+    structural, codes = _valid(T1)
+    assert structural == "valid" and codes == []
+
+
+def test_d1_external_batch_default_1_rejected():
+    p = pd.ParamDecl("img_batch", "int", required=False,
+                     has_default=True, default=1)
+    b = pd.ParamBinding("batch", "external", external_key="img_batch")
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=_img_bindings(
+                                     batch_binding=b)),
+                   external_params=T1.external_params + (p,))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_external_batch_choices_1_rejected():
+    p = pd.ParamDecl("img_batch", "int", required=False,
+                     has_default=True, default=1,
+                     constraints=(pd.Constraint("choices", (1,)),))
+    b = pd.ParamBinding("batch", "external", external_key="img_batch")
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=_img_bindings(
+                                     batch_binding=b)),
+                   external_params=T1.external_params + (p,))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_external_batch_range_1_4_rejected():
+    p = pd.ParamDecl("img_batch", "int", required=False,
+                     has_default=True, default=1,
+                     constraints=(pd.Constraint("min", 1),
+                                  pd.Constraint("max", 4)))
+    b = pd.ParamBinding("batch", "external", external_key="img_batch")
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=_img_bindings(
+                                     batch_binding=b)),
+                   external_params=T1.external_params + (p,))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_constant_batch_2_rejected():
+    b = pd.ParamBinding("batch", "constant", constant=2)
+    bad = _replace_node(T1, "img",
+                        param_bindings=_img_bindings(batch_binding=b))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_constant_batch_4_rejected():
+    b = pd.ParamBinding("batch", "constant", constant=4)
+    bad = _replace_node(T1, "img",
+                        param_bindings=_img_bindings(batch_binding=b))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_constant_batch_true_rejected():
+    b = pd.ParamBinding("batch", "constant", constant=True)
+    bad = _replace_node(T1, "img",
+                        param_bindings=_img_bindings(batch_binding=b))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_missing_batch_binding_rejected():
+    bad = _replace_node(T1, "img",
+                        param_bindings=_img_bindings(drop_batch=True))
+    _, codes = _valid(bad)
+    assert "cardinality_pin_violation" in codes
+
+
+def test_d1_duplicate_batch_bindings_rejected():
+    keep = list(T1.nodes[0].param_bindings)
+    keep.append(pd.ParamBinding("batch", "constant", constant=1))
+    bad = _replace_node(T1, "img", param_bindings=tuple(keep))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    # Phase-A duplicate-key check fires first — the definition is
+    # rejected before Phase-B pin analysis ever runs (bounds before
+    # traversal).
+    assert "conflicting_bindings" in codes
+
+
+# ==================================================================
+# D2 — non-finite numeric rejection
+# ==================================================================
+
+
+def test_d2_nonfinite_external_defaults_rejected():
+    for bad_val in (float("nan"), float("inf"), float("-inf")):
+        p = pd.ParamDecl("x", "float", required=False,
+                         has_default=True, default=bad_val)
+        bad = _replace(T1,
+                       external_params=T1.external_params + (p,))
+        structural, codes = _valid(bad)
+        assert structural == "invalid", bad_val
+        assert "default_type_mismatch" in codes
+
+
+def test_d2_nonfinite_constants_rejected():
+    for bad_val in (float("nan"), float("inf"), float("-inf")):
+        b = pd.ParamBinding("cfg", "constant", constant=bad_val)
+        bindings = T1.nodes[0].param_bindings + (b,)
+        bad = _replace_node(T1, "img", param_bindings=bindings)
+        structural, codes = _valid(bad)
+        assert structural == "invalid", bad_val
+        assert "constant_type_mismatch" in codes
+
+
+def test_d2_nonfinite_constraint_values_rejected():
+    for kind in ("min", "max"):
+        for bad_val in (float("nan"), float("inf"), float("-inf")):
+            p = pd.ParamDecl("x", "float", required=False,
+                             constraints=(pd.Constraint(kind,
+                                                        bad_val),))
+            assert "invalid_constraint" in _constraint_codes(p), \
+                (kind, bad_val)
+
+
+def test_d2_nan_in_choices_rejected():
+    p = pd.ParamDecl("x", "float", required=False,
+                     constraints=(pd.Constraint(
+                         "choices", (1.0, float("nan"))),))
+    assert "invalid_constraint" in _constraint_codes(p)
+
+
+def test_d2_bool_still_not_int():
+    b = pd.ParamBinding("cfg", "constant", constant=True)
+    bindings = T1.nodes[0].param_bindings + (b,)
+    bad = _replace_node(T1, "img", param_bindings=bindings)
+    _, codes = _valid(bad)
+    assert "constant_type_mismatch" in codes
+
+
+def test_d2_finite_values_still_valid():
+    p = pd.ParamDecl("ok_f", "float", required=False,
+                     has_default=True, default=0.5,
+                     constraints=(pd.Constraint("min", 0.0),
+                                  pd.Constraint("max", 1.0)))
+    good = _replace(T1, external_params=T1.external_params + (p,))
+    structural, codes = _valid(good)
+    assert structural == "valid" and codes == []
+
+
+def test_d2_describe_never_emits_nonfinite_json():
+    p = pd.ParamDecl("x", "float", required=False,
+                     has_default=True, default=float("nan"))
+    bad = _replace(T1, external_params=T1.external_params + (p,))
+    d = pd.describe_pipeline(bad, CTX)
+    raw = json.dumps(d, allow_nan=False)   # strict — raises on NaN
+    assert "NaN" not in raw
+    xp = next(x for x in d["external_params"]
+              if x["param_key"] == "x")
+    assert xp["default"] is None
+    assert d["validation"]["structural"] == "invalid"
+
+
+def test_d2_fingerprint_deterministic_on_nonfinite():
+    p = pd.ParamDecl("x", "float", required=False,
+                     has_default=True, default=float("nan"))
+    bad = _replace(T1, external_params=T1.external_params + (p,))
+    fp1 = pd.definition_fingerprint(bad)
+    fp2 = pd.definition_fingerprint(bad)
+    assert fp1 == fp2 and fp1.startswith("pipe:v1:")
+
+
+# ==================================================================
+# D3 — literal persisted origin evidence
+# ==================================================================
+
+
+def test_d3_contract_origin_is_persisted_literal():
+    """Adapters emit origin='generation' (jobs.py 'generated' is only
+    the fallback default); edge provenance stays the semantic label."""
+    assert pd.COMMAND_CONTRACTS["generate.image"].output_origin \
+        == "generation"
+    assert pd.COMMAND_CONTRACTS["generate.video"].output_origin \
+        == "generation"
+    assert T1.edges[0].provenance == "generated"   # semantic axis
+
+
+def test_d3_edge_still_compatible():
+    structural, codes = _valid(T1)
+    assert structural == "valid" and codes == []
+
+
+# ==================================================================
+# D4 / D5 — binding_support classifications
+# ==================================================================
+
+
+def test_d4_loras_binding_unsupported_on_image():
+    b = pd.ParamBinding("loras", "constant", constant="x:1.0")
+    bindings = T1.nodes[0].param_bindings + (b,)
+    bad = _replace_node(T1, "img", param_bindings=bindings)
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "unsupported_binding_target" in codes
+
+
+def test_d4_device_partial_still_bindable_as_string():
+    b = pd.ParamBinding("device", "constant", constant="cpu")
+    bindings = T1.nodes[0].param_bindings + (b,)
+    good = _replace_node(T1, "img", param_bindings=bindings)
+    structural, codes = _valid(good)
+    assert structural == "valid" and codes == []
+
+
+def test_d4_arg_classifications():
+    c_img = pd.COMMAND_CONTRACTS["generate.image"]
+    assert c_img.arg("loras").binding_support == "unsupported"
+    assert c_img.arg("device").binding_support == "partial"
+    rps = c_img.arg("runtime_prompt_sha256")
+    assert rps.computed and "passthrough" in rps.note
+    c_vid = pd.COMMAND_CONTRACTS["generate.video"]
+    assert c_vid.arg("loras").refused
+
+
+def test_d5_video_dims_not_bindable():
+    for arg in ("width", "height"):
+        b = pd.ParamBinding(arg, "constant", constant=512)
+        bindings = T1.nodes[1].param_bindings + (b,)
+        bad = _replace_node(T1, "vid", param_bindings=bindings)
+        structural, codes = _valid(bad)
+        assert structural == "invalid", arg
+        assert "unsupported_binding_target" in codes
+    c = pd.COMMAND_CONTRACTS["generate.video"]
+    assert c.arg("width").binding_support == "unsupported"
+    assert "paired" in c.arg("width").note
+
+
+# ==================================================================
+# D6 — duplicate registry detection before deduplication
+# ==================================================================
+
+
+def test_d6_unique_valid_declarations():
+    s, f = pd.pipeline_registry(CTX, declarations=(T1,))
+    assert s == "valid" and f == []
+
+
+def test_d6_duplicate_identical_defs_flagged():
+    s, f = pd.pipeline_registry(CTX, declarations=(T1, T1))
+    assert s == "invalid"
+    assert "duplicate_pipeline_key" in _codes(f)
+
+
+def test_d6_duplicate_different_defs_flagged():
+    twin = _replace(T1, display_name="Twin", description="other")
+    s, f = pd.pipeline_registry(CTX, declarations=(T1, twin))
+    assert s == "invalid"
+    assert "duplicate_pipeline_key" in _codes(f)
+
+
+def test_d6_registry_over_64_declarations():
+    decls = tuple(_replace(T1, pipeline_key=f"pipe_{i:02d}")
+                  for i in range(65))
+    s, f = pd.pipeline_registry(CTX, declarations=decls)
+    assert s == "invalid"
+    assert "limit_exceeded" in _codes(f)
+
+
+def test_d6_duplicate_detected_before_dedup():
+    """The ordered source keeps BOTH declarations — the finding fires
+    even though _build_registry would first-wins-collapse them."""
+    decls = (T1, _replace(T1, definition_version=9))
+    assert len(decls) == 2
+    _, f = pd.pipeline_registry(CTX, declarations=decls)
+    assert "duplicate_pipeline_key" in _codes(f)
+    reg = pd._build_registry(decls)
+    assert reg["img2vid_chain"].definition_version == 1
+
+
+# ==================================================================
+# D7 — concurrency analysis gated on valid bounded graphs
+# ==================================================================
+
+
+def _broken_defs():
+    too_many = _replace(T1, nodes=tuple(
+        dataclasses.replace(T1.nodes[0], node_id=f"n{i}")
+        for i in range(33)))
+    too_many_edges = _replace(T1, edges=tuple(
+        dataclasses.replace(T1.edges[0], edge_id=f"e{i}")
+        for i in range(65)))
+    missing_ref = _replace(T1, edges=(
+        dataclasses.replace(T1.edges[0], dst_node="ghost"),))
+    no_edge = _replace(T1, edges=())
+    return (too_many, too_many_edges, missing_ref, no_edge)
+
+
+def test_d7_concurrency_skipped_on_invalid_defs(monkeypatch):
+    calls = {"n": 0}
+
+    def counting(defn):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pd, "concurrency_pairs", counting)
+    for bad in _broken_defs():
+        d = pd.describe_pipeline(bad, CTX)
+        assert d["validation"]["structural"] == "invalid"
+        assert d["concurrency_pairs"] == []
+    assert calls["n"] == 0
+
+
+def test_d7_concurrency_runs_on_valid_t1(monkeypatch):
+    calls = {"n": 0}
+    real = pd.concurrency_pairs
+
+    def counting(defn):
+        calls["n"] += 1
+        return real(defn)
+
+    monkeypatch.setattr(pd, "concurrency_pairs", counting)
+    d = pd.describe_pipeline(T1, CTX)
+    assert calls["n"] == 1
+    assert d["concurrency_pairs"] == []
+
+
+# ==================================================================
+# D8 — constraint declarations validated independent of defaults
+# ==================================================================
+
+
+def test_d8_min_gt_max_without_default_rejected():
+    p = pd.ParamDecl("x", "int", required=False,
+                     constraints=(pd.Constraint("min", 10),
+                                  pd.Constraint("max", 5)))
+    bad = _replace(T1, external_params=T1.external_params + (p,))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "invalid_constraint" in codes
+
+
+def test_d8_min_gt_max_with_default_rejected():
+    p = pd.ParamDecl("x", "int", required=False, has_default=True,
+                     default=7,
+                     constraints=(pd.Constraint("min", 10),
+                                  pd.Constraint("max", 5)))
+    bad = _replace(T1, external_params=T1.external_params + (p,))
+    _, codes = _valid(bad)
+    assert "invalid_constraint" in codes
+
+
+def test_d8_duplicate_constraint_kinds_rejected():
+    p = pd.ParamDecl("x", "int", required=False,
+                     constraints=(pd.Constraint("min", 5),
+                                  pd.Constraint("min", 9)))
+    assert "invalid_constraint" in _constraint_codes(p)
+
+
+def test_d8_len_bounds_contradiction_rejected():
+    p = pd.ParamDecl("x", "string", required=False,
+                     constraints=(pd.Constraint("min_len", 5),
+                                  pd.Constraint("max_len", 2)))
+    assert "invalid_constraint" in _constraint_codes(p)
+
+
+def test_d8_bad_pattern_rejected():
+    p = pd.ParamDecl("x", "string", required=False,
+                     constraints=(pd.Constraint("pattern", "(["),))
+    assert "invalid_constraint" in _constraint_codes(p)
+
+
+def test_d8_choices_element_type_mismatch_rejected():
+    p = pd.ParamDecl("x", "int", required=False,
+                     constraints=(pd.Constraint("choices",
+                                                (1, "two")),))
+    assert "invalid_constraint" in _constraint_codes(p)
+
+
+def test_d8_binding_vs_contract_empty_domain():
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "width"]
+    keep.append(pd.ParamBinding(
+        "width", "external", external_key="width",
+        constraints=(pd.Constraint("min", 5000),)))
+    bad = _replace_node(T1, "img", param_bindings=tuple(keep))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "conflicting_constraints" in codes
+
+
+def test_d8_external_vs_contract_empty_domain():
+    p = pd.ParamDecl("width_hi", "int", required=True,
+                     constraints=(pd.Constraint("min", 5000),))
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "width"]
+    keep.append(pd.ParamBinding("width", "external",
+                                external_key="width_hi"))
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=tuple(keep)),
+                   external_params=T1.external_params + (p,))
+    _, codes = _valid(bad)
+    assert "conflicting_constraints" in codes
+
+
+def test_d8_disjoint_choices_empty_domain():
+    """External-param choices vs binding choices — the intersection is
+    empty, so NO value can ever satisfy the bound argument."""
+    p = pd.ParamDecl("w", "int", required=True,
+                     constraints=(pd.Constraint("choices",
+                                                (512, 768)),))
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "width"]
+    keep.append(pd.ParamBinding("width", "external", external_key="w",
+                                constraints=(pd.Constraint(
+                                    "choices", (64, 128)),)))
+    bad = _replace(_replace_node(T1, "img",
+                                 param_bindings=tuple(keep)),
+                   external_params=T1.external_params + (p,))
+    structural, codes = _valid(bad)
+    assert structural == "invalid"
+    assert "conflicting_constraints" in codes
+
+
+def test_d8_overlapping_choices_pass():
+    p = pd.ParamDecl("w", "int", required=True,
+                     constraints=(pd.Constraint("choices",
+                                                (512, 768)),))
+    keep = [b for b in T1.nodes[0].param_bindings
+            if b.request_key != "width"]
+    keep.append(pd.ParamBinding("width", "external", external_key="w",
+                                constraints=(pd.Constraint(
+                                    "choices", (512, 1024)),)))
+    good = _replace(_replace_node(T1, "img",
+                                  param_bindings=tuple(keep)),
+                    external_params=T1.external_params + (p,))
+    _, codes = _valid(good)
+    assert "conflicting_constraints" not in codes
+
+
+def test_d8_valid_compatible_ranges_pass():
+    p = pd.ParamDecl("x", "int", required=False,
+                     constraints=(pd.Constraint("min", 1),
+                                  pd.Constraint("max", 10)))
+    good = _replace(T1, external_params=T1.external_params + (p,))
+    structural, codes = _valid(good)
+    assert structural == "valid" and codes == []
+
+
+# ==================================================================
+# Gate 9 — fingerprint material-change coverage
+# ==================================================================
+
+
+def test_g9_ctx_fp_contract_arg_type_change(monkeypatch):
+    fp1 = pd.contract_evidence_fingerprint(T1, CTX)
+    c = pd.COMMAND_CONTRACTS["generate.image"]
+    mod = dataclasses.replace(
+        c, args=tuple(dataclasses.replace(a, ptype="float")
+                      if a.name == "width" else a for a in c.args))
+    monkeypatch.setitem(pd.COMMAND_CONTRACTS, "generate.image", mod)
+    assert pd.contract_evidence_fingerprint(T1, CTX) != fp1
+
+
+def test_g9_ctx_fp_required_arg_change(monkeypatch):
+    fp1 = pd.contract_evidence_fingerprint(T1, CTX)
+    c = pd.COMMAND_CONTRACTS["generate.video"]
+    mod = dataclasses.replace(
+        c, args=tuple(dataclasses.replace(a, required=False)
+                      if a.name == "model_key" else a
+                      for a in c.args))
+    monkeypatch.setitem(pd.COMMAND_CONTRACTS, "generate.video", mod)
+    assert pd.contract_evidence_fingerprint(T1, CTX) != fp1
+
+
+def test_g9_ctx_fp_runtime_state_change():
+    fp1 = pd.contract_evidence_fingerprint(T1, CTX)
+    ctx2 = _ctx(runtime_planned=(("sdcpp", True),))
+    assert pd.contract_evidence_fingerprint(T1, ctx2) != fp1
+
+
+def test_g9_ctx_fp_workflow_policy_change():
+    fp1 = pd.contract_evidence_fingerprint(T1, CTX)
+    ctx2 = _ctx(workflows=(
+        pd.WorkflowEvidence("text2image", "implemented", "lora_hold",
+                            ("diffusion",), ("lora",), 1),
+        _DEFAULT_WORKFLOWS[1]))
+    assert pd.contract_evidence_fingerprint(T1, ctx2) != fp1
+
+
+def test_g9_def_fp_fixed_constant_change():
+    bad = _replace_node(T1, "img", param_bindings=_img_bindings(
+        batch_binding=pd.ParamBinding("batch", "constant",
+                                      constant=2)))
+    assert pd.definition_fingerprint(bad) != \
+        pd.definition_fingerprint(T1)
+
+
+def test_g9_def_fp_param_constraint_change():
+    p = pd.ParamDecl("width", "int", required=False,
+                     has_default=True, default=512,
+                     constraints=(pd.Constraint("min", 1),
+                                  pd.Constraint("max", 2048)),
+                     description="image width")
+    bad = _replace(T1, external_params=tuple(
+        p if x.param_key == "width" else x
+        for x in T1.external_params))
+    assert pd.definition_fingerprint(bad) != \
+        pd.definition_fingerprint(T1)
