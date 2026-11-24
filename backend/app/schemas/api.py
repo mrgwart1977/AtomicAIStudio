@@ -1365,3 +1365,133 @@ class LoraPreviewOut(BaseModel):
     est_vram_lora_overhead_bytes: int | None = None
     context: LoraPreviewContextOut
     notes: list[str] = []
+
+
+# ---------- U-5c-2a declarative pipeline contracts ----------
+
+
+class PipelineConstraintOut(BaseModel):
+    kind: str
+    value: Any = None
+
+
+class PipelineParamOut(BaseModel):
+    param_key: str
+    ptype: str
+    required: bool
+    has_default: bool = False
+    default: Any = None
+    description: str = ""
+    constraints: list[PipelineConstraintOut] = []
+
+
+class PipelineBindingOut(BaseModel):
+    request_key: str
+    source: str                    # external | edge | constant
+    external_key: str | None = None
+    edge_id: str | None = None
+    constant: Any = None
+    constraints: list[PipelineConstraintOut] = []
+
+
+class PipelinePortOut(BaseModel):
+    port_key: str
+    direction: str                 # in | out
+    asset_kind: str
+    required: bool
+    cardinality: int
+    command_arg: str | None = None
+    output_contract: str | None = None
+
+
+class PipelineNodeOut(BaseModel):
+    """One executable whole-job node. The five derived axes are
+    independent static evidence — `operational_readiness` is always
+    the literal "not_evaluated"; nothing here asserts a runnable
+    pipeline."""
+    node_id: str
+    node_kind: str
+    command_key: str
+    adapter_id: str | None
+    workflow_key: str | None
+    runtime_keys: list[str]
+    runtime_declared: dict[str, str]       # declared | planned | unknown
+    required_components: list[str]
+    input_ports: list[PipelinePortOut]
+    output_ports: list[PipelinePortOut]
+    param_bindings: list[PipelineBindingOut]
+    policy_notes: list[str]
+    command_contract: str                  # exists | unknown
+    adapter_class: str                     # local | mock | unknown
+    execution_class: str                   # implemented | experimental |
+                                           # simulated | held | missing
+    policy_state: str                      # held | restricted |
+                                           # notes_only | none_declared
+    operational_readiness: str             # always "not_evaluated"
+
+
+class PipelineEdgeOut(BaseModel):
+    edge_id: str
+    src_node: str
+    src_port: str
+    dst_node: str
+    dst_port: str
+    dst_command_arg: str
+    asset_role: str
+    ownership: str
+    provenance: str
+
+
+class PipelineFindingOut(BaseModel):
+    code: str
+    subject: str
+    severity: str
+    detail: str
+
+
+class PipelineValidationOut(BaseModel):
+    structural: str                        # valid | invalid — never
+                                           # operational readiness
+    findings: list[PipelineFindingOut]
+
+
+class PipelineSummaryOut(BaseModel):
+    pipeline_key: str
+    display_name: str
+    category: str
+    status: str
+    node_count: int
+    edge_count: int
+    structural: str                        # invalid defs are surfaced,
+                                           # never silently valid
+    definition_fingerprint: str
+
+
+class PipelineListOut(BaseModel):
+    pipelines: list[PipelineSummaryOut]
+
+
+class PipelineDescribeOut(BaseModel):
+    """Static describe surface for one declared pipeline. Advisory
+    metadata only — no execution claim, no operational evaluation,
+    no project or machine state."""
+    pipeline_key: str
+    display_name: str
+    description: str
+    category: str
+    status: str
+    schema_version: int
+    definition_version: int
+    required_context: list[str]
+    policy_constraints: list[str]
+    limitations: list[str]
+    external_params: list[PipelineParamOut]
+    nodes: list[PipelineNodeOut]
+    edges: list[PipelineEdgeOut]
+    validation: PipelineValidationOut
+    concurrency_pairs: list[list[str]]     # potential only — never
+                                           # guaranteed execution
+    static_assessment: str
+    operational_readiness: str             # always "not_evaluated"
+    definition_fingerprint: str
+    contract_evidence_fingerprint: str
