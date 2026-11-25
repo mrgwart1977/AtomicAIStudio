@@ -1203,7 +1203,17 @@ def _plan_bindability(key, spec, command_key, adapter_ids, db, row=None):
     link_installs keeps catalog:{key} → latest ModelInstall row per
     key). It must identify one of the installed rows the command path
     can resolve — a proven mismatch is non_bindable; missing identity
-    evidence stays unknown."""
+    evidence stays unknown.
+
+    Ambiguous command selection (C1): installed_file resolves .first()
+    with NO ordering guarantee, so when several installed rows are
+    eligible for the same model_key the planner cannot prove which one
+    the command binds — membership of the selected install_id in the
+    eligible set is not exact selection. Multiple eligible rows stay
+    'unknown'/install_ambiguous for both artifact_id and catalog_key
+    selections; exactly one eligible row is the only case where the
+    command's pick is determinate. No planner-side ordering is invented
+    that the command does not have."""
     from app.db.models import ModelInstall
     from app.domain import model_catalog
     if key is None:
