@@ -1186,6 +1186,47 @@ def _pipe_plan_visibility(db, project) -> set:
             if getattr(a, "project_id", None) in (None, project.id)}
 
 
+def _plan_bindability(key, spec, command_key, adapter_ids, db):
+    """S2 — exact command-resolution chain for one (selection, node)
+    pair, mirroring the generation gates in commands.py:
+    catalog spec → modality/mode → support tier → license → adapter
+    service → installed weights (ModelInstall by model_key — the same
+    lookup model_files.installed_file performs). Bindability is never
+    inferred from a catalog: prefix or spec existence alone; every
+    gate that cannot be established from stored evidence returns
+    'unknown' rather than a fabricated verdict."""
+    from app.db.models import ModelInstall
+    from app.domain import model_catalog
+    if key is None:
+        return "non_bindable", "no_model_key_binding"
+    if spec is None:
+        return "non_bindable", "catalog_entry_missing"
+    if command_key == "generate.image":
+        if spec.modality != "image" or "text2image" not in spec.modes:
+            return "non_bindable", "command_contract_mismatch"
+        if spec.support not in ("production", "tested"):
+            return "non_bindable", "support_tier"
+    elif command_key == "generate.video":
+        if spec.modality != "video":
+            return "non_bindable", "command_contract_mismatch"
+        if spec.support not in ("production", "tested"):
+            # The experimental escape is a runtime env flag — not
+            # stored evidence; bindability stays unestablished.
+            return "unknown", "support_tier_unverified"
+    if not spec.license.get("commercial_ok", True):
+        return "non_bindable", "license_restricted"
+    if adapter_ids and not any(
+            model_catalog.serves_adapter(spec, a)
+            for a in adapter_ids):
+        return "non_bindable", "adapter_unverified"
+    inst = db.execute(select(ModelInstall).where(
+        ModelInstall.model_key == key,
+        ModelInstall.status == "installed")).scalars().first()
+    if inst is None:
+        return "non_bindable", "not_installed"
+    return "bindable", ""
+
+
 @api_router.post(
     "/api/projects/{project_id}/pipelines/{pipeline_key}/plan-preview",
     response_model=PipelinePlanPreviewOut)
@@ -1237,7 +1278,11 @@ def pipeline_plan_preview(
     resolved, deferred = pipeline_plan.resolve_bindings(defn, values)
     visible = _pipe_plan_visibility(db, project)
 
-    # ---- typed selections -> exact artifact + bindability (F6) ----
+    # ---- typed selections -> exact artifact identity (F6/S2) ----
+    # Selections resolve to a model_key + registry row. COMMAND
+    # BINDABILITY is evaluated per (selection, node) pair inside the
+    # node loop via _plan_bindability — never inferred here from a
+    # catalog prefix or spec existence alone.
     sel_out: dict[str, dict] = {}
     for ext_key, sel in body.selections.items():
         if sel.kind == "catalog_key":
@@ -1247,47 +1292,25 @@ def pipeline_plan_preview(
             aid = f"catalog:{sel.value}"
             row = db.get(ModelArtifact, aid)
             sel_out[ext_key] = {
+                "key": sel.value,
                 "artifact_id": aid if row is not None else None,
                 "model_key_effective": sel.value,
-                "bindability": "bindable" if row is not None
-                               else "unresolved",
-                "bindability_reason": "" if row is not None
-                                      else "artifact_not_installed",
                 "row": row, "spec": spec}
         elif sel.kind == "artifact_id":
             row = db.get(ModelArtifact, sel.value)
             if row is None or row.artifact_id not in visible:
                 raise HTTPException(404, "unknown artifact")
-            if not row.enabled:
-                sel_out[ext_key] = {
-                    "artifact_id": row.artifact_id,
-                    "model_key_effective": None,
-                    "bindability": "non_bindable",
-                    "bindability_reason": "artifact_disabled",
-                    "row": row, "spec": model_catalog.get(
-                        row.artifact_id.split(":", 1)[1])
-                    if row.artifact_id.startswith("catalog:") else None}
-            elif row.artifact_id.startswith("catalog:"):
-                mk = row.artifact_id.split(":", 1)[1]
-                spec = model_catalog.get(mk)
-                sel_out[ext_key] = {
-                    "artifact_id": row.artifact_id,
-                    "model_key_effective": mk,
-                    "bindability": "bindable" if spec is not None
-                                   else "unknown",
-                    "bindability_reason": "" if spec is not None
-                                          else "catalog_entry_missing",
-                    "row": row, "spec": spec}
-            else:
-                # No command contract can address a bare artifact row by
-                # model_key — definitively non-bindable, never a
-                # fabricated execution path.
-                sel_out[ext_key] = {
-                    "artifact_id": row.artifact_id,
-                    "model_key_effective": None,
-                    "bindability": "non_bindable",
-                    "bindability_reason": "no_model_key_binding",
-                    "row": row, "spec": None}
+            mk = (row.artifact_id.split(":", 1)[1]
+                  if row.artifact_id.startswith("catalog:") else None)
+            # No command contract can address a bare artifact row by
+            # model_key — key stays None → non_bindable in the node
+            # loop, never a fabricated execution path.
+            sel_out[ext_key] = {
+                "key": mk,
+                "artifact_id": row.artifact_id,
+                "model_key_effective": mk,
+                "row": row,
+                "spec": model_catalog.get(mk) if mk else None}
         else:
             raise HTTPException(400, f"selection_kind:{sel.kind}")
 
@@ -1315,6 +1338,13 @@ def pipeline_plan_preview(
         pref = body.nodes.get(n.node_id)
         res = (pref.residency_mode if pref and pref.residency_mode
                else "gpu")
+        wave_pol = pref.wave_policy if pref else None
+        if wave_pol not in (None, "fixed_level"):
+            # Only the fixed-level decomposition strategy exists in v1 —
+            # an unsupported declared policy is rejected, never
+            # silently ignored.
+            raise HTTPException(400, f"wave_policy_unsupported:"
+                                     f"{wave_pol}")
         # model_key external binding -> typed selection
         mk_ext = next((b.external_key for b in n.param_bindings
                        if b.request_key == "model_key"
@@ -1322,9 +1352,8 @@ def pipeline_plan_preview(
         sel = sel_out.get(mk_ext or "")
         row = sel["row"] if sel else None
         spec = sel["spec"] if sel else None
-        bindability = sel["bindability"] if sel else "unresolved"
-        bind_reason = (sel["bindability_reason"] if sel
-                       else "no_selection")
+        sel_key = sel["key"] if sel else None
+        sel_disabled = bool(row is not None and not row.enabled)
         dep_plan = None
         runtime_state = "unevaluated"
         rt_blocked_auth = False
@@ -1353,6 +1382,16 @@ def pipeline_plan_preview(
                 sum(m.size_bytes for m in man)
                 if man and all(m.size_bytes for m in man) else None)
             spec = dctx["spec"] or spec
+        # S2 — exact command bindability for THIS node's command gate,
+        # evaluated after adapter evidence is known (Q3).
+        if sel_disabled:
+            bindability, bind_reason = "non_bindable", \
+                "artifact_disabled"
+        elif sel is None:
+            bindability, bind_reason = "unresolved", "no_selection"
+        else:
+            bindability, bind_reason = _plan_bindability(
+                sel_key, spec, n.command_key, adapter_ids, db)
         res_ok, res_err = plan_preview.residency_evidence(
             "sdcpp", spec, res)
         args = resolved.get(n.node_id, {})
@@ -1437,10 +1476,30 @@ def pipeline_plan_preview(
             cpu_lane=lane, residency_error=None if res_ok else res_err,
             workflow_key=n.workflow_key, required=True))
         node_meta.append({
-            "node_id": n.node_id, "dep": dep_plan.resolution_version
-            if dep_plan else None,
-            "runtime": "sdcpp", "residency": res,
-            "bindability": bindability})
+            "node_id": n.node_id,
+            "dep": dep_plan.resolution_version if dep_plan else None,
+            "runtime": "sdcpp", "runtime_state": runtime_state,
+            "runtime_blocked": rt_blocked_auth,
+            "residency": res, "bindability": bindability,
+            "integrity": ("declared" if row is None else
+                          "verified" if row.source_type != "import"
+                          else "recorded" if row.content_sha256
+                          else "missing"),
+            "adapters": list(adapter_ids),
+            "verdict_fp": (dctx["root_verdict"].inputs_fingerprint
+                           if row is not None and
+                           dctx.get("root_verdict") is not None
+                           else None),
+            "verdict_staleness": (dctx["verdict_staleness"]["root"]
+                                  if row is not None else None),
+            "device_constraint": hard,
+            "device_preference": (pref.device_preference
+                                  if pref else None),
+            "wave_policy": wave_pol,
+            "eval_devices": sorted({a.get("index") for a in
+                                    alternatives}),
+            "est_vram_bytes": est["est_vram_bytes"],
+            "est_ram_bytes": est["est_ram_bytes"]})
 
     structural, defn_findings = pipeline_defs.validate_pipeline(
         defn, pctx)
@@ -1449,8 +1508,10 @@ def pipeline_plan_preview(
     mem_ev = (snapshot or {}).get("memory")
     eval_ram = lambda e, k: resources.evaluate_ram(
         e, known=k, mem=mem_ev, margins=margins)
+    reason_sink: set = set()
     retained, truncs, states = pipeline_plan.search(
-        node_ev, waves, lifetime, eval_ram, prefs, budgets)
+        node_ev, waves, lifetime, eval_ram, prefs, budgets,
+        reason_sink=reason_sink)
     truncs = list(dict.fromkeys(wave_trunc + truncs))
     exhaustive = not budgets.omitted_partial \
         and not budgets.omitted_completed \
@@ -1459,17 +1520,25 @@ def pipeline_plan_preview(
         structural, defn_findings, node_ev, retained, states, truncs,
         freshness, simulated,
         bool((snapshot or {}).get("reservations_captured")),
-        deferred, exhaustive)
-    # ---- fingerprints (S5) ----
+        deferred, exhaustive, explored_reasons=reason_sink)
+    # ---- fingerprints (S5/Q1) — material planning evidence ----
     reservations = ({str(i): b for i, b in
                      (sched.reservations() or {}).items()}
                     if sched is not None else None)
     plan_fp = pipeline_plan.plan_fingerprint(
         pipeline_defs.definition_fingerprint(defn),
         pipeline_defs.contract_evidence_fingerprint(defn, pctx),
-        str(project.id), values,
-        {k: {kk: v for kk, v in s.items() if kk in
-             ("artifact_id", "model_key_effective", "bindability")}
+        str(project.id),
+        {"params": values, "include_stale": body.include_stale},
+        {k: {"artifact_id": s["artifact_id"],
+             "model_key_effective": s["model_key_effective"],
+             "content_sha256": (s["row"].content_sha256
+                                if s["row"] is not None else None),
+             "integrity_class": (
+                 "declared" if s["row"] is None else
+                 "verified" if s["row"].source_type != "import"
+                 else "recorded" if s["row"].content_sha256
+                 else "missing")}
          for k, s in sel_out.items()},
         node_meta, deferred, lifetime,
         (snapshot or {}).get("snapshot_id"), reservations,

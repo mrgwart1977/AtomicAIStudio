@@ -309,9 +309,20 @@ def _composite_fit(est_sum: int | None, cpb: int | None) -> str:
 
 def evaluate_candidate(assign: dict, nodes: list[NodeEvidence],
                        wave: tuple, lifetime: str,
-                       evaluate_ram) -> dict:
+                       evaluate_ram, transition_host=None,
+                       transition_dev=None) -> dict:
     """One complete assignment: device/residency/adapter per node + wave
-    arrangement + lifetime scenario. Every required node exactly once."""
+    arrangement + lifetime scenario. Every required node exactly once.
+
+    Transition overhead (Q2): `transition_host` maps wave index → known
+    additional host bytes for that wave; `transition_dev` maps
+    (wave, device) → known additional device bytes. Only established
+    values are summed — an absent key stays UNKNOWN (never a measured
+    zero) and is disclosed via transition_overhead_unknown /
+    _partial. Overhead already inside stage_estimates is never
+    re-added: callers pass only ADDITIONAL evidenced bytes."""
+    transition_host = transition_host or {}
+    transition_dev = transition_dev or {}
     reasons: list[str] = []
     limitations: list[str] = []
     node_by_id = {n.node_id: n for n in nodes}
@@ -319,6 +330,7 @@ def evaluate_candidate(assign: dict, nodes: list[NodeEvidence],
     dev_peak: dict[int, list] = {}
     host_by_wave: list[int] = []
     unknown_wave_host = set()
+    dev_used: set = set()
     for w, grp in enumerate(wave):
         host_sum = 0
         dev_sum: dict[int, int] = {}
@@ -340,6 +352,7 @@ def evaluate_candidate(assign: dict, nodes: list[NodeEvidence],
         host_by_wave.append(host_sum)
         for d, s in dev_sum.items():
             dev_peak.setdefault(d, []).append((w, s))
+            dev_used.add((w, d))
     # Retained scenario adds all earlier waves to each wave's demand.
     if lifetime in (LIFETIME_RETAINED, LIFETIME_UNKNOWN):
         for d, entries in dev_peak.items():
@@ -348,12 +361,30 @@ def evaluate_candidate(assign: dict, nodes: list[NodeEvidence],
                            for w, s in sorted(entries)]
         running = 0
         host_by_wave = [(running := running + h) for h in host_by_wave]
+    # Known transition overhead joins ITS wave only — applied after any
+    # retained-accumulation so transient bytes are never carried into a
+    # later wave's retained totals. Absence stays unknown, not zero.
+    t_unknown_waves = {w for w in range(len(wave))
+                       if w not in transition_host}
+    t_unknown_dev = dev_used - set(transition_dev)
+    t_unknown = bool(t_unknown_waves or t_unknown_dev)
+    t_known_any = bool(
+        any(w in transition_host for w in range(len(wave))) or
+        any((w, d) in transition_dev for w, d in dev_used))
+    host_by_wave = [h + transition_host.get(w, 0)
+                    for w, h in enumerate(host_by_wave)]
+    for d, entries in dev_peak.items():
+        dev_peak[d] = [(w, s + transition_dev.get((w, d), 0))
+                       for w, s in entries]
     host_peak = max(host_by_wave) if host_by_wave else 0
     host_known = all(n.ram_known for n in nodes) \
         and not unknown_wave_host
     if lifetime != LIFETIME_RELEASE_ASSUMED:
         limitations.append("retained_bound_unproven")
-    limitations.append("transition_overhead_unknown")
+    if t_unknown:
+        limitations.append("transition_overhead_unknown")
+        if t_known_any:
+            limitations.append("transition_overhead_partial")
     # Device fits (composite per device, margin once).
     dev_fits: dict[int, str] = {}
     dev_budgets: dict[int, int | None] = {}
@@ -444,7 +475,10 @@ def evaluate_candidate(assign: dict, nodes: list[NodeEvidence],
     elif any_unknown or ram_decision == "unknown" \
             or not ram_eval.get("fully_evaluated"):
         cand_state = INFEASIBLE_UNVERIFIED
-    elif incomplete:
+    elif incomplete or t_unknown:
+        # Placement depends on unresolved assumptions (deferred inputs,
+        # unknown transition overhead, unverified concurrency) —
+        # conditional, never unqualified feasible (Q5).
         cand_state = FEASIBLE_CONDITIONAL
     else:
         cand_state = (FEASIBLE_CONDITIONAL
@@ -493,9 +527,14 @@ def _rank_key(cand: dict, prefs: dict) -> tuple:
 
 def search(nodes: list[NodeEvidence], waves: list,
            lifetime: str, evaluate_ram, prefs: dict,
-           budgets: Budgets) -> tuple[list, list[str], list]:
+           budgets: Budgets, reason_sink: set | None = None,
+           transition_host=None, transition_dev=None,
+           ) -> tuple[list, list[str], list]:
     """Bounded DFS over per-node variants. Returns (retained, truncations,
-    all_states) — every explored candidate feeds aggregate feasibility."""
+    all_states) — every explored candidate feeds aggregate feasibility.
+    `reason_sink` (optional set) collects every explored candidate's
+    reason codes so aggregate can classify an all-blocked outcome by
+    cause; `transition_*` forward to evaluate_candidate."""
     trunc: list[str] = []
     retained: list[dict] = []
     states: list[str] = []
@@ -553,14 +592,21 @@ def search(nodes: list[NodeEvidence], waves: list,
             return
         budgets.partial_expansions += 1          # pruned states count too
         if i == len(node_order):
-            if budgets.completed >= LIMITS["max_completed_assignments"]:
-                budgets.omitted_completed = True
-                return
-            budgets.completed += 1
             for wave in waves:
-                cand = evaluate_candidate(dict(assign), nodes, wave,
-                                          lifetime, evaluate_ram)
+                # A completed arrangement is (assignment × wave ×
+                # lifetime) — counted per materialized arrangement,
+                # not per assignment (Q4).
+                if budgets.completed >= \
+                        LIMITS["max_completed_assignments"]:
+                    budgets.omitted_completed = True
+                    break
+                budgets.completed += 1
+                cand = evaluate_candidate(
+                    dict(assign), nodes, wave, lifetime, evaluate_ram,
+                    transition_host, transition_dev)
                 states.append(cand["state"])
+                if reason_sink is not None:
+                    reason_sink.update(cand["reasons"])
                 if len(retained) < LIMITS["max_retained_candidates"]:
                     retained.append(cand)
                     retained.sort(key=lambda c: _rank_key(c, prefs))
@@ -598,7 +644,8 @@ def aggregate(structural: str, defn_findings: list,
               node_ev: list[NodeEvidence], retained: list,
               states: list, truncs: list, freshness: str,
               simulated: bool, reservations_captured: bool,
-              deferred: list, exhaustive: bool) -> dict:
+              deferred: list, exhaustive: bool,
+              explored_reasons: set | frozenset = frozenset()) -> dict:
     """F1 precedence — blockers at correct scope."""
     findings = [{"code": f.code, "subject": f.subject,
                  "detail": f.detail} for f in defn_findings]
@@ -650,12 +697,17 @@ def aggregate(structural: str, defn_findings: list,
                 "block_reason": "stale_evidence",
                 "axes": axes, "findings": findings}
     # Rank 4 — evidence-dependent blockers: qualified ram block on
-    # required (scenario-A) workload, or proven no-fit.
+    # required (scenario-A) workload, or proven no-fit. A RAM-driven
+    # all-blocked outcome is labelled by its actual cause; a
+    # contract-driven one stays authoritative_block (Q5).
     blocked_states = [s for s in states]
     if retained and all(s == CAND_BLOCKED for s in blocked_states) \
             and exhaustive:
+        cause = ("ram_insufficient" if explored_reasons and
+                 explored_reasons <= {"ram_insufficient"}
+                 else "authoritative_block")
         return {"advisory_state": ADVISORY_BLOCKED,
-                "block_reason": "authoritative_block",
+                "block_reason": cause,
                 "axes": axes, "findings": findings}
     if not reservations_captured:
         return {"advisory_state": ADVISORY_INCOMPLETE,

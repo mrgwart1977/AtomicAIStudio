@@ -419,11 +419,35 @@ def test_sequential_scenario_a_fits():
                       "runtime_key": "sdcpp", "adapter_id": "ad",
                       "residency": "gpu", "est_vram_bytes": 8 * GIB,
                       "est_ram_bytes": 6 * GIB}}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vid",)),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 0, (0, 1): 0, (1, 0): 0, (1, 1): 0})
+    assert c["device_fits"]["0"] == pv.FIT_WITH_HEADROOM
+    assert c["device_fits"]["1"] == pv.FIT_WITH_HEADROOM
+    # unqualified feasible — scenario A, all transition overhead
+    # established (known zero), no unresolved assumptions (Q5)
+    assert c["state"] == pp.FEASIBLE
+
+
+def test_unknown_overhead_caps_at_conditional():
+    """Q5/Q2-E: same arithmetic fits, but transition overhead unknown →
+    feasible_conditional, never unqualified feasible."""
+    nodes = _t1_nodes()
+    assign = {"img": {"device": 0, "artifact_id": "a",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                      "est_ram_bytes": 4 * GIB},
+              "vid": {"device": 1, "artifact_id": "b",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 8 * GIB,
+                      "est_ram_bytes": 6 * GIB}}
     c = pp.evaluate_candidate(assign, nodes, (("img",), ("vid",)),
                               pp.LIFETIME_RELEASE_ASSUMED, eval_ram())
     assert c["device_fits"]["0"] == pv.FIT_WITH_HEADROOM
-    assert c["device_fits"]["1"] == pv.FIT_WITH_HEADROOM
-    assert c["state"] == pp.FEASIBLE
+    assert c["state"] == pp.FEASIBLE_CONDITIONAL
+    assert "transition_overhead_unknown" in c["limitations"]
 
 
 def test_sequential_retained_sums():
@@ -1008,3 +1032,651 @@ def test_endpoint_runs_on_t1_structure(client):
     d = body["deferred_bindings"][0]
     assert d["state"] == "deferred_future_output"
     assert "asset_id" not in d and "path" not in d and "sha" not in d
+
+
+# ============================================================ Q1 — canonical
+# fingerprint material evidence (A–M)
+
+
+def _fp_nodes_meta(**kw):
+    m = {"node_id": "n", "dep": "dep:v1:0", "runtime": "sdcpp",
+         "runtime_state": "candidate_compatible_static",
+         "residency": "gpu", "bindability": "bindable",
+         "integrity": "verified", "adapters": ["gen.image.sdcpp"],
+         "verdict_fp": "u4:fam1.caps2:x", "verdict_staleness": "current",
+         "device_constraint": None, "device_preference": 1,
+         "wave_policy": "fixed_level", "eval_devices": [0, 1],
+         "est_vram_bytes": 6 * GIB, "est_ram_bytes": 4 * GIB}
+    m.update(kw)
+    return [m]
+
+
+def test_q1b_hash_change_recorded_class():
+    """Hash value A→B with UNCHANGED recorded classification → both
+    fingerprints change (hash VALUE is material, not just class)."""
+    s1 = {"m": {"artifact_id": "x", "model_key_effective": "m",
+                "content_sha256": "aa", "integrity_class": "recorded"}}
+    s2 = {"m": {"artifact_id": "x", "model_key_effective": "m",
+                "content_sha256": "bb", "integrity_class": "recorded"}}
+    a = pp.plan_fingerprint(**_fp_inputs(selections=s1))
+    b = pp.plan_fingerprint(**_fp_inputs(selections=s2))
+    assert a != b
+    agg = {"advisory_state": "x", "block_reason": None, "axes": {},
+           "findings": []}
+    assert pp.result_fingerprint(a, agg, [], [], {}, []) != \
+        pp.result_fingerprint(b, agg, [], [], {}, [])
+
+
+def test_q1c_hash_class_change_same_value():
+    s1 = {"m": {"artifact_id": "x", "content_sha256": "aa",
+                "integrity_class": "verified"}}
+    s2 = {"m": {"artifact_id": "x", "content_sha256": "aa",
+                "integrity_class": "recorded"}}
+    assert pp.plan_fingerprint(**_fp_inputs(selections=s1)) != \
+        pp.plan_fingerprint(**_fp_inputs(selections=s2))
+
+
+def test_q1d_missing_hash_stays_missing():
+    s_none = {"m": {"artifact_id": "x", "content_sha256": None,
+                    "integrity_class": "missing"}}
+    s_val = {"m": {"artifact_id": "x", "content_sha256": "aa",
+                   "integrity_class": "recorded"}}
+    fp_none = pp.plan_fingerprint(**_fp_inputs(selections=s_none))
+    assert fp_none != pp.plan_fingerprint(
+        **_fp_inputs(selections=s_val))
+    # a missing hash is canonical-missing, never silently equated
+    s_zero = {"m": {"artifact_id": "x", "content_sha256": 0,
+                    "integrity_class": "missing"}}
+    assert fp_none != pp.plan_fingerprint(
+        **_fp_inputs(selections=s_zero))
+
+
+def test_q1e_adapter_evidence_change():
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(
+            adapters=["gen.image.sdcpp"])))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(
+            adapters=["gen.image.sdcpp-server"])))
+    assert a != b
+
+
+def test_q1f_verdict_staleness_change():
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(
+            verdict_staleness="current")))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(
+            verdict_staleness="stale")))
+    assert a != b
+
+
+def test_q1g_device_preference_change():
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(device_preference=0)))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(device_preference=1)))
+    assert a != b
+
+
+def test_q1h_wave_policy_change():
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(
+            wave_policy="fixed_level")))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(wave_policy=None)))
+    assert a != b
+
+
+def test_q1i_eval_domain_change():
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(eval_devices=[0, 1])))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(eval_devices=[0])))
+    assert a != b
+
+
+def test_q1m_presentation_fields_excluded():
+    """Elapsed seconds / presentation-only candidate fields change
+    neither fingerprint (only canonical material fields are hashed)."""
+    agg = {"advisory_state": "x", "block_reason": None, "axes": {},
+           "findings": []}
+    c1 = {"assignment": {"n": {"device": 0}}, "wave": [["n"]],
+          "lifetime": "r", "state": "feasible", "device_fits": {},
+          "ram_eval": {"decision": "ok"}, "elapsed_s": 1.5,
+          "display": "fancy"}
+    c2 = dict(c1, elapsed_s=99.0, display="other")
+    a = pp.result_fingerprint("p", agg, [c1], [], {}, ["feasible"])
+    b = pp.result_fingerprint("p", agg, [c2], [], {}, ["feasible"])
+    assert a == b
+
+
+# =============================================== Q2 — transition overhead
+
+
+def _q2_assign(est_ram_a, est_ram_b, dev_a=0, dev_b=0):
+    return {"a": {"device": dev_a, "artifact_id": "x",
+                  "runtime_key": "sdcpp", "adapter_id": "ad",
+                  "residency": "gpu", "est_vram_bytes": 1 * GIB,
+                  "est_ram_bytes": est_ram_a},
+            "b": {"device": dev_b, "artifact_id": "y",
+                  "runtime_key": "sdcpp", "adapter_id": "ad",
+                  "residency": "gpu", "est_vram_bytes": 1 * GIB,
+                  "est_ram_bytes": est_ram_b}}
+
+
+def _q2_nodes():
+    return [node_ev("a", 1 * GIB, 16 * GIB,
+                    devices=[dev(0, budget=64 * GIB)]),
+            node_ev("b", 1 * GIB, 32 * GIB,
+                    devices=[dev(0, budget=64 * GIB)])]
+
+
+def test_q2a_wave_overhead_not_independently_maximized():
+    """wave1 demand 16 + T 10 = 26; wave2 demand 32 + T 2 = 34 →
+    peak is 34, NOT 42 (overhead binds to its own wave)."""
+    nodes = _q2_nodes()
+    c = pp.evaluate_candidate(
+        _q2_assign(16 * GIB, 32 * GIB), nodes, (("a",), ("b",)),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 10 * GIB, 1: 2 * GIB},
+        transition_dev={(0, 0): 0, (1, 0): 0})
+    assert c["host_peak_bytes"] == 34 * GIB
+    assert "transition_overhead_unknown" not in c["limitations"]
+
+
+def test_q2b_device_overhead_scoped_to_gpu():
+    """A device-specific transition demand affects only its GPU."""
+    nodes = _t1_nodes()
+    assign = {"img": {"device": 0, "artifact_id": "a",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                      "est_ram_bytes": 4 * GIB},
+              "vid": {"device": 1, "artifact_id": "b",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 8 * GIB,
+                      "est_ram_bytes": 6 * GIB}}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vid",)),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 5 * GIB, (0, 1): 0,
+                        (1, 0): 0, (1, 1): 0})
+    # dev0: 6 + 5 = 11 > 7 budget; dev1: 8 ≤ 10 unaffected
+    assert c["device_fits"]["0"] == pv.FIT_INSUFFICIENT
+    assert c["device_fits"]["1"] == pv.FIT_WITH_HEADROOM
+
+
+def test_q2c_known_overhead_changes_fit():
+    """Same est, budget boundary: known overhead flips the fit class."""
+    nodes = [node_ev("a", 6 * GIB, 4 * GIB,
+                     devices=[dev(0, budget=7 * GIB)])]
+    assign = {"a": {"device": 0, "artifact_id": "x",
+                    "runtime_key": "sdcpp", "adapter_id": "ad",
+                    "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                    "est_ram_bytes": 4 * GIB}}
+    tdev = {(0, 0): 2 * GIB}
+    c = pp.evaluate_candidate(assign, nodes, (("a",),),
+                              pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+                              transition_host={0: 0},
+                              transition_dev=tdev)
+    assert c["device_fits"]["0"] == pv.FIT_INSUFFICIENT  # 6+2 > 7
+
+
+def test_q2d_known_overhead_counted_once():
+    """Known T adds exactly once — host peak = est + T, not est + 2T."""
+    nodes = _q2_nodes()
+    c = pp.evaluate_candidate(
+        _q2_assign(4 * GIB, 0), nodes, (("a",), ("b",)),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 1 * GIB, 1: 0},
+        transition_dev={(0, 0): 0, (1, 0): 0})
+    assert c["host_peak_bytes"] == 5 * GIB   # 4+1 once; b contributes 0
+
+
+def test_q2e_unknown_overhead_no_positive_feasibility():
+    """est fits arithmetic, but T unknown → conditional (Q5)."""
+    nodes = _q2_nodes()
+    c = pp.evaluate_candidate(
+        _q2_assign(4 * GIB, 4 * GIB), nodes, (("a",), ("b",)),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 0},
+        transition_dev={(0, 0): 0, (1, 0): 0})
+    assert c["state"] == pp.FEASIBLE_CONDITIONAL
+    assert "transition_overhead_unknown" in c["limitations"]
+    assert "transition_overhead_partial" in c["limitations"]
+
+
+def test_q2f_retention_overflow_remains_unverified():
+    """Hypothetical retention overflow stays infeasible_unverified,
+    never proven."""
+    nodes = _t1_nodes()
+    assign = {"img": {"device": 0, "artifact_id": "a",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                      "est_ram_bytes": 4 * GIB},
+              "vid": {"device": 0, "artifact_id": "b",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 8 * GIB,
+                      "est_ram_bytes": 6 * GIB}}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vid",)), pp.LIFETIME_RETAINED,
+        eval_ram(decision="block", commit_ok=False),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 0, (1, 0): 0})
+    assert c["state"] == pp.INFEASIBLE_UNVERIFIED
+    assert "retained_bound_unproven" in c["limitations"]
+
+
+def test_q2g_retained_transition_not_carried():
+    """Scenario B: dev0 est 6+8=14 cumulative; wave0 T (2G) is
+    TRANSIENT — never carried into wave1's retained total."""
+    nodes = _t1_nodes(dev0=dev(0, budget=15 * GIB))
+    assign = {"img": {"device": 0, "artifact_id": "a",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                      "est_ram_bytes": 4 * GIB},
+              "vid": {"device": 0, "artifact_id": "b",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 8 * GIB,
+                      "est_ram_bytes": 6 * GIB}}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vid",)), pp.LIFETIME_RETAINED,
+        eval_ram(),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 2 * GIB, (1, 0): 0})
+    # retained dev0 peak: wave0 = 6+2 = 8, wave1 = (6+8)+0 = 14.
+    # budget 15G → headroom; had T been retained it would be 16 > 15.
+    assert c["device_fits"]["0"] == pv.FIT_WITH_HEADROOM
+
+
+# ============================================================ Q4 — counters
+
+
+def test_q4_completed_counts_arrangements():
+    """A completed arrangement is (assignment × wave): one assignment
+    evaluated over two wave arrangements counts two completions."""
+    nodes = [node_ev("a"), node_ev("b")]
+    b1 = pp.Budgets()
+    pp.search(nodes, [(("a",), ("b",))],
+              pp.LIFETIME_RELEASE_ASSUMED, eval_ram(), {}, b1)
+    assert b1.completed == 1
+    b2 = pp.Budgets()
+    pp.search(nodes, [(("a",), ("b",)), (("a", "b"),)],
+              pp.LIFETIME_RELEASE_ASSUMED, eval_ram(), {}, b2)
+    assert b2.completed == 2
+
+
+def test_q4_partial_counts_every_dfs_visit():
+    nodes = [node_ev("a"), node_ev("b")]
+    b = pp.Budgets()
+    pp.search(nodes, [(("a",), ("b",))],
+              pp.LIFETIME_RELEASE_ASSUMED, eval_ram(), {}, b)
+    assert b.partial_expansions == 3   # root + node a + leaf
+
+
+def test_q4_exact_ceiling_vs_omitted():
+    """Reaching the ceiling WITHOUT omitting work is distinguished
+    from truncation."""
+    nodes = [node_ev("a"), node_ev("b")]
+    b = pp.Budgets()
+    b.completed = pp.LIMITS["max_completed_assignments"] - 1
+    _, _, states = pp.search(
+        nodes, [(("a",), ("b",))], pp.LIFETIME_RELEASE_ASSUMED,
+        eval_ram(), {}, b)
+    assert b.completed == pp.LIMITS["max_completed_assignments"]
+    assert not b.omitted_completed and len(states) == 1
+
+
+def test_q4_budgets_request_global():
+    """wave_arrangements + search share ONE Budgets object — counters
+    never reset between phases."""
+    b = pp.Budgets()
+    waves, _ = pp.wave_arrangements(FANOUT, b)
+    groups = b.group_proposals
+    waves_n = b.waves
+    nodes = [node_ev("img"), node_ev("vida"), node_ev("vidb")]
+    pp.search(nodes, waves, pp.LIFETIME_RELEASE_ASSUMED,
+              eval_ram(), {}, b)
+    assert b.group_proposals == groups and b.waves == waves_n
+    assert b.partial_expansions > 0
+
+
+def test_q4_variant_evals_attempts_bounded():
+    """variant_evals counts attempted combinations; ≤24 materialize
+    per node and excess attempts are flagged omitted."""
+    n = node_ev("a", devices=[dev(i) for i in range(8)],
+                adapters=tuple(f"ad{i}" for i in range(5)))
+    b = pp.Budgets()
+    pp.search([n, node_ev("b")], [(("a",), ("b",))],
+              pp.LIFETIME_RELEASE_ASSUMED, eval_ram(), {}, b)
+    # adapters capped at max_runtime_candidates_per_node=4 → 8×4=32
+    # attempted, only 24 materialized
+    assert b.variant_evals["a"] == 32
+    assert b.omitted_variants.get("a") is True
+    _, trunc, _ = pp.search(
+        [n, node_ev("b")], [(("a",), ("b",))],
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(), {}, pp.Budgets())
+    assert "variant_truncated" in trunc
+
+
+def test_q4_hard_device_prunes_variants():
+    """Hard device constraint filters variants at DFS expansion —
+    non-matching variants never become completed arrangements."""
+    nodes = [node_ev("a", devices=[dev(0), dev(1)]), node_ev("b")]
+    b = pp.Budgets()
+    retained, _, _ = pp.search(
+        nodes, [(("a",), ("b",))], pp.LIFETIME_RELEASE_ASSUMED,
+        eval_ram(), {"a": 1}, b)
+    assert all(c["assignment"]["a"]["device"] == 1 for c in retained)
+    assert b.completed >= 1
+
+
+# ============================================= Q5 — feasibility and
+# blocker scope
+
+
+def test_q5_high_ram_wave_fails_sequential_survives():
+    """A candidate-specific RAM failure must not block a surviving
+    lower-demand alternative: concurrent wave demand 8G blocks while
+    the sequential wave (peak 4G) survives."""
+    def ram_gate(est, known):
+        return {"decision": "block" if est >= 8 * GIB else "ok",
+                "fully_evaluated": True, "checks": {}, "reason": "",
+                "snapshot": {}}
+    nodes = [node_ev("a", 1 * GIB, 4 * GIB, devices=[dev(0)]),
+             node_ev("b", 1 * GIB, 4 * GIB, devices=[dev(0)])]
+    assign = _q2_assign(4 * GIB, 4 * GIB)
+    con = pp.evaluate_candidate(assign, nodes, (("a", "b"),),
+                                pp.LIFETIME_RELEASE_ASSUMED, ram_gate,
+                                transition_host={0: 0},
+                                transition_dev={(0, 0): 0})
+    seq = pp.evaluate_candidate(assign, nodes, (("a",), ("b",)),
+                                pp.LIFETIME_RELEASE_ASSUMED, ram_gate,
+                                transition_host={0: 0, 1: 0},
+                                transition_dev={(0, 0): 0, (1, 0): 0})
+    assert con["state"] == pp.CAND_BLOCKED
+    assert seq["state"] == pp.FEASIBLE
+    r = pp.aggregate(**agg_kwargs(
+        states=[con["state"], seq["state"]],
+        retained=[{"state": seq["state"], "node_states": {}}],
+        explored_reasons=set(con["reasons"]) | set(seq["reasons"])))
+    assert r["advisory_state"] != pp.ADVISORY_BLOCKED
+
+
+def test_q5_all_blocked_ram_reason_not_authoritative():
+    """Every explored candidate blocked solely by RAM insufficiency →
+    ram_insufficient, not a conflated authoritative_block."""
+    r = pp.aggregate(**agg_kwargs(
+        states=[pp.CAND_BLOCKED, pp.CAND_BLOCKED],
+        retained=[{"state": pp.CAND_BLOCKED, "node_states": {}}],
+        explored_reasons={"ram_insufficient"}))
+    assert r["advisory_state"] == pp.ADVISORY_BLOCKED
+    assert r["block_reason"] == "ram_insufficient"
+
+
+def test_q5_all_blocked_contract_reason_authoritative():
+    r = pp.aggregate(**agg_kwargs(
+        states=[pp.CAND_BLOCKED],
+        retained=[{"state": pp.CAND_BLOCKED, "node_states": {}}],
+        explored_reasons={"binding_contract_mismatch:x"}))
+    assert r["advisory_state"] == pp.ADVISORY_BLOCKED
+    assert r["block_reason"] == "authoritative_block"
+
+
+# ============================================================ Q3 — exact
+# command bindability
+
+
+def _seed_artifact(s, artifact_id, source_type="catalog",
+                   sha="a" * 64, enabled=True):
+    from app.db.models import ModelArtifact
+    s.add(ModelArtifact(
+        artifact_id=artifact_id, kind="model", family="sd15",
+        fmt="safetensors", role="diffusion", modality="image",
+        source_type=source_type, managed_by="catalog",
+        content_sha256=sha, enabled=enabled,
+        support_tier="tested", version="1"))
+
+
+def _seed_install(s, key="sd15.fp16", status="installed",
+                  adapter="gen.image.sdcpp"):
+    from app.db.models import ModelInstall, new_id
+    s.add(ModelInstall(
+        id=new_id(), model_key=key, adapter_id=adapter,
+        version="1.0", status=status, install_root="/tmp/m",
+        rel_dir=key, file_name="w.gguf", byte_size=1,
+        sha256="ab" * 32, verified=(status == "installed"),
+        license="test", meta_json={"source": {}}))
+
+
+def _node_bindability(body_json, client, node_id="img"):
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/"
+        "plan-preview", json=body_json)
+    assert r.status_code == 200
+    return next(n for n in r.json()["nodes"]
+                if n["node_id"] == node_id)
+
+
+def test_q3_video_spec_on_image_node_nonbindable(client):
+    """Actual lookup mismatch: a video-modality spec selected for the
+    image node's model_key can never satisfy generate.image —
+    definitively non_bindable."""
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "catalog_key", "value": "wan21.t2v.1_3b"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "command_contract_mismatch"
+
+
+def test_q3_catalog_key_without_install_nonbindable(client):
+    """Spec existence alone is NOT bindable: no ModelInstall row →
+    installed_file() resolves nothing → non_bindable/not_installed."""
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "catalog_key", "value": "sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "not_installed"
+
+
+def test_q3_bindable_with_install(client):
+    """Bindable requires the whole command gate: spec + matching
+    installed ModelInstall + served adapter."""
+    from sqlalchemy.orm import Session
+    with Session(client.app.state.engine) as s:
+        _seed_install(s, "sd15.fp16")
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "bindable"
+    assert n["integrity_class"] in ("verified", "recorded", "missing",
+                                    "declared")
+
+
+def test_q3_planned_tier_unknown_bindability(client):
+    """A planned-tier video spec: generate.video's experimental gate
+    is a runtime env flag — not stored evidence → unknown."""
+    n = _node_bindability({
+        "selections": {"vid_model_key": {
+            "kind": "catalog_key", "value": "ltx.2.5"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client, "vid")
+    assert n["bindability"] == "unknown"
+    assert n["bindability_reason"] == "support_tier_unverified"
+
+
+def test_q3_disabled_artifact_nonbindable(client):
+    """A disabled selected row is artifact_disabled — authoritative,
+    independent of any command path."""
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelArtifact
+    with Session(client.app.state.engine) as s:
+        row = s.get(ModelArtifact, "catalog:sd15.fp16")
+        row.enabled = False
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "artifact_disabled"
+
+
+def test_q3_import_row_no_model_key_path(client):
+    """Bare import rows have no model_key binding — definitively
+    non_bindable regardless of integrity or enabled state."""
+    import uuid
+
+    from sqlalchemy.orm import Session
+    aid = f"import:{uuid.uuid4()}"
+    with Session(client.app.state.engine) as s:
+        _seed_artifact(s, aid, source_type="import")
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": aid}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "no_model_key_binding"
+
+
+# ============================================================ Q6 — isolation
+
+
+def test_q6_visibility_predicate_unit():
+    """Project-scope visibility predicate: project-scoped rows admit
+    only global (None) or owned rows; a foreign scope is excluded."""
+    from app.api.routers import _pipe_plan_visibility
+    rows = [NS(artifact_id="a", project_id=None),
+            NS(artifact_id="b", project_id="P1"),
+            NS(artifact_id="c", project_id="P9")]
+    db = NS(execute=lambda _q: NS(scalars=lambda: rows))
+    vis = _pipe_plan_visibility(db, NS(id="P1"))
+    assert vis == {"a", "b"}
+
+
+def test_q6_unrelated_artifact_no_fp_change(client):
+    """An unrelated artifact row cannot influence the plan
+    fingerprint — it never enters selections or root evidence."""
+    import uuid
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelArtifact
+    from tests.conftest import make_project
+    p = make_project(client)
+    url = (f"/api/projects/{p['id']}/pipelines/img2vid_chain/"
+           "plan-preview")
+    body = {"params": {"img_model_key": "a", "img_prompt": "p",
+                       "vid_model_key": "b"}}
+    r1 = client.post(url, json=body)
+    assert r1.status_code == 200
+    fp1 = r1.json()["plan_fingerprint"]
+    with Session(client.app.state.engine) as s:
+        s.add(ModelArtifact(
+            artifact_id=f"import:{uuid.uuid4()}", kind="model",
+            family="zz", fmt="safetensors", role="diffusion",
+            modality="image", source_type="import",
+            managed_by="external", content_sha256="f" * 64,
+            enabled=True, support_tier="tested", version="1"))
+        s.commit()
+    r2 = client.post(url, json=body)
+    assert r2.status_code == 200
+    assert r2.json()["plan_fingerprint"] == fp1
+
+
+def test_q6_context_fields_rejected(client):
+    """No character/shot/cast selector surface exists on this
+    endpoint — any such field is rejected at schema level."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    for extra in ({"character_ids": "x"}, {"shot_id": "x"},
+                  {"cast": {}}, {"select": ["lora:z"]}):
+        r = client.post(
+            f"/api/projects/{p['id']}/pipelines/img2vid_chain/"
+            "plan-preview", json=extra)
+        assert r.status_code == 422
+
+
+def test_q6_shared_catalog_artifact_visible(client):
+    """Catalog registry rows are the shared library — an artifact_id
+    selection of one is authorized for every project (Q6-H)."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"selections": {"img_model_key": {
+                  "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+              "params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+
+
+# ============================================== Q8 — request contract
+
+
+def test_q8_wave_policy_unsupported_rejected(client):
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"nodes": {"img": {"wave_policy": "dynamic"}},
+              "params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 400
+    assert "wave_policy_unsupported" in str(r.json())
+
+
+def test_q8_wave_policy_fixed_level_accepted(client):
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"nodes": {"img": {"wave_policy": "fixed_level"}},
+              "params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+
+
+def test_q8_missing_param_is_invalid_request(client):
+    """param_findings enforced: a missing required external param is
+    an invalid request (400), not a silent partial plan."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"params": {"img_model_key": "a"}})
+    assert r.status_code == 400
+    assert "invalid_params" in str(r.json())
+
+
+def test_q8_typed_response_shape(client):
+    """Response validates against PipelinePlanPreviewOut — required
+    fields present with declared types and bounded collections."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["advisory"] is True
+    assert isinstance(b["axes"], dict)
+    assert isinstance(b["candidates"], list) and len(b["candidates"]) <= 8
+    assert isinstance(b["findings"], list) and len(b["findings"]) <= 64
+    assert isinstance(b["counters"], dict)
+    assert b["operational_readiness"] == "not_evaluated"

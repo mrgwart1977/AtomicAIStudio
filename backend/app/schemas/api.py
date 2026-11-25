@@ -1503,6 +1503,8 @@ class PipelinePlanNodePrefs(BaseModel):
     device_constraint: str | int | None = None
     device_preference: str | int | None = None
     residency_mode: str | None = None
+    wave_policy: str | None = None          # declared intent only —
+                                           # v1 honors "fixed_level"
 
 
 class PipelinePlanPreviewIn(BaseModel):
