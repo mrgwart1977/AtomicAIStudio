@@ -1488,10 +1488,15 @@ def test_q3_catalog_key_without_install_nonbindable(client):
 
 def test_q3_bindable_with_install(client):
     """Bindable requires the whole command gate: spec + matching
-    installed ModelInstall + served adapter."""
+    installed ModelInstall + served adapter + the registry's
+    maintained install_id association (link_installs invariant)."""
     from sqlalchemy.orm import Session
+
+    from app.domain import model_artifacts
     with Session(client.app.state.engine) as s:
         _seed_install(s, "sd15.fp16")
+        s.flush()
+        model_artifacts.link_installs(s)
         s.commit()
     n = _node_bindability({
         "selections": {"img_model_key": {
@@ -1680,3 +1685,402 @@ def test_q8_typed_response_shape(client):
     assert isinstance(b["findings"], list) and len(b["findings"]) <= 64
     assert isinstance(b["counters"], dict)
     assert b["operational_readiness"] == "not_evaluated"
+
+
+# ============================================================ R1 — exact
+# artifact-to-installation identity
+
+
+def test_r1b_install_identity_mismatch_nonbindable(client):
+    """install_id points at a DIFFERENT install than the command would
+    resolve: A installed, then B installed-then-removed — link_installs
+    associates the artifact with latest B; the command's installed-only
+    lookup resolves A. Proven mismatch → non_bindable."""
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelArtifact, ModelInstall, new_id
+    from app.domain import model_artifacts
+    with Session(client.app.state.engine) as s:
+        a = ModelInstall(
+            id=new_id(), model_key="sd15.fp16",
+            adapter_id="gen.image.sdcpp", version="1.0",
+            status="installed", install_root="/tmp/m",
+            rel_dir="sd15.fp16", file_name="w.gguf", byte_size=1,
+            sha256="ab" * 32, verified=True, license="test",
+            meta_json={"source": {}},
+            created_at=datetime(2025, 1, 1))
+        b = ModelInstall(
+            id=new_id(), model_key="sd15.fp16",
+            adapter_id="gen.image.sdcpp", version="1.1",
+            status="removed", install_root="/tmp/m",
+            rel_dir="sd15.fp16", file_name="w2.gguf", byte_size=1,
+            sha256="cd" * 32, verified=False, license="test",
+            meta_json={"source": {}},
+            created_at=datetime(2025, 6, 1))
+        s.add_all([a, b])
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+        row = s.get(ModelArtifact, "catalog:sd15.fp16")
+        assert row.install_id == b.id      # linked to removed B
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "install_identity_mismatch"
+
+
+def test_r1c_missing_install_identity_unknown(client):
+    """An installed row exists but the artifact's install_id was never
+    associated (link_installs not run) → identity evidence missing →
+    unknown, never silently bindable."""
+    from sqlalchemy.orm import Session
+    with Session(client.app.state.engine) as s:
+        _seed_install(s, "sd15.fp16")
+        s.commit()                               # no link_installs
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "unknown"
+    assert n["bindability_reason"] == "install_identity_unverified"
+
+
+def test_r1d_bindable_independent_of_integrity(client):
+    """Bindability and integrity are independent axes: a bindable
+    catalog selection stays bindable with a NULL content hash."""
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelArtifact
+    from app.domain import model_artifacts
+    with Session(client.app.state.engine) as s:
+        _seed_install(s, "sd15.fp16")
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.get(ModelArtifact, "catalog:sd15.fp16").content_sha256 = None
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "bindable"
+
+
+def test_r1e_mismatch_no_silent_substitution(client):
+    """A proven identity mismatch never falls back to another artifact
+    or install — the node reports the selected row and non_bindable."""
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelInstall, new_id
+    from app.domain import model_artifacts
+    with Session(client.app.state.engine) as s:
+        s.add(ModelInstall(
+            id="inst-old", model_key="sd15.fp16",
+            adapter_id="gen.image.sdcpp", version="1.0",
+            status="installed", install_root="/tmp/m",
+            rel_dir="sd15.fp16", file_name="w.gguf", byte_size=1,
+            sha256="ab" * 32, verified=True, license="test",
+            meta_json={"source": {}},
+            created_at=datetime(2025, 1, 1)))
+        s.add(ModelInstall(
+            id=new_id(), model_key="sd15.fp16",
+            adapter_id="gen.image.sdcpp", version="1.1",
+            status="removed", install_root="/tmp/m",
+            rel_dir="sd15.fp16", file_name="w2.gguf", byte_size=1,
+            sha256="cd" * 32, verified=False, license="test",
+            meta_json={"source": {}},
+            created_at=datetime(2025, 6, 1)))
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"selections": {"img_model_key": {
+                  "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+              "params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+    img = next(n for n in r.json()["nodes"] if n["node_id"] == "img")
+    assert img["artifact_id"] == "catalog:sd15.fp16"
+    assert img["bindability"] == "non_bindable"
+
+
+# ============================================ R2 — rejected-work counters
+
+
+def _wide_defn():
+    """Two roots, 4+4 independent children: L0 has 2 choices, L1 has
+    155 (1 + C(8,2)+C(8,3)+C(8,4) admissible groups) -> 310 attempted
+    decompositions, far beyond the 64 materialization cap."""
+    from app.domain.pipeline_defs import (
+        ParamBinding,
+        ParamDecl,
+        PipelineDefinition,
+        PipelineEdge,
+        PipelineNode,
+        PortDecl,
+    )
+    out = PortDecl("result", "out", "image", cardinality=1,
+                   output_contract="primary_asset")
+    inp = PortDecl("init_image", "in", "image", required=True,
+                   command_arg="image_asset_id")
+    nodes = []
+    edges = []
+    for rid in ("r1", "r2"):
+        nodes.append(PipelineNode(
+            node_id=rid, node_kind="job", command_key="generate.image",
+            workflow_key="text2image", runtime_keys=("sdcpp",),
+            required_components=("diffusion",), input_ports=(),
+            output_ports=(out,),
+            param_bindings=(
+                ParamBinding("model_key", "external",
+                             external_key="img_model_key"),
+                ParamBinding("prompt", "external",
+                             external_key="img_prompt"))))
+    for root in ("r1", "r2"):
+        for i in range(4):
+            cid = f"{root}c{i}"
+            nodes.append(PipelineNode(
+                node_id=cid, node_kind="job",
+                command_key="generate.video",
+                workflow_key="image2video", runtime_keys=("sdcpp",),
+                required_components=("diffusion",),
+                input_ports=(inp,), output_ports=(out,),
+                param_bindings=(
+                    ParamBinding("model_key", "external",
+                                 external_key="vid_model_key"),
+                    ParamBinding("image_asset_id", "edge",
+                                 edge_id=f"e_{cid}"),)))
+            edges.append(PipelineEdge(
+                f"e_{cid}", root, "result", cid, "init_image",
+                "image_asset_id", "init_image", "same_project",
+                "generated"))
+    return PipelineDefinition(
+        pipeline_key="wide_test", schema_version=1, definition_version=1,
+        display_name="wide", description="", category="generation_chain",
+        status="declared", required_context=("project",),
+        policy_constraints=(), limitations=(),
+        external_params=(
+            ParamDecl("img_model_key", "string", required=True),
+            ParamDecl("img_prompt", "string", required=True),
+            ParamDecl("vid_model_key", "string", required=True)),
+        nodes=tuple(nodes), edges=tuple(edges))
+
+
+def test_r2_wave_attempts_materialized_rejected():
+    """waves counter = attempted decompositions (materialized +
+    rejected): 64 materialize, the 65th attempt is counted, flagged
+    omitted and never appended — bounded before materialization."""
+    b = pp.Budgets()
+    arrangements, trunc = pp.wave_arrangements(_wide_defn(), b)
+    assert b.waves == pp.LIMITS["max_wave_decompositions"] + 1  # 65
+    assert len(arrangements) == pp.LIMITS["max_wave_decompositions"]
+    assert b.waves - len(arrangements) == 1   # rejected attempt counted
+    assert b.omitted_waves is True
+    assert pp.TRUNC_WAVE in trunc
+    # every group proposal attempted counted (L0: 1 + L1: 154)
+    assert b.group_proposals == 155
+    assert not b.omitted_groups
+
+
+def test_r2_completed_is_assignment_x_wave_single_lifetime():
+    """completed = assignment x wave arrangements under the request's
+    ONE lifetime scenario — the endpoint calls search() exactly once
+    with a single lifetime_assumption, so no multiplier applies."""
+    nodes = [node_ev("a"), node_ev("b")]
+    for waves, expect in (
+            ([(("a",), ("b",))], 1),
+            ([(("a",), ("b",)), (("a", "b"),)], 2)):
+        b = pp.Budgets()
+        pp.search(nodes, waves, pp.LIFETIME_RELEASE_ASSUMED,
+                  eval_ram(), {}, b)
+        assert b.completed == expect
+
+
+# ============================================================ R3 — full
+# domain fingerprint + conditional feasibility
+
+
+def test_r3a_known_t_unverified_release_conditional():
+    """Known overhead + all arithmetic fits, but release is UNVERIFIED
+    (retained model) -> feasible_conditional, never unqualified."""
+    nodes = _t1_nodes(dev0=dev(0, budget=16 * GIB),
+                      dev1=dev(1, budget=16 * GIB))
+    assign = {"img": {"device": 0, "artifact_id": "a",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 6 * GIB,
+                      "est_ram_bytes": 4 * GIB},
+              "vid": {"device": 0, "artifact_id": "b",
+                      "runtime_key": "sdcpp", "adapter_id": "ad",
+                      "residency": "gpu", "est_vram_bytes": 8 * GIB,
+                      "est_ram_bytes": 6 * GIB}}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vid",)), pp.LIFETIME_RETAINED,
+        eval_ram(),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 0, (1, 0): 0})
+    assert c["state"] == pp.FEASIBLE_CONDITIONAL
+
+
+def test_r3c_concurrency_unverified_never_unqualified():
+    """A concurrent wave group cannot become unqualified feasible by
+    arithmetic fit alone — concurrency_unverified -> conditional."""
+    img = node_ev("img", 4 * GIB, 4 * GIB,
+                  devices=[dev(0, budget=16 * GIB),
+                           dev(1, budget=16 * GIB)])
+    va = dataclasses.replace(
+        node_ev("vida", 4 * GIB, 4 * GIB,
+                devices=[dev(0, budget=16 * GIB),
+                         dev(1, budget=16 * GIB)]),
+        workflow_key="image2video")
+    vb = dataclasses.replace(
+        node_ev("vidb", 4 * GIB, 4 * GIB,
+                devices=[dev(0, budget=16 * GIB),
+                         dev(1, budget=16 * GIB)]),
+        workflow_key="image2video")
+    nodes = [img, va, vb]
+    devmap = {"img": 0, "vida": 1, "vidb": 0}
+    assign = {nid: {"device": devmap[nid], "artifact_id": "x",
+                    "runtime_key": "sdcpp", "adapter_id": "ad",
+                    "residency": "gpu", "est_vram_bytes": 4 * GIB,
+                    "est_ram_bytes": 4 * GIB}
+              for nid in ("img", "vida", "vidb")}
+    c = pp.evaluate_candidate(
+        assign, nodes, (("img",), ("vida", "vidb")),
+        pp.LIFETIME_RELEASE_ASSUMED, eval_ram(),
+        transition_host={0: 0, 1: 0},
+        transition_dev={(0, 0): 0, (0, 1): 0, (0, 2): 0,
+                        (1, 0): 0, (1, 1): 0, (1, 2): 0})
+    assert "concurrency_unverified" in c["limitations"]
+    assert c["state"] == pp.FEASIBLE_CONDITIONAL
+
+
+def test_r3_domain_meta_changes_fingerprint():
+    """The evaluated variant domain participates in pipeplan:v1:
+    residency domain, cpu-lane admissibility and artifact identity
+    changes each move the fingerprint."""
+    kw0 = {"artifact_id": "catalog:sd15.fp16",
+           "eval_residencies": ["gpu"], "cpu_lane_permitted": False}
+    fp = pp.plan_fingerprint(**_fp_inputs(nodes_meta=_fp_nodes_meta(**kw0)))
+    for kw in ({"eval_residencies": ["gpu", "cpu_offload"]},
+               {"cpu_lane_permitted": True},
+               {"artifact_id": "catalog:sd15.q8"}):
+        m = _fp_nodes_meta(**{**kw0, **kw})
+        assert pp.plan_fingerprint(**_fp_inputs(nodes_meta=m)) != fp
+
+
+# ============================================================ R4 — endpoint
+# isolation evidence
+
+
+def test_r4e_disable_unrelated_artifact_no_change(client):
+    """Disabling an unrelated registry row leaves the local plan
+    fingerprint and advisory outcome untouched."""
+    import uuid
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models import ModelArtifact
+    from tests.conftest import make_project
+    p = make_project(client)
+    url = (f"/api/projects/{p['id']}/pipelines/img2vid_chain/"
+           "plan-preview")
+    body = {"params": {"img_model_key": "a", "img_prompt": "p",
+                       "vid_model_key": "b"}}
+    aid = f"import:{uuid.uuid4()}"
+    with Session(client.app.state.engine) as s:
+        s.add(ModelArtifact(
+            artifact_id=aid, kind="model", family="zz",
+            fmt="safetensors", role="diffusion", modality="image",
+            source_type="import", managed_by="external",
+            content_sha256="e" * 64, enabled=True,
+            support_tier="tested", version="1"))
+        s.commit()
+    r1 = client.post(url, json=body)
+    assert r1.status_code == 200
+    fp1, st1 = (r1.json()["plan_fingerprint"],
+                r1.json()["advisory_state"])
+    with Session(client.app.state.engine) as s:
+        s.get(ModelArtifact, aid).enabled = False
+        s.commit()
+    r2 = client.post(url, json=body)
+    assert r2.status_code == 200
+    assert r2.json()["plan_fingerprint"] == fp1
+    assert r2.json()["advisory_state"] == st1
+
+
+def test_r4f_foreign_verdict_no_fp_change(client):
+    """A compat verdict for an UNRELATED artifact never enters this
+    plan's evidence — verdicts resolve per root artifact_id."""
+    from sqlalchemy.orm import Session
+
+    from app.db.models import CompatVerdict, new_id
+    from tests.conftest import make_project
+    p = make_project(client)
+    url = (f"/api/projects/{p['id']}/pipelines/img2vid_chain/"
+           "plan-preview")
+    body = {"params": {"img_model_key": "a", "img_prompt": "p",
+                       "vid_model_key": "b"}}
+    r1 = client.post(url, json=body)
+    assert r1.status_code == 200
+    fp1 = r1.json()["plan_fingerprint"]
+    with Session(client.app.state.engine) as s:
+        s.add(CompatVerdict(
+            id=new_id(), artifact_id="catalog:ltx.2.5",
+            runtime_key="sdcpp", arch_axis="supported",
+            arch_confidence="high", runtime_axis="operational",
+            hardware_axis="fits", policy_axis="eligible", level=3,
+            domain_levels_json={}, overall="compatible"))
+        s.commit()
+    r2 = client.post(url, json=body)
+    assert r2.status_code == 200
+    assert r2.json()["plan_fingerprint"] == fp1
+
+
+# ============================================================ R5 — residency
+# and typed response evidence
+
+
+def test_r5_unsupported_residency_block(client):
+    """An unsupported residency_mode produces residency_not_supported
+    per node — an authoritative per-candidate blocker, never an HTTP
+    error or silent fallback."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"nodes": {"img": {"residency_mode": "bogus_mode"}},
+              "params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+    img = next(n for n in r.json()["nodes"] if n["node_id"] == "img")
+    assert img["residency_error"]
+    reasons = r.json()["reasons"] + [
+        f.get("code", "") for f in r.json()["findings"]]
+    assert any("residency_not_supported" in x for x in reasons)
+
+
+def test_r5_counters_attempted_materialized(client):
+    """Response counters expose attempted vs materialized wave work and
+    every omitted flag — ceiling vs omission stays distinguishable."""
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+    c = r.json()["counters"]
+    assert c["waves_attempted"] >= c["waves_materialized"]
+    assert set(c["omitted"]) == {"partial", "completed", "waves",
+                               "groups", "variants", "findings"}

@@ -1186,7 +1186,7 @@ def _pipe_plan_visibility(db, project) -> set:
             if getattr(a, "project_id", None) in (None, project.id)}
 
 
-def _plan_bindability(key, spec, command_key, adapter_ids, db):
+def _plan_bindability(key, spec, command_key, adapter_ids, db, row=None):
     """S2 — exact command-resolution chain for one (selection, node)
     pair, mirroring the generation gates in commands.py:
     catalog spec → modality/mode → support tier → license → adapter
@@ -1194,7 +1194,16 @@ def _plan_bindability(key, spec, command_key, adapter_ids, db):
     lookup model_files.installed_file performs). Bindability is never
     inferred from a catalog: prefix or spec existence alone; every
     gate that cannot be established from stored evidence returns
-    'unknown' rather than a fabricated verdict."""
+    'unknown' rather than a fabricated verdict.
+
+    Exact artifact-to-installation identity (R1): a matching model_key
+    and installed status alone do NOT prove the selected registry row
+    represents the install the command resolves. `ModelArtifact.
+    install_id` is the registry-maintained association (model_artifacts.
+    link_installs keeps catalog:{key} → latest ModelInstall row per
+    key). It must identify one of the installed rows the command path
+    can resolve — a proven mismatch is non_bindable; missing identity
+    evidence stays unknown."""
     from app.db.models import ModelInstall
     from app.domain import model_catalog
     if key is None:
@@ -1219,11 +1228,17 @@ def _plan_bindability(key, spec, command_key, adapter_ids, db):
             model_catalog.serves_adapter(spec, a)
             for a in adapter_ids):
         return "non_bindable", "adapter_unverified"
-    inst = db.execute(select(ModelInstall).where(
-        ModelInstall.model_key == key,
-        ModelInstall.status == "installed")).scalars().first()
-    if inst is None:
+    installed_ids = {i.id for i in db.execute(
+        select(ModelInstall).where(
+            ModelInstall.model_key == key,
+            ModelInstall.status == "installed")).scalars()}
+    if not installed_ids:
         return "non_bindable", "not_installed"
+    if row is not None and row.artifact_id.startswith("catalog:"):
+        if row.install_id is None:
+            return "unknown", "install_identity_unverified"
+        if row.install_id not in installed_ids:
+            return "non_bindable", "install_identity_mismatch"
     return "bindable", ""
 
 
@@ -1391,7 +1406,7 @@ def pipeline_plan_preview(
             bindability, bind_reason = "unresolved", "no_selection"
         else:
             bindability, bind_reason = _plan_bindability(
-                sel_key, spec, n.command_key, adapter_ids, db)
+                sel_key, spec, n.command_key, adapter_ids, db, row)
         res_ok, res_err = plan_preview.residency_evidence(
             "sdcpp", spec, res)
         args = resolved.get(n.node_id, {})
@@ -1496,8 +1511,15 @@ def pipeline_plan_preview(
             "device_preference": (pref.device_preference
                                   if pref else None),
             "wave_policy": wave_pol,
+            "artifact_id": sel["artifact_id"] if sel else None,
             "eval_devices": sorted({a.get("index") for a in
                                     alternatives}),
+            # Full evaluated variant domain (R3): residency axis is
+            # 'gpu' only in v1; the cpu-lane pseudo-variant is part of
+            # the domain exactly when the lane is permitted.
+            "eval_residencies": ["gpu"],
+            "cpu_lane_permitted": bool(
+                lane is not None and lane.get("permitted")),
             "est_vram_bytes": est["est_vram_bytes"],
             "est_ram_bytes": est["est_ram_bytes"]})
 
@@ -1534,6 +1556,8 @@ def pipeline_plan_preview(
              "model_key_effective": s["model_key_effective"],
              "content_sha256": (s["row"].content_sha256
                                 if s["row"] is not None else None),
+             "install_id": (s["row"].install_id
+                            if s["row"] is not None else None),
              "integrity_class": (
                  "declared" if s["row"] is None else
                  "verified" if s["row"].source_type != "import"
@@ -1548,18 +1572,28 @@ def pipeline_plan_preview(
                           _commit_evidence_qualified(mem_ev or {})
                           else "unqualified")},
         dict(pipeline_plan.LIMITS), freshness, margins)
+    findings = list(agg["findings"])
+    omitted = max(0, len(findings) - pipeline_plan.LIMITS[
+        "max_findings"])
+    # Counter inventory (R2): attempted vs materialized wave work is
+    # explicit; every omitted_* flag participates in piperesult:v1.
     counters = {
         "partial_expansions": budgets.partial_expansions,
         "completed_assignments": budgets.completed,
         "group_proposals": budgets.group_proposals,
+        "waves_attempted": budgets.waves,
+        "waves_materialized": len(waves),
         "waves_evaluated": budgets.waves,
         "explored_candidates": len(states),
-        "retained": len(retained)}
+        "retained": len(retained),
+        "omitted": {"partial": budgets.omitted_partial,
+                    "completed": budgets.omitted_completed,
+                    "waves": budgets.omitted_waves,
+                    "groups": budgets.omitted_groups,
+                    "variants": bool(budgets.omitted_variants),
+                    "findings": omitted}}
     result_fp = pipeline_plan.result_fingerprint(
         plan_fp, agg, retained, truncs, counters, states)
-    findings = list(agg["findings"])
-    omitted = max(0, len(findings) - pipeline_plan.LIMITS[
-        "max_findings"])
     auth = [f for f in findings if f["code"] in (
         "authoritative_block", "binding_contract_mismatch",
         "residency_not_supported")]

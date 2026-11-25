@@ -1530,9 +1530,11 @@ class PipelinePlanPreviewOut(BaseModel):
                                            # plan_incomplete | ready_advisory
     block_reason: str | None
     axes: dict
-    nodes: list[dict]
+    # Bounds mirror planner LIMITS — enforced again at serialization
+    # (max_nodes 32, max_retained_candidates 8, max_findings 64).
+    nodes: list[dict] = Field(max_length=32)
     deferred_bindings: list[dict]
-    candidates: list[dict]
+    candidates: list[dict] = Field(max_length=8)
     counters: dict
     truncations: list[str]
     search_exhaustive: bool
@@ -1542,7 +1544,7 @@ class PipelinePlanPreviewOut(BaseModel):
     snapshot_id: str | None
     plan_fingerprint: str                    # "pipeplan:v1:" + hash
     plan_result_fingerprint: str             # "piperesult:v1:" + hash
-    findings: list[dict]
+    findings: list[dict] = Field(max_length=64)
     limitations: list[str]
     reasons: list[str]
 
