@@ -1239,6 +1239,13 @@ def _plan_bindability(key, spec, command_key, adapter_ids, db, row=None):
             return "unknown", "install_identity_unverified"
         if row.install_id not in installed_ids:
             return "non_bindable", "install_identity_mismatch"
+        if len(installed_ids) > 1:
+            # C1 — installed_file resolves .first() with NO ordering;
+            # with several eligible rows, WHICH installation the
+            # command binds is not established by stored evidence.
+            # Set membership alone is not exact selection — ambiguity
+            # stays unknown, never silently bindable.
+            return "unknown", "install_ambiguous"
     return "bindable", ""
 
 

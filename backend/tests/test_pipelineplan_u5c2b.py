@@ -7,6 +7,8 @@ decision contract; the planner never reaches hardware paths."""
 import dataclasses
 from types import SimpleNamespace as NS
 
+import pytest
+
 from app.domain import dep_resolve as dr
 from app.domain import pipeline_defs as pdefs
 from app.domain import pipeline_plan as pp
@@ -2084,3 +2086,242 @@ def test_r5_counters_attempted_materialized(client):
     assert c["waves_attempted"] >= c["waves_materialized"]
     assert set(c["omitted"]) == {"partial", "completed", "waves",
                                "groups", "variants", "findings"}
+
+
+# ============================================================ C1 — install
+# selection ambiguity
+
+
+def _mk_install(s, key, status, created, file_name="w.gguf",
+                install_id=None):
+    from app.db.models import ModelInstall, new_id
+    s.add(ModelInstall(
+        id=install_id or new_id(), model_key=key,
+        adapter_id="gen.image.sdcpp", version="1.0",
+        status=status, install_root="/tmp/m",
+        rel_dir=key, file_name=file_name, byte_size=1,
+        sha256="ab" * 32, verified=(status == "installed"),
+        license="test", meta_json={"source": {}},
+        created_at=created))
+
+
+def test_c1b_multiple_eligible_selected_ambiguous(client):
+    """Two installed rows for the key and install_id points at one of
+    them: the command's unordered .first() cannot be proven to pick
+    that row — ambiguity stays unknown, never bindable."""
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.domain import model_artifacts
+    with Session(client.app.state.engine) as s:
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 1, 1), "a.gguf")
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 6, 1), "b.gguf")
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "unknown"
+    assert n["bindability_reason"] == "install_ambiguous"
+
+
+def test_c1c_multiple_eligible_excluding_selected_nonbindable(client):
+    """Two eligible installs but the artifact's association points at
+    a third (removed) row → install_id absent from eligible →
+    non_bindable, not ambiguity."""
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.domain import model_artifacts
+    with Session(client.app.state.engine) as s:
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 1, 1), "a.gguf")
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 3, 1), "b.gguf")
+        _mk_install(s, "sd15.fp16", "removed",
+                    datetime(2025, 6, 1), "c.gguf")
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+    n = _node_bindability({
+        "selections": {"img_model_key": {
+            "kind": "artifact_id", "value": "catalog:sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}, client)
+    assert n["bindability"] == "non_bindable"
+    assert n["bindability_reason"] == "install_identity_mismatch"
+
+
+def test_c1g_bindability_material_in_fingerprint():
+    """Ambiguity evidence participates in pipeplan:v1 — a bindable vs
+    unknown bindability classification changes the fingerprint."""
+    a = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(bindability="bindable")))
+    b = pp.plan_fingerprint(
+        **_fp_inputs(nodes_meta=_fp_nodes_meta(bindability="unknown")))
+    assert a != b
+
+
+# ============================================================ C2 — psutil
+# teardown diagnostic
+
+
+def test_c2_psutil_interceptor_is_pool_monitor(client, monkeypatch):
+    """The psutil.virtual_memory call observed at teardown of
+    test_commit_evidence_u5c1b::test_ep_never_live_collects is the
+    worker-pool's 1 Hz background monitor
+    (WorkerPool._monitor_loop -> ResidencyRegistry.under_pressure ->
+    _ram_free -> psutil) ticking on the app portal loop — never a
+    request path. Reproduces with the same interceptor pattern and
+    captures the real calling stack + thread."""
+    import inspect
+    import threading
+    import time
+
+    import app.domain.hardware as _hw
+    calls: list[dict] = []
+    orig = _hw.psutil.virtual_memory
+
+    def spy():
+        calls.append({
+            "thread": threading.current_thread().name,
+            "stack": [f.function for f in inspect.stack()[1:8]]})
+        return orig()
+
+    monkeypatch.setattr(_hw.psutil, "virtual_memory", spy)
+    time.sleep(1.6)          # monitor interval is 1.0 s
+    assert calls, "no background virtual_memory tick observed"
+    assert any(
+        "under_pressure" in c["stack"] or "_monitor_loop" in c["stack"]
+        for c in calls)
+    assert not any(
+        f in c["stack"]
+        for c in calls
+        for f in ("pipeline_plan_preview", "evaluate_ram",
+                  "probe_cached"))
+
+
+def test_c2_plan_preview_request_path_no_psutil(client, monkeypatch):
+    """The plan-preview endpoint never transitively invokes psutil:
+    the interceptor is armed across a real request and any recorded
+    caller stack containing the endpoint would fail this test."""
+    import inspect
+    import time
+
+    import app.domain.hardware as _hw
+    calls: list[dict] = []
+    orig = _hw.psutil.virtual_memory
+
+    def spy():
+        calls.append({"t": time.monotonic(),
+                      "stack": [f.function
+                                for f in inspect.stack()[1:8]]})
+        return orig()
+
+    monkeypatch.setattr(_hw.psutil, "virtual_memory", spy)
+    from tests.conftest import make_project
+    p = make_project(client)
+    r = client.post(
+        f"/api/projects/{p['id']}/pipelines/img2vid_chain/plan-preview",
+        json={"params": {"img_model_key": "a", "img_prompt": "p",
+                         "vid_model_key": "b"}})
+    assert r.status_code == 200
+    assert not [c for c in calls
+                if "pipeline_plan_preview" in c["stack"]]
+    # every recorded caller is the background monitor, if any fired
+    assert all(
+        "under_pressure" in c["stack"] or "_monitor_loop" in c["stack"]
+        or "virtual_memory" == c["stack"][0]
+        for c in calls)
+
+
+# ============================================================ D2 — typed
+# nested response validation
+
+
+def _d2_node():
+    return {"node_id": "img", "artifact_id": "catalog:sd15.fp16",
+            "model_key_effective": "sd15.fp16",
+            "bindability": "bindable", "bindability_reason": "",
+            "integrity_class": "verified", "dep_plan_ref": None,
+            "runtime_state": "candidate_compatible_static",
+            "est_vram_bytes": 1, "est_ram_bytes": 2,
+            "device_alternatives": [], "cpu_lane": None,
+            "residency_error": None, "workflow_key": "text2image"}
+
+
+def _d2_candidate():
+    return {"assignment": {"img": {"artifact_id": "catalog:sd15.fp16",
+                "runtime_key": "sdcpp", "adapter_id": "a",
+                "device": 0, "residency": "gpu"}},
+            "wave": [["img"]], "lifetime": "release_assumed",
+            "state": "feasible", "device_fits": {"0": "fits_tight"},
+            "device_budgets": {"0": 1}, "host_peak_bytes": 1,
+            "ram_eval": {"decision": "ok"},
+            "node_states": {"img": "ok"},
+            "reasons": [], "limitations": []}
+
+
+def _d2_out(**over):
+    out = {"pipeline_key": "k", "pipeline_valid": "valid",
+           "advisory_state": "plan_incomplete", "block_reason": "x",
+           "axes": {"structure": "valid", "resource_evidence": "fresh",
+                    "execution_input_availability": "all_available"},
+           "nodes": [], "deferred_bindings": [], "candidates": [],
+           "counters": {"partial_expansions": 1,
+                        "completed_assignments": 1,
+                        "group_proposals": 1, "waves_attempted": 1,
+                        "waves_materialized": 1, "waves_evaluated": 1,
+                        "explored_candidates": 1, "retained": 1,
+                        "omitted": {"partial": False, "completed": False,
+                                    "waves": False, "groups": False,
+                                    "variants": False, "findings": 0},
+                        "findings_omitted": 0},
+           "truncations": [], "search_exhaustive": True,
+           "limits": {"max_nodes": 32}, "snapshot_freshness": "fresh",
+           "snapshot_simulated": False, "snapshot_id": None,
+           "plan_fingerprint": "pipeplan:v1:x",
+           "plan_result_fingerprint": "piperesult:v1:y",
+           "findings": [], "limitations": [], "reasons": []}
+    out.update(over)
+    return out
+
+
+def test_d2_nested_schema_enforced():
+    """Malformed nested values and oversized nested collections cannot
+    pass the typed response contract."""
+    import pydantic
+
+    from app.schemas.api import PipelinePlanCandidateOut, PipelinePlanNodeOut, PipelinePlanPreviewOut
+    node, cand = _d2_node(), _d2_candidate()
+    PipelinePlanNodeOut(**node)                  # valid shape passes
+    PipelinePlanCandidateOut(**cand)
+    PipelinePlanPreviewOut(**_d2_out())
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanNodeOut(**{**node, "bogus": 1})      # extra key
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanNodeOut(
+            **{**node, "est_vram_bytes": "big"})          # bad type
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanCandidateOut(**{
+            **cand,
+            "assignment": {"img": {"device": "gpu0"}}})   # bad nested
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanPreviewOut(
+            **_d2_out(nodes=[node] * 33))                 # >32 nodes
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanPreviewOut(
+            **_d2_out(candidates=[cand] * 9))             # >8 cands
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanPreviewOut(**_d2_out(findings=[
+            {"code": "x", "subject": "y", "detail": "z"}] * 65))
+    with pytest.raises(pydantic.ValidationError):
+        PipelinePlanPreviewOut(**_d2_out(
+            axes={"structure": "valid"}))                 # missing key
