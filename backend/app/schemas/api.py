@@ -4,7 +4,7 @@ from /openapi.json so these are the single source of truth."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -1483,6 +1483,192 @@ class PipelineSummaryOut(BaseModel):
     structural: str                        # invalid defs are surfaced,
                                            # never silently valid
     definition_fingerprint: str
+
+
+class PipelinePlanSelection(BaseModel):
+    """U-5c-2b — typed artifact selection. `catalog_key` resolves through
+    the model catalog; `artifact_id` binds one exact registry row.
+    Strict: no coercion, no unknown fields, no bool-as-int."""
+    model_config = {"extra": "forbid", "strict": True}
+    kind: str                                # catalog_key | artifact_id
+    value: str
+
+
+class PipelinePlanNodePrefs(BaseModel):
+    """Per-node placement controls. `device_constraint` is a HARD
+    constraint ('auto'|'cpu'|<index>); `device_preference` is soft and
+    feeds ranking only. `lifetime_assumption` selects the conditional
+    release scenario."""
+    model_config = {"extra": "forbid", "strict": True}
+    device_constraint: str | int | None = None
+    device_preference: str | int | None = None
+    residency_mode: str | None = None
+    wave_policy: str | None = None          # declared intent only —
+                                           # v1 honors "fixed_level"
+
+
+class PipelinePlanPreviewIn(BaseModel):
+    """Request body — strictly bounded before any expensive work."""
+    model_config = {"extra": "forbid", "strict": True}
+    params: dict[str, str | int | float | bool] = {}
+    selections: dict[str, PipelinePlanSelection] = {}
+    nodes: dict[str, PipelinePlanNodePrefs] = {}
+    lifetime_assumption: str | None = None   # release_assumed |
+                                           # retained_model | unknown
+    include_stale: bool = True
+
+
+class PipelinePlanFindingOut(BaseModel):
+    """One aggregate/definition finding — emitted code, subject and
+    detail only."""
+    model_config = {"extra": "forbid"}
+    code: str
+    subject: str
+    detail: str
+
+
+class PipelinePlanDeferredOut(BaseModel):
+    """One deferred execution input — a typed binding to a future
+    node output; never an asset identity."""
+    model_config = {"extra": "forbid"}
+    node_id: str
+    request_key: str
+    edge_id: str | None
+    state: str                                # deferred_future_output
+    asset_kind: str | None
+    ownership: str | None
+    provenance: str | None
+
+
+class PipelinePlanNodeOut(BaseModel):
+    """Per-node planning evidence row."""
+    model_config = {"extra": "forbid"}
+    node_id: str
+    artifact_id: str | None
+    model_key_effective: str | None
+    bindability: str                          # bindable|non_bindable|
+                                            # unknown|unresolved
+    bindability_reason: str
+    integrity_class: str                      # verified|recorded|
+                                            # missing|declared
+    dep_plan_ref: str | None
+    runtime_state: str
+    est_vram_bytes: int | None
+    est_ram_bytes: int | None
+    # plan_preview.evaluate_device() rows — one per snapshot device
+    # plus at most one explicit hard index. Construction-bounded by
+    # len(devices)+1; 64 is a defensive serialization cap (the 8-device
+    # planner limit governs the search domain, not reporting).
+    device_alternatives: list[dict] = Field(max_length=64)
+    # plan_preview.cpu_lane() verdict dict when a CPU lane is evaluated.
+    cpu_lane: dict | None
+    residency_error: str | None
+    workflow_key: str | None
+
+
+class PipelinePlanAssignOut(BaseModel):
+    """One node assignment inside a retained candidate."""
+    model_config = {"extra": "forbid"}
+    artifact_id: str | None
+    runtime_key: str | None
+    adapter_id: str | None
+    device: int | None                        # -1 = cpu lane
+    residency: str | None
+
+
+class PipelinePlanCandidateOut(BaseModel):
+    """One retained candidate arrangement (top-8)."""
+    model_config = {"extra": "forbid"}
+    # Keyed by node_id / device index — bounded by max_nodes (32) and
+    # the device-alternatives reporting cap (64).
+    assignment: dict[str, PipelinePlanAssignOut] = Field(max_length=32)
+    # Wave groups of node ids — ≤32 groups of ≤32 nodes (max_nodes).
+    wave: list[Annotated[list[str], Field(max_length=32)]] = Field(
+        max_length=32)
+    lifetime: str
+    state: str                                # feasible|feasible_conditional|
+                                            # infeasible_*|blocked
+    device_fits: dict[str, str] = Field(max_length=64)
+    device_budgets: dict[str, int | None] = Field(max_length=64)
+    host_peak_bytes: int | None
+    # resources.evaluate_ram() verdict — decision/checks/snapshot keys
+    # owned by the shared helper, not this schema.
+    ram_eval: dict
+    node_states: dict[str, str] = Field(max_length=32)
+    # Per-candidate reason strings ≤ ~3×max_nodes; limitation strings
+    # are a fixed dedup'd vocabulary — bounds are defensive caps.
+    reasons: list[str] = Field(max_length=128)
+    limitations: list[str] = Field(max_length=32)
+
+
+class PipelinePlanAxesOut(BaseModel):
+    model_config = {"extra": "forbid"}
+    structure: str
+    resource_evidence: str
+    execution_input_availability: str
+
+
+class PipelinePlanOmittedOut(BaseModel):
+    """Ceiling-vs-omission flags — True means work was omitted, not
+    merely that the ceiling was reached."""
+    model_config = {"extra": "forbid"}
+    partial: bool
+    completed: bool
+    waves: bool
+    groups: bool
+    variants: bool
+    findings: int
+
+
+class PipelinePlanCountersOut(BaseModel):
+    model_config = {"extra": "forbid"}
+    partial_expansions: int
+    completed_assignments: int
+    group_proposals: int
+    waves_attempted: int
+    waves_materialized: int
+    waves_evaluated: int
+    explored_candidates: int
+    retained: int
+    omitted: PipelinePlanOmittedOut
+    findings_omitted: int
+
+
+class PipelinePlanPreviewOut(BaseModel):
+    """U-5c-2b — advisory-only multi-node pipeline plan preview.
+    `advisory` is always True; `operational_readiness` is always
+    'not_evaluated'. Nothing here reserves, enqueues or executes."""
+    advisory: bool = True
+    operational_readiness: str = "not_evaluated"
+    pipeline_key: str
+    pipeline_valid: str                      # valid | invalid
+    advisory_state: str                      # invalid | plan_blocked |
+                                           # plan_incomplete | ready_advisory
+    block_reason: str | None
+    axes: PipelinePlanAxesOut
+    # Bounds mirror planner LIMITS — enforced again at serialization
+    # (max_nodes 32, max_retained_candidates 8, max_findings 64).
+    nodes: list[PipelinePlanNodeOut] = Field(max_length=32)
+    # Edge-source deferred inputs ≤ max_nodes × pipeline_defs
+    # max_param_bindings_per_node (32×32).
+    deferred_bindings: list[PipelinePlanDeferredOut] = Field(
+        max_length=1024)
+    candidates: list[PipelinePlanCandidateOut] = Field(max_length=8)
+    counters: PipelinePlanCountersOut
+    # Distinct TRUNC_* classes emitted — 7 exist today.
+    truncations: list[str] = Field(max_length=8)
+    search_exhaustive: bool
+    limits: dict[str, int] = Field(max_length=16)
+    snapshot_freshness: str
+    snapshot_simulated: bool
+    snapshot_id: str | None
+    plan_fingerprint: str                    # "pipeplan:v1:" + hash
+    plan_result_fingerprint: str             # "piperesult:v1:" + hash
+    findings: list[PipelinePlanFindingOut] = Field(max_length=64)
+    # Dedup'd vocabularies across ≤8 retained candidates — defensive
+    # caps well above the per-candidate ceilings.
+    limitations: list[str] = Field(max_length=256)
+    reasons: list[str] = Field(max_length=1024)
 
 
 class PipelineListOut(BaseModel):
