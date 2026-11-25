@@ -18,14 +18,17 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AppSetting, ModelInstall, RuntimeInstall, new_id, utcnow
-from app.domain.model_catalog import ModelSpec, RuntimeSpec
+from app.db.models import (
+    AppSetting, ModelArtifact, ModelInstall, RuntimeInstall,
+    new_id, utcnow)
+from app.domain.model_catalog import ModelSpec, RuntimeSpec, serves_adapter
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +37,407 @@ _CHUNK = 4 * 1024 * 1024
 
 class ModelError(Exception):
     pass
+
+
+# ------------------------------------------------------------------
+# U-5d-0 — exact model-execution binding substrate (execbind:v1)
+#
+# Legacy generation resolves installed models by unordered .first()
+# model_key lookups at BOTH command preview and worker dispatch. The
+# pinned path replaces that with an exact, versioned, server-built
+# binding: one approved ModelInstall row, every required member file,
+# and each member's expected SHA-256 — re-validated with streaming
+# current-content verification before any external inference spawn.
+# Ordinary unpinned generation is unchanged.
+# ------------------------------------------------------------------
+
+EXECBIND_VERSION = "execbind:v1"
+EXECBIND_INTEGRITY = ("catalog_declared", "install_verified")
+_EXECBIND_FIELDS = {"binding_version", "artifact_id", "model_key",
+                    "install_id", "runtime_key", "adapter_id", "members"}
+_EXECBIND_MEMBER_FIELDS = {"role", "file_name", "expected_sha256",
+                           "integrity"}
+_HEX64 = frozenset("0123456789abcdef")
+
+
+class ExecbindError(ModelError):
+    """Pinned-execution refusal — `code` is the stable machine reason."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _sha64_ok(v) -> bool:
+    return (isinstance(v, str) and len(v) == 64
+            and all(c in _HEX64 for c in v))
+
+
+def resolve_install(session: Session, model_key: str) -> ModelInstall:
+    """Exact selection for pinned binding: precisely one eligible
+    installed row or a refusal. Unlike installed_file() this NEVER picks
+    arbitrarily from an ambiguous set — 0 rows refuses 'not_installed',
+    >1 rows refuses 'install_ambiguous'."""
+    rows = session.execute(
+        select(ModelInstall).where(
+            ModelInstall.model_key == model_key,
+            ModelInstall.status == "installed")).scalars().all()
+    if not rows:
+        raise ExecbindError(
+            "not_installed",
+            f"model '{model_key}' is not installed")
+    if len(rows) > 1:
+        raise ExecbindError(
+            "install_ambiguous",
+            f"model '{model_key}' has {len(rows)} eligible installed "
+            "rows — exact binding refuses unordered selection")
+    return rows[0]
+
+
+def _expected_member_sha(install: ModelInstall, f) -> tuple[str, str]:
+    """(expected_sha256, evidence_class) for one catalog-declared member.
+    install.sha256 covers ONLY the primary weight file (install.file_name)
+    — it is never reused as evidence for vae/text_encoder/clip_vision.
+    Conflicting applicable sources refuse rather than silently prefer one."""
+    candidates: dict[str, str] = {}
+    if f.sha256:
+        candidates["catalog_declared"] = f.sha256
+    if (f.name == install.file_name and install.verified
+            and install.sha256):
+        candidates["install_verified"] = install.sha256
+    if not candidates:
+        raise ExecbindError(
+            "missing_expected_hash",
+            f"member '{f.name}' has no expected sha256 evidence")
+    values = set(candidates.values())
+    if len(values) > 1:
+        raise ExecbindError(
+            "conflicting_hash_evidence",
+            f"member '{f.name}' has conflicting expected sha256 values")
+    return values.pop(), ("catalog_declared"
+                          if "catalog_declared" in candidates
+                          else "install_verified")
+
+
+def _check_install_artifact(session: Session, spec: ModelSpec,
+                            install: ModelInstall, adapter_id: str,
+                            artifact_id: str | None) -> None:
+    """Record-level revalidation shared by build, commit validation and
+    worker dispatch."""
+    if install.model_key != spec.key:
+        raise ExecbindError(
+            "model_key_mismatch",
+            f"installation belongs to '{install.model_key}', not '{spec.key}'")
+    if install.status != "installed":
+        raise ExecbindError(
+            "install_status",
+            f"installation status is '{install.status}', not 'installed'")
+    if install.adapter_id != spec.adapter_id:
+        raise ExecbindError(
+            "install_adapter_mismatch",
+            f"installation adapter '{install.adapter_id}' != declared "
+            f"'{spec.adapter_id}'")
+    if not serves_adapter(spec, adapter_id):
+        raise ExecbindError(
+            "adapter_mismatch",
+            f"adapter '{adapter_id}' is not declared compatible with "
+            f"'{spec.key}'")
+    if artifact_id is not None:
+        art = session.get(ModelArtifact, artifact_id)
+        if art is None:
+            raise ExecbindError(
+                "artifact_missing",
+                f"registry artifact '{artifact_id}' not found")
+        if not art.enabled:
+            raise ExecbindError(
+                "artifact_disabled",
+                f"registry artifact '{artifact_id}' is disabled")
+        if art.install_id != install.id:
+            raise ExecbindError(
+                "artifact_install_mismatch",
+                f"artifact '{artifact_id}' is linked to a different "
+                "installation")
+
+
+def execbind_roles(spec: ModelSpec, *, adapter_id: str,
+                   has_image_input: bool) -> tuple[str, ...]:
+    """The exact member roles a pinned generation binds — every member
+    the adapter resolves, no assumed extras."""
+    if adapter_id == "gen.video.sdcpp":
+        roles = ["diffusion", "vae", "text_encoder"]
+        if has_image_input and any(f.role == "clip_vision"
+                                   for f in spec.files):
+            roles.append("clip_vision")
+        return tuple(roles)
+    return ("diffusion",)
+
+
+def _member_entries(spec: ModelSpec, install: ModelInstall,
+                    roles: tuple[str, ...]) -> list[dict]:
+    members: list[dict] = []
+    seen: set[str] = set()
+    for role in roles:
+        cands = [f for f in spec.files if f.role == role]
+        if len(cands) != 1:
+            raise ExecbindError(
+                "member_unresolvable",
+                f"role '{role}' resolves to {len(cands)} declared "
+                f"files for '{spec.key}' — exact binding requires "
+                "precisely one")
+        f = cands[0]
+        if role == "diffusion" and install.file_name != f.name:
+            raise ExecbindError(
+                "primary_file_drift",
+                f"installed primary '{install.file_name}' differs "
+                f"from declared '{f.name}'")
+        if f.name in seen:
+            raise ExecbindError(
+                "duplicate_member",
+                f"member file '{f.name}' appears more than once")
+        seen.add(f.name)
+        sha, klass = _expected_member_sha(install, f)
+        members.append({"role": role, "file_name": f.name,
+                        "expected_sha256": sha, "integrity": klass})
+    return members
+
+
+def build_execbind(session: Session, spec: ModelSpec,
+                   install: ModelInstall, *, adapter_id: str,
+                   roles: tuple[str, ...],
+                   artifact_id: str | None) -> dict:
+    """Server-side execbind:v1 binding over the APPROVED install row.
+    All record and member evidence checks run here; callers must NOT
+    accept a client-supplied binding."""
+    _check_install_artifact(session, spec, install, adapter_id,
+                            artifact_id)
+    members = _member_entries(spec, install, roles)
+    base = Path(install.install_root) / install.rel_dir
+    for m in members:
+        if not (base / m["file_name"]).is_file():
+            raise ExecbindError(
+                "member_missing",
+                f"required member '{m['file_name']}' is absent from "
+                "the approved installation")
+    return {"binding_version": EXECBIND_VERSION,
+            "artifact_id": artifact_id,
+            "model_key": spec.key,
+            "install_id": install.id,
+            "runtime_key": "sdcpp",
+            "adapter_id": adapter_id,
+            "members": members}
+
+
+def validate_execbind_schema(binding) -> dict:
+    """Strict execbind:v1 shape validation — unknown fields, wrong
+    types, malformed ids/hashes and incomplete members all refuse."""
+    if not isinstance(binding, dict):
+        raise ExecbindError("binding_malformed",
+                            "execution_binding is not an object")
+    extra = set(binding) - _EXECBIND_FIELDS
+    if extra:
+        raise ExecbindError("binding_unknown_fields",
+                            f"unknown binding fields {sorted(extra)}")
+    missing = _EXECBIND_FIELDS - set(binding)
+    if missing:
+        raise ExecbindError("binding_incomplete",
+                            f"missing binding fields {sorted(missing)}")
+    if binding["binding_version"] != EXECBIND_VERSION:
+        raise ExecbindError("binding_version",
+                            f"unsupported binding_version "
+                            f"'{binding['binding_version']}'")
+    for k in ("model_key", "install_id", "runtime_key", "adapter_id"):
+        if not isinstance(binding[k], str) or not binding[k]:
+            raise ExecbindError("binding_malformed",
+                                f"binding field '{k}' must be a "
+                                "non-empty string")
+    if (binding["artifact_id"] is not None
+            and not isinstance(binding["artifact_id"], str)):
+        raise ExecbindError("binding_malformed",
+                            "binding field 'artifact_id' must be a "
+                            "string or null")
+    members = binding["members"]
+    if not isinstance(members, list) or not members:
+        raise ExecbindError("binding_incomplete",
+                            "binding members must be a non-empty list")
+    seen_names: set[str] = set()
+    seen_roles: set[str] = set()
+    for m in members:
+        if not isinstance(m, dict) or set(m) != _EXECBIND_MEMBER_FIELDS:
+            raise ExecbindError("binding_malformed",
+                                "each member requires exactly role, "
+                                "file_name, expected_sha256, integrity")
+        if not isinstance(m["role"], str) or not m["role"]:
+            raise ExecbindError("binding_malformed",
+                                "member role must be a non-empty string")
+        if not isinstance(m["file_name"], str) or not m["file_name"]:
+            raise ExecbindError("binding_malformed",
+                                "member file_name must be a non-empty "
+                                "string")
+        if not _sha64_ok(m["expected_sha256"]):
+            raise ExecbindError("malformed_hash",
+                                "member expected_sha256 must be "
+                                "64 lowercase hex chars")
+        if m["integrity"] not in EXECBIND_INTEGRITY:
+            raise ExecbindError("binding_malformed",
+                                f"member integrity '{m['integrity']}' "
+                                "is not a supported evidence class")
+        if m["file_name"] in seen_names or m["role"] in seen_roles:
+            raise ExecbindError("duplicate_member",
+                                "duplicate member role or file identity")
+        seen_names.add(m["file_name"])
+        seen_roles.add(m["role"])
+    return binding
+
+
+def validate_execbind(session: Session, spec: ModelSpec,
+                      expected: dict, *, adapter_id: str,
+                      roles: tuple[str, ...]) -> dict:
+    """Re-validate an expected binding against CURRENT authoritative
+    records. The pinned install_id is the identity — there is no
+    re-resolution by model_key, so a replacement installation under the
+    same key cannot substitute for the approved row."""
+    validate_execbind_schema(expected)
+    if expected["model_key"] != spec.key:
+        raise ExecbindError("model_key_mismatch",
+                            f"binding is for '{expected['model_key']}', "
+                            f"not '{spec.key}'")
+    if expected["adapter_id"] != adapter_id:
+        raise ExecbindError("adapter_mismatch",
+                            f"binding is for '{expected['adapter_id']}'"
+                            f", not '{adapter_id}'")
+    install = session.get(ModelInstall, expected["install_id"])
+    if install is None:
+        raise ExecbindError(
+            "install_missing",
+            "the approved installation no longer exists — refusing "
+            "rather than substituting another")
+    rebuilt = build_execbind(
+        session, spec, install, adapter_id=adapter_id, roles=roles,
+        artifact_id=expected.get("artifact_id"))
+    if rebuilt != expected:
+        raise ExecbindError(
+            "binding_drift",
+            "the approved installation, artifact link, member set or "
+            "expected integrity evidence changed since validation")
+    return expected
+
+
+def stream_sha256(path: Path,
+                  cancel_check: Callable[[], None] | None = None) -> str:
+    """Bounded streaming SHA-256 of one member file. cancel_check runs
+    once per chunk so worker cancellation semantics stay responsive."""
+    sha = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            if cancel_check is not None:
+                cancel_check()
+            chunk = fh.read(_CHUNK)
+            if not chunk:
+                break
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _member_name_ok(name: str) -> bool:
+    return bool(name) and name == Path(name).name \
+        and not Path(name).is_absolute() and name not in (".", "..") \
+        and "/" not in name and "\\" not in name and ":" not in name
+
+
+def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
+                         binding: dict, *, adapter_id: str,
+                         roles: tuple[str, ...],
+                         cancel_check: Callable[[], None] | None = None
+                         ) -> dict[str, Path]:
+    """Worker-side pinned resolution: revalidate the persisted binding
+    against current records, resolve every required member under the
+    APPROVED installation directory inside the authorized models root,
+    and stream-verify current SHA-256 content — all BEFORE any external
+    inference spawn. Any failure refuses; nothing falls back to
+    unordered model-key resolution."""
+    validate_execbind_schema(binding)
+    if binding["model_key"] != spec.key:
+        raise ExecbindError("model_key_mismatch",
+                            f"binding is for '{binding['model_key']}', "
+                            f"not '{spec.key}'")
+    if binding["adapter_id"] != adapter_id:
+        raise ExecbindError("adapter_mismatch",
+                            f"binding is for '{binding['adapter_id']}'"
+                            f", not '{adapter_id}'")
+    install = session.get(ModelInstall, binding["install_id"])
+    if install is None:
+        raise ExecbindError("install_missing",
+                            "the approved installation no longer "
+                            "exists")
+    _check_install_artifact(session, spec, install, adapter_id,
+                            binding.get("artifact_id"))
+    bound = {m["role"] for m in binding["members"]}
+    if bound != set(roles):
+        raise ExecbindError(
+            "member_set_mismatch",
+            f"binding members {sorted(bound)} != required members "
+            f"{sorted(roles)}")
+    # Expected-evidence re-derivation: the pinned expected values must
+    # still match what current records produce — no trusting of stale
+    # or self-declared binding evidence.
+    for m in binding["members"]:
+        f = next((x for x in spec.files if x.name == m["file_name"]),
+                 None)
+        if f is None:
+            raise ExecbindError("unexpected_member",
+                                f"member '{m['file_name']}' is not a "
+                                f"declared file of '{spec.key}'")
+        if f.role != m["role"]:
+            raise ExecbindError("wrong_member_role",
+                                f"member '{f.name}' is role "
+                                f"'{f.role}', not '{m['role']}'")
+        sha, klass = _expected_member_sha(install, f)
+        if sha != m["expected_sha256"] or klass != m["integrity"]:
+            raise ExecbindError("hash_evidence_drift",
+                                f"expected evidence for '{f.name}' "
+                                "changed since the binding was "
+                                "approved")
+    # Containment: authorized root comes from settings, never from the
+    # persisted row — a corrupted install path cannot define its own
+    # trusted boundary.
+    root = models_root(session, settings).resolve()
+    install_root = Path(install.install_root).resolve()
+    if install_root != root:
+        raise ExecbindError("install_root_mismatch",
+                            "approved install root is not the "
+                            "authorized models root")
+    install_dir = (install_root / install.rel_dir).resolve()
+    if install_dir != install_root and install_root not in \
+            install_dir.parents:
+        raise ExecbindError("install_dir_escape",
+                            "install directory escapes the authorized "
+                            "models root")
+    out: dict[str, Path] = {}
+    for m in binding["members"]:
+        name = m["file_name"]
+        if not _member_name_ok(name):
+            raise ExecbindError("member_path_invalid",
+                                "member file_name is not a plain "
+                                "relative name")
+        p = install_dir / name
+        resolved = p.resolve()
+        if install_dir not in resolved.parents:
+            raise ExecbindError("member_escape",
+                                f"member '{name}' resolves outside "
+                                "the approved installation")
+        if not resolved.is_file():
+            raise ExecbindError("member_unavailable",
+                                f"member '{name}' is not a regular "
+                                "readable file")
+        # Hash the containment-verified path — the residual
+        # verify→open TOCTOU is disclosed in the milestone report.
+        digest = stream_sha256(resolved, cancel_check)
+        if digest != m["expected_sha256"]:
+            raise ExecbindError("integrity_mismatch",
+                                f"current content of '{name}' does "
+                                "not match the approved hash")
+        out[m["role"]] = resolved
+    return out
 
 
 def _get_setting(session: Session, key: str) -> Any:

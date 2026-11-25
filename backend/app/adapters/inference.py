@@ -72,6 +72,38 @@ def _device_env(flavor: str, gpu_index: int | None) -> dict[str, str]:
     return {"GGML_VULKAN_DEVICE": idx, "GGML_VK_VISIBLE_DEVICES": idx}
 
 
+def _execbind_marker(request: dict) -> dict | None:
+    """Persisted execbind state discriminator (U-5d-0).
+
+    Returns the execution_binding dict to honor, or None for a genuine
+    legacy unpinned request. Every other combination refuses — a job
+    that requires pinned execution never silently becomes unpinned, and
+    a stray binding without its required marker is never silently
+    treated as legacy.
+
+      binding_required absent  + execution_binding absent  → legacy
+      binding_required absent  + execution_binding present → refuse
+      binding_required 'execbind:v1' + valid binding dict  → pinned
+      any other marker version or malformed binding        → refuse
+    """
+    required = request.get("binding_required")
+    binding = request.get("execution_binding")
+    if required is None and binding is None:
+        return None
+    if required != model_files.EXECBIND_VERSION:
+        raise ValueError(
+            "execution-binding marker is absent or unsupported — "
+            "refusing rather than resolving unpinned")
+    if binding is None:
+        raise ValueError(
+            "binding_required marker present but execution_binding is "
+            "missing — refusing")
+    if not isinstance(binding, dict):
+        raise TypeError(
+            "execution_binding is malformed — refusing")
+    return binding
+
+
 def _pipe_to_queue(pipe, queue: "asyncio.Queue", loop: asyncio.AbstractEventLoop) -> None:
     """Pump worker stdout lines into an asyncio queue from a daemon thread
     (synchronous Popen → async consumer bridge)."""
@@ -186,7 +218,8 @@ class SdCppAdapter:
 
     # ------------------------------------------------------------ helpers
 
-    def _resolve(self, request: dict) -> tuple[ModelSpec, Path, Path | None]:
+    def _resolve(self, request: dict, *, cancel_check=None
+                 ) -> tuple[ModelSpec, Path, Path | None]:
         key = request.get("model_key")
         spec = model_catalog.get(key or "")
         if spec is None:
@@ -194,8 +227,25 @@ class SdCppAdapter:
         if spec.modality != "image" or "text2image" not in spec.modes or spec.support not in ("production", "tested"):
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for image generation")
+        binding = _execbind_marker(request)
         with self._sf() as s:
-            weight = model_files.installed_file(s, self._settings, spec)
+            if binding is not None:
+                # U-5d-0 — pinned path: exact approved installation +
+                # every required member hash-verified BEFORE spawn. The
+                # unordered installed_file() lookup is never used.
+                try:
+                    weight = model_files.resolve_pinned_paths(
+                        s, self._settings, spec, binding,
+                        adapter_id=self.profile.adapter_id,
+                        roles=model_files.execbind_roles(
+                            spec, adapter_id=self.profile.adapter_id,
+                            has_image_input=False),
+                        cancel_check=cancel_check)["diffusion"]
+                except model_files.ExecbindError as exc:
+                    raise ValueError(
+                        f"execbind:{exc.code}: {exc}") from exc
+            else:
+                weight = model_files.installed_file(s, self._settings, spec)
         if weight is None:
             raise ValueError(f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
         exe = self._exe_path(request)
@@ -462,7 +512,8 @@ class SdCppAdapter:
 
     async def _run(self, handle: JobHandle,
                    staged_dir: Path | None) -> AsyncIterator[dict[str, Any]]:
-        spec, weight, _ = self._resolve(handle.request)
+        spec, weight, _ = self._resolve(
+            handle.request, cancel_check=handle.check_cancel)
         req = handle.request
         seed = req.get("seed", -1)
         if seed in (-1, "random", None):
@@ -669,7 +720,8 @@ class SdCppVideoAdapter(SdCppAdapter):
               "all downloads are user-approved.",
     )
 
-    def _resolve(self, request: dict) -> tuple[ModelSpec, Path, Path | None]:
+    def _resolve(self, request: dict, *, cancel_check=None
+                 ) -> tuple[ModelSpec, Path, Path | None]:
         key = request.get("model_key")
         spec = model_catalog.get(key or "")
         if spec is None:
@@ -680,19 +732,44 @@ class SdCppVideoAdapter(SdCppAdapter):
         if spec.modality != "video" or spec.support not in allowed:
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for video generation")
+        binding = _execbind_marker(request)
         with self._sf() as s:
-            weight = model_files.installed_file(s, self._settings, spec)
-            if weight is None:
-                raise ValueError(
-                    f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
-            vae = model_files.installed_component(s, self._settings, spec, "vae")
-            if vae is None:
-                raise ValueError(f"model '{spec.display_name}' VAE component is missing — reinstall")
-            tenc = model_files.installed_component(s, self._settings, spec, "text_encoder")
-            if tenc is None:
-                raise ValueError(f"model '{spec.display_name}' text-encoder component is missing — reinstall")
-            imgenc = model_files.installed_component(s, self._settings, spec, "image_encoder")
-        self._components = {"vae": vae, "text_encoder": tenc, "image_encoder": imgenc}
+            if binding is not None:
+                # U-5d-0 — pinned path: exact approved installation and
+                # EVERY required member (weights + vae + text_encoder +
+                # clip_vision when declared and i2v) hash-verified
+                # BEFORE spawn. installed_file/installed_component are
+                # never used on this path.
+                try:
+                    paths = model_files.resolve_pinned_paths(
+                        s, self._settings, spec, binding,
+                        adapter_id=self.profile.adapter_id,
+                        roles=model_files.execbind_roles(
+                            spec, adapter_id=self.profile.adapter_id,
+                            has_image_input=bool(
+                                request.get("image_path"))),
+                        cancel_check=cancel_check)
+                except model_files.ExecbindError as exc:
+                    raise ValueError(
+                        f"execbind:{exc.code}: {exc}") from exc
+                weight = paths["diffusion"]
+                self._components = {
+                    "vae": paths["vae"],
+                    "text_encoder": paths["text_encoder"],
+                    "image_encoder": paths.get("clip_vision")}
+            else:
+                weight = model_files.installed_file(s, self._settings, spec)
+                if weight is None:
+                    raise ValueError(
+                        f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
+                vae = model_files.installed_component(s, self._settings, spec, "vae")
+                if vae is None:
+                    raise ValueError(f"model '{spec.display_name}' VAE component is missing — reinstall")
+                tenc = model_files.installed_component(s, self._settings, spec, "text_encoder")
+                if tenc is None:
+                    raise ValueError(f"model '{spec.display_name}' text-encoder component is missing — reinstall")
+                imgenc = model_files.installed_component(s, self._settings, spec, "image_encoder")
+                self._components = {"vae": vae, "text_encoder": tenc, "image_encoder": imgenc}
         exe = self._exe_path(request)
         return spec, weight, exe
 
@@ -712,7 +789,8 @@ class SdCppVideoAdapter(SdCppAdapter):
         return errors
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
-        spec, weight, _ = self._resolve(handle.request)
+        spec, weight, _ = self._resolve(
+            handle.request, cancel_check=handle.check_cancel)
         req = handle.request
         seed = req.get("seed", -1)
         if seed in (-1, "random", None):
@@ -1086,7 +1164,8 @@ class ModelBenchmarkAdapter:
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         req = handle.request
-        spec, weight, _exe = self._gen._resolve(req)
+        spec, weight, _exe = self._gen._resolve(
+            req, cancel_check=handle.check_cancel)
         argv_prefix = self._gen._argv_prefix(req)
         runs = max(1, min(5, int(req.get("runs", 3) or 3)))
         work = Path(handle.work_dir)

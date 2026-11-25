@@ -188,6 +188,20 @@ SPEND_GUARDED_COMMANDS = {
     "project.delete",
 }
 
+# U-5d-0 — exact model-execution binding engages ONLY through trusted
+# internal invocation (a keyword on commit/preview, never payload JSON).
+# Any client attempt to supply binding internals to a generation
+# command refuses — a public JSON flag is NOT an authorization
+# mechanism (D1).
+EXECBIND_COMMANDS = frozenset({
+    "generate.image", "generate.image.persistent", "generate.video"})
+EXECBIND_CLIENT_KEYS = frozenset({
+    "execution_binding", "expected_binding", "binding_required",
+    "execbind", "execbind_expected", "internal_execbind",
+    "install_id", "expected_sha256", "member_sha256",
+    "binding_version", "binding_marker", "trusted_internal",
+    "internal_invocation"})
+
 # Commands that enqueue durable jobs (visible progress, restart-safe).
 JOB_COMMANDS = {
     "generate.image.mock": "mock.image",
@@ -3046,6 +3060,11 @@ def _check_generation(session: Session, project: Project, payload: dict,
     """generate.image / .persistent: model must be known, licensed, declared
     compatible with the selected adapter, and actually installed; referenced
     shot/scene must belong to the project; device selection must be sane."""
+    bad = EXECBIND_CLIENT_KEYS & payload.keys()
+    if bad:
+        raise CommandError(
+            422, "internal execution-binding fields are not "
+                 f"client-settable: {sorted(bad)}")
     from app.domain import model_catalog, model_files
 
     from app.db.models import Scene, Shot
@@ -3106,6 +3125,11 @@ def _experimental_ok() -> bool:
 def _check_video_generation(session: Session, project: Project, payload: dict) -> None:
     """generate.video: multi-component video model installed, prompt or a
     project image asset for i2v, sane frames/fps/device."""
+    bad = EXECBIND_CLIENT_KEYS & payload.keys()
+    if bad:
+        raise CommandError(
+            422, "internal execution-binding fields are not "
+                 f"client-settable: {sorted(bad)}")
     from app.domain import model_catalog, model_files
 
     from app.db.models import Asset, Scene, Shot
@@ -3325,9 +3349,53 @@ def _preview_cost_estimate(command_type: str, payload: dict) -> dict | None:
             "rates_checked": est.get("rates_checked")}
 
 
+def _execbind_adapter(command_type: str) -> str:
+    return JOB_COMMANDS[command_type]
+
+
+def _execbind_roles(spec, command_type: str,
+                    payload: dict) -> tuple[str, ...]:
+    from app.domain import model_files
+    return model_files.execbind_roles(
+        spec, adapter_id=_execbind_adapter(command_type),
+        has_image_input=bool(payload.get("image_asset_id")))
+
+
+def _execbind_commit(session: Session, command_type: str, payload: dict,
+                     expected: dict | None,
+                     adapter_id: str | None = None) -> dict:
+    """Trusted-internal execbind resolution at commit (U-5d-0).
+
+    Without an expected binding: build one server-side now — exactly
+    one eligible installation or refusal (D3). With `expected` (the
+    binding produced by a trusted validation step): re-validate it
+    against current records by the pinned install_id — a replacement
+    installation under the same model_key never substitutes (P2).
+    Raises CommandError on any refusal."""
+    from app.domain import model_catalog, model_files
+    spec = model_catalog.get(payload.get("model_key") or "")
+    if spec is None:
+        raise CommandError(422, "unknown model "
+                                f"'{payload.get('model_key')}'")
+    adapter_id = adapter_id or _execbind_adapter(command_type)
+    roles = _execbind_roles(spec, command_type, payload)
+    try:
+        if expected is None:
+            install = model_files.resolve_install(session, spec.key)
+            return model_files.build_execbind(
+                session, spec, install, adapter_id=adapter_id,
+                roles=roles, artifact_id=f"catalog:{spec.key}")
+        return model_files.validate_execbind(
+            session, spec, expected, adapter_id=adapter_id, roles=roles)
+    except model_files.ExecbindError as exc:
+        raise CommandError(
+            422, {"error": exc.code, "detail": str(exc)}) from exc
+
+
 def preview(session: Session, project: Project, *, command_type: str, payload: dict,
             scope: str, origin: str, target_type: str | None, target_id: str | None,
-            vault=None, gpu_scheduler=None, adapter_registry=None) -> dict:
+            vault=None, gpu_scheduler=None, adapter_registry=None,
+            internal_execbind: bool = False) -> dict:
     if command_type not in SUPPORTED_COMMANDS:
         raise CommandError(422, f"unsupported command_type '{command_type}'")
     warnings = _validate(session, project, command_type, payload)
@@ -3412,6 +3480,12 @@ def preview(session: Session, project: Project, *, command_type: str, payload: d
         # (model, dims, duration, sampling) via expected_params at
         # commit; shot state is pinned separately by expected_shot.
         out["resolved_params"] = _shot_video_params(eff)
+    if internal_execbind and command_type in EXECBIND_COMMANDS:
+        # U-5d-0 — trusted-internal preview surfaces the binding commit
+        # would validate: the caller pins it via execbind_expected so
+        # the approved installation cannot drift before commit (P2).
+        out["execution_binding"] = _execbind_commit(
+            session, command_type, eff, expected=None)
     if (command_type.startswith("timeline.")
             and command_type != "timeline.create"
             and payload.get("timeline_id")):
@@ -5061,7 +5135,18 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
            scope: str, origin: str, target_type: str | None, target_id: str | None,
            expected_revision: int, idempotency_key: str,
            job_engine=None, storage=None, vault=None,
-           session_factory=None, data_dir=None) -> dict:
+           session_factory=None, data_dir=None,
+           internal_execbind: bool = False,
+           execbind_expected: dict | None = None) -> dict:
+    if not internal_execbind:
+        if execbind_expected is not None:
+            raise CommandError(
+                422, "execbind_expected requires internal_execbind — "
+                     "a payload field cannot authorize it")
+    elif command_type not in EXECBIND_COMMANDS:
+        raise CommandError(
+            422, f"internal_execbind does not apply to "
+                 f"'{command_type}'")
     existing = session.execute(
         select(CreativeCommand).where(CreativeCommand.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
@@ -5462,6 +5547,17 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
                           "detail": _res.get("unavailable_reason")
                                     or "the pinned plan would not admit "
                                        "this submit — re-run cloud.plan"})
+        if internal_execbind:
+            # U-5d-0 — trusted-internal commit stamps the complete
+            # server-side binding into the durable request; the worker
+            # fails closed if it is missing/malformed. Resolved against
+            # the ACTUAL dispatched adapter so a local persistent-server
+            # override still binds correctly.
+            from app.domain import model_files
+            request["binding_required"] = model_files.EXECBIND_VERSION
+            request["execution_binding"] = _execbind_commit(
+                session, command_type, payload,
+                expected=execbind_expected, adapter_id=_adapter_id)
         try:
             job = job_engine.enqueue(
                 session,
