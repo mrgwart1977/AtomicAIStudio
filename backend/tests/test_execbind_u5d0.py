@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from app.adapters.base import JobCancelled, JobHandle
 from app.adapters.inference import SdCppAdapter, SdCppVideoAdapter, _execbind_marker
-from app.db.models import GenerationJob, ModelArtifact, ModelInstall, Project, new_id, utcnow
+from app.db.models import Asset, GenerationJob, ModelArtifact, ModelInstall, Project, new_id, utcnow
 from app.domain import commands as cmd
 from app.domain import model_catalog, model_files
 from app.domain.commands import CommandError
@@ -379,15 +379,18 @@ def test_legacy_unpinned_request_unchanged(client, monkeypatch):
 # B. trusted internal activation + persistence (54)
 
 def test_internal_invocation_constructs_binding(client, monkeypatch):
-    """54, 95 — trusted commit stamps binding_required + complete
-    execbind:v1 into the durable request; nothing else changes."""
+    """54, 95 — trusted preview constructs the complete binding;
+    trusted commit with the SAME approved binding stamps
+    binding_required + execbind:v1 into the durable request."""
     spec = _img_spec()
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    res = _internal_commit(client, p["id"], "generate.image",
-                           {"model_key": spec.key, "prompt": "a cat"},
-                           "k-pin-1")
+    payload = {"model_key": spec.key, "prompt": "a cat"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.image", payload,
+                           "k-pin-1", expected=b)
     req = _req_of(client, res)
     assert req["binding_required"] == model_files.EXECBIND_VERSION
     b = req["execution_binding"]
@@ -430,7 +433,8 @@ def test_expected_without_flag_refused(client, monkeypatch):
 def test_marker_state_matrix():
     """55-58 — every persisted combination resolves deterministically:
     only marker+valid-binding pins; every other combo refuses."""
-    good = {"binding_version": "execbind:v1", "artifact_id": None,
+    good = {"binding_version": "execbind:v1",
+            "artifact_id": "catalog:m",
             "model_key": "m", "install_id": "i", "runtime_key": "s",
             "adapter_id": "a", "members": [
                 {"role": "diffusion", "file_name": "f",
@@ -447,18 +451,25 @@ def test_marker_state_matrix():
     with pytest.raises(TypeError, match="malformed"):
         _execbind_marker({"binding_required": "execbind:v1",
                           "execution_binding": "x"})
-    # 58 — binding present, marker absent → refuse, never legacy
-    with pytest.raises(ValueError, match="absent or unsupported"):
-        _execbind_marker({"execution_binding": dict(good)})
-    with pytest.raises(ValueError, match="absent or unsupported"):
-        _execbind_marker({"binding_required": "execbind:v9",
-                          "execution_binding": dict(good)})
+    # 58 — binding present, marker absent/null/wrong-type/unknown
+    # version → refuse, never legacy
+    for marker_state in ({}, {"binding_required": None},
+                         {"binding_required": False},
+                         {"binding_required": 1},
+                         {"binding_required": "execbind:v0"},
+                         {"binding_required": "execbind:v9"},
+                         {"binding_required": {"v": 1}}):
+        with pytest.raises(ValueError, match="absent or unsupported"):
+            _execbind_marker({**marker_state,
+                              "execution_binding": dict(good)})
     # valid pair → pinned
     assert _execbind_marker({"binding_required": "execbind:v1",
                              "execution_binding": good}) == good
-    # genuine legacy → None
+    # genuine legacy → None (absent or null marker, no binding)
     assert _execbind_marker({"model_key": "m"}) is None
     assert _execbind_marker({}) is None
+    assert _execbind_marker({"binding_required": None}) is None
+    assert _execbind_marker({"execution_binding": None}) is None
 
 
 def test_schema_strictness(client, monkeypatch):
@@ -481,6 +492,10 @@ def test_schema_strictness(client, monkeypatch):
     bad(members="nope")
     bad(install_id=5)
     bad(extra_field="x")
+    # C2 — artifact identity is mandatory for pinned execution
+    bad(artifact_id=None)
+    bad(artifact_id="")
+    bad(artifact_id=42)
     b2 = dict(base)
     del b2["adapter_id"]
     with pytest.raises(model_files.ExecbindError,
@@ -624,9 +639,8 @@ def test_zero_and_ambiguous_installs_refuse(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     p = make_project(client)
     with pytest.raises(CommandError) as ei:
-        _internal_commit(client, p["id"], "generate.image",
-                         {"model_key": spec.key, "prompt": "x"},
-                         "k-none")
+        _internal_preview(client, p["id"], "generate.image",
+                          {"model_key": spec.key, "prompt": "x"})
     # The legacy installed-model gate refuses first — still a refusal;
     # the execbind 'not_installed' code covers direct binder use.
     assert "not installed" in str(ei.value)
@@ -637,9 +651,8 @@ def test_zero_and_ambiguous_installs_refuse(client, monkeypatch):
     _install_pinned(client, spec)
     _install_pinned(client, spec)
     with pytest.raises(CommandError) as ei2:
-        _internal_commit(client, p["id"], "generate.image",
-                         {"model_key": spec.key, "prompt": "x"},
-                         "k-two")
+        _internal_preview(client, p["id"], "generate.image",
+                          {"model_key": spec.key, "prompt": "x"})
     assert "install_ambiguous" in str(ei2.value)
 
 
@@ -691,7 +704,8 @@ def test_conflicting_hash_sources_refuse(client, monkeypatch):
                            match="conflicting"):
             model_files.build_execbind(
                 s, spec, row, adapter_id="gen.image.sdcpp",
-                roles=("diffusion",), artifact_id=None)
+                roles=("diffusion",),
+                artifact_id=f"catalog:{spec.key}")
 
 
 def test_primary_hash_never_covers_aux(client, monkeypatch):
@@ -717,6 +731,18 @@ def test_primary_hash_never_covers_aux(client, monkeypatch):
             verified=False, created_at=utcnow(), updated_at=utcnow())
         s.add(row)
         s.flush()
+        s.add(ModelArtifact(
+            artifact_id=f"catalog:{spec.key}",
+            display_name=spec.display_name, kind="model",
+            arch="diffusion", family=spec.family,
+            modality=spec.modality, fmt=spec.fmt, role="diffusion",
+            version=spec.version, source_type="catalog",
+            managed_by="atomic", content_sha256="",
+            byte_size=0, license_json=dict(spec.license),
+            support_tier=spec.support, enabled=True, tags_json=[],
+            install_id=row.id, meta_json={},
+            created_at=utcnow(), updated_at=utcnow()))
+        s.flush()
         # i2v on a clip-declaring model needs clip_vision — which has
         # no declared sha and no install-row coverage.
         with pytest.raises(model_files.ExecbindError,
@@ -724,7 +750,8 @@ def test_primary_hash_never_covers_aux(client, monkeypatch):
             model_files.build_execbind(
                 s, spec, row, adapter_id="gen.video.sdcpp",
                 roles=("diffusion", "vae", "text_encoder",
-                       "clip_vision"), artifact_id=None)
+                       "clip_vision"),
+                artifact_id=f"catalog:{spec.key}")
 
 
 def test_clip_required_i2v_missing_refuses(client, monkeypatch):
@@ -742,12 +769,16 @@ def test_clip_required_i2v_missing_refuses(client, monkeypatch):
             model_files.build_execbind(
                 s, spec, row, adapter_id="gen.video.sdcpp",
                 roles=("diffusion", "vae", "text_encoder",
-                       "clip_vision"), artifact_id=None)
+                       "clip_vision"),
+                artifact_id=f"catalog:{spec.key}")
 
 
 def test_clip_not_required_when_absent(client, monkeypatch):
     """70 — a model with no clip_vision declaration and a t2v request
-    binds exactly diffusion+vae+text_encoder."""
+    binds exactly diffusion+vae+text_encoder. C3 — i2v on the same
+    model cannot establish that no vision encoder is needed under the
+    supported adapter contract, so it fails CLOSED (member_unresolv-
+    able) rather than silently binding without image conditioning."""
     spec = _vid_spec(clip_declared=False)
     _add_spec(monkeypatch, spec)
     install_id = _install_pinned(client, spec)
@@ -757,8 +788,21 @@ def test_clip_not_required_when_absent(client, monkeypatch):
     assert {m["role"] for m in b["members"]} == {
         "diffusion", "vae", "text_encoder"}
     assert model_files.execbind_roles(
-        spec, adapter_id="gen.video.sdcpp", has_image_input=True
+        spec, adapter_id="gen.video.sdcpp", has_image_input=False
     ) == ("diffusion", "vae", "text_encoder")
+    # i2v always requires the clip_vision member — the catalog omission
+    # is not evidence that no encoder is needed.
+    assert model_files.execbind_roles(
+        spec, adapter_id="gen.video.sdcpp", has_image_input=True
+    ) == ("diffusion", "vae", "text_encoder", "clip_vision")
+    with client.app.state.session_factory() as s, pytest.raises(
+            model_files.ExecbindError,
+            match="resolves to 0 declared"):
+        model_files.build_execbind(
+            s, spec, s.get(ModelInstall, install_id),
+            adapter_id="gen.video.sdcpp",
+            roles=("diffusion", "vae", "text_encoder", "clip_vision"),
+            artifact_id=f"catalog:{spec.key}")
 
 
 def test_verified_aux_modified_detected(client, monkeypatch):
@@ -772,7 +816,9 @@ def test_verified_aux_modified_detected(client, monkeypatch):
                      roles=("diffusion", "vae", "text_encoder"))
     with client.app.state.session_factory() as s:
         root = model_files.models_root(s, client.app.state.settings)
-    (root / spec.key / "vae.safetensors").write_bytes(b"TAMPERED")
+    # Same-size tamper: bypasses the metadata check so the CURRENT-
+    # content hash is what detects the modification.
+    (root / spec.key / "vae.safetensors").write_bytes(b"BADX")
     ad = _vid_adapter(client)
     with pytest.raises(ValueError, match="integrity_mismatch"):
         ad._resolve({"model_key": spec.key, "runtime_flavor": "vulkan",
@@ -818,7 +864,7 @@ def test_every_member_hashed_before_spawn(client, monkeypatch, tmp_path):
     spawned.clear()
     with client.app.state.session_factory() as s:
         root = model_files.models_root(s, client.app.state.settings)
-    (root / spec.key / "tenc.safetensors").write_bytes(b"EVIL")
+    (root / spec.key / "tenc.safetensors").write_bytes(b"EVIL!")
     with pytest.raises(ValueError, match="integrity_mismatch"):
         asyncio.run(_drain(ad.run(handle)))
     assert spawned == []
@@ -874,7 +920,8 @@ def test_integrity_failure_is_not_cancel(client, monkeypatch, tmp_path):
     b = _binding_for(client, install_id=install_id)
     with client.app.state.session_factory() as s:
         root = model_files.models_root(s, client.app.state.settings)
-    (root / spec.key / "main.safetensors").write_bytes(b"CORRUPT")
+    # Same-size corruption so the current-content hash decides.
+    (root / spec.key / "main.safetensors").write_bytes(b"BAD!")
     ad = _img_adapter(client)
     with pytest.raises(ValueError, match="execbind:integrity_mismatch"):
         ad._resolve(_pinned_request(b),
@@ -1018,9 +1065,11 @@ def test_pinned_persists_and_recovery_honors(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    res = _internal_commit(client, p["id"], "generate.image",
-                           {"model_key": spec.key, "prompt": "x"},
-                           "k-persist")
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.image", payload,
+                           "k-persist", expected=b)
     req = _req_of(client, res)
     assert req["binding_required"] == "execbind:v1"
     assert len(req["execution_binding"]["members"]) == 1
@@ -1036,8 +1085,11 @@ def test_recovered_malformed_pinned_never_legacy(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    _internal_commit(client, p["id"], "generate.image",
-                     {"model_key": spec.key, "prompt": "x"}, "k-rec")
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    _internal_commit(client, p["id"], "generate.image", payload,
+                     "k-rec", expected=b)
     req = _last_job(client)
     ad = _img_adapter(client)
     req.pop("execution_binding")
@@ -1056,12 +1108,14 @@ def test_idempotent_replay_same_binding(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    _internal_commit(client, p["id"], "generate.image",
-                     {"model_key": spec.key, "prompt": "x"}, "k-idem")
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    _internal_commit(client, p["id"], "generate.image", payload,
+                     "k-idem", expected=b)
     n1 = _job_count(client)
-    r2 = _internal_commit(client, p["id"], "generate.image",
-                          {"model_key": spec.key, "prompt": "x"},
-                          "k-idem")
+    r2 = _internal_commit(client, p["id"], "generate.image", payload,
+                          "k-idem", expected=b)
     assert r2.get("idempotent_replay") is True
     assert _job_count(client) == n1
 
@@ -1078,12 +1132,15 @@ def test_idem_conflict_different_binding(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    _internal_commit(client, p["id"], "generate.image",
-                     {"model_key": spec.key, "prompt": "x"}, "k-conf")
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    _internal_commit(client, p["id"], "generate.image", payload,
+                     "k-conf", expected=b)
     with pytest.raises(CommandError) as ei:
         _internal_commit(client, p["id"], "generate.image",
                          {"model_key": spec.key, "prompt": "different"},
-                         "k-conf")
+                         "k-conf", expected=b)
     assert ei.value.status_code == 409
 
 
@@ -1114,9 +1171,11 @@ def test_device_fields_pass_through_unchanged(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    res = _internal_commit(client, p["id"], "generate.image",
-                           {"model_key": spec.key, "prompt": "x",
-                            "device": "auto"}, "k-dev")
+    payload = {"model_key": spec.key, "prompt": "x", "device": "auto"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.image", payload,
+                           "k-dev", expected=b)
     req = _req_of(client, res)
     assert req["device"] == "auto"
     assert "gpu_device_id" not in req and "physical_device" not in req
@@ -1129,9 +1188,11 @@ def test_no_marker_fields_in_public_surface(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    res = _internal_commit(client, p["id"], "generate.image",
-                           {"model_key": spec.key, "prompt": "x"},
-                           "k-surface")
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.image", payload,
+                           "k-surface", expected=b)
     req = _req_of(client, res)
     internal = {"binding_required", "execution_binding"}
     assert internal <= set(req)
@@ -1144,9 +1205,12 @@ def test_persistent_adapter_binds_server_id(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image.persistent",
+                          payload)["execution_binding"]
     res = _internal_commit(
-        client, p["id"], "generate.image.persistent",
-        {"model_key": spec.key, "prompt": "x"}, "k-srv")
+        client, p["id"], "generate.image.persistent", payload,
+        "k-srv", expected=b)
     req = _req_of(client, res)
     assert req["execution_binding"]["adapter_id"] == \
         "gen.image.sdcpp-server"
@@ -1159,11 +1223,237 @@ def test_video_internal_commit_binds_all_roles(client, monkeypatch):
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
-    res = _internal_commit(client, p["id"], "generate.video",
-                           {"model_key": spec.key, "prompt": "waves",
-                            "frames": 4, "width": 832, "height": 480},
-                           "k-vid")
+    payload = {"model_key": spec.key, "prompt": "waves",
+               "frames": 4, "width": 832, "height": 480}
+    b = _internal_preview(client, p["id"], "generate.video",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.video", payload,
+                           "k-vid", expected=b)
     req = _req_of(client, res)
     roles = {m["role"] for m in
              req["execution_binding"]["members"]}
     assert roles == {"diffusion", "vae", "text_encoder"}
+
+
+# ------------------------------------------------------------------
+# I. C1–C6 acceptance corrections
+
+def test_commit_requires_expected_binding(client, monkeypatch):
+    """C1.D/E/F — trusted commit refuses a missing, null or malformed
+    execbind_expected; only the valid, unchanged approved binding is
+    accepted. Construction is preview's job — never commit's."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x"}
+    with pytest.raises(CommandError, match="execbind_expected"):
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-c1-miss")  # expected=None
+    for bad in ({"nonsense": True}, "not-a-dict", 42):
+        with pytest.raises(CommandError):
+            _internal_commit(client, p["id"], "generate.image",
+                             payload, "k-c1-mal", expected=bad)
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    res = _internal_commit(client, p["id"], "generate.image", payload,
+                           "k-c1-ok", expected=b)
+    assert _req_of(client, res)["execution_binding"] == b
+
+
+def test_artifact_identity_mandatory(client, monkeypatch):
+    """C2 — absent/null/empty/malformed artifact ids, unknown or
+    foreign-model artifacts, disabled, relinked and post-commit-deleted
+    artifacts all refuse at worker dispatch; only the canonical
+    catalog:{model_key} row linked to the pinned install passes."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    for art in (None, "", 42):
+        with pytest.raises(ValueError, match="artifact_id"):
+            ad._resolve(_pinned_request(dict(b, artifact_id=art)))
+    for art in ("catalog:t5d.other", "bogus"):
+        with pytest.raises(ValueError,
+                           match="artifact_model_mismatch"):
+            ad._resolve(_pinned_request(dict(b, artifact_id=art)))
+    with client.app.state.session_factory() as s:
+        art = s.get(ModelArtifact, f"catalog:{spec.key}")
+        art.enabled = False
+        s.commit()
+    with pytest.raises(ValueError, match="artifact_disabled"):
+        ad._resolve(_pinned_request(b))
+    with client.app.state.session_factory() as s:
+        art = s.get(ModelArtifact, f"catalog:{spec.key}")
+        art.enabled = True
+        art.install_id = new_id()
+        s.commit()
+    with pytest.raises(ValueError,
+                       match="artifact_install_mismatch"):
+        ad._resolve(_pinned_request(b))
+    with client.app.state.session_factory() as s:
+        s.delete(s.get(ModelArtifact, f"catalog:{spec.key}"))
+        s.commit()
+    with pytest.raises(ValueError, match="artifact_missing"):
+        ad._resolve(_pinned_request(b))
+
+
+def test_artifact_deleted_before_commit_refuses(client, monkeypatch):
+    """C2.F — the registry artifact removed between trusted preview
+    and commit refuses at validation; never an artifact-free pin."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    with client.app.state.session_factory() as s:
+        s.delete(s.get(ModelArtifact, f"catalog:{spec.key}"))
+        s.commit()
+    with pytest.raises(CommandError, match="artifact_missing"):
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-art-del", expected=b)
+
+
+def test_i2v_requires_clip_vision_declaration(client, monkeypatch):
+    """C3 — image-conditioned pinned video on a catalog declaring no
+    clip_vision fails closed: a missing declaration cannot establish
+    the vision encoder is unneeded."""
+    spec = _vid_spec(clip_declared=False)
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    with client.app.state.session_factory() as s:
+        a = Asset(project_id=p["id"], kind="image", name="in.png")
+        s.add(a)
+        s.commit()
+        asset_id = a.id
+    payload = {"model_key": spec.key, "prompt": "move",
+               "image_asset_id": asset_id, "frames": 4,
+               "width": 832, "height": 480}
+    with pytest.raises(CommandError, match="member_unresolvable"):
+        _internal_preview(client, p["id"], "generate.video", payload)
+    # Worker side: a binding smuggling a clip member the catalog never
+    # declared is an unexpected member, not a rescue.
+    b = _binding_for(client, spec.key, adapter="gen.video.sdcpp",
+                     roles=("diffusion", "vae", "text_encoder"))
+    b["members"].append({"role": "clip_vision",
+                         "file_name": "ghost.safetensors",
+                         "expected_sha256": "0" * 64,
+                         "integrity": "catalog_declared"})
+    ad = _vid_adapter(client)
+    with pytest.raises(ValueError, match="unexpected_member"):
+        ad._resolve({"model_key": spec.key, "image_path": "x.png",
+                     "runtime_flavor": "vulkan",
+                     "binding_required": model_files.EXECBIND_VERSION,
+                     "execution_binding": b})
+
+
+def test_replay_pinned_vs_legacy_refuses(client, monkeypatch):
+    """C4.E/F — one idempotency key cannot serve both modes: pinned
+    over a prior legacy job, or public over a prior pinned job, is a
+    409 conflict — never a cross-mode replay."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x"}
+    r = _commit_public(client, p["id"], "generate.image", payload,
+                       "k-mode-01")
+    assert r.status_code == 200, r.text
+    b = _internal_preview(client, p["id"], "generate.image",
+                          payload)["execution_binding"]
+    with pytest.raises(CommandError) as ei:
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-mode-01", expected=b)
+    assert ei.value.status_code == 409
+    _internal_commit(client, p["id"], "generate.image", payload,
+                     "k-mode-02", expected=b)
+    r2 = _commit_public(client, p["id"], "generate.image", payload,
+                        "k-mode-02")
+    assert r2.status_code == 409
+
+
+def test_replay_different_approved_binding_refuses(client, monkeypatch):
+    """C4.B/C — same key + identical public payload but a DIFFERENT
+    approved binding (new install_id, or new member hash evidence)
+    conflicts — the payload alone is not the replay contract."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_a = _install_pinned(client, spec)
+    p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x"}
+    b1 = _internal_preview(client, p["id"], "generate.image",
+                           payload)["execution_binding"]
+    _internal_commit(client, p["id"], "generate.image", payload,
+                     "k-diff", expected=b1)
+    with client.app.state.session_factory() as s:
+        s.get(ModelInstall, install_a).status = "removed"
+        s.commit()
+    _install_pinned(client, spec)  # install B replaces A
+    b2 = _internal_preview(client, p["id"], "generate.image",
+                           payload)["execution_binding"]
+    assert b2["install_id"] != b1["install_id"]
+    with pytest.raises(CommandError) as ei:
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-diff", expected=b2)
+    assert ei.value.status_code == 409
+    # Different approved member-hash evidence conflicts the same way:
+    # re-declare the catalog member hash and re-approve a replacement
+    # install (exactly one eligible row remains).
+    with client.app.state.session_factory() as s:
+        s.get(ModelInstall, b2["install_id"]).status = "removed"
+        s.commit()
+    spec2 = _img_spec(content=b"IMGX")
+    _add_spec(monkeypatch, spec2)
+    # verified=False → no recorded-hash evidence on the new install;
+    # the approved member sha is the spec2 catalog declaration.
+    _install_pinned(client, spec2, verified=False)
+    b3 = _internal_preview(client, p["id"], "generate.image",
+                           payload)["execution_binding"]
+    assert b3["members"] != b1["members"]
+    with pytest.raises(CommandError) as ei3:
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-diff", expected=b3)
+    assert ei3.value.status_code == 409
+
+
+def test_member_size_drift_refuses(client, monkeypatch):
+    """C5 — a member whose current size differs from its catalog-
+    declared size refuses BEFORE the hash pass; an equal-size
+    replacement still fails on content hash (size is not proof)."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    with client.app.state.session_factory() as s:
+        root = model_files.models_root(s, client.app.state.settings)
+    target = root / spec.key / "main.safetensors"
+    target.write_bytes(b"IMGW-with-extra-drift")
+    ad = _img_adapter(client)
+    with pytest.raises(ValueError, match="member_size_drift"):
+        ad._resolve(_pinned_request(b))
+    target.write_bytes(b"JUNK")  # same size, different content
+    with pytest.raises(ValueError, match="integrity_mismatch"):
+        ad._resolve(_pinned_request(b))
+
+
+def test_refused_commit_creates_no_job(client, monkeypatch):
+    """C6.F — refused requests (prohibited client fields, missing
+    expected binding) create neither pinned nor unpinned jobs."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    n0 = _job_count(client)
+    r = _commit_public(client, p["id"], "generate.image",
+                       {"model_key": spec.key, "prompt": "x",
+                        "execution_binding": {"x": 1}}, "k-noside")
+    assert r.status_code == 422
+    with pytest.raises(CommandError):
+        _internal_commit(client, p["id"], "generate.image",
+                         {"model_key": spec.key, "prompt": "x"},
+                         "k-noside2")  # expected=None
+    assert _job_count(client) == n0

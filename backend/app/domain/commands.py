@@ -5147,6 +5147,14 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         raise CommandError(
             422, f"internal_execbind does not apply to "
                  f"'{command_type}'")
+    elif execbind_expected is None:
+        # C1 — trusted commit REQUIRES the approved binding produced by
+        # a trusted preview; it never silently constructs a replacement
+        # under a stale or absent expected contract.
+        raise CommandError(
+            422, "internal_execbind commit requires the approved "
+                 "execbind_expected binding from a trusted preview — "
+                 "refusing to silently construct a replacement")
     existing = session.execute(
         select(CreativeCommand).where(CreativeCommand.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
@@ -5164,6 +5172,36 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
             raise CommandError(
                 409, "idempotency_key already committed with a "
                      "different payload — refusing to replay")
+        # C4 — replay equivalence also covers the approved execution
+        # identity: an identical public payload is not the whole
+        # contract. pinned↔unpinned under one key, or a different
+        # approved binding (installation, artifact, member evidence),
+        # is a conflict — never a silent cross-mode or cross-
+        # installation replay.
+        prior_job = session.execute(
+            select(GenerationJob).where(
+                GenerationJob.idempotency_key ==
+                f"job:{idempotency_key}")).scalar_one_or_none()
+        prior_req = (prior_job.request_json
+                     if prior_job is not None else {}) or {}
+        if internal_execbind:
+            if prior_req.get("binding_required") is None:
+                raise CommandError(
+                    409, "idempotency_key previously committed an "
+                         "unpinned generation — refusing to replay "
+                         "as pinned")
+            approved = _execbind_commit(
+                session, command_type, payload,
+                expected=execbind_expected)
+            if approved != prior_req.get("execution_binding"):
+                raise CommandError(
+                    409, "idempotency_key was committed with a "
+                         "different approved execution binding — "
+                         "refusing to replay")
+        elif prior_req.get("binding_required") is not None:
+            raise CommandError(
+                409, "idempotency_key previously committed a pinned "
+                     "generation — refusing to replay as unpinned")
         return {"command": existing, "idempotent_replay": True}
 
     if project.status == "archived" and command_type != "project.restore":

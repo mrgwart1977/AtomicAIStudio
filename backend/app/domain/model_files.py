@@ -121,9 +121,12 @@ def _expected_member_sha(install: ModelInstall, f) -> tuple[str, str]:
 
 def _check_install_artifact(session: Session, spec: ModelSpec,
                             install: ModelInstall, adapter_id: str,
-                            artifact_id: str | None) -> None:
+                            artifact_id: str) -> None:
     """Record-level revalidation shared by build, commit validation and
-    worker dispatch."""
+    worker dispatch. The artifact identity is MANDATORY (C2): pinned
+    execution is catalog-model execution, whose canonical registry
+    identity is 'catalog:{model_key}' — a null or foreign artifact id
+    can never satisfy it."""
     if install.model_key != spec.key:
         raise ExecbindError(
             "model_key_mismatch",
@@ -142,21 +145,25 @@ def _check_install_artifact(session: Session, spec: ModelSpec,
             "adapter_mismatch",
             f"adapter '{adapter_id}' is not declared compatible with "
             f"'{spec.key}'")
-    if artifact_id is not None:
-        art = session.get(ModelArtifact, artifact_id)
-        if art is None:
-            raise ExecbindError(
-                "artifact_missing",
-                f"registry artifact '{artifact_id}' not found")
-        if not art.enabled:
-            raise ExecbindError(
-                "artifact_disabled",
-                f"registry artifact '{artifact_id}' is disabled")
-        if art.install_id != install.id:
-            raise ExecbindError(
-                "artifact_install_mismatch",
-                f"artifact '{artifact_id}' is linked to a different "
-                "installation")
+    if artifact_id != f"catalog:{spec.key}":
+        raise ExecbindError(
+            "artifact_model_mismatch",
+            f"artifact '{artifact_id}' is not the canonical registry "
+            f"identity of model '{spec.key}'")
+    art = session.get(ModelArtifact, artifact_id)
+    if art is None:
+        raise ExecbindError(
+            "artifact_missing",
+            f"registry artifact '{artifact_id}' not found")
+    if not art.enabled:
+        raise ExecbindError(
+            "artifact_disabled",
+            f"registry artifact '{artifact_id}' is disabled")
+    if art.install_id != install.id:
+        raise ExecbindError(
+            "artifact_install_mismatch",
+            f"artifact '{artifact_id}' is linked to a different "
+            "installation")
 
 
 def execbind_roles(spec: ModelSpec, *, adapter_id: str,
@@ -165,8 +172,13 @@ def execbind_roles(spec: ModelSpec, *, adapter_id: str,
     the adapter resolves, no assumed extras."""
     if adapter_id == "gen.video.sdcpp":
         roles = ["diffusion", "vae", "text_encoder"]
-        if has_image_input and any(f.role == "clip_vision"
-                                   for f in spec.files):
+        if has_image_input:
+            # C3 — image-conditioned video requires the vision encoder
+            # under the supported adapter contract. A catalog that
+            # declares no clip_vision cannot establish that no encoder
+            # is needed, so i2v on such a model fails CLOSED at member
+            # resolution (member_unresolvable) — it is never silently
+            # bound without image conditioning.
             roles.append("clip_vision")
         return tuple(roles)
     return ("diffusion",)
@@ -204,7 +216,7 @@ def _member_entries(spec: ModelSpec, install: ModelInstall,
 def build_execbind(session: Session, spec: ModelSpec,
                    install: ModelInstall, *, adapter_id: str,
                    roles: tuple[str, ...],
-                   artifact_id: str | None) -> dict:
+                   artifact_id: str) -> dict:
     """Server-side execbind:v1 binding over the APPROVED install row.
     All record and member evidence checks run here; callers must NOT
     accept a client-supplied binding."""
@@ -250,11 +262,11 @@ def validate_execbind_schema(binding) -> dict:
             raise ExecbindError("binding_malformed",
                                 f"binding field '{k}' must be a "
                                 "non-empty string")
-    if (binding["artifact_id"] is not None
-            and not isinstance(binding["artifact_id"], str)):
+    if (not isinstance(binding["artifact_id"], str)
+            or not binding["artifact_id"]):
         raise ExecbindError("binding_malformed",
                             "binding field 'artifact_id' must be a "
-                            "string or null")
+                            "non-empty string")
     members = binding["members"]
     if not isinstance(members, list) or not members:
         raise ExecbindError("binding_incomplete",
@@ -380,6 +392,7 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
     # Expected-evidence re-derivation: the pinned expected values must
     # still match what current records produce — no trusting of stale
     # or self-declared binding evidence.
+    declared: dict[str, object] = {}
     for m in binding["members"]:
         f = next((x for x in spec.files if x.name == m["file_name"]),
                  None)
@@ -397,6 +410,7 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
                                 f"expected evidence for '{f.name}' "
                                 "changed since the binding was "
                                 "approved")
+        declared[f.name] = f
     # Containment: authorized root comes from settings, never from the
     # persisted row — a corrupted install path cannot define its own
     # trusted boundary.
@@ -429,6 +443,17 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
             raise ExecbindError("member_unavailable",
                                 f"member '{name}' is not a regular "
                                 "readable file")
+        # Detectable drift (C5): a changed size refuses before the
+        # hash pass — a cheap, portable metadata check. The streaming
+        # hash remains the authoritative content proof; mtime/ctime
+        # comparisons are platform-dependent and deliberately not
+        # treated as content evidence.
+        declared_size = getattr(declared[name], "size_bytes", 0) or 0
+        if declared_size and resolved.stat().st_size != declared_size:
+            raise ExecbindError(
+                "member_size_drift",
+                f"member '{name}' is {resolved.stat().st_size} "
+                f"bytes, expected the declared {declared_size}")
         # Hash the containment-verified path — the residual
         # verify→open TOCTOU is disclosed in the milestone report.
         digest = stream_sha256(resolved, cancel_check)
