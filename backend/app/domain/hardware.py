@@ -221,7 +221,14 @@ def _runtimes() -> dict:
 def _cached_probe(_bucket: int) -> dict:
     """Probe results cached per ~5-minute bucket; hardware rarely changes.
     Call probe(force=True) for an on-demand refresh."""
+    # Physical RAM + commit evidence are sampled together at the START of
+    # collection — the report's probed_monotonic postdates them by the
+    # full device-query time, so memory carries its own sampling instant
+    # and staleness may age from the OLDEST sample, never the newest.
+    t_mem = time.monotonic()
     vm = psutil.virtual_memory()
+    from app.domain import resources
+    commit = resources.commit_evidence()
     devinfo = _device_info()
     gpus = _query_gpus(devinfo)
     return {
@@ -235,7 +242,8 @@ def _cached_probe(_bucket: int) -> dict:
             "physical_cores": psutil.cpu_count(logical=False),
             "logical_cores": psutil.cpu_count(logical=True),
         },
-        "memory": {"total_bytes": vm.total, "available_bytes": vm.available},
+        "memory": {"total_bytes": vm.total, "available_bytes": vm.available,
+                   "sampled_monotonic": t_mem, **commit},
         "gpus": gpus,
         "disks": _disks(),
         "backends": _backends(devinfo, gpus),

@@ -64,7 +64,13 @@ def probe_report(gpus=None, backends=None, simulated=False, probed_at=None,
                           "logical_cores": 16},
         "memory": memory or {"total_bytes": 32 * GIB,
                              "available_bytes": 24 * GIB,
-                             "commit_headroom_bytes": 30 * GIB},
+                             "commit_limit_bytes": 44 * GIB,
+                             "commit_charge_bytes": 14 * GIB,
+                             "commit_headroom_bytes": 30 * GIB,
+                             "commit_source": "get_performance_info",
+                             "commit_scope": "system_wide",
+                             "commit_confidence": "measured",
+                             "commit_unavailable_reason": None},
         "gpus": gpus or [], "disks": [],
         "backends": backends or {
             "cpu": {"available": True, "measured": True},
@@ -304,8 +310,32 @@ def test_evaluate_ram_missing_commit_is_unknown_not_ok():
     assert out["fully_evaluated"] is False
 
 
+_COMMIT_PROV = {"commit_source": "get_performance_info",
+                "commit_scope": "system_wide",
+                "commit_confidence": "measured"}
+
+
+def test_evaluate_ram_unqualified_commit_is_unknown_not_ok():
+    # R3: a bare commit number without measured system-wide provenance
+    # (legacy/approximate/process-capped evidence) never establishes the
+    # commit check — it degrades to unqualified unknown, never READY.
+    out = resources.evaluate_ram(
+        4 * GIB, known=True,
+        mem={"total_bytes": 32 * GIB, "available_bytes": 24 * GIB,
+             "commit_headroom_bytes": 30 * GIB},
+        margins=MARGINS)
+    assert out["checks"]["phys_avail"] == "ok"
+    assert out["checks"]["commit_headroom"] == "unknown"
+    assert out["checks"]["commit_evidence"] == "unqualified"
+    assert out["decision"] == "unknown"
+    assert out["fully_evaluated"] is False
+
+
 def test_evaluate_ram_block_warn_ok_levels():
-    base = {"total_bytes": 32 * GIB, "commit_headroom_bytes": 30 * GIB}
+    base = {"total_bytes": 32 * GIB, "commit_limit_bytes": 44 * GIB,
+            "commit_charge_bytes": 14 * GIB,
+            "commit_headroom_bytes": 30 * GIB,
+            **_COMMIT_PROV}
     block = resources.evaluate_ram(
         24 * GIB, known=True,
         mem={**base, "available_bytes": int(24.5 * GIB)},
@@ -326,7 +356,8 @@ def test_evaluate_ram_estimate_unknown():
     out = resources.evaluate_ram(
         None, known=False,
         mem={"total_bytes": 32 * GIB, "available_bytes": 24 * GIB,
-             "commit_headroom_bytes": 30 * GIB}, margins=MARGINS)
+             "commit_headroom_bytes": 30 * GIB, **_COMMIT_PROV},
+        margins=MARGINS)
     assert out["decision"] == "unknown"
     assert out["fully_evaluated"] is False
 
