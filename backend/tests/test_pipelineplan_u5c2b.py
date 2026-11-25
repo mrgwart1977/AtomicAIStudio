@@ -2169,6 +2169,39 @@ def test_c1g_bindability_material_in_fingerprint():
     assert a != b
 
 
+def test_c1h_catalog_key_selection_also_ambiguous(client):
+    """catalog_key selection carries no install_id identity — with
+    two eligible installs the command's unordered .first() is just as
+    unprovable as for an artifact selection → unknown, consistent
+    verdict for the same effective model_key. A single eligible
+    install remains bindable (the command can only pick that one)."""
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.domain import model_artifacts
+    body = {"selections": {"img_model_key": {
+        "kind": "catalog_key", "value": "sd15.fp16"}},
+        "params": {"img_model_key": "a", "img_prompt": "p",
+                   "vid_model_key": "b"}}
+    with Session(client.app.state.engine) as s:
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 1, 1), "a.gguf")
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+    assert _node_bindability(body, client)["bindability"] == "bindable"
+    with Session(client.app.state.engine) as s:
+        _mk_install(s, "sd15.fp16", "installed",
+                    datetime(2025, 6, 1), "b.gguf")
+        s.flush()
+        model_artifacts.link_installs(s)
+        s.commit()
+    n = _node_bindability(body, client)
+    assert n["bindability"] == "unknown"
+    assert n["bindability_reason"] == "install_ambiguous"
+
+
 # ============================================================ C2 — psutil
 # teardown diagnostic
 
