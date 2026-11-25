@@ -1485,6 +1485,66 @@ class PipelineSummaryOut(BaseModel):
     definition_fingerprint: str
 
 
+class PipelinePlanSelection(BaseModel):
+    """U-5c-2b — typed artifact selection. `catalog_key` resolves through
+    the model catalog; `artifact_id` binds one exact registry row.
+    Strict: no coercion, no unknown fields, no bool-as-int."""
+    model_config = {"extra": "forbid", "strict": True}
+    kind: str                                # catalog_key | artifact_id
+    value: str
+
+
+class PipelinePlanNodePrefs(BaseModel):
+    """Per-node placement controls. `device_constraint` is a HARD
+    constraint ('auto'|'cpu'|<index>); `device_preference` is soft and
+    feeds ranking only. `lifetime_assumption` selects the conditional
+    release scenario."""
+    model_config = {"extra": "forbid", "strict": True}
+    device_constraint: str | int | None = None
+    device_preference: str | int | None = None
+    residency_mode: str | None = None
+
+
+class PipelinePlanPreviewIn(BaseModel):
+    """Request body — strictly bounded before any expensive work."""
+    model_config = {"extra": "forbid", "strict": True}
+    params: dict[str, str | int | float | bool] = {}
+    selections: dict[str, PipelinePlanSelection] = {}
+    nodes: dict[str, PipelinePlanNodePrefs] = {}
+    lifetime_assumption: str | None = None   # release_assumed |
+                                           # retained_model | unknown
+    include_stale: bool = True
+
+
+class PipelinePlanPreviewOut(BaseModel):
+    """U-5c-2b — advisory-only multi-node pipeline plan preview.
+    `advisory` is always True; `operational_readiness` is always
+    'not_evaluated'. Nothing here reserves, enqueues or executes."""
+    advisory: bool = True
+    operational_readiness: str = "not_evaluated"
+    pipeline_key: str
+    pipeline_valid: str                      # valid | invalid
+    advisory_state: str                      # invalid | plan_blocked |
+                                           # plan_incomplete | ready_advisory
+    block_reason: str | None
+    axes: dict
+    nodes: list[dict]
+    deferred_bindings: list[dict]
+    candidates: list[dict]
+    counters: dict
+    truncations: list[str]
+    search_exhaustive: bool
+    limits: dict
+    snapshot_freshness: str
+    snapshot_simulated: bool
+    snapshot_id: str | None
+    plan_fingerprint: str                    # "pipeplan:v1:" + hash
+    plan_result_fingerprint: str             # "piperesult:v1:" + hash
+    findings: list[dict]
+    limitations: list[str]
+    reasons: list[str]
+
+
 class PipelineListOut(BaseModel):
     pipelines: list[PipelineSummaryOut]
 

@@ -85,6 +85,8 @@ from app.schemas.api import (
     PackagePreviewOut,
     PipelineDescribeOut,
     PipelineListOut,
+    PipelinePlanPreviewIn,
+    PipelinePlanPreviewOut,
     ProjectCardOut,
     ProjectCreate,
     ProjectOut,
@@ -600,7 +602,8 @@ HW_UNAVAILABLE = "hw_evidence_unavailable"
 def _dep_plan_assembly(db, request, project, artifact_id, workflow,
                        runtime_key, shot_id, character_ids,
                        select_params, include_stale,
-                       hw_evidence=_HW_ACQUIRE):
+                       hw_evidence=_HW_ACQUIRE,
+                       visible_ids=None):
     """Shared U-5b/U-5c-1 assembly: stored evidence → DepPlan.
 
     Returns (plan, ctx) where ctx carries the root row, the candidate
@@ -752,6 +755,11 @@ def _dep_plan_assembly(db, request, project, artifact_id, workflow,
     root = _view(row)
     pool: dict[str, dep_resolve.CompEntry] = {}
     for a in db.execute(select(ModelArtifact)).scalars():
+        # S1 — when the caller supplies an authorized visibility set,
+        # foreign artifacts never reach the resolution pool: they cannot
+        # fill slots, create ambiguity, or influence any identity.
+        if visible_ids is not None and a.artifact_id not in visible_ids:
+            continue
         v = verdict_rows.get((a.artifact_id, runtime_key))
         stale = _stale(a, v) if v is not None else False
         pool[a.artifact_id] = dep_resolve.CompEntry(
@@ -1162,6 +1170,370 @@ def describe_pipeline(pipeline_key: str, request: Request):
         raise HTTPException(404, "unknown_pipeline")
     return pipeline_defs.describe_pipeline(
         defn, _pipeline_evidence(request))
+
+
+def _pipe_plan_visibility(db, project) -> set:
+    """S1 — authorized visibility set. ModelArtifact rows are the global
+    shared-library registry (no project_id/scope column exists on the
+    table — model artifacts are shared by every project), so every row
+    is authorized; any future project-scoped column would be honored by
+    the getattr guard. Project isolation applies to cast/shot context
+    (enforced inside _dep_plan_assembly) and to asset arguments, whose
+    bindings stay typed-deferred here and never resolve to rows."""
+    from app.db.models import ModelArtifact as _MA
+    return {a.artifact_id
+            for a in db.execute(select(_MA)).scalars()
+            if getattr(a, "project_id", None) in (None, project.id)}
+
+
+@api_router.post(
+    "/api/projects/{project_id}/pipelines/{pipeline_key}/plan-preview",
+    response_model=PipelinePlanPreviewOut)
+def pipeline_plan_preview(
+        pipeline_key: str, request: Request,
+        body: PipelinePlanPreviewIn,
+        project: Project = Depends(get_project),   # noqa: B008
+        db: Session = Depends(get_db)):            # noqa: B008
+    """U-5c-2b — multi-node hardware-aware pipeline plan preview.
+
+    READ-ONLY and advisory only: consumes the last published hardware
+    evidence via hardware.probe_cached() and the scheduler's
+    state_for() observational view — never a probe, reservation, job,
+    write or model execution. Aggregate advisory_state never grants
+    execution authority; operational_readiness is always
+    'not_evaluated'."""
+    from app.db.models import ModelArtifact
+    from app.domain import (
+        dep_graph,
+        hw_snapshot,
+        model_catalog,
+        pipeline_defs,
+        pipeline_plan,
+        plan_preview,
+        resources,
+    )
+
+    defn = pipeline_defs.get_pipeline(pipeline_key)
+    if defn is None:
+        raise HTTPException(404, "unknown_pipeline")
+    node_ids = {n.node_id for n in defn.nodes}
+    for k in body.nodes:
+        if k not in node_ids:
+            raise HTTPException(400, f"unknown_node:{k}")
+    lifetime = body.lifetime_assumption or \
+        pipeline_plan.LIFETIME_RELEASE_ASSUMED
+    if lifetime not in pipeline_plan.LIFETIME_POLICIES:
+        raise HTTPException(400, f"lifetime_assumption:{lifetime}")
+    if len(body.params) > 64 or len(body.selections) > 64 \
+            or len(body.nodes) > 32:
+        raise HTTPException(400, "request_too_large")
+
+    values, param_findings = pipeline_plan.resolve_external_params(
+        defn, body.params)
+    if param_findings:
+        raise HTTPException(
+            400, "invalid_params:" + ",".join(
+                sorted({f.code for f in param_findings})))
+    resolved, deferred = pipeline_plan.resolve_bindings(defn, values)
+    visible = _pipe_plan_visibility(db, project)
+
+    # ---- typed selections -> exact artifact + bindability (F6) ----
+    sel_out: dict[str, dict] = {}
+    for ext_key, sel in body.selections.items():
+        if sel.kind == "catalog_key":
+            spec = model_catalog.get(sel.value)
+            if spec is None:
+                raise HTTPException(404, "catalog_key_not_found")
+            aid = f"catalog:{sel.value}"
+            row = db.get(ModelArtifact, aid)
+            sel_out[ext_key] = {
+                "artifact_id": aid if row is not None else None,
+                "model_key_effective": sel.value,
+                "bindability": "bindable" if row is not None
+                               else "unresolved",
+                "bindability_reason": "" if row is not None
+                                      else "artifact_not_installed",
+                "row": row, "spec": spec}
+        elif sel.kind == "artifact_id":
+            row = db.get(ModelArtifact, sel.value)
+            if row is None or row.artifact_id not in visible:
+                raise HTTPException(404, "unknown artifact")
+            if not row.enabled:
+                sel_out[ext_key] = {
+                    "artifact_id": row.artifact_id,
+                    "model_key_effective": None,
+                    "bindability": "non_bindable",
+                    "bindability_reason": "artifact_disabled",
+                    "row": row, "spec": model_catalog.get(
+                        row.artifact_id.split(":", 1)[1])
+                    if row.artifact_id.startswith("catalog:") else None}
+            elif row.artifact_id.startswith("catalog:"):
+                mk = row.artifact_id.split(":", 1)[1]
+                spec = model_catalog.get(mk)
+                sel_out[ext_key] = {
+                    "artifact_id": row.artifact_id,
+                    "model_key_effective": mk,
+                    "bindability": "bindable" if spec is not None
+                                   else "unknown",
+                    "bindability_reason": "" if spec is not None
+                                          else "catalog_entry_missing",
+                    "row": row, "spec": spec}
+            else:
+                # No command contract can address a bare artifact row by
+                # model_key — definitively non-bindable, never a
+                # fabricated execution path.
+                sel_out[ext_key] = {
+                    "artifact_id": row.artifact_id,
+                    "model_key_effective": None,
+                    "bindability": "non_bindable",
+                    "bindability_reason": "no_model_key_binding",
+                    "row": row, "spec": None}
+        else:
+            raise HTTPException(400, f"selection_kind:{sel.kind}")
+
+    # ---- one coherent cache-only hardware context (Gate 6) ----
+    ev = hardware.probe_cached()
+    margins = resources.safety_margins(resources.settings_overrides(db))
+    sched = getattr(request.app.state, "gpu_scheduler", None)
+    hw = ev
+    sched_state = (sched.state_for(hw.get("gpus") or [],
+                                   simulated=bool(hw.get("simulated")))
+                   if (sched is not None and hw is not None) else None)
+    snapshot = (hw_snapshot.build_snapshot(hw, sched_state, margins)
+                if hw is not None else None)
+    freshness = ("unavailable" if snapshot is None
+                 else "stale" if snapshot["stale"] else "fresh")
+    simulated = bool(snapshot and snapshot.get("simulated"))
+    devices = (snapshot or {}).get("devices") or []
+
+    # ---- per-node evidence assembly (stored evidence only) ----
+    pctx = _pipeline_evidence(request)
+    node_ev: list[pipeline_plan.NodeEvidence] = []
+    node_meta: list[dict] = []
+    prefs: dict[str, object] = {}
+    for n in defn.nodes:
+        pref = body.nodes.get(n.node_id)
+        res = (pref.residency_mode if pref and pref.residency_mode
+               else "gpu")
+        # model_key external binding -> typed selection
+        mk_ext = next((b.external_key for b in n.param_bindings
+                       if b.request_key == "model_key"
+                       and b.source == "external"), None)
+        sel = sel_out.get(mk_ext or "")
+        row = sel["row"] if sel else None
+        spec = sel["spec"] if sel else None
+        bindability = sel["bindability"] if sel else "unresolved"
+        bind_reason = (sel["bindability_reason"] if sel
+                       else "no_selection")
+        dep_plan = None
+        runtime_state = "unevaluated"
+        rt_blocked_auth = False
+        lora_apps = 0
+        weights_declared = None
+        adapter_ids: tuple = ()
+        if row is not None:
+            plan, dctx = _dep_plan_assembly(
+                db, request, project, row.artifact_id, n.workflow_key,
+                "sdcpp", None, None, [], body.include_stale,
+                hw_evidence=hw if hw is not None else HW_UNAVAILABLE,
+                visible_ids=visible)
+            dep_plan, runtime_state = plan, plan.runtime_state
+            rt_blocked_auth = bool(
+                dctx["runtime_blocked_authoritative"])
+            cap = dctx["cap"]
+            adapter_ids = tuple(getattr(cap, "adapter_ids", ()) or ())
+            for s in plan.requirements:
+                for f in s.fills:
+                    if f.role in ("lora", "lora_identity",
+                                  "lora_style"):
+                        lora_apps += 1
+            man = dep_graph.canonical_manifest(
+                (row.meta_json or {}).get("files") or [])
+            weights_declared = (
+                sum(m.size_bytes for m in man)
+                if man and all(m.size_bytes for m in man) else None)
+            spec = dctx["spec"] or spec
+        res_ok, res_err = plan_preview.residency_evidence(
+            "sdcpp", spec, res)
+        args = resolved.get(n.node_id, {})
+        w = args.get("width") if isinstance(args.get("width"), int) else 512
+        h = args.get("height") if isinstance(
+            args.get("height"), int) else 512
+        est = plan_preview.stage_estimates(
+            spec, weights_declared, w, h, 1, res, lora_apps)
+        decl_backends = ()
+        if row is not None:
+            decl_backends = tuple(
+                getattr(dctx["cap"], "backends", ()) or ())
+        alternatives = []
+        dev_req = (pref.device_constraint if pref else None)
+        for dev in devices:
+            alternatives.append(plan_preview.evaluate_device(
+                dev, snapshot.get("backends") or {}, decl_backends,
+                est["est_vram_bytes"], est["weights_declared_bytes"]))
+        # Explicit index beyond the automatic window remains addressable.
+        hard: object = None
+        if dev_req is not None:
+            if dev_req in ("auto",):
+                hard = "auto"
+            elif dev_req == "cpu":
+                hard = -1
+            else:
+                try:
+                    hard = int(dev_req)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "device must be "
+                                        "auto|cpu|<index>") from None
+                if isinstance(dev_req, bool) or hard < 0:
+                    raise HTTPException(400, "device must be "
+                                        "auto|cpu|<index>")
+                known_idx = {d["index"] for d in devices} | {
+                    d["index"] for d in
+                    (snapshot.get("lost_devices") or [])}
+                if hard not in {d["index"] for d in devices}:
+                    if freshness == "fresh" and not simulated \
+                            and hard not in known_idx:
+                        raise HTTPException(
+                            422, f"no GPU with index {hard} in this "
+                                 "hardware snapshot")
+                    dev = {"index": hard, "present": (
+                        False if freshness == "fresh"
+                        and not simulated else "unverified")}
+                    alternatives.append(plan_preview.evaluate_device(
+                        dev, snapshot.get("backends") or {},
+                        decl_backends, est["est_vram_bytes"],
+                        est["weights_declared_bytes"]))
+        prefs[n.node_id] = hard
+        lane = None
+        if hard in (None, "auto", -1):
+            est_lane = plan_preview.stage_estimates(
+                spec, weights_declared, w, h, 1, res, lora_apps,
+                cpu_only=True)["est_ram_bytes"] if hard == -1 else None
+            lane = plan_preview.cpu_lane(
+                evidence_class="cpu_unsupported",
+                explicitly_requested=(hard == -1),
+                est_ram=est_lane or est["est_ram_bytes"],
+                ram_known=spec is not None,
+                evaluate=lambda e, k: resources.evaluate_ram(
+                    e, known=k, mem=(snapshot or {}).get("memory"),
+                    margins=margins))
+        node_ev.append(pipeline_plan.NodeEvidence(
+            node_id=n.node_id,
+            artifact_id=sel["artifact_id"] if sel else None,
+            model_key_effective=(sel["model_key_effective"]
+                                 if sel else None),
+            bindability=bindability, bindability_reason=bind_reason,
+            integrity_class=("declared" if row is None else
+                             "verified" if row.source_type != "import"
+                             else "recorded" if row.content_sha256
+                             else "missing"),
+            dep_plan=dep_plan, runtime_state=runtime_state,
+            runtime_blocked_authoritative=rt_blocked_auth,
+            adapter_ids=adapter_ids,
+            est_vram_bytes=est["est_vram_bytes"],
+            est_ram_bytes=est["est_ram_bytes"],
+            ram_known=spec is not None,
+            device_alternatives=tuple(alternatives),
+            cpu_lane=lane, residency_error=None if res_ok else res_err,
+            workflow_key=n.workflow_key, required=True))
+        node_meta.append({
+            "node_id": n.node_id, "dep": dep_plan.resolution_version
+            if dep_plan else None,
+            "runtime": "sdcpp", "residency": res,
+            "bindability": bindability})
+
+    structural, defn_findings = pipeline_defs.validate_pipeline(
+        defn, pctx)
+    budgets = pipeline_plan.Budgets()
+    waves, wave_trunc = pipeline_plan.wave_arrangements(defn, budgets)
+    mem_ev = (snapshot or {}).get("memory")
+    eval_ram = lambda e, k: resources.evaluate_ram(
+        e, known=k, mem=mem_ev, margins=margins)
+    retained, truncs, states = pipeline_plan.search(
+        node_ev, waves, lifetime, eval_ram, prefs, budgets)
+    truncs = list(dict.fromkeys(wave_trunc + truncs))
+    exhaustive = not budgets.omitted_partial \
+        and not budgets.omitted_completed \
+        and not budgets.omitted_waves and not budgets.omitted_groups
+    agg = pipeline_plan.aggregate(
+        structural, defn_findings, node_ev, retained, states, truncs,
+        freshness, simulated,
+        bool((snapshot or {}).get("reservations_captured")),
+        deferred, exhaustive)
+    # ---- fingerprints (S5) ----
+    reservations = ({str(i): b for i, b in
+                     (sched.reservations() or {}).items()}
+                    if sched is not None else None)
+    plan_fp = pipeline_plan.plan_fingerprint(
+        pipeline_defs.definition_fingerprint(defn),
+        pipeline_defs.contract_evidence_fingerprint(defn, pctx),
+        str(project.id), values,
+        {k: {kk: v for kk, v in s.items() if kk in
+             ("artifact_id", "model_key_effective", "bindability")}
+         for k, s in sel_out.items()},
+        node_meta, deferred, lifetime,
+        (snapshot or {}).get("snapshot_id"), reservations,
+        {"avail": (mem_ev or {}).get("available_bytes"),
+         "commit": (mem_ev or {}).get("commit_headroom_bytes"),
+         "commit_class": ("qualified" if resources.
+                          _commit_evidence_qualified(mem_ev or {})
+                          else "unqualified")},
+        dict(pipeline_plan.LIMITS), freshness, margins)
+    counters = {
+        "partial_expansions": budgets.partial_expansions,
+        "completed_assignments": budgets.completed,
+        "group_proposals": budgets.group_proposals,
+        "waves_evaluated": budgets.waves,
+        "explored_candidates": len(states),
+        "retained": len(retained)}
+    result_fp = pipeline_plan.result_fingerprint(
+        plan_fp, agg, retained, truncs, counters, states)
+    findings = list(agg["findings"])
+    omitted = max(0, len(findings) - pipeline_plan.LIMITS[
+        "max_findings"])
+    auth = [f for f in findings if f["code"] in (
+        "authoritative_block", "binding_contract_mismatch",
+        "residency_not_supported")]
+    findings = (auth + [f for f in findings if f not in auth])[
+        :pipeline_plan.LIMITS["max_findings"]]
+    limitations = sorted({l for c in retained for l in c["limitations"]})
+    return {
+        "pipeline_key": pipeline_key,
+        "pipeline_valid": structural,
+        "advisory_state": agg["advisory_state"],
+        "block_reason": agg["block_reason"],
+        "axes": agg["axes"],
+        "nodes": [{
+            "node_id": n.node_id, "artifact_id": e.artifact_id,
+            "model_key_effective": e.model_key_effective,
+            "bindability": e.bindability,
+            "bindability_reason": e.bindability_reason,
+            "integrity_class": e.integrity_class,
+            "dep_plan_ref": (e.dep_plan.resolution_version
+                             if e.dep_plan else None),
+            "runtime_state": e.runtime_state,
+            "est_vram_bytes": e.est_vram_bytes,
+            "est_ram_bytes": e.est_ram_bytes,
+            "device_alternatives": list(e.device_alternatives),
+            "cpu_lane": e.cpu_lane,
+            "residency_error": e.residency_error,
+            "workflow_key": e.workflow_key}
+            for n, e in zip(defn.nodes, node_ev)],
+        "deferred_bindings": deferred,
+        "candidates": retained,
+        "counters": {**counters, "findings_omitted": omitted},
+        "truncations": truncs,
+        "search_exhaustive": exhaustive,
+        "limits": dict(pipeline_plan.LIMITS),
+        "snapshot_freshness": freshness,
+        "snapshot_simulated": simulated,
+        "snapshot_id": (snapshot or {}).get("snapshot_id"),
+        "plan_fingerprint": plan_fp,
+        "plan_result_fingerprint": result_fp,
+        "findings": findings,
+        "limitations": limitations,
+        "reasons": sorted({r for c in retained for r in c["reasons"]}),
+    }
 
 
 @api_router.get("/api/models/import-capabilities",
