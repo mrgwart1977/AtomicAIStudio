@@ -47,6 +47,32 @@ foreach ($k in @('HKLM:\SOFTWARE\Khronos\Vulkan\Drivers', 'HKLM:\SOFTWARE\WOW643
 @{ vram = $v; vulkan_icd_count = $icd; vulkan_dll = (Test-Path "$env:WINDIR\System32\vulkan-1.dll") } | ConvertTo-Json -Depth 3
 """
 
+# U-5d-0b alpha — bounded PCI topology evidence for the SAME display
+# devices already enumerated by _PS_GPU_QUERY. Documented device
+# properties only: DEVPKEY_Device_BusNumber (bus), DEVPKEY_Device_
+# Address (PCI device/function encoding) and DEVPKEY_Device_
+# LocationPaths (PCIROOT segment + devfn cross-check). Instance ids are
+# passed as cmdlet parameters — never interpolated into the script.
+_PS_PCI_QUERY = r"""
+$rows = @()
+foreach ($d in (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)) {
+  $id = [string]$d.PNPDeviceID
+  if (-not $id) { continue }
+  $bus = $null; $addr = $null; $loc = @()
+  try {
+    $props = Get-PnpDeviceProperty -InstanceId $id -ErrorAction Stop
+    foreach ($p in $props) {
+      if ($p.KeyName -eq 'DEVPKEY_Device_BusNumber') { $bus = $p.Data }
+      elseif ($p.KeyName -eq 'DEVPKEY_Device_Address') { $addr = $p.Data }
+      elseif ($p.KeyName -eq 'DEVPKEY_Device_LocationInfo') { $linfo = $p.Data }
+      elseif ($p.KeyName -eq 'DEVPKEY_Device_LocationPaths') { $loc = @($p.Data) }
+    }
+  } catch {}
+  $rows += @{ id = $id; bus_number = $bus; address = $addr; location_info = $linfo; location_paths = $loc }
+}
+@{ pci = $rows } | ConvertTo-Json -Depth 3 -Compress
+"""
+
 
 def _vendor_from_pnp(pnp_id: str) -> str:
     pnp = (pnp_id or "").upper()
@@ -69,8 +95,40 @@ def _ps_json(script: str, timeout: int = 15):
         return None
 
 
+def _pci_properties() -> dict:
+    """U-5d-0b alpha — documented PCI topology properties keyed by the
+    upper-cased PNPDeviceID of each enumerated display device.
+    Windows-gated and bounded to the display class only; {} on timeout,
+    nonzero exit, unsupported OS or malformed output — the absence of
+    evidence is itself reported, never fabricated."""
+    if platform.system() != "Windows":
+        return {}
+    data = _ps_json(_PS_PCI_QUERY)
+    rows = []
+    if isinstance(data, dict):
+        raw = data.get("pci")
+        rows = (raw if isinstance(raw, list)
+                else [raw] if isinstance(raw, dict) else [])
+    out = {}
+    for r in rows:
+        pid = (r.get("id") or "").upper()
+        if not pid:
+            continue
+        loc = r.get("location_paths")
+        loc = (loc if isinstance(loc, list)
+               else [loc] if loc else [])
+        out[pid] = {
+            "bus_number": r.get("bus_number"),
+            "address": r.get("address"),
+            "location_info": r.get("location_info"),
+            "location_paths": [p for p in loc if isinstance(p, str)],
+        }
+    return out
+
+
 def _device_info() -> dict:
-    """Registry VRAM map + Vulkan ICD count. Empty on failure/non-Windows."""
+    """Registry VRAM map + Vulkan ICD count + PCI topology properties.
+    Empty on failure/non-Windows."""
     data = _ps_json(_PS_DEVINFO_QUERY)
     vram = {}
     icd_count = 0
@@ -81,7 +139,8 @@ def _device_info() -> dict:
                 vram[rid] = qw
         icd_count = int(data.get("vulkan_icd_count") or 0)
     dll = bool(data.get("vulkan_dll")) if isinstance(data, dict) else False
-    return {"vram_by_device": vram, "vulkan_icd_count": icd_count, "vulkan_dll": dll}
+    return {"vram_by_device": vram, "vulkan_icd_count": icd_count,
+            "vulkan_dll": dll, "pci_by_pnp": _pci_properties()}
 
 
 def _nvidia_smi() -> list[dict]:
@@ -91,9 +150,10 @@ def _nvidia_smi() -> list[dict]:
     if not smi:
         return []
     try:
+        q = ("index,name,memory.total,memory.free,driver_version,"
+             "pci.bus_id,uuid")
         out = subprocess.run(
-            [smi, "--query-gpu=index,name,memory.total,memory.free,driver_version",
-             "--format=csv,noheader,nounits"],
+            [smi, f"--query-gpu={q}", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=15,
         )
         if out.returncode != 0:
@@ -102,28 +162,52 @@ def _nvidia_smi() -> list[dict]:
         for line in out.stdout.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 5:
-                rows.append({
-                    "smi_index": int(parts[0]), "name": parts[1],
-                    "vram_bytes": int(parts[2]) * 1024 * 1024,
-                    "vram_free_bytes": int(parts[3]) * 1024 * 1024,
-                    "driver_version": parts[4],
-                })
+                try:
+                    rows.append({
+                        "smi_index": int(parts[0]), "name": parts[1],
+                        "vram_bytes": int(parts[2]) * 1024 * 1024,
+                        "vram_free_bytes": int(parts[3]) * 1024 * 1024,
+                        "driver_version": parts[4],
+                        # U-5d-0b alpha — physical identity join keys.
+                        # Absent on older drivers — None stays None.
+                        "pci_bus_id": parts[5] if len(parts) > 5 else None,
+                        "uuid": parts[6] if len(parts) > 6 else None,
+                    })
+                except ValueError:
+                    continue  # malformed row skipped; never fabricated
         return rows
     except (subprocess.SubprocessError, ValueError):
         return []
 
 
 def _query_gpus(devinfo: dict) -> list[dict]:
+    """Public GPU rows — fixed key set (the /api/hardware contract).
+
+    U-5d-0b alpha: every SMI-derived per-device value (total VRAM
+    upgrade and free VRAM) now requires a qualified one-to-one
+    BDF+UUID correlation via hw_identity. Name-substring matching and
+    the single-GPU single-row fallback are removed — unmatched or
+    ambiguous evidence yields None, never a guess.
+    The correlation evidence itself is handed back through
+    ``devinfo["_identity"]`` — an internal out-channel bound to THIS
+    collection; it is never placed on the public rows."""
+    from app.domain import hw_identity
     data = _ps_json(_PS_GPU_QUERY)
     rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
     vram_map = devinfo["vram_by_device"]
     smi_rows = _nvidia_smi()
-    nvidia_gpu_count = sum(1 for r in rows if "VEN_10DE" in (r.get("PNPDeviceID") or "").upper())
+    meta = [{"index": i, "pnp": (r.get("PNPDeviceID") or "").upper(),
+             "vendor": _vendor_from_pnp(r.get("PNPDeviceID") or "")}
+            for i, r in enumerate(rows)]
+    ident = hw_identity.correlate(
+        meta, smi_rows, devinfo.get("pci_by_pnp") or {})
+    devinfo["_identity"] = ident
 
     gpus = []
     for i, row in enumerate(rows):
-        pnp = (row.get("PNPDeviceID") or "").upper()
-        vendor = _vendor_from_pnp(pnp)
+        pnp = meta[i]["pnp"]
+        vendor = meta[i]["vendor"]
+        rec = ident["records"][i]
         wmi_vram = row.get("AdapterRAM")
         # Prefer the registry QWORD (accurate past the WMI uint32 cap),
         # then nvidia-smi, then WMI with the cap flagged.
@@ -132,15 +216,12 @@ def _query_gpus(devinfo: dict) -> list[dict]:
         reg_hit = next((qw for rid, qw in vram_map.items() if pnp.startswith(rid)), None)
         if reg_hit:
             vram, vram_source = reg_hit, "registry"
-        smi_hit = None
-        if vendor == "NVIDIA":
-            match = [r for r in smi_rows
-                     if r["name"].lower() in (row.get("Name") or "").lower()]
-            if not match and nvidia_gpu_count == 1:
-                match = smi_rows[:1]
-            smi_hit = match[0] if match else None
-            if smi_hit and (not vram or vram < smi_hit["vram_bytes"]):
-                vram, vram_source = smi_hit["vram_bytes"], "nvidia-smi"
+        free = None
+        if rec["correlation"] == hw_identity.CORR_QUALIFIED:
+            if (rec["smi_vram_bytes"] is not None
+                    and (not vram or vram < rec["smi_vram_bytes"])):
+                vram, vram_source = rec["smi_vram_bytes"], "nvidia-smi"
+            free = rec["smi_vram_free_bytes"]  # measured zero preserved
         gpus.append(
             {
                 "index": i,  # enumeration index — the scheduler's device selector
@@ -148,7 +229,7 @@ def _query_gpus(devinfo: dict) -> list[dict]:
                 "vendor": vendor,
                 "vram_bytes": vram,
                 "vram_source": vram_source,
-                "vram_free_bytes": smi_hit["vram_free_bytes"] if smi_hit else None,
+                "vram_free_bytes": free,
                 "vram_capped_at_4gb": vram_source == "wmi_capped",
                 "driver_version": row.get("DriverVersion"),
                 "role": "display",
@@ -232,6 +313,10 @@ def _cached_probe(_bucket: int) -> dict:
     devinfo = _device_info()
     gpus = _query_gpus(devinfo)
     return {
+        # Internal identity evidence paired with THIS collection —
+        # stripped by probe() before publication so raw identifiers
+        # never reach the serialized report.
+        "_identity": devinfo.get("_identity"),
         "probed_at": time.time(),
         # Monotonic companion — collected at the actual discovery moment;
         # freshness classification must not depend on wall-clock jumps.
@@ -285,15 +370,23 @@ def _simulated_report() -> dict | None:
 
 _PUBLISH_LOCK = threading.Lock()
 _PUBLISHED: dict | None = None
+_PUBLISH_GENERATION = 0
 
 
-def _publish(report: dict) -> None:
+def _publish(report: dict, identity: dict | None = None) -> None:
     """Atomically publish a complete probe report. A private deep copy is
     stored; the ordering key is the report's own collection monotonic so
-    an older discovery finishing late can never overwrite newer evidence."""
-    global _PUBLISHED
+    an older discovery finishing late can never overwrite newer evidence.
+    ``identity`` (U-5d-0b alpha) is the internal identity-evidence payload
+    produced by the SAME collection — stored under the same lock so the
+    report/identity pair can never diverge across publications, and the
+    equal-key republish rule applies to the COMPLETE pair (a same-key
+    record carrying identical public evidence but different identity
+    evidence is a conflict, never a silent overwrite)."""
+    global _PUBLISHED, _PUBLISH_GENERATION
     record = {
         "report": copy.deepcopy(report),
+        "identity": copy.deepcopy(identity),
         "probed_at": report.get("probed_at"),
         "probed_monotonic": report.get("probed_monotonic"),
         "simulated": bool(report.get("simulated")),
@@ -310,8 +403,11 @@ def _publish(report: dict) -> None:
         # a conflict and must not silently replace what was published.
         if key > current_key or (
                 key == current_key
-                and _PUBLISHED["report"] == report):
+                and _PUBLISHED["report"] == report
+                and _PUBLISHED["identity"] == record["identity"]):
+            _PUBLISH_GENERATION += 1
             record["_order"] = key
+            record["generation"] = _PUBLISH_GENERATION
             _PUBLISHED = record
 
 
@@ -335,6 +431,48 @@ def probe_cached() -> dict | None:
     }
 
 
+def identity_cached() -> dict | None:
+    """U-5d-0b alpha — internal, strictly cache-only access to the
+    identity-evidence payload published with the last probe report.
+    Same guarantees as probe_cached: never touches discovery, the OS,
+    simulation sources or a subprocess; never refreshes; returns a
+    defensive deep copy (or None when unpaired/absent).
+    Internal-only surface — no route may serve it.
+    NOTE: a separate identity_cached() + probe_cached() pair of calls
+    is NOT a coherent pair — two publications can interleave between
+    them. Consumers needing a coherent report+identity pair must use
+    evidence_cached() (one lock-held snapshot with a generation tag)."""
+    with _PUBLISH_LOCK:
+        rec = _PUBLISHED
+    if rec is None:
+        return None
+    return copy.deepcopy(rec["identity"])
+
+
+def evidence_cached() -> dict | None:
+    """U-5d-0b alpha — coherent paired read of the last published
+    report+identity evidence: one lock-held snapshot, so the pair can
+    never be assembled from different collections. ``generation`` is a
+    monotonically increasing publication counter — a consumer holding
+    evidence from generation N can detect any subsequent publication
+    (even same-monotonic replays) by comparing generations.
+    Cache-only: never touches discovery, the OS, simulation sources or
+    a subprocess. Internal-only surface — no route may serve it."""
+    with _PUBLISH_LOCK:
+        rec = _PUBLISHED
+        if rec is None:
+            return None
+        return {
+            "report": copy.deepcopy(rec["report"]),
+            "identity": copy.deepcopy(rec["identity"]),
+            "probed_at": rec["probed_at"],
+            "probed_monotonic": rec["probed_monotonic"],
+            "simulated": rec["simulated"],
+            "order": rec["_order"],
+            "generation": rec["generation"],
+        }
+
+
 def _reset_published() -> None:
     """Test-only hook: drop the published record (cold-cache state)."""
     global _PUBLISHED
@@ -345,12 +483,29 @@ def _reset_published() -> None:
 def probe(force: bool = False) -> dict:
     if force:
         _cached_probe.cache_clear()
-    report = _cached_probe(int(time.time() // 300))
+    raw = _cached_probe(int(time.time() // 300))
+    # Strip the internal identity sideband — the serialized report
+    # keeps its exact public shape; raw identifiers never escape.
+    ident = raw.get("_identity") if isinstance(raw, dict) else None
+    report = {k: v for k, v in raw.items() if k != "_identity"}
     if report.get("hardware_profile") is None:
         from app.domain import compatibility
         report = {**report, "hardware_profile": compatibility.classify_profile(report)["key"]}
     sim = _simulated_report()
+    from app.domain import hw_identity
     if sim:
         report = {**report, **sim, "simulated": True}
-    _publish(report)
+        identity = hw_identity.simulated_payload(report.get("gpus") or [])
+    elif ident is not None:
+        identity = hw_identity.finalize(ident, provenance="real")
+    else:
+        identity = hw_identity.unavailable_payload()
+    # Bind the evidence to THIS collection — identity evidence is only
+    # ever published against the report whose collection produced it.
+    identity["collection"] = {
+        "probed_at": report.get("probed_at"),
+        "probed_monotonic": report.get("probed_monotonic"),
+        "simulated": bool(report.get("simulated")),
+    }
+    _publish(report, identity=identity)
     return report
