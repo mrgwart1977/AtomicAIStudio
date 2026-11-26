@@ -14,16 +14,24 @@ Authority model (A1/A3):
 - OS device-instance evidence — PNPDeviceID (identity of the OS device
   instance, not a decodable PCI address).
 - PCI topology evidence — assembled ONLY from documented Windows
-  device properties and the documented location-path grammar:
-    segment   : PCIROOT(n) in DEVPKEY_Device_LocationPaths (the PCI
-                segment group number in the documented path grammar).
-    bus       : DEVPKEY_Device_BusNumber (the device's bus number).
-    dev+func  : DEVPKEY_Device_Address (Microsoft-documented PCI
-                address encoding: (DeviceNumber << 16) | FunctionNumber),
-                cross-checked against the last PCI(ddff) hop of the
-                location path (documented device-function encoding).
-  LocationPaths is supporting evidence only — it carries no bus number,
-  so it can never produce a complete BDF alone. A missing component is
+  device properties. Microsoft Learn "Obtaining PCI Segment Values"
+  (windows-hardware/drivers/pci/obtaining-pci-segment-values) names
+  DEVPKEY_Device_LocationInfo as the supported source for the PCI
+  Segment value, with two documented string forms:
+    multi-segment : "PCI segment <S> bus <B>, device <D>, function <F>"
+    single-segment: "PCI bus <B>, device <D>, function <F>"  (S := 0)
+  All four address components are taken from that documented string.
+    segment   : DEVPKEY_Device_LocationInfo (documented segment source)
+    bus       : DEVPKEY_Device_LocationInfo, cross-checked against
+                DEVPKEY_Device_BusNumber (the device's bus number).
+    dev+func  : DEVPKEY_Device_LocationInfo, cross-checked against
+                DEVPKEY_Device_Address (Microsoft-documented PCI
+                address encoding: (DeviceNumber << 16) | FunctionNumber)
+                and the last PCI(ddff) hop of the location path.
+  PCIROOT(n) in DEVPKEY_Device_LocationPaths is an ACPI root ordering,
+  NOT a documented PCI segment value — LocationPaths is supporting
+  topology evidence only (devfn cross-check + root-hop context); it can
+  never establish a segment or a bus number. A missing component is
   reported missing — never fabricated.
 - Vendor-specific identity — nvidia-smi pci.bus_id (PCI domain:bus:
   device.function) and uuid fields.
@@ -64,9 +72,20 @@ _SMI_BUS_ID_RE = re.compile(
     r"^([0-9A-Fa-f]{8}):([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2})"
     r"\.([0-9A-Fa-f])$")
 
+# DEVPKEY_Device_LocationInfo documented forms (Microsoft Learn
+# "Obtaining PCI Segment Values"): multi-segment systems emit
+# "PCI segment <S> bus <B>, device <D>, function <F>"; single-segment
+# systems emit "PCI bus <B>, device <D>, function <F>" (segment := 0).
+_LOCINFO_SEG_RE = re.compile(
+    r"^PCI segment (\d+) bus (\d+), device (\d+), function (\d+)\s*$",
+    re.IGNORECASE)
+_LOCINFO_RE = re.compile(
+    r"^PCI bus (\d+), device (\d+), function (\d+)\s*$", re.IGNORECASE)
+
 # Documented location-path grammar: PCIROOT(n)#PCI(ddff)#PCI(ddff)...
-# PCIROOT(n) is the PCI segment group; each PCI(ddff) hop encodes
-# device (high byte) and function (low byte) of that bridge/device.
+# PCIROOT(n) is an ACPI root-bus ordering, NOT a PCI segment value;
+# each PCI(ddff) hop encodes device (high byte) and function (low
+# byte) of that bridge/device — supporting evidence only.
 _PCIROOT_RE = re.compile(r"PCIROOT\((\d+)\)", re.IGNORECASE)
 _PCI_HOP_RE = re.compile(r"PCI\(([0-9A-Fa-f]{4})\)")
 
@@ -105,19 +124,45 @@ def parse_smi_bus_id(raw) -> dict | None:
     return {"segment": seg, "bus": bus, "device": dev, "function": fn}
 
 
+def parse_location_info(raw) -> dict:
+    """Parse DEVPKEY_Device_LocationInfo per the documented contract:
+    "PCI segment <S> bus <B>, device <D>, function <F>" on multi-segment
+    systems, "PCI bus <B>, device <D>, function <F>" on single-segment
+    systems (segment := 0). Unparseable or localized strings yield all
+    None — the segment is then unproven, never assumed."""
+    out = {"segment": None, "bus": None, "devfn": None, "form": None}
+    if not isinstance(raw, str):
+        return out
+    s = raw.strip()
+    m = _LOCINFO_SEG_RE.match(s)
+    if m:
+        seg, bus, dev, fn = (int(g) for g in m.groups())
+        form = "multi"
+    else:
+        m = _LOCINFO_RE.match(s)
+        if not m:
+            return out
+        seg, bus, dev, fn = 0, *(int(g) for g in m.groups())
+        form = "single"
+    if (bus > _PCI_MAX_BUS or dev > _PCI_MAX_DEVICE
+            or fn > _PCI_MAX_FUNCTION or seg > _PCI_MAX_SEGMENT):
+        return out
+    return {"segment": seg, "bus": bus, "devfn": (dev, fn), "form": form}
+
+
 def parse_location_paths(paths) -> dict:
-    """Extract segment (PCIROOT) and the device's own device/function
-    (last PCI(ddff) hop) from DEVPKEY_Device_LocationPaths. Missing or
-    malformed elements stay None — supporting evidence, never a BDF."""
-    out = {"segment": None, "devfn": None}
+    """Extract the ACPI root index (PCIROOT — NOT a PCI segment) and
+    the device's own device/function (last PCI(ddff) hop) from
+    DEVPKEY_Device_LocationPaths — supporting evidence only."""
+    out = {"pciroot": None, "devfn": None}
     first = (paths or [None])[0]
     if not isinstance(first, str) or not first:
         return out
     m = _PCIROOT_RE.search(first)
     if m:
-        seg = int(m.group(1))
-        if seg <= _PCI_MAX_SEGMENT:
-            out["segment"] = seg
+        root = int(m.group(1))
+        if root <= _PCI_MAX_SEGMENT:
+            out["pciroot"] = root
     hops = _PCI_HOP_RE.findall(first)
     if hops:
         ddff = int(hops[-1], 16)
@@ -138,42 +183,65 @@ def _as_int(value) -> int | None:
 
 
 def pci_address_from_props(props: dict | None) -> dict:
-    """Assemble the OS-side PCI address for one display device from the
-    collected device properties. Returns {complete, conflict, segment,
-    bus, device, function, sources}. Every component keeps the property
-    it came from; an absent component stays None — never assumed."""
+    """Assemble the OS-side PCI address for one display device.
+    Authoritative components come from DEVPKEY_Device_LocationInfo
+    (documented segment/bus/device/function source); independently
+    sourced DEVPKEY_Device_BusNumber, DEVPKEY_Device_Address and the
+    LocationPaths devfn cross-check it — any contradiction is evidence
+    conflict, never a favorable resolution. Returns {complete,
+    conflict, segment, bus, device, function, sources}."""
     props = props or {}
-    bus = _as_int(props.get("bus_number"))
+    li = parse_location_info(props.get("location_info"))
+    bus_dp = _as_int(props.get("bus_number"))
     addr = _as_int(props.get("address"))
-    loc = parse_location_paths(props.get("location_paths") or [])
+    lp = parse_location_paths(props.get("location_paths") or [])
 
-    dev = fn = None
+    devfn_dp = None
     if addr is not None:
         d, f = (addr >> 16) & 0xFFFF, addr & 0xFFFF
         if d <= _PCI_MAX_DEVICE and f <= _PCI_MAX_FUNCTION:
-            dev, fn = d, f
-    devfn_source = "devpkey_address" if dev is not None else None
+            devfn_dp = (d, f)
 
     conflict = False
-    if dev is None and loc["devfn"] is not None:
-        dev, fn = loc["devfn"]
-        devfn_source = "location_paths"
-    elif (loc["devfn"] is not None and dev is not None
-            and loc["devfn"] != (dev, fn)):
-        conflict = True  # contradictory topology evidence
+    if (bus_dp is not None and li["bus"] is not None
+            and bus_dp != li["bus"]):
+        conflict = True  # independent bus sources disagree
+    for alt in (devfn_dp, lp["devfn"]):
+        if alt is not None and li["devfn"] is not None and alt != li["devfn"]:
+            conflict = True  # independent devfn sources disagree
+    devfn = li["devfn"]
+    if devfn is None and (devfn_dp or lp["devfn"]):
+        # LocationInfo gave no devfn — an independent source may supply
+        # it only if the others agree; otherwise contradictory evidence.
+        cand = {v for v in (devfn_dp, lp["devfn"]) if v is not None}
+        if len(cand) == 1:
+            devfn = cand.pop()
+        elif cand:
+            conflict = True
 
-    valid_bus = bus is not None and 0 <= bus <= _PCI_MAX_BUS
+    bus = li["bus"]
+    if bus is None and bus_dp is not None and 0 <= bus_dp <= _PCI_MAX_BUS:
+        bus = bus_dp
+    dev, fn = devfn if devfn else (None, None)
+    complete = (bus is not None and dev is not None
+                and li["segment"] is not None)
     return {
-        "complete": bool(valid_bus and dev is not None),
+        "complete": complete and not conflict,
         "conflict": conflict,
-        "segment": loc["segment"],
-        "bus": bus if valid_bus else None,
+        "segment": li["segment"],
+        "bus": bus,
         "device": dev,
         "function": fn,
+        "form": li["form"],
+        "pciroot": lp["pciroot"],
         "sources": {
-            "segment": "location_paths" if loc["segment"] is not None else None,
-            "bus": "devpkey_bus_number" if valid_bus else None,
-            "devfn": devfn_source,
+            "segment": "location_info" if li["segment"] is not None else None,
+            "bus": ("location_info" if li["bus"] is not None
+                    else "devpkey_bus_number" if bus is not None else None),
+            "devfn": ("location_info" if li["devfn"] is not None
+                      else "devpkey_address" if devfn_dp is not None
+                      else "location_paths" if lp["devfn"] is not None
+                      else None),
         },
     }
 
@@ -245,11 +313,11 @@ def correlate(meta: list[dict], smi_rows: list[dict],
             records.append(rec)
             continue
         a = dev_addr[m["index"]]
-        rec["pci"] = a if a["complete"] else None
+        rec["pci"] = a if a["complete"] and not a["conflict"] else None
         if a["conflict"]:
             rec.update(correlation=CORR_AMBIGUOUS,
                        reason="contradictory_topology_evidence")
-        elif not a["complete"]:
+        elif a["bus"] is None or a["device"] is None:
             rec.update(correlation=CORR_UNAVAILABLE,
                        reason="missing_pci_evidence")
         elif a["segment"] is None:
@@ -276,11 +344,21 @@ def correlate(meta: list[dict], smi_rows: list[dict],
                            reason="duplicate_uuid_evidence")
             else:
                 p = cand[0]
+                # Contradictory memory evidence (free > total) is
+                # suppressed — the identity join stays qualified, but
+                # impossible measurements are never attributed.
+                mem_conflict = (
+                    p.get("vram_bytes") is not None
+                    and p.get("vram_free_bytes") is not None
+                    and p["vram_free_bytes"] > p["vram_bytes"])
                 rec.update(
-                    correlation=CORR_QUALIFIED, reason="bdf_uuid_join",
+                    correlation=CORR_QUALIFIED,
+                    reason=("bdf_uuid_join|memory_conflict"
+                            if mem_conflict else "bdf_uuid_join"),
                     gpu_uuid=p["_uuid"], smi_index=p.get("smi_index"),
                     smi_vram_bytes=p.get("vram_bytes"),
-                    smi_vram_free_bytes=p.get("vram_free_bytes"),
+                    smi_vram_free_bytes=(None if mem_conflict
+                                         else p.get("vram_free_bytes")),
                     token=identity_token(p["_uuid"]))
         records.append(rec)
 
@@ -301,9 +379,16 @@ def correlate(meta: list[dict], smi_rows: list[dict],
 
 
 def canonical_inventory(records: list[dict], provenance: str) -> dict:
-    """Separately versioned canonical identity inventory. Contains only
-    material identity/topology/association evidence — never index, name,
-    VRAM, driver, timestamps or free-memory readings."""
+    """Separately versioned canonical identity inventory.
+
+    Canonical field inventory (v1): pnp_device_id (OS device-instance
+    evidence), vendor, pci [segment,bus,device,function] (PCI topology
+    evidence), uuid (vendor identity evidence), correlation (join
+    qualification), os_index and smi_index (CURRENT OS/scheduler and
+    vendor namespace associations). Namespace associations are mutable
+    but material — their drift is digest-detectable. Never included:
+    name, VRAM (total or free), driver version, timestamps — volatile
+    resource and descriptive evidence is not material identity."""
     devices = []
     for r in records or []:
         pci = r.get("pci")
@@ -315,10 +400,14 @@ def canonical_inventory(records: list[dict], provenance: str) -> dict:
                     if pci else None),
             "uuid": r.get("gpu_uuid"),
             "correlation": r.get("correlation"),
+            "os_index": r.get("index"),
+            "smi_index": r.get("smi_index"),
         })
     devices.sort(key=lambda d: (
         d["pnp_device_id"] or "", d["uuid"] or "",
-        d["vendor"] or "", _canon(d["pci"])))
+        d["vendor"] or "", _canon(d["pci"]),
+        -1 if d["os_index"] is None else d["os_index"],
+        -1 if d["smi_index"] is None else d["smi_index"]))
     return {"v": HW_IDENTITY_VERSION, "provenance": provenance,
             "devices": devices}
 

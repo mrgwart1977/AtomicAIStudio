@@ -64,10 +64,11 @@ foreach ($d in (Get-CimInstance Win32_VideoController -ErrorAction SilentlyConti
     foreach ($p in $props) {
       if ($p.KeyName -eq 'DEVPKEY_Device_BusNumber') { $bus = $p.Data }
       elseif ($p.KeyName -eq 'DEVPKEY_Device_Address') { $addr = $p.Data }
+      elseif ($p.KeyName -eq 'DEVPKEY_Device_LocationInfo') { $linfo = $p.Data }
       elseif ($p.KeyName -eq 'DEVPKEY_Device_LocationPaths') { $loc = @($p.Data) }
     }
   } catch {}
-  $rows += @{ id = $id; bus_number = $bus; address = $addr; location_paths = $loc }
+  $rows += @{ id = $id; bus_number = $bus; address = $addr; location_info = $linfo; location_paths = $loc }
 }
 @{ pci = $rows } | ConvertTo-Json -Depth 3 -Compress
 """
@@ -119,6 +120,7 @@ def _pci_properties() -> dict:
         out[pid] = {
             "bus_number": r.get("bus_number"),
             "address": r.get("address"),
+            "location_info": r.get("location_info"),
             "location_paths": [p for p in loc if isinstance(p, str)],
         }
     return out
@@ -368,6 +370,7 @@ def _simulated_report() -> dict | None:
 
 _PUBLISH_LOCK = threading.Lock()
 _PUBLISHED: dict | None = None
+_PUBLISH_GENERATION = 0
 
 
 def _publish(report: dict, identity: dict | None = None) -> None:
@@ -376,8 +379,11 @@ def _publish(report: dict, identity: dict | None = None) -> None:
     an older discovery finishing late can never overwrite newer evidence.
     ``identity`` (U-5d-0b alpha) is the internal identity-evidence payload
     produced by the SAME collection — stored under the same lock so the
-    report/identity pair can never diverge across publications."""
-    global _PUBLISHED
+    report/identity pair can never diverge across publications, and the
+    equal-key republish rule applies to the COMPLETE pair (a same-key
+    record carrying identical public evidence but different identity
+    evidence is a conflict, never a silent overwrite)."""
+    global _PUBLISHED, _PUBLISH_GENERATION
     record = {
         "report": copy.deepcopy(report),
         "identity": copy.deepcopy(identity),
@@ -397,8 +403,11 @@ def _publish(report: dict, identity: dict | None = None) -> None:
         # a conflict and must not silently replace what was published.
         if key > current_key or (
                 key == current_key
-                and _PUBLISHED["report"] == report):
+                and _PUBLISHED["report"] == report
+                and _PUBLISHED["identity"] == record["identity"]):
+            _PUBLISH_GENERATION += 1
             record["_order"] = key
+            record["generation"] = _PUBLISH_GENERATION
             _PUBLISHED = record
 
 
@@ -428,12 +437,40 @@ def identity_cached() -> dict | None:
     Same guarantees as probe_cached: never touches discovery, the OS,
     simulation sources or a subprocess; never refreshes; returns a
     defensive deep copy (or None when unpaired/absent).
-    Internal-only surface — no route may serve it."""
+    Internal-only surface — no route may serve it.
+    NOTE: a separate identity_cached() + probe_cached() pair of calls
+    is NOT a coherent pair — two publications can interleave between
+    them. Consumers needing a coherent report+identity pair must use
+    evidence_cached() (one lock-held snapshot with a generation tag)."""
     with _PUBLISH_LOCK:
         rec = _PUBLISHED
     if rec is None:
         return None
     return copy.deepcopy(rec["identity"])
+
+
+def evidence_cached() -> dict | None:
+    """U-5d-0b alpha — coherent paired read of the last published
+    report+identity evidence: one lock-held snapshot, so the pair can
+    never be assembled from different collections. ``generation`` is a
+    monotonically increasing publication counter — a consumer holding
+    evidence from generation N can detect any subsequent publication
+    (even same-monotonic replays) by comparing generations.
+    Cache-only: never touches discovery, the OS, simulation sources or
+    a subprocess. Internal-only surface — no route may serve it."""
+    with _PUBLISH_LOCK:
+        rec = _PUBLISHED
+        if rec is None:
+            return None
+        return {
+            "report": copy.deepcopy(rec["report"]),
+            "identity": copy.deepcopy(rec["identity"]),
+            "probed_at": rec["probed_at"],
+            "probed_monotonic": rec["probed_monotonic"],
+            "simulated": rec["simulated"],
+            "order": rec["_order"],
+            "generation": rec["generation"],
+        }
 
 
 def _reset_published() -> None:

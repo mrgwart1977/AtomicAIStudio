@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import copy
 import subprocess
-import time
 
 import pytest
 
-from app.domain import hardware, hw_identity as hi, hw_snapshot as hs
+from app.domain import hardware
+from app.domain import hw_identity as hi
+from app.domain import hw_snapshot as hs
 
 GIB = 1024 ** 3
 
@@ -44,9 +45,27 @@ def smi_row(index=0, name="NVIDIA GeForce RTX 3060", total=12 * GIB,
             "pci_bus_id": bus_id, "uuid": uuid}
 
 
-def pci_props(bus=1, address=0,
-              locpath="PCIROOT(0)#PCI(1B00)#PCI(0000)", pnp=PNP_A):
+_AUTO = "auto"
+
+
+def pci_props(bus=1, device=0, function=0, segment=None, address=None,
+              locpath="PCIROOT(0)#PCI(1B00)#PCI(0000)", pnp=PNP_A,
+              location_info=_AUTO):
+    """Synthetic device-property evidence. ``location_info`` is the
+    authoritative DEVPKEY_Device_LocationInfo value — 'auto' builds the
+    documented string from the other components; None means the
+    property was absent (segment then unproven)."""
+    if address is None:
+        address = (device << 16) | function
+    if location_info == _AUTO:
+        if segment is None:
+            location_info = (f"PCI bus {bus}, device {device}, "
+                             f"function {function}")
+        else:
+            location_info = (f"PCI segment {segment} bus {bus}, "
+                             f"device {device}, function {function}")
     return {pnp: {"bus_number": bus, "address": address,
+                  "location_info": location_info,
                   "location_paths": [locpath] if locpath else []}}
 
 
@@ -93,46 +112,94 @@ def test_smi_bus_id_rejects_malformed(bad):
     assert hi.parse_smi_bus_id(bad) is None
 
 
-def test_location_paths_segment_and_devfn():
+def test_location_info_parses_documented_forms():
+    m = hi.parse_location_info("PCI segment 3 bus 9, device 2, "
+                             "function 1")
+    assert m == {"segment": 3, "bus": 9, "devfn": (2, 1), "form": "multi"}
+    s = hi.parse_location_info("PCI bus 1, device 0, function 0")
+    assert s == {"segment": 0, "bus": 1, "devfn": (0, 0),
+                 "form": "single"}
+
+
+def test_location_info_rejects_undocumented_forms():
+    for bad in (None, 42, "", "PCIe Controller",
+                "PCI bus 1 device 0 function 0",
+                "PCI segment x bus 1, device 0, function 0",
+                "PCI bus 256, device 0, function 0",   # bus out of range
+                "PCI bus 1, device 32, function 0",    # dev out of range
+                "PCI segment 99999 bus 1, device 0, function 0"):
+        assert hi.parse_location_info(bad) == {
+            "segment": None, "bus": None, "devfn": None, "form": None}
+
+
+def test_location_paths_pciroot_is_not_segment():
+    # C1 — PCIROOT(n) is an ACPI root ordering, never segment evidence.
     out = hi.parse_location_paths(["PCIROOT(3)#PCI(1B00)#PCI(0200)"])
-    assert out == {"segment": 3, "devfn": (2, 0)}
-    assert hi.parse_location_paths([]) == {"segment": None, "devfn": None}
+    assert out == {"pciroot": 3, "devfn": (2, 0)}
+    assert hi.parse_location_paths([]) == {"pciroot": None, "devfn": None}
     assert hi.parse_location_paths(["junk"]) == {
-        "segment": None, "devfn": None}
-    # last hop is the device itself
+        "pciroot": None, "devfn": None}
     assert hi.parse_location_paths(
         ["PCIROOT(0)#PCI(0300)#PCI(0200)#PCI(0701)"])["devfn"] == (7, 1)
 
 
 def test_pci_address_requires_bus_component():
-    # LocationPaths alone can never complete a BDF (req 91): no bus.
+    # Neither LocationPaths nor devpkey Address alone can complete a
+    # BDF (req 91): no authoritative bus.
     a = hi.pci_address_from_props({"bus_number": None, "address": 0,
                                    "location_paths":
                                    ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]})
     assert a["complete"] is False and a["bus"] is None
-    assert a["segment"] == 0 and a["device"] == 0
+    assert a["device"] == 0
 
 
 def test_pci_address_missing_segment_not_fabricated():
+    # Bus+devfn present via independent sources but LocationInfo absent
+    # → segment remains unproven, never assumed zero (req 92, C1).
     a = hi.pci_address_from_props({"bus_number": 1, "address": 0,
-                                   "location_paths": ["bogus"]})
-    assert a["complete"] is True and a["segment"] is None  # req 92
+                                   "location_info": None,
+                                   "location_paths":
+                                   ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]})
+    assert a["bus"] == 1 and a["device"] == 0
+    assert a["segment"] is None and a["complete"] is False
 
 
 def test_pci_address_conflict_devfn_sources():
+    # DEVPKEY_Address devfn (1,0) contradicts LocationInfo devfn (0,0)
+    # — independent-source disagreement is evidence conflict.
     a = hi.pci_address_from_props({
-        "bus_number": 1, "address": (1 << 16),      # device 1, fn 0
-        "location_paths": ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]})  # (0,0)
-    assert a["conflict"] is True
+        "bus_number": 1, "address": (1 << 16),
+        "location_info": "PCI bus 1, device 0, function 0",
+        "location_paths": ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]})
+    assert a["conflict"] is True and a["complete"] is False
+    # LocationPaths devfn contradicts LocationInfo → also conflict.
+    b = hi.pci_address_from_props({
+        "bus_number": 1, "address": 0,
+        "location_info": "PCI bus 1, device 0, function 0",
+        "location_paths": ["PCIROOT(0)#PCI(1B00)#PCI(0100)"]})
+    assert b["conflict"] is True
+
+
+def test_pci_address_conflict_bus_sources():
+    a = hi.pci_address_from_props({
+        "bus_number": 5, "address": 0,
+        "location_info": "PCI bus 1, device 0, function 0",
+        "location_paths": ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]})
+    assert a["conflict"] is True and a["complete"] is False
 
 
 def test_pci_address_string_coercion_and_bool_rejection():
-    a = hi.pci_address_from_props({"bus_number": "1", "address": "0",
-                                   "location_paths": []})
-    assert a["bus"] == 1 and a["device"] == 0
+    a = hi.pci_address_from_props({
+        "bus_number": "1", "address": "0",
+        "location_info": "PCI bus 1, device 0, function 0",
+        "location_paths": []})
+    assert a["bus"] == 1 and a["device"] == 0 and a["complete"] is True
     b = hi.pci_address_from_props({"bus_number": True, "address": 0,
+                                   "location_info":
+                                   "PCI bus 1, device 0, function 0",
                                    "location_paths": []})
-    assert b["bus"] is None and b["complete"] is False
+    # bool bus rejected as a devpkey source, but LocationInfo bus stands
+    assert b["bus"] == 1 and b["complete"] is True
 
 
 # --------------------------------------------------------- correlation
@@ -165,7 +232,74 @@ def test_no_smi_row_stays_unavailable():
 
 
 def test_missing_segment_blocks_qualification():
-    props = pci_props(locpath=None)
+    # PCIROOT evidence exists, but LocationInfo (the authoritative
+    # segment source) is absent → segment unproven → unavailable.
+    props = pci_props(location_info=None)
+    r = hi.correlate([meta()], [smi_row()], props)
+    rec = r["records"][0]
+    assert rec["correlation"] == hi.CORR_UNAVAILABLE
+    assert rec["reason"] == "segment_unproven"
+    assert rec["token"] is None and rec["smi_vram_free_bytes"] is None
+
+
+def test_pciroot_present_locationinfo_absent_never_qualifies():
+    # C1 — PCIROOT(0) cannot substitute for segment authority even
+    # with a single matching SMI row.
+    props = pci_props(location_info=None,
+                      locpath="PCIROOT(0)#PCI(1B00)#PCI(0000)")
+    r = hi.correlate([meta()], [smi_row()], props)
+    assert r["records"][0]["correlation"] == hi.CORR_UNAVAILABLE
+    assert r["records"][0]["token"] is None
+
+
+def test_pciroot_not_segment_root_index_differs():
+    # C1 — PCIROOT(3) with documented segment 0: the root index is not
+    # the segment; LocationInfo authority still qualifies.
+    props = pci_props(locpath="PCIROOT(3)#PCI(1B00)#PCI(0000)")
+    r = hi.correlate([meta()], [smi_row()], props)
+    assert r["records"][0]["correlation"] == hi.CORR_QUALIFIED
+
+
+def test_multiple_roots_one_segment_qualify():
+    # C1 — two roots within segment 0; each device qualifies on its
+    # own authoritative address.
+    meta2 = [meta(index=0), meta(pnp=PNP_B, index=1)]
+    props = {
+        **pci_props(locpath="PCIROOT(0)#PCI(1B00)#PCI(0000)"),
+        **pci_props(pnp=PNP_B, bus=9,
+                    locpath="PCIROOT(1)#PCI(1B00)#PCI(0000)"),
+    }
+    smi2 = [smi_row(), smi_row(index=1, bus_id="00000000:09:00.0",
+                               uuid=UUID_B, free=5 * GIB)]
+    r = hi.correlate(meta2, smi2, props)
+    assert all(rec["correlation"] == hi.CORR_QUALIFIED
+               for rec in r["records"])
+    assert r["records"][1]["smi_vram_free_bytes"] == 5 * GIB
+
+
+def test_same_bus_devfn_across_segments():
+    # C1 — identical bus/dev/fn in two segment groups; only the
+    # segment-matched vendor row joins.
+    meta2 = [meta(index=0), meta(pnp=PNP_B, index=1)]
+    props = {
+        **pci_props(),                                    # seg0 bus1
+        **pci_props(pnp=PNP_B, segment=1,
+                    locpath="PCIROOT(1)#PCI(1B00)#PCI(0000)"),
+    }                                                     # seg1 bus1
+    smi2 = [smi_row(bus_id="00000001:01:00.0", uuid=UUID_B,
+                    index=1, free=5 * GIB),
+            smi_row()]                                    # seg0 bus1
+    r = hi.correlate(meta2, smi2, props)
+    a, b = r["records"]
+    assert a["correlation"] == hi.CORR_QUALIFIED
+    assert a["gpu_uuid"] == UUID_A
+    assert b["correlation"] == hi.CORR_QUALIFIED
+    assert b["gpu_uuid"] == UUID_B
+    assert b["smi_vram_free_bytes"] == 5 * GIB
+
+
+def test_unparseable_location_info_segment_unproven():
+    props = pci_props(location_info="PCIe Controller")
     r = hi.correlate([meta()], [smi_row()], props)
     rec = r["records"][0]
     assert rec["correlation"] == hi.CORR_UNAVAILABLE
@@ -299,15 +433,36 @@ def test_digest_order_independent():
     r1 = hi.correlate(meta2, smi2, props)
     r2 = hi.correlate(list(reversed(meta2)), list(reversed(smi2)),
                       props)
-    # records differ per index; digest over same material evidence equal
+    # Same material evidence, input order reversed → identical digest.
     d1 = hi.inventory_digest(r1["records"], "real")
     d2 = hi.inventory_digest(r2["records"], "real")
     assert d1.startswith("hwid:v1:") and len(d1) == len("hwid:v1:") + 64
-    # Index is not identity — same devices at swapped indices digest equal.
+    assert d2 == d1
+
+
+def test_digest_detects_namespace_association_drift():
+    # C2 — os_index/smi_index are namespace-association evidence:
+    # material to the digest while never affecting the identity token.
+    meta2 = [meta(index=0), meta(pnp=PNP_B, index=1)]
+    smi2 = [smi_row(), smi_row(index=1, bus_id="00000000:09:00.0",
+                               uuid=UUID_B)]
+    props = {**pci_props(), **pci_props(pnp=PNP_B, bus=9)}
+    r1 = hi.correlate(meta2, smi2, props)
+    d1 = hi.inventory_digest(r1["records"], "real")
+    t1 = [rec["token"] for rec in r1["records"]]
+    # Same devices, indices swapped → association change is material.
     meta3 = [meta(index=1), meta(pnp=PNP_B, index=0)]
     r3 = hi.correlate(meta3, smi2, props)
-    assert hi.inventory_digest(r3["records"], "real") == d1
-    assert d2 == d1
+    assert hi.inventory_digest(r3["records"], "real") != d1
+    assert [rec["token"] for rec in r3["records"]] == t1
+    # Same device, different SMI ordinal → association drift detected.
+    r4 = hi.correlate(meta2,
+                      [smi_row(index=4),
+                       smi_row(index=1, bus_id="00000000:09:00.0",
+                               uuid=UUID_B)],
+                      props)
+    assert hi.inventory_digest(r4["records"], "real") != d1
+    assert r4["records"][0]["token"] == t1[0]
 
 
 def test_digest_changes_on_material_identity_drift():
@@ -514,13 +669,18 @@ def test_pci_props_collects_display_only(monkeypatch):
     def _ps(script, timeout=15):
         seen["script"] = script
         return {"pci": [{"id": PNP_A, "bus_number": 1, "address": 0,
+                         "location_info":
+                         "PCI bus 1, device 0, function 0",
                          "location_paths":
                          ["PCIROOT(0)#PCI(1B00)#PCI(0000)"]}]}
     monkeypatch.setattr(hardware, "_ps_json", _ps)
     out = hardware._pci_properties()
     assert out[PNP_A]["bus_number"] == 1
+    assert out[PNP_A]["location_info"] == ("PCI bus 1, device 0, "
+                                         "function 0")
     assert "Win32_VideoController" in seen["script"]   # bounded class
     assert "Get-PnpDeviceProperty" in seen["script"]
+    assert "DEVPKEY_Device_LocationInfo" in seen["script"]
 
 
 def test_pci_props_failure_modes(monkeypatch):
@@ -670,3 +830,219 @@ def test_probe_no_identity_leak_to_caller(monkeypatch):
     rep = hardware.probe()
     assert "uuid" not in str(rep.get("gpus"))
     assert all(k != "_identity" for k in rep)
+
+
+# ------------------------------------------- C3 publication pairing
+
+
+def test_equal_key_different_identity_never_overwrites():
+    rep = {"probed_at": 1.0, "probed_monotonic": 500.0, "gpus": [],
+           "os": {}, "cpu": {}, "memory": {}, "disks": [],
+           "backends": {}, "runtimes": {}}
+    id_a = {"records": [{"uuid": "A"}], "digest": "hwid:v1:a"}
+    id_b = {"records": [{"uuid": "B"}], "digest": "hwid:v1:b"}
+    hardware._publish(rep, identity=id_a)
+    hardware._publish(rep, identity=id_b)   # same key, same report
+    pub = hardware.evidence_cached()
+    assert pub["identity"]["digest"] == "hwid:v1:a"   # C3-C retained
+
+
+def test_equal_key_identical_pair_republishes():
+    rep = {"probed_at": 1.0, "probed_monotonic": 500.0, "gpus": [],
+           "os": {}, "cpu": {}, "memory": {}, "disks": [],
+           "backends": {}, "runtimes": {}}
+    id_a = {"records": [], "digest": "hwid:v1:a"}
+    hardware._publish(rep, identity=id_a)
+    g1 = hardware.evidence_cached()["generation"]
+    hardware._publish(dict(rep), identity=dict(id_a))
+    g2 = hardware.evidence_cached()["generation"]
+    assert g2 == g1 + 1                                 # accepted replay
+
+
+def test_equal_key_different_report_conflict_retained():
+    rep = {"probed_at": 1.0, "probed_monotonic": 500.0, "gpus": [],
+           "os": {}, "cpu": {}, "memory": {}, "disks": [],
+           "backends": {}, "runtimes": {}}
+    other = dict(rep, gpus=[{"index": 0}])
+    hardware._publish(rep, identity={"d": 1})
+    hardware._publish(other, identity={"d": 1})
+    pub = hardware.evidence_cached()
+    assert pub["report"]["gpus"] == []                # C3-D
+
+
+def test_failed_publish_leaves_pair_intact():
+    rep = {"probed_at": 1.0, "probed_monotonic": 500.0, "gpus": [],
+           "os": {}, "cpu": {}, "memory": {}, "disks": [],
+           "backends": {}, "runtimes": {}}
+    stale = dict(rep, probed_monotonic=400.0)
+    hardware._publish(rep, identity={"digest": "hwid:v1:new"})
+    hardware._publish(stale, identity={"digest": "hwid:v1:stale"})
+    pub = hardware.evidence_cached()
+    assert pub["report"]["probed_monotonic"] == 500.0  # C3-G
+    assert pub["identity"]["digest"] == "hwid:v1:new"
+
+
+def test_missing_identity_does_not_retain_prior(monkeypatch):
+    ident = hi.correlate([meta()], [smi_row()], pci_props())
+    rep1 = _patch_collection(monkeypatch, ident=ident)
+    hardware.probe()
+    assert hardware.identity_cached()["records"][0]["token"]
+    rep2 = dict(rep1, probed_monotonic=900.0)
+    rep2.pop("_identity", None)                        # unpaired newer
+    monkeypatch.setattr(hardware, "_cached_probe", lambda b: rep2)
+    hardware.probe()
+    pub = hardware.identity_cached()                   # C3-I
+    assert pub["collection_state"] == "unpaired"
+
+
+def test_caller_mutation_cannot_alter_published(monkeypatch):
+    ident = hi.correlate([meta()], [smi_row()], pci_props())
+    rep = _patch_collection(monkeypatch, ident=ident)
+    hardware.probe()
+    rep["probed_monotonic"] = -1
+    ident["records"][0]["token"] = "poison"
+    pub = hardware.evidence_cached()                   # C3-E
+    assert pub["probed_monotonic"] == 500.0
+    assert pub["identity"]["records"][0]["token"].startswith("hwid:nv:")
+
+
+def test_reader_mutation_isolated(monkeypatch):
+    _patch_collection(monkeypatch)
+    hardware.probe()
+    ev = hardware.evidence_cached()
+    ev["report"]["probed_monotonic"] = -1
+    ev["identity"]["collection_state"] = "corrupt"
+    again = hardware.evidence_cached()                 # C3-F
+    assert again["probed_monotonic"] == 500.0
+    assert again["identity"]["collection_state"] == "unpaired"
+
+
+def test_paired_read_never_mixes_collections():
+    """C3-J — deterministic interleaving: a reader can only observe a
+    coherent (report, identity, generation) triple; the lock-held
+    snapshot never assembles pair members across publications."""
+    import threading
+    rep1 = {"probed_at": 1.0, "probed_monotonic": 500.0, "gpus": [],
+            "os": {}, "cpu": {}, "memory": {}, "disks": [],
+            "backends": {}, "runtimes": {}}
+    rep2 = dict(rep1, probed_monotonic=900.0)
+    hardware._publish(rep1, identity={"digest": "hwid:v1:one"})
+    barrier = threading.Barrier(2)
+    seen = []
+
+    def writer():
+        barrier.wait()
+        hardware._publish(rep2, identity={"digest": "hwid:v1:two"})
+
+    t = threading.Thread(target=writer)
+    t.start()
+    barrier.wait()
+    seen.append(hardware.evidence_cached())
+    t.join()
+    seen.append(hardware.evidence_cached())
+    for ev in seen:
+        pairs = {ev["report"]["probed_monotonic"],
+                 ev["identity"]["digest"]}
+        assert pairs in ({500.0, "hwid:v1:one"},
+                         {900.0, "hwid:v1:two"})
+        assert (ev["report"]["probed_monotonic"] == 500.0) == (
+            ev["identity"]["digest"] == "hwid:v1:one")
+    gens = [ev["generation"] for ev in seen]
+    assert gens == sorted(gens) and len(set(gens)) == len(gens)
+
+
+# ------------------------------------- C4 partial/duplicate evidence
+
+
+def test_dup_uuid_one_row_malformed_bdf():
+    # A malformed-BDF SMI row cannot join, but its duplicate UUID still
+    # poisons uniqueness for the well-formed row (C4-2).
+    smi2 = [smi_row(), {**smi_row(index=1), "pci_bus_id": "broken"}]
+    r = hi.correlate([meta()], smi2, pci_props())
+    assert r["records"][0]["correlation"] == hi.CORR_AMBIGUOUS
+    assert r["records"][0]["reason"] == "duplicate_uuid_evidence"
+
+
+def test_dup_pnp_records_share_address():
+    # Duplicate OS device-instance records resolving to one address —
+    # neither may claim it (C4-4/5).
+    meta2 = [meta(index=0), meta(index=1)]             # same pnp
+    r = hi.correlate(meta2, [smi_row()], pci_props())
+    assert all(rec["correlation"] == hi.CORR_AMBIGUOUS
+               and rec["reason"] == "duplicate_pci_association"
+               for rec in r["records"])
+
+
+def test_identical_and_contradictory_dup_vendor_rows():
+    # Identical duplicate vendor rows (same BDF+UUID) and contradictory
+    # duplicates (same BDF, different UUID) both block join (C4-6/7).
+    r = hi.correlate([meta()], [smi_row(), smi_row(index=7)],
+                     pci_props())
+    assert r["records"][0]["correlation"] == hi.CORR_AMBIGUOUS
+    r2 = hi.correlate([meta()],
+                      [smi_row(), smi_row(index=7, uuid=UUID_B)],
+                      pci_props())
+    assert r2["records"][0]["correlation"] == hi.CORR_AMBIGUOUS
+
+
+def test_unmatched_vendor_row_ignored():
+    # An SMI row matching no OS device must not influence the unmatched
+    # device, and never fabricates inventory (C4-9).
+    r = hi.correlate(
+        [meta()], [smi_row(bus_id="00000000:77:00.0")],
+        pci_props())
+    rec = r["records"][0]
+    assert rec["correlation"] == hi.CORR_UNAVAILABLE
+    assert rec["smi_vram_free_bytes"] is None
+
+
+def test_non_nvidia_with_pci_evidence_unsupported():
+    # OS PCI evidence never upgrades a non-NVIDIA device (C4-11/12).
+    metas = [meta(pnp=PNP_AMD, vendor="AMD", index=0),
+             meta(pnp="ROOT\\VMBUS\\0000", vendor="unknown", index=1)]
+    props = {PNP_AMD: pci_props()[PNP_A]}
+    r = hi.correlate(metas, [smi_row()], props)
+    assert all(rec["correlation"] == hi.CORR_UNSUPPORTED
+               for rec in r["records"])
+    assert all(rec["token"] is None for rec in r["records"])
+
+
+def test_invalid_total_and_free_measurements():
+    # Qualified join but absent measurements stay absent (C4-13/14).
+    r = hi.correlate([meta()], [smi_row(total=None, free=None)],
+                     pci_props())
+    rec = r["records"][0]
+    assert rec["correlation"] == hi.CORR_QUALIFIED
+    assert rec["smi_vram_bytes"] is None
+    assert rec["smi_vram_free_bytes"] is None
+    assert rec["token"].startswith("hwid:nv:")
+
+
+def test_contradictory_free_over_total_suppressed():
+    # free > total is impossible evidence — suppressed, never
+    # attributed; the identity join itself remains qualified (C4-16).
+    r = hi.correlate([meta()],
+                     [smi_row(total=8 * GIB, free=10 * GIB)],
+                     pci_props())
+    rec = r["records"][0]
+    assert rec["correlation"] == hi.CORR_QUALIFIED
+    assert rec["smi_vram_free_bytes"] is None
+    assert rec["smi_vram_bytes"] == 8 * GIB
+    assert "memory_conflict" in rec["reason"]
+
+
+def test_independent_qualified_row_not_punished():
+    # Ambiguity on one device must not invalidate an unrelated
+    # independently established qualified row (C4 independence).
+    meta2 = [meta(index=0), meta(pnp=PNP_B, index=1)]
+    props = {**pci_props(), **pci_props(pnp=PNP_B, bus=9)}
+    # device A's address has one SMI row; device B's has two (ambiguous)
+    r = hi.correlate(
+        meta2,
+        [smi_row(),
+         smi_row(index=1, bus_id="00000000:09:00.0", uuid=UUID_B),
+         smi_row(index=2, bus_id="00000000:09:00.0",
+                 uuid="GPU-00000000-0000-0000-0000-000000000001")],
+        props)
+    assert r["records"][0]["correlation"] == hi.CORR_QUALIFIED
+    assert r["records"][1]["correlation"] == hi.CORR_AMBIGUOUS
