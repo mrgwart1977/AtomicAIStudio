@@ -132,6 +132,49 @@ def test_provenance_label_cannot_upgrade_trust(tmp_path):
     assert not ri.validate_reference_manifest(forged)["ok"]
 
 
+@pytest.mark.parametrize("prov", ["publisher", "owner_attested"])
+def test_recognized_labels_cannot_establish_trust(tmp_path, prov):
+    """Adversarial C1: modified executable bytes → self-computed
+    hashes → matching manifest → claimed provenance 'publisher' /
+    'owner_attested'. The label is schema-valid but can never
+    establish trusted reference authority: trust stays
+    unverified_claim even when every member matches."""
+    root = _tree(tmp_path, {"sd-cli.exe": b"TAMPERED exe bytes"})
+    tampered = [{"name": "sd-cli.exe",
+                 "sha256": _sha(b"TAMPERED exe bytes"),
+                 "size": len(b"TAMPERED exe bytes")}]
+    res = ri.build_reference_manifest("sdcpp-cuda", "cuda", tampered,
+                                      prov)
+    assert res["ok"]                      # schema-valid ≠ trusted
+    m = res["manifest"]
+    assert ri.trust_classification(m) == ri.TRUST_UNVERIFIED_CLAIM
+    assert ri.trust_classification(m) != ri.TRUST_EXTERNAL
+    q = ri.qualify(root, m, expected_flavor="cuda")
+    # Member comparison succeeds — that is E-vs-O evidence only;
+    # the trust classification is never promoted by the match.
+    assert q["checks"]["all_members_match"]
+    assert q["trust"] == ri.TRUST_UNVERIFIED_CLAIM
+
+
+def test_install_capture_stays_observed_first_use(tmp_path):
+    root = _tree(tmp_path, {"sd-cli.exe": b"exe"})
+    m = _manifest(root, {"sd-cli.exe": b"exe"})
+    q = ri.qualify(root, m)
+    assert q["trust"] == ri.TRUST_OBSERVED_FIRST_USE
+    # The module can never return the reserved external class.
+    for prov in ("publisher", "owner_attested", "install_capture"):
+        assert ri.trust_classification(
+            {"provenance": prov}) != ri.TRUST_EXTERNAL
+
+
+def test_qualify_record_carries_runtime_association(tmp_path):
+    files = {"sd-cli.exe": b"exe"}
+    root = _tree(tmp_path, files)
+    q = ri.qualify(root, _manifest(root, files))
+    assert q["runtime_key"] == "sdcpp-cuda"
+    assert q["flavor"] == "cuda"
+
+
 def test_current_bytes_cannot_self_certify(tmp_path):
     """A manifest generated FROM current bytes is still only
     observed-first-use evidence — never a trusted reference."""
@@ -257,14 +300,14 @@ def test_changed_during_verification_refuses(tmp_path, monkeypatch):
     files = {"sd-cli.exe": b"exe"}
     root = _tree(tmp_path, files)
     m = _manifest(root, files)
-    real_stream = ri._stream_sha256
+    real_stream = ri._stream_sha256_checked
 
-    def racing(path, cancel=None):
-        digest = real_stream(path, cancel)
+    def racing(path, st0):
+        digest, same = real_stream(path, st0)
         path.write_bytes(b"post-check mutation")
-        return digest
+        return digest, same
 
-    monkeypatch.setattr(ri, "_stream_sha256", racing)
+    monkeypatch.setattr(ri, "_stream_sha256_checked", racing)
     q = ri.qualify(root, m)
     assert q["classification"] == ri.UNQUALIFIED
     assert q["members"][0]["state"] == "changed_during_verification"
@@ -275,15 +318,55 @@ def test_io_failure_sanitized(tmp_path, monkeypatch):
     root = _tree(tmp_path, files)
     m = _manifest(root, files)
 
-    def deny(path, cancel=None):
+    def deny(path, st0):
         raise OSError("access denied")
 
-    monkeypatch.setattr(ri, "_stream_sha256", deny)
+    monkeypatch.setattr(ri, "_stream_sha256_checked", deny)
     q = ri.qualify(root, m)
     assert q["classification"] == ri.UNQUALIFIED
     assert q["members"][0]["state"] == "io_error"
     assert q["errors"][0]["member"] == "sd-cli.exe"
     assert str(root) not in repr(q)  # absolute paths never leak
+
+
+def test_opened_file_identity_swap_refuses(tmp_path, monkeypatch):
+    """Same-path swap between stat and open: the opened handle's
+    st_dev/st_ino differs from the pre-read stat → refusal."""
+    files = {"sd-cli.exe": b"exe"}
+    root = _tree(tmp_path, files)
+    m = _manifest(root, files)
+
+    class FakeStat:
+        st_dev, st_ino, st_size = 999, 999, 3
+
+    monkeypatch.setattr(ri.os, "fstat", lambda fd: FakeStat())
+    q = ri.qualify(root, m)
+    assert q["classification"] == ri.UNQUALIFIED
+    assert q["members"][0]["state"] == "opened_file_identity_changed"
+
+
+def test_post_verify_association_lost_refuses(tmp_path, monkeypatch):
+    """Path swapped to a reparse/redirect AFTER the hash: the
+    post-close association check catches it."""
+    files = {"sd-cli.exe": b"exe"}
+    root = _tree(tmp_path, files)
+    m = _manifest(root, files)
+    real_realpath = ri.os.path.realpath
+    member_calls = [0]
+
+    def flipflop(p):
+        if "sd-cli" in str(p):
+            member_calls[0] += 1
+            if member_calls[0] > 1:
+                # First resolution (containment pre-check) stayed
+                # inside; every later association check escapes.
+                return str(tmp_path / "elsewhere" / "sd-cli.exe")
+        return real_realpath(p)
+
+    monkeypatch.setattr(ri.os.path, "realpath", flipflop)
+    q = ri.qualify(root, m)
+    assert q["classification"] == ri.UNQUALIFIED
+    assert q["members"][0]["state"] == "post_verify_association_lost"
 
 
 def test_unexpected_member_closed_coverage(tmp_path):

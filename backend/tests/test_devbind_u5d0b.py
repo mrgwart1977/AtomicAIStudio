@@ -70,11 +70,15 @@ def evidence(mono=500.0, gen=1, meta=None, smi=None, props=None,
             "order": mono, "generation": gen}
 
 
-def rtq_qualified(flavor="cuda"):
-    return {"flavor": flavor,
+def rtq_qualified(flavor="cuda", runtime_key="sdcpp-cuda"):
+    return {"flavor": flavor, "runtime_key": runtime_key,
             "rtq": {"contract": "rtq:v1", "classification": "qualified",
+                    "runtime_key": runtime_key, "flavor": flavor,
                     "manifest_digest": "sha256:" + "ab" * 32,
                     "trust": ri.TRUST_OBSERVED_FIRST_USE}}
+
+
+FRESH = {"max_age_s": 300.0, "now_monotonic": 600.0}
 
 
 def refusal(res):
@@ -85,7 +89,8 @@ def refusal(res):
 def build(env=None, **kw):
     args = {"evidence": evidence(), "gpu_token": TOKEN_A,
             "flavor": "cuda", "runtime": rtq_qualified(),
-            "environ": env if env is not None else {}}
+            "environ": env if env is not None else {},
+            "freshness": dict(FRESH)}
     args.update(kw)
     return db.build_cuda_candidate(**args)
 
@@ -407,7 +412,8 @@ def test_synthetic_rtq_end_to_end(tmp_path):
           "size": len(d)} for n, d in files.items()],
         ri.P_INSTALL_CAPTURE)["manifest"]
     q = ri.qualify(root, m, expected_flavor="cuda")
-    res = build(runtime={"flavor": "cuda", "rtq": q})
+    res = build(runtime={"flavor": "cuda",
+                         "runtime_key": "sdcpp-cuda", "rtq": q})
     assert res["state"] == "candidate"
     assert res["runtime"]["rtq_classification"] == "qualified"
     assert res["runtime"]["rtq_trust"] == ri.TRUST_OBSERVED_FIRST_USE
@@ -573,28 +579,34 @@ def test_drift_pci_changed_is_revalidation():
 
 def test_drift_replacement_requires_new_approval():
     held = evidence()
-    # Same OS index, different qualified UUID — a different physical
-    # device: binding refuses, never transfers approval.
+    # Same OS index, different qualified UUID — NOT proof of physical
+    # replacement (index reuse is equally consistent): the original
+    # binding refuses with the unverified-replacement classification
+    # and a new physical approval is required for the different token.
     fresh = evidence(mono=600.0, smi=[smi_row(uuid=UUID_B)])
     d = db.classify_drift(held, fresh, TOKEN_A)
-    assert d["decision"] == \
-        "refuse_physical_replacement_new_approval_required"
+    assert d["decision"] == "refuse_binding_token_absent"
+    assert d["replacement_evidence"] == \
+        "slot_occupied_by_different_token_unverified"
+    assert d["new_physical_approval_required"]
 
 
 def test_drift_missing_identity_refuses():
     held = evidence()
     fresh = evidence(smi=[])  # token absent, slot not re-qualified
     d = db.classify_drift(held, fresh, TOKEN_A)
-    assert d["decision"] == "refuse_missing_identity"
+    assert d["decision"] == "refuse_binding_token_absent"
+    assert d["replacement_evidence"] == "token_absent_no_occupant"
+    assert not d["new_physical_approval_required"]
     assert db.classify_drift(held, None, TOKEN_A)[
-        "decision"] == "refuse_missing_identity"
+        "decision"] == "refuse_binding_token_absent"
 
 
 def test_drift_contradictory_refuses():
     held = evidence()
     fresh = evidence(smi=[smi_row(uuid=None)])
     d = db.classify_drift(held, fresh, TOKEN_A)
-    assert d["decision"] == "refuse_missing_identity"
+    assert d["decision"] == "refuse_binding_token_absent"
 
 
 def test_drift_resource_only_not_replacement():
@@ -672,3 +684,240 @@ def test_candidate_contract_version():
     res = build()
     assert res["contract"] == "lcfg:v1"
     assert refusal(build(flavor="cpu")) or True
+
+
+# -------------------------------------------------- C3 freshness
+
+
+def test_freshness_policy_required():
+    assert refusal(build(freshness=None)) == \
+        "freshness_policy_unspecified"
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"),
+                                 "300", True, None])
+def test_invalid_max_age_refuses(bad):
+    assert refusal(build(freshness={"max_age_s": bad,
+                                    "now_monotonic": 600.0})) == \
+        "invalid_freshness_policy"
+
+
+@pytest.mark.parametrize("bad", [-1, float("nan"), float("inf"),
+                                 "600", True])
+def test_invalid_now_refuses(bad):
+    assert refusal(build(freshness={"max_age_s": 300.0,
+                                    "now_monotonic": bad})) == \
+        "invalid_freshness_policy"
+
+
+def test_expired_evidence_refuses():
+    # probed at 500, now 900, max_age 300 → age 400 > 300
+    assert refusal(build(freshness={"max_age_s": 300.0,
+                                    "now_monotonic": 900.0})) == \
+        "stale_evidence"
+
+
+def test_future_timestamp_refuses():
+    assert refusal(build(freshness={"max_age_s": 300.0,
+                                    "now_monotonic": 400.0})) == \
+        "future_timestamp"
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), "500",
+                                 True, -1])
+def test_malformed_probed_monotonic_refuses(bad):
+    ev = evidence()
+    ev["probed_monotonic"] = bad
+    ev["identity"]["collection"]["probed_monotonic"] = bad
+    assert refusal(build(evidence=ev)) == "invalid_timestamp"
+
+
+def test_missing_timestamp_refuses():
+    ev = evidence()
+    del ev["probed_monotonic"]
+    assert refusal(build(evidence=ev)) == "missing_evidence"
+
+
+def test_freshness_recorded_in_candidate():
+    res = build()
+    f = res["evidence"]["freshness"]
+    assert f["policy_supplied"] and f["max_age_s"] == 300.0
+    assert f["age_s"] == 100.0
+    assert f["generation_scope"] == "process_lifetime_only_not_durable"
+
+
+# -------------------------------------------------- C4 completeness
+
+
+def test_inventory_partial_vendor_parse_recorded():
+    ev = evidence()
+    # 3 raw smi rows, only 1 valid — partial parse: target still
+    # qualified but inventory completeness is honestly "partial".
+    ev["identity"]["completeness"]["smi_rows"] = 3
+    res = build(evidence=ev)
+    inv = res["evidence"]["inventory_completeness"]
+    assert inv["partial_vendor_parse"] and inv["state"] == "partial"
+    assert res["state"] == "candidate"
+
+
+def test_mixed_inventory_unsupported_flagged():
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": "PCI\\VEN_1002&DEV_X\\Y",
+             "vendor": "AMD"}]
+    ev = evidence(meta=meta)
+    res = build(evidence=ev)
+    assert res["state"] == "candidate"
+    assert res["evidence"]["inventory_completeness"][
+        "unsupported_rows"] == 1
+
+
+def test_non_target_ambiguous_rows_flagged_not_refused():
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, bus_id="00000000:1B:00.0", uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    props = {**pci_props(bus=0x1B, pnp=PNP_A),
+             **pci_props(bus=0x21, pnp=PNP_B)}
+    # GPU B's own OS topology evidence contradicts itself → record 1
+    # ambiguous; unrelated ambiguity is flagged, target unaffected.
+    props[PNP_B]["bus_number"] = 0x33
+    ev = evidence(meta=meta, smi=smi, props=props)
+    res = build(evidence=ev)
+    inv = res["evidence"]["inventory_completeness"]
+    assert inv["ambiguous_rows"] == 1
+    assert res["state"] == "candidate"
+
+
+# -------------------------------------------------- C2 rtq association
+
+
+def test_rtq_missing_runtime_key_refuses():
+    rt = {"flavor": "cuda",
+          "rtq": {"contract": "rtq:v1", "classification": "qualified",
+                  "manifest_digest": "sha256:" + "ab" * 32,
+                  "trust": ri.TRUST_OBSERVED_FIRST_USE}}
+    assert refusal(build(runtime=rt)) == "runtime_evidence_incomplete"
+
+
+def test_rtq_wrong_runtime_key_refuses():
+    rt = rtq_qualified()
+    rt["runtime_key"] = "sdcpp-vulkan"
+    rt["rtq"]["runtime_key"] = "sdcpp-cuda"
+    assert refusal(build(runtime=rt)) == "runtime_evidence_mismatch"
+
+
+def test_rtq_flavor_mismatch_refuses():
+    rt = rtq_qualified()
+    rt["rtq"]["flavor"] = "vulkan"
+    assert refusal(build(runtime=rt)) == "runtime_evidence_mismatch"
+
+
+def test_rtq_missing_manifest_digest_refuses():
+    rt = rtq_qualified()
+    del rt["rtq"]["manifest_digest"]
+    assert refusal(build(runtime=rt)) == "runtime_evidence_incomplete"
+
+
+def test_rtq_malformed_manifest_digest_refuses():
+    rt = rtq_qualified()
+    rt["rtq"]["manifest_digest"] = "sha256:nothex"
+    assert refusal(build(runtime=rt)) == "runtime_evidence_incomplete"
+
+
+def test_rtq_fabricated_trusted_external_refuses():
+    """A dict claiming qualified + trusted_external can never be
+    produced inside this foundation — fabrication is refused."""
+    rt = rtq_qualified()
+    rt["rtq"]["trust"] = "trusted_external"
+    assert refusal(build(runtime=rt)) == \
+        "runtime_evidence_trust_unestablished"
+
+
+def test_rtq_unknown_trust_class_refuses():
+    rt = rtq_qualified()
+    rt["rtq"]["trust"] = "totally_trusted"
+    assert refusal(build(runtime=rt)) == \
+        "runtime_evidence_trust_unestablished"
+
+
+def test_rtq_association_structural_only():
+    res = build()
+    assert res["runtime"]["rtq_association"] == \
+        "structural_unverified"
+    assert res["runtime"]["runtime_key"] == "sdcpp-cuda"
+
+
+# -------------------------------------------------- C6 backend
+
+
+def test_duplicate_module_assignment_refuses():
+    assert refusal(build(backend={
+        "spec": "te=cpu,te=cuda0"})) == "duplicate_module_assignment"
+
+
+def test_conflicting_module_assignments_refuse():
+    assert refusal(build(backend={
+        "spec": "diffusion=cuda0,diffusion=cpu"})) == \
+        "duplicate_module_assignment"
+
+
+def test_unknown_backend_option_refuses():
+    r = build(backend={"spec": "all=cuda0", "gpu": 1})
+    assert refusal(r) == "unknown_backend_option"
+
+
+def test_repeated_all_assignment_refuses():
+    assert refusal(build(backend={
+        "spec": "all=cuda0,all=cuda0"})) == \
+        "duplicate_module_assignment"
+
+
+# -------------------------------------------------- C5 drift precedence
+
+
+def test_drift_two_gpus_swap_os_indices_is_refresh():
+    held = _two_gpu_evidence()
+    meta_swap = [{"index": 1, "pnp": PNP_A, "vendor": "NVIDIA"},
+                 {"index": 0, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, bus_id="00000000:1B:00.0", uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    fresh = evidence(mono=600.0, meta=meta_swap, smi=smi,
+                     props=_dual_props())
+    d = db.classify_drift(held, fresh, TOKEN_A)
+    assert d["decision"] == "mapping_refresh"
+
+
+def test_drift_two_gpus_swap_smi_indices_is_refresh():
+    held = _two_gpu_evidence()
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=1, bus_id="00000000:1B:00.0", uuid=UUID_A),
+           smi_row(index=0, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    fresh = evidence(mono=600.0, meta=meta, smi=smi,
+                     props=_dual_props())
+    d = db.classify_drift(held, fresh, TOKEN_A)
+    assert d["decision"] == "mapping_refresh"
+
+
+def test_drift_token_at_old_pnp_occupied_by_different():
+    held = evidence()
+    # Different qualified token claiming the old PNP association.
+    fresh = evidence(mono=600.0, smi=[smi_row(uuid=UUID_B)])
+    d = db.classify_drift(held, fresh, TOKEN_A)
+    assert d["decision"] == "refuse_binding_token_absent"
+    assert d["new_physical_approval_required"]
+
+
+def test_drift_unrelated_inventory_change_token_stable():
+    held = _two_gpu_evidence()
+    # GPU B's record changes (new index); token A fully stable →
+    # unrelated inventory change does not disturb A's classification.
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 7, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, bus_id="00000000:1B:00.0", uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    fresh = evidence(mono=600.0, meta=meta, smi=smi,
+                     props=_dual_props())
+    d = db.classify_drift(held, fresh, TOKEN_A)
+    assert d["decision"] in ("unchanged",
+                             "identity_revalidation_required")

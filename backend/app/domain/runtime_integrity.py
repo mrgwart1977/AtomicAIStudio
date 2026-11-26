@@ -91,10 +91,19 @@ _ALLOWED_PROVENANCE = {P_INSTALL_CAPTURE, P_OWNER_ATTESTED, P_PUBLISHER}
 
 TRUST_OBSERVED_FIRST_USE = "observed_first_use"
 TRUST_EXTERNAL = "trusted_external"
+TRUST_UNVERIFIED_CLAIM = "unverified_claim"
+# A caller-supplied provenance LABEL can never establish independent
+# reference authority inside this foundation scope. install_capture is
+# honestly observed-first-use; publisher/owner_attested are merely
+# CLAIMED acquisition channels — no independent delivery mechanism
+# exists here, so they classify unverified_claim, never
+# trusted_external. TRUST_EXTERNAL is reserved for a future
+# independently delivered reference and is never returned by this
+# module.
 _PROVENANCE_TRUST = {
     P_INSTALL_CAPTURE: TRUST_OBSERVED_FIRST_USE,
-    P_OWNER_ATTESTED: TRUST_EXTERNAL,
-    P_PUBLISHER: TRUST_EXTERNAL,
+    P_OWNER_ATTESTED: TRUST_UNVERIFIED_CLAIM,
+    P_PUBLISHER: TRUST_UNVERIFIED_CLAIM,
 }
 
 QUALIFIED = "qualified"
@@ -253,6 +262,26 @@ def _stream_sha256(path: Path, cancel=None) -> str:
     return h.hexdigest()
 
 
+def _stream_sha256_checked(path: Path, st0) -> tuple[str, bool]:
+    """Bounded streaming hash that also verifies the OPENED file is
+    the one the pre-read stat described: os.fstat on the open handle
+    is compared on (st_dev, st_ino, st_size). st_ino is reported as 0
+    on some Windows filesystems — when inode is unavailable the check
+    degrades to device+size only and that limitation is documented in
+    the module contract, never hidden."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        fst = os.fstat(f.fileno())
+        same = (fst.st_dev == st0.st_dev and fst.st_size == st0.st_size
+                and (fst.st_ino == st0.st_ino or not st0.st_ino))
+        while True:
+            b = f.read(_CHUNK)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest(), same
+
+
 def measure_members(root: str | Path, manifest: dict) -> dict:
     """Measure the flat install dir against a VALIDATED reference
     manifest. Bounded: one directory listing (capped), one sequential
@@ -310,11 +339,25 @@ def measure_members(root: str | Path, manifest: dict) -> dict:
                 if st0.st_size != mem["size"]:
                     rec["state"] = "size_mismatch"
                 else:
-                    rec["observed_sha256"] = _stream_sha256(cand)
+                    rec["observed_sha256"], opened_same = \
+                        _stream_sha256_checked(cand, st0)
                     st1 = cand.stat()
-                    if st1.st_size != st0.st_size \
+                    if not opened_same:
+                        # The opened file's identity (st_dev/st_ino
+                        # where the platform reports it) differed from
+                        # the pre-read stat — same-path swap between
+                        # stat and open.
+                        rec["state"] = "opened_file_identity_changed"
+                    elif st1.st_size != st0.st_size \
                             or st1.st_mtime_ns != st0.st_mtime_ns:
                         rec["state"] = "changed_during_verification"
+                    elif Path(os.path.realpath(cand)).parent != root_r \
+                            or cand.is_symlink():
+                        # Post-close association: the path must still
+                        # resolve inside the coverage root as a plain
+                        # file — a same-path swap to a reparse point
+                        # during verification is a refusal.
+                        rec["state"] = "post_verify_association_lost"
                     elif rec["observed_sha256"] != mem["sha256"]:
                         rec["state"] = "sha256_mismatch"
                     else:
@@ -344,6 +387,8 @@ def qualify(root: str | Path, manifest: dict,
                 "reason": "reference_manifest_invalid",
                 "refusals": measured["refusals"], "members": [],
                 "unexpected": measured["unexpected"],
+                "runtime_key": (manifest or {}).get("runtime_key"),
+                "flavor": (manifest or {}).get("flavor"),
                 "manifest_digest": manifest_digest(manifest),
                 "trust": trust_classification(manifest),
                 "checks": checks}
@@ -370,6 +415,8 @@ def qualify(root: str | Path, manifest: dict,
             "members": measured["members"],
             "unexpected": measured["unexpected"],
             "errors": measured["errors"],
+            "runtime_key": manifest.get("runtime_key"),
+            "flavor": manifest.get("flavor"),
             "manifest_digest": manifest_digest(manifest),
             "trust": trust_classification(manifest),
             "checks": checks}

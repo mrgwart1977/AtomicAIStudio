@@ -215,12 +215,26 @@ def inherited_accelerator_env_names(env: dict) -> list[str]:
     return sorted(set(out))
 
 
+def _finite_num(v) -> bool:
+    import math
+    return isinstance(v, (int, float)) and not isinstance(v, bool) \
+        and math.isfinite(v)
+
+
 def assess_evidence(evidence: dict | None,
-                    fresh: dict | None = None) -> dict:
+                    fresh: dict | None = None,
+                    freshness: dict | None = None) -> dict:
     """Independent validation of ONE coherent Phase alpha evidence
-    snapshot. Generation equality alone never proves freshness —
-    identical generations with different content are contradictory
-    evidence, and generation is process-lifetime scoped only."""
+    snapshot. Generation equality alone never proves freshness — it is
+    a process-lifetime publication counter, not elapsed-time evidence
+    and never a durable cross-restart identifier.
+
+    Freshness policy is an explicit caller dependency:
+    ``freshness={"max_age_s": <positive finite seconds>,
+    "now_monotonic": <finite monotonic reference>}``. Absent policy,
+    malformed policy, malformed timestamps, future timestamps and
+    expired snapshots all fail CLOSED — no arbitrary policy is
+    silently selected."""
     if not isinstance(evidence, dict):
         return {"ok": False, "refusal": "missing_evidence"}
     for key in ("report", "identity", "generation",
@@ -234,6 +248,26 @@ def assess_evidence(evidence: dict | None,
             or isinstance(evidence["generation"], bool) \
             or evidence["generation"] < 1:
         return {"ok": False, "refusal": "generation_invalid"}
+    if not _finite_num(evidence["probed_monotonic"]) \
+            or evidence["probed_monotonic"] < 0:
+        return {"ok": False, "refusal": "invalid_timestamp"}
+    probed_at = evidence.get("probed_at")
+    if probed_at is not None and not _finite_num(probed_at):
+        return {"ok": False, "refusal": "invalid_timestamp"}
+    if freshness is None:
+        return {"ok": False,
+                "refusal": "freshness_policy_unspecified"}
+    max_age = freshness.get("max_age_s")
+    now = freshness.get("now_monotonic")
+    if not _finite_num(max_age) or max_age <= 0:
+        return {"ok": False, "refusal": "invalid_freshness_policy"}
+    if not _finite_num(now) or now < 0:
+        return {"ok": False, "refusal": "invalid_freshness_policy"}
+    if evidence["probed_monotonic"] > now:
+        return {"ok": False, "refusal": "future_timestamp"}
+    if now - evidence["probed_monotonic"] > max_age:
+        return {"ok": False, "refusal": "stale_evidence",
+                "age_s": now - evidence["probed_monotonic"]}
     ident = evidence["identity"]
     if not isinstance(ident, dict) or not ident:
         return {"ok": False, "refusal": "missing_identity_evidence"}
@@ -263,6 +297,23 @@ def assess_evidence(evidence: dict | None,
         records, ident.get("provenance"))
     if recomputed != ident.get("digest"):
         return {"ok": False, "refusal": "identity_digest_mismatch"}
+    # Inventory completeness is REPORTED, not fused into a boolean:
+    # structural count consistency above is not inventory completeness.
+    # Partial vendor-row parsing, non-target ambiguous/unavailable/
+    # unsupported rows are recorded — the target-level qualification
+    # check (correlation + token + digest) is the binding gate.
+    smi_rows = comp.get("smi_rows") or 0
+    smi_valid = comp.get("smi_rows_valid") or 0
+    inventory = {
+        "partial_vendor_parse": smi_rows > smi_valid,
+        "ambiguous_rows": comp.get("ambiguous", 0),
+        "unavailable_rows": comp.get("unavailable", 0),
+        "unsupported_rows": comp.get("unsupported", 0),
+        "state": "complete"}
+    if (inventory["partial_vendor_parse"]
+            or inventory["ambiguous_rows"]
+            or inventory["unavailable_rows"]):
+        inventory["state"] = "partial"
     if fresh is not None:
         if not isinstance(fresh, dict) \
                 or fresh.get("generation") != evidence["generation"]:
@@ -272,7 +323,8 @@ def assess_evidence(evidence: dict | None,
             # Same generation, different content — contradictory
             # evidence, never a favorable resolution.
             return {"ok": False, "refusal": "contradictory_evidence"}
-    return {"ok": True, "identity": ident, "records": records}
+    return {"ok": True, "identity": ident, "records": records,
+            "inventory": inventory}
 
 
 def _find_record(records: list[dict], token: str) -> dict:
@@ -333,8 +385,13 @@ def evaluate_backend(backend: dict | None) -> dict:
     Exact-build support exists at sd.cpp 991f825 (L3); packaged-binary
     behavior is unqualified (L5-held)."""
     recommended = backend is None
+    _ALLOWED_KEYS = {"spec", "auto_fit", "split_mode", "params_backend"}
     b = {"spec": "all=cuda0", "auto_fit": "off", "split_mode": None,
          "params_backend": None} if recommended else dict(backend)
+    unknown = set(b) - _ALLOWED_KEYS
+    if unknown:
+        return {"state": "refuse", "refusal": "unknown_backend_option",
+                "options": sorted(str(u) for u in unknown)}
     flags = []
     af = b.get("auto_fit")
     if af is not None:
@@ -367,6 +424,12 @@ def evaluate_backend(backend: dict | None) -> dict:
                 mod_n = _norm_module(mod)
                 if mod_n not in _KNOWN_MODULES:
                     return {"refusal": "backend_config_conflict",
+                            "module": mod.strip()}
+                if mod_n in {a["module"] for a in assigns}:
+                    # Same module assigned twice — conflicting or
+                    # silently overriding repeated options are never
+                    # resolvable in the caller's favor.
+                    return {"refusal": "duplicate_module_assignment",
                             "module": mod.strip()}
                 default = mod_n in ("all", "default", "*")
             else:
@@ -414,7 +477,9 @@ def classify_drift(held_evidence: dict, fresh_evidence: dict | None,
     a fresh coherent snapshot. A candidate refresh is NEVER claimed to
     be an actual runtime mapping refresh."""
     if not isinstance(fresh_evidence, dict):
-        return {"decision": "refuse_missing_identity",
+        return {"decision": "refuse_binding_token_absent",
+                "replacement_evidence": "token_absent_no_occupant",
+                "new_physical_approval_required": False,
                 "reason": "fresh_evidence_absent"}
     fresh_ident = fresh_evidence.get("identity") or {}
     held_ident = (held_evidence or {}).get("identity") or {}
@@ -424,6 +489,13 @@ def classify_drift(held_evidence: dict, fresh_evidence: dict | None,
     f_rec = next((r for r in f_records if r.get("token") == token),
                  None)
     if f_rec is None:
+        # Resolve the ORIGINAL approved token first — it is gone. A
+        # different token occupying the old index/PNP is NOT proof of
+        # physical replacement (index reuse, unqualified absence or
+        # ambiguous topology are equally consistent); the binding
+        # refuses either way, and any different token requires a NEW
+        # physical-device approval before it may execute — approval is
+        # never transferred.
         slot_taken = any(
             r.get("correlation") == hw_identity.CORR_QUALIFIED
             and h_rec is not None
@@ -432,12 +504,12 @@ def classify_drift(held_evidence: dict, fresh_evidence: dict | None,
                      and r.get("pnp_device_id")
                      == h_rec.get("pnp_device_id")))
             for r in f_records)
-        if slot_taken:
-            return {"decision":
-                    "refuse_physical_replacement_new_approval_required",
-                    "reason": "different_qualified_token_at_slot"}
-        return {"decision": "refuse_missing_identity",
-                "reason": "token_absent_in_fresh"}
+        return {"decision": "refuse_binding_token_absent",
+                "replacement_evidence": (
+                    "slot_occupied_by_different_token_unverified"
+                    if slot_taken else "token_absent_no_occupant"),
+                "new_physical_approval_required": bool(slot_taken),
+                "reason": "original_token_unavailable_in_fresh"}
     if f_rec.get("correlation") != hw_identity.CORR_QUALIFIED:
         return {"decision": "refuse_contradictory_identity",
                 "reason": "fresh_record_not_qualified"}
@@ -467,11 +539,46 @@ def classify_drift(held_evidence: dict, fresh_evidence: dict | None,
     return {"decision": "unchanged", "reason": "identity_stable"}
 
 
+_RTQ_ACCEPTED_TRUST = {"observed_first_use", "unverified_claim"}
+_MANIFEST_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _rtq_association(rt: dict, rtq: dict, flavor: str) -> dict:
+    """Validate that the rtq:v1 record is associated with THIS runtime
+    descriptor. Structural association only: a matching manifest
+    digest proves WHICH reference was used, not that the reference is
+    trustworthy, that the runtime behaves as documented, or that the
+    evidence was measured from this runtime — the association class is
+    recorded honestly as structural_unverified."""
+    key = rt.get("runtime_key")
+    if not isinstance(key, str) or not key:
+        return {"refusal": "runtime_evidence_incomplete",
+                "missing": "runtime_key"}
+    if rtq.get("runtime_key") != key:
+        return {"refusal": "runtime_evidence_mismatch",
+                "expected": key}
+    if rtq.get("flavor") != flavor:
+        return {"refusal": "runtime_evidence_mismatch",
+                "expected": flavor}
+    digest = rtq.get("manifest_digest")
+    if not isinstance(digest, str) \
+            or not _MANIFEST_DIGEST_RE.match(digest):
+        return {"refusal": "runtime_evidence_incomplete",
+                "missing": "manifest_digest"}
+    if rtq.get("trust") not in _RTQ_ACCEPTED_TRUST:
+        # A claimed trusted_external record cannot be produced by this
+        # foundation — such a value is fabricated, never honored.
+        return {"refusal": "runtime_evidence_trust_unestablished"}
+    return {"ok": True, "runtime_key": key, "manifest_digest": digest,
+            "class": "structural_unverified"}
+
+
 def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
                          flavor: str, runtime: dict | None = None,
                          environ: dict | None = None,
                          backend: dict | None = None,
-                         fresh: dict | None = None) -> dict:
+                         fresh: dict | None = None,
+                         freshness: dict | None = None) -> dict:
     """Build the lcfg:v1 candidate for exact single-physical-device
     CUDA binding, or a controlled refusal. Pure: no IO, no launch, no
     reservation, no env mutation."""
@@ -485,7 +592,7 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
             or not gpu_token.startswith("hwid:nv:"):
         return _refuse("malformed_physical_token")
 
-    ev = assess_evidence(evidence, fresh=fresh)
+    ev = assess_evidence(evidence, fresh=fresh, freshness=freshness)
     if not ev["ok"]:
         return _refuse(ev["refusal"],
                        **{k: v for k, v in ev.items()
@@ -509,6 +616,11 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
                        rtq_classification=(
                            rtq.get("classification")
                            if isinstance(rtq, dict) else "absent"))
+    assoc = _rtq_association(rt, rtq, flavor)
+    if "refusal" in assoc:
+        return _refuse(assoc["refusal"],
+                       **{k: v for k, v in assoc.items()
+                          if k != "refusal"})
 
     env_src = os.environ if environ is None else environ
     order = evaluate_device_order(env_src)
@@ -553,9 +665,20 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
             "assurance": be["assurance"]},
         "runtime": {
             "flavor": flavor,
+            "runtime_key": assoc["runtime_key"],
             "rtq_classification": rtq["classification"],
-            "rtq_manifest_digest": rtq.get("manifest_digest"),
-            "rtq_trust": rtq.get("trust")},
+            "rtq_manifest_digest": assoc["manifest_digest"],
+            "rtq_trust": rtq["trust"],
+            "rtq_association": assoc["class"]},
+        "evidence": {
+            "inventory_completeness": ev["inventory"],
+            "freshness": {
+                "policy_supplied": True,
+                "max_age_s": freshness["max_age_s"],
+                "age_s": (freshness["now_monotonic"]
+                          - evidence["probed_monotonic"]),
+                "generation_scope":
+                    "process_lifetime_only_not_durable"}},
         "assurance": {
             "L1_documented_semantics": {
                 "state": "established",
