@@ -19,6 +19,7 @@ model is marked installed.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import subprocess
 import hashlib
 import logging
@@ -70,6 +71,44 @@ def _device_env(flavor: str, gpu_index: int | None) -> dict[str, str]:
         return {"CUDA_VISIBLE_DEVICES": idx}
     # Vulkan + default: GGML_VULKAN_DEVICE selects the physical device.
     return {"GGML_VULKAN_DEVICE": idx, "GGML_VK_VISIBLE_DEVICES": idx}
+
+
+def _execbind_marker(request: dict) -> dict | None:
+    """Persisted execbind state discriminator (U-5d-0).
+
+    Returns the execution_binding dict to honor, or None for a genuine
+    legacy unpinned request. Every other combination refuses — a job
+    that requires pinned execution never silently becomes unpinned, and
+    a stray binding without its required marker is never silently
+    treated as legacy.
+
+      binding_required absent  + execution_binding absent  → legacy
+      binding_required absent  + execution_binding present → refuse
+      binding_required 'execbind:v1' + valid binding dict  → pinned
+      any other marker version or malformed binding        → refuse
+
+    Key presence is distinguished from a present-null value (F2): only
+    the GENUINE absence of both fields engages the legacy path — a
+    persisted 'binding_required': null or 'execution_binding': null is
+    tampered state and refuses, never silently unpinned.
+    """
+    if "binding_required" not in request \
+            and "execution_binding" not in request:
+        return None
+    required = request.get("binding_required")
+    binding = request.get("execution_binding")
+    if required != model_files.EXECBIND_VERSION:
+        raise ValueError(
+            "execution-binding marker is absent or unsupported — "
+            "refusing rather than resolving unpinned")
+    if binding is None:
+        raise ValueError(
+            "binding_required marker present but execution_binding is "
+            "missing — refusing")
+    if not isinstance(binding, dict):
+        raise TypeError(
+            "execution_binding is malformed — refusing")
+    return binding
 
 
 def _pipe_to_queue(pipe, queue: "asyncio.Queue", loop: asyncio.AbstractEventLoop) -> None:
@@ -151,6 +190,17 @@ def _result_apply_command(req: dict) -> dict | None:
     return None
 
 
+# E3 — pinned verification evidence is request-local, never adapter
+# state. Adapter instances are registry singletons shared across jobs
+# and the engine dispatches each job as its own asyncio task, so a
+# ContextVar gives every invocation its own evidence slot: concurrent
+# invocations can neither read nor overwrite each other's verified
+# paths, and a fresh task starts empty (no inherited pinned state, no
+# persistence across unrelated executions). See SdCppAdapter._pinned.
+_PINNED_EVIDENCE: contextvars.ContextVar = contextvars.ContextVar(
+    "execbind_pinned_evidence", default=None)
+
+
 class SdCppAdapter:
     """Real text-to-image via a stable-diffusion.cpp `sd` worker binary.
 
@@ -180,13 +230,35 @@ class SdCppAdapter:
               "Requires an installed model; all downloads are user-approved.",
     )
 
+    @property
+    def _pinned(self):
+        """Pinned verification evidence for THIS invocation (E3).
+
+        Adapter instances are registry singletons shared across jobs,
+        and the engine dispatches jobs as concurrent asyncio tasks —
+        plain instance state could be overwritten by another invocation
+        between _resolve and the pre-spawn gate (a skipped or foreign
+        revalidation). A ContextVar gives every task its own slot:
+        concurrent invocations can neither read nor overwrite each
+        other's evidence, a fresh task starts empty (no inherited
+        pinned state, no persistence across executions), and an
+        unpinned request can never reuse another request's evidence.
+        """
+        return _PINNED_EVIDENCE.get()
+
+    @_pinned.setter
+    def _pinned(self, value) -> None:
+        _PINNED_EVIDENCE.set(value)
+
     def __init__(self, session_factory, settings) -> None:
         self._sf = session_factory
         self._settings = settings
+        self._pinned = None  # PinnedPaths when the last _resolve was pinned
 
     # ------------------------------------------------------------ helpers
 
-    def _resolve(self, request: dict) -> tuple[ModelSpec, Path, Path | None]:
+    def _resolve(self, request: dict, *, cancel_check=None
+                 ) -> tuple[ModelSpec, Path, Path | None]:
         key = request.get("model_key")
         spec = model_catalog.get(key or "")
         if spec is None:
@@ -194,8 +266,41 @@ class SdCppAdapter:
         if spec.modality != "image" or "text2image" not in spec.modes or spec.support not in ("production", "tested"):
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for image generation")
+        binding = _execbind_marker(request)
+        self._pinned = None
         with self._sf() as s:
-            weight = model_files.installed_file(s, self._settings, spec)
+            if binding is not None:
+                # E1 — pinned execution is a subprocess-adapter
+                # contract. An unsupported (persistent) adapter refuses
+                # HERE: _resolve runs before _server_exe, pool acquire,
+                # model load/reuse and the HTTP submit on the persistent
+                # run() path, so this precedes every server interaction.
+                if self.profile.adapter_id not in \
+                        model_files.EXECBIND_SUPPORTED_ADAPTERS:
+                    raise ValueError(
+                        "execbind:persistent_runtime_unsupported — "
+                        "pinned execution is supported on standard "
+                        "subprocess adapters only; a persistent runtime "
+                        "cannot prove loaded-model identity at its "
+                        "execution boundary")
+                # U-5d-0 — pinned path: exact approved installation +
+                # every required member hash-verified BEFORE spawn. The
+                # unordered installed_file() lookup is never used.
+                try:
+                    paths = model_files.resolve_pinned_paths(
+                        s, self._settings, spec, binding,
+                        adapter_id=self.profile.adapter_id,
+                        roles=model_files.execbind_roles(
+                            spec, adapter_id=self.profile.adapter_id,
+                            has_image_input=False),
+                        cancel_check=cancel_check)
+                except model_files.ExecbindError as exc:
+                    raise ValueError(
+                        f"execbind:{exc.code}: {exc}") from exc
+                self._pinned = paths
+                weight = paths["diffusion"]
+            else:
+                weight = model_files.installed_file(s, self._settings, spec)
         if weight is None:
             raise ValueError(f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
         exe = self._exe_path(request)
@@ -462,7 +567,8 @@ class SdCppAdapter:
 
     async def _run(self, handle: JobHandle,
                    staged_dir: Path | None) -> AsyncIterator[dict[str, Any]]:
-        spec, weight, _ = self._resolve(handle.request)
+        spec, weight, _ = self._resolve(
+            handle.request, cancel_check=handle.check_cancel)
         req = handle.request
         seed = req.get("seed", -1)
         if seed in (-1, "random", None):
@@ -514,6 +620,18 @@ class SdCppAdapter:
         env = dict(os.environ)
         env.update(_device_env(flavor, gpu if isinstance(gpu, int) else None))
 
+        if self._pinned is not None:
+            # U-5d-0 F1 — final all-member drift revalidation AFTER all
+            # preparation (LoRA staging, argv, flavor, env), immediately
+            # before the external inference spawn. No second hash pass;
+            # any detected replacement/disappearance/modification is a
+            # controlled refusal, never a fallback or substitution.
+            try:
+                self._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         yield {"progress": 0.02, "message": "starting inference worker"}
         started = time.time()
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
@@ -669,7 +787,8 @@ class SdCppVideoAdapter(SdCppAdapter):
               "all downloads are user-approved.",
     )
 
-    def _resolve(self, request: dict) -> tuple[ModelSpec, Path, Path | None]:
+    def _resolve(self, request: dict, *, cancel_check=None
+                 ) -> tuple[ModelSpec, Path, Path | None]:
         key = request.get("model_key")
         spec = model_catalog.get(key or "")
         if spec is None:
@@ -680,19 +799,58 @@ class SdCppVideoAdapter(SdCppAdapter):
         if spec.modality != "video" or spec.support not in allowed:
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for video generation")
+        binding = _execbind_marker(request)
+        self._pinned = None
         with self._sf() as s:
-            weight = model_files.installed_file(s, self._settings, spec)
-            if weight is None:
-                raise ValueError(
-                    f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
-            vae = model_files.installed_component(s, self._settings, spec, "vae")
-            if vae is None:
-                raise ValueError(f"model '{spec.display_name}' VAE component is missing — reinstall")
-            tenc = model_files.installed_component(s, self._settings, spec, "text_encoder")
-            if tenc is None:
-                raise ValueError(f"model '{spec.display_name}' text-encoder component is missing — reinstall")
-            imgenc = model_files.installed_component(s, self._settings, spec, "image_encoder")
-        self._components = {"vae": vae, "text_encoder": tenc, "image_encoder": imgenc}
+            if binding is not None:
+                # E1 — same contract as the image adapter: pinned
+                # execution is supported on standard subprocess
+                # adapters only; a persistent runtime refuses before
+                # any server/pool interaction.
+                if self.profile.adapter_id not in \
+                        model_files.EXECBIND_SUPPORTED_ADAPTERS:
+                    raise ValueError(
+                        "execbind:persistent_runtime_unsupported — "
+                        "pinned execution is supported on standard "
+                        "subprocess adapters only; a persistent runtime "
+                        "cannot prove loaded-model identity at its "
+                        "execution boundary")
+                # U-5d-0 — pinned path: exact approved installation and
+                # EVERY required member (weights + vae + text_encoder +
+                # clip_vision when declared and i2v) hash-verified
+                # BEFORE spawn. installed_file/installed_component are
+                # never used on this path.
+                try:
+                    paths = model_files.resolve_pinned_paths(
+                        s, self._settings, spec, binding,
+                        adapter_id=self.profile.adapter_id,
+                        roles=model_files.execbind_roles(
+                            spec, adapter_id=self.profile.adapter_id,
+                            has_image_input=bool(
+                                request.get("image_path"))),
+                        cancel_check=cancel_check)
+                except model_files.ExecbindError as exc:
+                    raise ValueError(
+                        f"execbind:{exc.code}: {exc}") from exc
+                self._pinned = paths
+                weight = paths["diffusion"]
+                self._components = {
+                    "vae": paths["vae"],
+                    "text_encoder": paths["text_encoder"],
+                    "image_encoder": paths.get("clip_vision")}
+            else:
+                weight = model_files.installed_file(s, self._settings, spec)
+                if weight is None:
+                    raise ValueError(
+                        f"model '{spec.display_name}' is not installed — install it from the Model Manager first")
+                vae = model_files.installed_component(s, self._settings, spec, "vae")
+                if vae is None:
+                    raise ValueError(f"model '{spec.display_name}' VAE component is missing — reinstall")
+                tenc = model_files.installed_component(s, self._settings, spec, "text_encoder")
+                if tenc is None:
+                    raise ValueError(f"model '{spec.display_name}' text-encoder component is missing — reinstall")
+                imgenc = model_files.installed_component(s, self._settings, spec, "image_encoder")
+                self._components = {"vae": vae, "text_encoder": tenc, "image_encoder": imgenc}
         exe = self._exe_path(request)
         return spec, weight, exe
 
@@ -712,7 +870,8 @@ class SdCppVideoAdapter(SdCppAdapter):
         return errors
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
-        spec, weight, _ = self._resolve(handle.request)
+        spec, weight, _ = self._resolve(
+            handle.request, cancel_check=handle.check_cancel)
         req = handle.request
         seed = req.get("seed", -1)
         if seed in (-1, "random", None):
@@ -787,6 +946,16 @@ class SdCppVideoAdapter(SdCppAdapter):
         env = dict(os.environ)
         env.update(_device_env(flavor, gpu if isinstance(gpu, int) else None))
 
+        if self._pinned is not None:
+            # U-5d-0 F1 — final all-member drift revalidation AFTER all
+            # preparation, immediately before the external inference
+            # spawn. No second hash pass.
+            try:
+                self._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         yield {"progress": 0.02, "message": "starting video inference worker"}
         started = time.time()
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
@@ -1033,6 +1202,15 @@ class ModelBenchmarkAdapter:
         env = dict(os.environ)
         env.update(_device_env(flavor, req.get("assigned_gpu")
                                if isinstance(req.get("assigned_gpu"), int) else None))
+        if self._gen._pinned is not None:
+            # U-5d-0 F1 — same final drift gate as generation paths:
+            # every pinned member revalidated before this spawn.
+            try:
+                self._gen._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
         peak_rss: int | None = None
         cancelled = False
@@ -1086,7 +1264,8 @@ class ModelBenchmarkAdapter:
 
     async def run(self, handle: JobHandle) -> AsyncIterator[dict[str, Any]]:
         req = handle.request
-        spec, weight, _exe = self._gen._resolve(req)
+        spec, weight, _exe = self._gen._resolve(
+            req, cancel_check=handle.check_cancel)
         argv_prefix = self._gen._argv_prefix(req)
         runs = max(1, min(5, int(req.get("runs", 3) or 3)))
         work = Path(handle.work_dir)
