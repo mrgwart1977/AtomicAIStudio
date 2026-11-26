@@ -85,11 +85,17 @@ def _execbind_marker(request: dict) -> dict | None:
       binding_required absent  + execution_binding present → refuse
       binding_required 'execbind:v1' + valid binding dict  → pinned
       any other marker version or malformed binding        → refuse
+
+    Key presence is distinguished from a present-null value (F2): only
+    the GENUINE absence of both fields engages the legacy path — a
+    persisted 'binding_required': null or 'execution_binding': null is
+    tampered state and refuses, never silently unpinned.
     """
+    if "binding_required" not in request \
+            and "execution_binding" not in request:
+        return None
     required = request.get("binding_required")
     binding = request.get("execution_binding")
-    if required is None and binding is None:
-        return None
     if required != model_files.EXECBIND_VERSION:
         raise ValueError(
             "execution-binding marker is absent or unsupported — "
@@ -215,6 +221,7 @@ class SdCppAdapter:
     def __init__(self, session_factory, settings) -> None:
         self._sf = session_factory
         self._settings = settings
+        self._pinned = None  # PinnedPaths when the last _resolve was pinned
 
     # ------------------------------------------------------------ helpers
 
@@ -228,22 +235,25 @@ class SdCppAdapter:
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for image generation")
         binding = _execbind_marker(request)
+        self._pinned = None
         with self._sf() as s:
             if binding is not None:
                 # U-5d-0 — pinned path: exact approved installation +
                 # every required member hash-verified BEFORE spawn. The
                 # unordered installed_file() lookup is never used.
                 try:
-                    weight = model_files.resolve_pinned_paths(
+                    paths = model_files.resolve_pinned_paths(
                         s, self._settings, spec, binding,
                         adapter_id=self.profile.adapter_id,
                         roles=model_files.execbind_roles(
                             spec, adapter_id=self.profile.adapter_id,
                             has_image_input=False),
-                        cancel_check=cancel_check)["diffusion"]
+                        cancel_check=cancel_check)
                 except model_files.ExecbindError as exc:
                     raise ValueError(
                         f"execbind:{exc.code}: {exc}") from exc
+                self._pinned = paths
+                weight = paths["diffusion"]
             else:
                 weight = model_files.installed_file(s, self._settings, spec)
         if weight is None:
@@ -565,6 +575,18 @@ class SdCppAdapter:
         env = dict(os.environ)
         env.update(_device_env(flavor, gpu if isinstance(gpu, int) else None))
 
+        if self._pinned is not None:
+            # U-5d-0 F1 — final all-member drift revalidation AFTER all
+            # preparation (LoRA staging, argv, flavor, env), immediately
+            # before the external inference spawn. No second hash pass;
+            # any detected replacement/disappearance/modification is a
+            # controlled refusal, never a fallback or substitution.
+            try:
+                self._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         yield {"progress": 0.02, "message": "starting inference worker"}
         started = time.time()
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
@@ -733,6 +755,7 @@ class SdCppVideoAdapter(SdCppAdapter):
             raise ValueError(
                 f"model '{spec.display_name}' ({spec.modality}, {spec.support}) is not usable for video generation")
         binding = _execbind_marker(request)
+        self._pinned = None
         with self._sf() as s:
             if binding is not None:
                 # U-5d-0 — pinned path: exact approved installation and
@@ -752,6 +775,7 @@ class SdCppVideoAdapter(SdCppAdapter):
                 except model_files.ExecbindError as exc:
                     raise ValueError(
                         f"execbind:{exc.code}: {exc}") from exc
+                self._pinned = paths
                 weight = paths["diffusion"]
                 self._components = {
                     "vae": paths["vae"],
@@ -865,6 +889,16 @@ class SdCppVideoAdapter(SdCppAdapter):
         env = dict(os.environ)
         env.update(_device_env(flavor, gpu if isinstance(gpu, int) else None))
 
+        if self._pinned is not None:
+            # U-5d-0 F1 — final all-member drift revalidation AFTER all
+            # preparation, immediately before the external inference
+            # spawn. No second hash pass.
+            try:
+                self._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         yield {"progress": 0.02, "message": "starting video inference worker"}
         started = time.time()
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
@@ -1111,6 +1145,15 @@ class ModelBenchmarkAdapter:
         env = dict(os.environ)
         env.update(_device_env(flavor, req.get("assigned_gpu")
                                if isinstance(req.get("assigned_gpu"), int) else None))
+        if self._gen._pinned is not None:
+            # U-5d-0 F1 — same final drift gate as generation paths:
+            # every pinned member revalidated before this spawn.
+            try:
+                self._gen._pinned.revalidate(
+                    cancel_check=handle.check_cancel)
+            except model_files.ExecbindError as exc:
+                raise ValueError(
+                    f"execbind:{exc.code}: {exc}") from exc
         proc, lines = _spawn_supervised_async(argv, env=env, cwd=str(work))
         peak_rss: int | None = None
         cancelled = False

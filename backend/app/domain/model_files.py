@@ -335,11 +335,25 @@ def validate_execbind(session: Session, spec: ModelSpec,
 
 
 def stream_sha256(path: Path,
-                  cancel_check: Callable[[], None] | None = None) -> str:
+                  cancel_check: Callable[[], None] | None = None,
+                  *, evidence: dict | None = None) -> str:
     """Bounded streaming SHA-256 of one member file. cancel_check runs
-    once per chunk so worker cancellation semantics stay responsive."""
+    once per chunk so worker cancellation semantics stay responsive.
+
+    Opened-file drift evidence (F1): the file is opened once; os.fstat
+    on the open descriptor captures size/mtime BEFORE and AFTER the
+    stream — an in-place write through another handle during hashing is
+    detected and refused. A post-close stat of the same path proves it
+    still names the verified file: on filesystems that report a nonzero
+    st_ino (NTFS, ext4, most POSIX volumes) a dev+ino change means the
+    path was swapped mid-verify; where st_ino is unsupported the check
+    degrades to size/mtime only (disclosed limitation — metadata equality
+    is never claimed as content proof). Access time is never consulted.
+    When `evidence` (a dict) is supplied it receives the verified file's
+    identity/metadata for the pre-spawn revalidation gate."""
     sha = hashlib.sha256()
     with open(path, "rb") as fh:
+        pre = os.fstat(fh.fileno())
         while True:
             if cancel_check is not None:
                 cancel_check()
@@ -347,6 +361,33 @@ def stream_sha256(path: Path,
             if not chunk:
                 break
             sha.update(chunk)
+        post = os.fstat(fh.fileno())
+    if post.st_size != pre.st_size \
+            or post.st_mtime_ns != pre.st_mtime_ns:
+        raise ExecbindError(
+            "member_modified",
+            "member changed while its content was being verified")
+    try:
+        cur = path.stat()
+    except OSError as exc:
+        raise ExecbindError(
+            "member_unavailable",
+            "member is no longer a readable file") from exc
+    if pre.st_ino and cur.st_ino and \
+            (cur.st_dev, cur.st_ino) != (pre.st_dev, pre.st_ino):
+        raise ExecbindError(
+            "member_replaced",
+            "member file was replaced while its content was being "
+            "verified")
+    if cur.st_size != pre.st_size \
+            or cur.st_mtime_ns != pre.st_mtime_ns:
+        raise ExecbindError(
+            "member_modified",
+            "member changed while its content was being verified")
+    if evidence is not None:
+        evidence.update({"dev": pre.st_dev, "ino": pre.st_ino,
+                         "size": pre.st_size,
+                         "mtime_ns": pre.st_mtime_ns})
     return sha.hexdigest()
 
 
@@ -356,11 +397,60 @@ def _member_name_ok(name: str) -> bool:
         and "/" not in name and "\\" not in name and ":" not in name
 
 
+class PinnedPaths(dict):
+    """role → verified member Path plus the retained per-member
+    verification evidence captured while hashing (U-5d-0 F1).
+
+    revalidate() is the final pre-spawn drift gate: the member name is
+    re-resolved inside the approved install dir (a retargeted link or
+    escaped path resolves differently and refuses), the path must still
+    be a readable regular file, and the current identity (dev+ino where
+    the filesystem reports a nonzero index) and size/mtime must equal
+    the verified file's. No second hash pass — the gate detects
+    observable replacement/disappearance/size/modification drift; the
+    residual verify→open race remains disclosed."""
+
+    def revalidate(self, *, cancel_check: Callable[[], None] | None = None
+                   ) -> None:
+        install_dir = self._install_dir
+        for ev in self._evidence:
+            if cancel_check is not None:
+                cancel_check()
+            name = ev["file_name"]
+            resolved = (install_dir / name).resolve()
+            if resolved != ev["resolved"]:
+                raise ExecbindError(
+                    "member_replaced",
+                    f"member '{name}' no longer resolves to the "
+                    "verified file")
+            try:
+                st = resolved.stat()
+            except OSError as exc:
+                raise ExecbindError(
+                    "member_unavailable",
+                    f"member '{name}' is no longer a readable file"
+                    ) from exc
+            if not resolved.is_file():
+                raise ExecbindError(
+                    "member_unavailable",
+                    f"member '{name}' is no longer a regular file")
+            if ev["ino"] and st.st_ino and \
+                    (st.st_dev, st.st_ino) != (ev["dev"], ev["ino"]):
+                raise ExecbindError(
+                    "member_replaced",
+                    f"member '{name}' was replaced after verification")
+            if st.st_size != ev["size"] \
+                    or st.st_mtime_ns != ev["mtime_ns"]:
+                raise ExecbindError(
+                    "member_modified",
+                    f"member '{name}' changed after verification")
+
+
 def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
                          binding: dict, *, adapter_id: str,
                          roles: tuple[str, ...],
                          cancel_check: Callable[[], None] | None = None
-                         ) -> dict[str, Path]:
+                         ) -> PinnedPaths:
     """Worker-side pinned resolution: revalidate the persisted binding
     against current records, resolve every required member under the
     APPROVED installation directory inside the authorized models root,
@@ -426,7 +516,8 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
         raise ExecbindError("install_dir_escape",
                             "install directory escapes the authorized "
                             "models root")
-    out: dict[str, Path] = {}
+    out = PinnedPaths()
+    evidence: list[dict] = []
     for m in binding["members"]:
         name = m["file_name"]
         if not _member_name_ok(name):
@@ -445,9 +536,7 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
                                 "readable file")
         # Detectable drift (C5): a changed size refuses before the
         # hash pass — a cheap, portable metadata check. The streaming
-        # hash remains the authoritative content proof; mtime/ctime
-        # comparisons are platform-dependent and deliberately not
-        # treated as content evidence.
+        # hash remains the authoritative content proof.
         declared_size = getattr(declared[name], "size_bytes", 0) or 0
         if declared_size and resolved.stat().st_size != declared_size:
             raise ExecbindError(
@@ -456,12 +545,29 @@ def resolve_pinned_paths(session: Session, settings, spec: ModelSpec,
                 f"bytes, expected the declared {declared_size}")
         # Hash the containment-verified path — the residual
         # verify→open TOCTOU is disclosed in the milestone report.
-        digest = stream_sha256(resolved, cancel_check)
+        # The verified file's opened-descriptor identity/metadata is
+        # retained for the final pre-spawn revalidation (F1).
+        ev = {"file_name": name, "resolved": resolved}
+        digest = stream_sha256(resolved, cancel_check, evidence=ev)
+        if "size" not in ev:
+            # stream_sha256 patched without evidence forwarding (test
+            # spies) — anchor the same fields from a fresh stat.
+            st = resolved.stat()
+            ev.update({"dev": st.st_dev, "ino": st.st_ino,
+                       "size": st.st_size,
+                       "mtime_ns": st.st_mtime_ns})
         if digest != m["expected_sha256"]:
             raise ExecbindError("integrity_mismatch",
                                 f"current content of '{name}' does "
                                 "not match the approved hash")
+        evidence.append(ev)
         out[m["role"]] = resolved
+    out._install_dir = install_dir
+    out._evidence = evidence
+    # End-of-resolution gate: a member verified first may have drifted
+    # while later members were hashing — refuse before returning the
+    # approved map. Callers re-run the same gate at the spawn boundary.
+    out.revalidate(cancel_check=cancel_check)
     return out
 
 

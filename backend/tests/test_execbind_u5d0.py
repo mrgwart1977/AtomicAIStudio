@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import threading
 from pathlib import Path
 
@@ -373,6 +374,7 @@ def test_legacy_unpinned_request_unchanged(client, monkeypatch):
     _spec_out, weight, _ = ad._resolve(
         {"model_key": spec.key, "runtime_flavor": "vulkan"})
     assert called and weight.name == "main.safetensors"
+    assert ad._pinned is None  # legacy resolution retains no pin state
 
 
 # ------------------------------------------------------------------
@@ -465,11 +467,25 @@ def test_marker_state_matrix():
     # valid pair → pinned
     assert _execbind_marker({"binding_required": "execbind:v1",
                              "execution_binding": good}) == good
-    # genuine legacy → None (absent or null marker, no binding)
+    # genuine legacy → None (BOTH keys truly absent only)
     assert _execbind_marker({"model_key": "m"}) is None
     assert _execbind_marker({}) is None
-    assert _execbind_marker({"binding_required": None}) is None
-    assert _execbind_marker({"execution_binding": None}) is None
+    # F2 — key PRESENCE is not key absence: a persisted null/false/
+    # wrong-type/unsupported marker, or a null binding without a
+    # marker, is tampered state — refuse, never legacy.
+    for tampered in ({"binding_required": None},
+                     {"execution_binding": None},
+                     {"binding_required": None,
+                      "execution_binding": None},
+                     {"binding_required": False},
+                     {"binding_required": 1},
+                     {"binding_required": {"v": 1}},
+                     {"binding_required": "execbind:v0"},
+                     {"binding_required": "execbind:v9"},
+                     {"binding_required": None,
+                      "execution_binding": dict(good)}):
+        with pytest.raises((ValueError, TypeError)):
+            _execbind_marker(tampered)
 
 
 def test_schema_strictness(client, monkeypatch):
@@ -840,9 +856,9 @@ def test_every_member_hashed_before_spawn(client, monkeypatch, tmp_path):
                      roles=("diffusion", "vae", "text_encoder"))
     hashed = []
     orig = model_files.stream_sha256
-    def spy(path, cancel_check=None):
+    def spy(path, cancel_check=None, **kw):
         hashed.append(Path(path).name)
-        return orig(path, cancel_check)
+        return orig(path, cancel_check, **kw)
     monkeypatch.setattr(model_files, "stream_sha256", spy)
     spawned = []
     monkeypatch.setattr(
@@ -1440,20 +1456,353 @@ def test_member_size_drift_refuses(client, monkeypatch):
         ad._resolve(_pinned_request(b))
 
 
+def test_execbind_client_keys_inventory():
+    """F2 — the prohibited client-field inventory is exactly these 13
+    names; locking it so a silent key removal is a regression, not a
+    reporting detail."""
+    assert cmd.EXECBIND_CLIENT_KEYS == frozenset({
+        "execution_binding", "expected_binding", "binding_required",
+        "execbind", "execbind_expected", "internal_execbind",
+        "install_id", "expected_sha256", "member_sha256",
+        "binding_version", "binding_marker", "trusted_internal",
+        "internal_invocation"})
+
+
 def test_refused_commit_creates_no_job(client, monkeypatch):
-    """C6.F — refused requests (prohibited client fields, missing
-    expected binding) create neither pinned nor unpinned jobs."""
+    """C6.F, F2 — EVERY prohibited client field commits to neither a
+    pinned nor an unpinned job; a missing expected binding likewise."""
     spec = _img_spec()
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
     n0 = _job_count(client)
-    r = _commit_public(client, p["id"], "generate.image",
-                       {"model_key": spec.key, "prompt": "x",
-                        "execution_binding": {"x": 1}}, "k-noside")
-    assert r.status_code == 422
+    for i, field in enumerate(sorted(cmd.EXECBIND_CLIENT_KEYS)):
+        r = _commit_public(
+            client, p["id"], "generate.image",
+            {"model_key": spec.key, "prompt": "x", field: {"x": 1}},
+            f"k-noside-{i}")
+        assert r.status_code == 422, (field, r.text)
     with pytest.raises(CommandError):
         _internal_commit(client, p["id"], "generate.image",
                          {"model_key": spec.key, "prompt": "x"},
                          "k-noside2")  # expected=None
     assert _job_count(client) == n0
+    # a valid public commit afterwards still works — nothing was
+    # silently stripped or latched by the refused attempts
+    r = _commit_public(client, p["id"], "generate.image",
+                       {"model_key": spec.key, "prompt": "x"},
+                       "k-after-refusals")
+    assert r.status_code == 200, r.text
+    req = _last_job(client)
+    assert "binding_required" not in req
+    assert "execution_binding" not in req
+
+
+# ------------------------------------------------------------------
+# J. F1 — opened-file drift verification & final pre-spawn gate
+#
+# Deterministic mutation points: cancel_check runs before EVERY chunk
+# inside stream_sha256 (call N lands between the pre- and post-hash
+# fstat captures), and _pick_flavor is a fixed preparation step between
+# resolution and the spawn boundary — no timing dependence anywhere.
+
+def _member_file(client, spec, name="main.safetensors") -> Path:
+    with client.app.state.session_factory() as s:
+        return model_files.models_root(
+            s, client.app.state.settings) / spec.key / name
+
+
+def test_unchanged_member_passes_both_gates(client, monkeypatch):
+    """F1.A — an untouched regular file verifies at the end-of-
+    resolution gate AND the final revalidation gate."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    _spec_out, w, _ = ad._resolve(_pinned_request(b))
+    assert w.name == "main.safetensors"
+    assert isinstance(ad._pinned, model_files.PinnedPaths)
+    ad._pinned.revalidate()  # second gate: unchanged → clean
+
+
+def test_size_change_during_hash_refuses(client, monkeypatch):
+    """F1.D — the file grows under the open descriptor mid-stream →
+    member_modified; the digest is never trusted."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    target = _member_file(client, spec)
+    calls = []
+    def cc():
+        calls.append(1)
+        if len(calls) == 2:  # deterministic: after the first chunk
+            with open(target, "ab") as fh:
+                fh.write(b"!")
+    ad = _img_adapter(client)
+    with pytest.raises(ValueError, match="execbind:member_modified"):
+        ad._resolve(_pinned_request(b), cancel_check=cc)
+
+
+def test_metadata_change_during_hash_refuses(client, monkeypatch):
+    """F1.E — a metadata-only modification (mtime) under the open
+    descriptor mid-stream → member_modified. Access time is never a
+    failure condition."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    target = _member_file(client, spec)
+    calls = []
+    def cc():
+        calls.append(1)
+        if len(calls) == 2:
+            st = target.stat()
+            os.utime(target, ns=(st.st_atime_ns,
+                                 st.st_mtime_ns + 1_000_000_000))
+    ad = _img_adapter(client)
+    with pytest.raises(ValueError, match="execbind:member_modified"):
+        ad._resolve(_pinned_request(b), cancel_check=cc)
+
+
+def test_replacement_during_hash_refuses(client, monkeypatch):
+    """F1.F — the path is swapped in the post-close stat window during
+    verification → member_replaced via opened-file identity (dev+ino)
+    where the filesystem reports file indices.
+
+    Deterministic mutation point: Path.stat is hooked to perform a REAL
+    filesystem replacement the first time the verified path is stat'd
+    after the stream (the fd-close→path-stat window — the only window a
+    path swap can reach on Windows, which forbids deleting an open
+    file). The detection machinery itself is unmocked."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    target = _member_file(client, spec)
+    if not target.stat().st_ino:
+        pytest.skip("file-identity evidence unavailable on this "
+                    "filesystem")
+    resolved_target = target.resolve()
+    armed = []
+    def cc():
+        if not armed:  # arm inside the stream — before fd close
+            armed.append(1)
+    orig_stat = Path.stat
+    def swapped_stat(self, *a, **k):
+        if armed and self == resolved_target:
+            armed.clear()        # one-shot, at the post-close stat
+            target.unlink()      # fd is closed here — unlink allowed
+            target.write_bytes(b"SWAP")  # new file index, same path
+        return orig_stat(self, *a, **k)
+    monkeypatch.setattr(Path, "stat", swapped_stat)
+    ad = _img_adapter(client)
+    with pytest.raises(ValueError, match="execbind:member_replaced"):
+        ad._resolve(_pinned_request(b), cancel_check=cc)
+
+
+def test_first_member_drift_during_second_verify_refuses(
+        client, monkeypatch):
+    """F1.G — diffusion verified, then mutated while vae streams — the
+    end-of-resolution gate refuses before any spawn-boundary path."""
+    spec = _vid_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, spec.key, install_id,
+                     adapter="gen.video.sdcpp",
+                     roles=("diffusion", "vae", "text_encoder"))
+    diff = _member_file(client, spec, "diffusion.safetensors")
+    orig = model_files.stream_sha256
+    def mutate_after_vae(path, cancel_check=None, **kw):
+        out = orig(path, cancel_check, **kw)
+        if Path(path).name == "vae.safetensors":
+            with open(diff, "ab") as fh:
+                fh.write(b"!")
+        return out
+    monkeypatch.setattr(model_files, "stream_sha256", mutate_after_vae)
+    ad = _vid_adapter(client)
+    with pytest.raises(ValueError, match="execbind:member_modified"):
+        ad._resolve({**_pinned_request(b), "model_key": spec.key})
+
+
+def test_member_drift_during_preparation_refuses_image(
+        client, monkeypatch, tmp_path):
+    """F1.H/O — a verified member modified during request preparation
+    (flavor selection) refuses at the spawn-boundary gate; the external
+    worker is NEVER spawned."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    target = _member_file(client, spec)
+    orig_flavor = SdCppAdapter._pick_flavor
+    def drifted_flavor(self, requested, rt_spec):
+        with open(target, "ab") as fh:  # fixed prep step → deterministic
+            fh.write(b"!")
+        return orig_flavor(self, requested, rt_spec)
+    monkeypatch.setattr(SdCppAdapter, "_pick_flavor", drifted_flavor)
+    spawned = []
+    monkeypatch.setattr(
+        "app.adapters.inference._spawn_supervised_async",
+        lambda *a, **k: spawned.append(1))
+    ad = _img_adapter(client)
+    handle = _handle({**_pinned_request(b), "model_key": spec.key,
+                      "width": 512, "height": 512}, tmp_path)
+    with pytest.raises(ValueError, match="execbind:member_modified"):
+        asyncio.run(_drain(ad.run(handle)))
+    assert spawned == []
+
+
+def test_member_drift_during_preparation_refuses_video(
+        client, monkeypatch, tmp_path):
+    """F1.H/O — same gate on the video path: an aux member modified
+    during preparation refuses and never reaches spawn."""
+    spec = _vid_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, spec.key, install_id,
+                     adapter="gen.video.sdcpp",
+                     roles=("diffusion", "vae", "text_encoder"))
+    vae = _member_file(client, spec, "vae.safetensors")
+    orig_flavor = SdCppAdapter._pick_flavor
+    def drifted_flavor(self, requested, rt_spec):
+        with open(vae, "ab") as fh:
+            fh.write(b"!")
+        return orig_flavor(self, requested, rt_spec)
+    monkeypatch.setattr(SdCppAdapter, "_pick_flavor", drifted_flavor)
+    spawned = []
+    monkeypatch.setattr(
+        "app.adapters.inference._spawn_supervised_async",
+        lambda *a, **k: spawned.append(1))
+    ad = _vid_adapter(client)
+    req = {**_pinned_request(b), "model_key": spec.key,
+           "frames": 4, "width": 832, "height": 480}
+    with pytest.raises(ValueError, match="execbind:member_modified"):
+        asyncio.run(_drain(ad.run(_handle(req, tmp_path))))
+    assert spawned == []
+
+
+def test_member_disappears_after_verify_refuses(client, monkeypatch):
+    """F1.I — a member deleted between verification and the final gate
+    refuses member_unavailable."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    _member_file(client, spec).unlink()
+    with pytest.raises(model_files.ExecbindError) as ei:
+        ad._pinned.revalidate()
+    assert ei.value.code == "member_unavailable"
+
+
+def test_same_size_replacement_at_gate_refuses(client, monkeypatch):
+    """F1.J — a same-size replacement with the original mtime restored
+    still refuses via opened-file identity (dev+ino) where the
+    filesystem reports file indices; where it does not, the check
+    degrades to size/mtime (disclosed, not claimed detected)."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    target = _member_file(client, spec)
+    orig_st = target.stat()
+    if not orig_st.st_ino:
+        pytest.skip("file-identity evidence unavailable on this "
+                    "filesystem")
+    tmp = target.parent / "_swap.tmp"
+    tmp.write_bytes(b"XXXX")              # same size, other content
+    os.replace(tmp, target)
+    os.utime(target, ns=(orig_st.st_atime_ns, orig_st.st_mtime_ns))
+    with pytest.raises(model_files.ExecbindError) as ei:
+        ad._pinned.revalidate()
+    assert ei.value.code == "member_replaced"
+
+
+def test_cancel_during_revalidation_preserves_cancel(client, monkeypatch):
+    """F1.K — a genuine cancel observed by the final gate propagates
+    JobCancelled — preserved cancellation semantics, not a drift
+    failure."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    ev = threading.Event()
+    ev.set()
+    with pytest.raises(JobCancelled):
+        ad._pinned.revalidate(
+            cancel_check=_handle({}, Path("."), ev).check_cancel)
+
+
+def test_drift_refusal_is_controlled_failure(client, monkeypatch):
+    """F1.3/L — a drift refusal is a coded failure: not JobCancelled,
+    not a legacy fallback, not a substitute, and the message carries
+    member names, never absolute paths."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    target = _member_file(client, spec)
+    with open(target, "ab") as fh:
+        fh.write(b"!")
+    with pytest.raises(model_files.ExecbindError) as ei:
+        ad._pinned.revalidate()
+    assert ei.value.code == "member_modified"
+    assert not isinstance(ei.value, JobCancelled)
+    with client.app.state.session_factory() as s:
+        root = model_files.models_root(s, client.app.state.settings)
+    assert str(root) not in str(ei.value)
+    assert "main.safetensors" in str(ei.value)
+
+
+def test_final_gate_precedes_spawn_image_and_video(
+        client, monkeypatch, tmp_path):
+    """F1.M/N — ordering proof for BOTH adapters: every member hash →
+    end-of-resolution gate → preparation → final gate → spawn."""
+    order = []
+    orig_hash = model_files.stream_sha256
+    monkeypatch.setattr(
+        model_files, "stream_sha256",
+        lambda p, c=None, **k: order.append("hash")
+        or orig_hash(p, c, **k))
+    orig_gate = model_files.PinnedPaths.revalidate
+    monkeypatch.setattr(
+        model_files.PinnedPaths, "revalidate",
+        lambda self, **k: order.append("gate") or orig_gate(self, **k))
+    monkeypatch.setattr(
+        "app.adapters.inference._spawn_supervised_async",
+        lambda *a, **k: order.append("spawn") or (_ for _ in ()).throw(
+            RuntimeError("spawn-boundary")))
+
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    handle = _handle({**_pinned_request(b), "model_key": spec.key,
+                      "width": 512, "height": 512}, tmp_path)
+    with pytest.raises(RuntimeError, match="spawn-boundary"):
+        asyncio.run(_drain(ad.run(handle)))
+    assert order == ["hash", "gate", "gate", "spawn"]
+
+    order.clear()
+    vspec = _vid_spec()
+    _add_spec(monkeypatch, vspec)
+    vinst = _install_pinned(client, vspec)
+    vb = _binding_for(client, vspec.key, vinst,
+                      adapter="gen.video.sdcpp",
+                      roles=("diffusion", "vae", "text_encoder"))
+    vad = _vid_adapter(client)
+    vreq = {**_pinned_request(vb), "model_key": vspec.key,
+            "frames": 4, "width": 832, "height": 480}
+    with pytest.raises(RuntimeError, match="spawn-boundary"):
+        asyncio.run(_drain(vad.run(_handle(vreq, tmp_path))))
+    assert order == ["hash", "hash", "hash", "gate", "gate", "spawn"]
