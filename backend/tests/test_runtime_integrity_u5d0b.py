@@ -243,8 +243,9 @@ def test_reparse_point_refused(tmp_path):
     link = root / "ggml.dll"
     link.unlink()
     try:
-        os.symlink(tmp_path / "payload.dll", link)
-        _write(tmp_path, "payload.dll", b"dep")
+        # Same-root redirect — resolves inside the coverage dir but is
+        # still a reparse point and must be refused.
+        os.symlink(root / "sd-cli.exe", link)
     except (OSError, NotImplementedError):
         pytest.skip("symlink privilege unavailable")
     q = ri.qualify(root, m)
