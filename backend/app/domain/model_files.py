@@ -52,6 +52,15 @@ class ModelError(Exception):
 # ------------------------------------------------------------------
 
 EXECBIND_VERSION = "execbind:v1"
+# E1 — the exact-execution-binding guarantee covers STANDARD SUBPROCESS
+# adapters only. Persistent inference cannot establish the identity of
+# already-loaded model weights at its execution boundary (the post-
+# resolve spawn flow lives outside this contract), so pinned execution
+# is refused everywhere an unsupported adapter would be selected —
+# command-side and worker-side. Ordinary unpinned persistent inference
+# is unchanged.
+EXECBIND_SUPPORTED_ADAPTERS = frozenset(
+    {"gen.image.sdcpp", "gen.video.sdcpp"})
 EXECBIND_INTEGRITY = ("catalog_declared", "install_verified")
 _EXECBIND_FIELDS = {"binding_version", "artifact_id", "model_key",
                     "install_id", "runtime_key", "adapter_id", "members"}

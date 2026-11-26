@@ -3353,6 +3353,39 @@ def _execbind_adapter(command_type: str) -> str:
     return JOB_COMMANDS[command_type]
 
 
+def _execbind_effective_adapter(command_type: str, payload: dict,
+                                adapter_id: str | None) -> str:
+    """The adapter pinned execution would actually dispatch — the
+    composed local-adapter stamp wins over the command default exactly
+    as the job-enqueue path resolves it, so a trusted preview refuses
+    the same routing a commit would (E1: enforcement binds the
+    EFFECTIVE adapter, never the command name alone)."""
+    if adapter_id is not None:
+        return adapter_id
+    if payload.get("execution_target") == "local" \
+            and payload.get("local_adapter_id"):
+        return payload["local_adapter_id"]
+    return _execbind_adapter(command_type)
+
+
+def _execbind_adapter_supported(adapter_id: str) -> bool:
+    from app.domain import model_files
+    return adapter_id in model_files.EXECBIND_SUPPORTED_ADAPTERS
+
+
+def _execbind_refuse_persistent(adapter_id: str):
+    """Stable controlled refusal (E1) — pinned execution is a
+    subprocess-adapter contract; a persistent runtime cannot prove
+    loaded-model identity at the execution boundary."""
+    raise CommandError(
+        422, {"error": "execbind:persistent_runtime_unsupported",
+              "detail": f"pinned execution is supported on the standard "
+                        f"subprocess adapters only — '{adapter_id}' is "
+                        f"a persistent runtime whose loaded-model "
+                        f"identity cannot be established at the "
+                        f"execution boundary"})
+
+
 def _execbind_roles(spec, command_type: str,
                     payload: dict) -> tuple[str, ...]:
     from app.domain import model_files
@@ -3377,7 +3410,10 @@ def _execbind_commit(session: Session, command_type: str, payload: dict,
     if spec is None:
         raise CommandError(422, "unknown model "
                                 f"'{payload.get('model_key')}'")
-    adapter_id = adapter_id or _execbind_adapter(command_type)
+    adapter_id = _execbind_effective_adapter(
+        command_type, payload, adapter_id)
+    if not _execbind_adapter_supported(adapter_id):
+        _execbind_refuse_persistent(adapter_id)
     roles = _execbind_roles(spec, command_type, payload)
     try:
         if expected is None:
@@ -5147,6 +5183,14 @@ def commit(session: Session, project: Project, *, command_type: str, payload: di
         raise CommandError(
             422, f"internal_execbind does not apply to "
                  f"'{command_type}'")
+    elif not _execbind_adapter_supported(
+            _execbind_adapter(command_type)):
+        # E1 — pinned execution covers standard subprocess adapters
+        # only; the persistent command refuses on ITS command-mapped
+        # adapter before any expected-binding handling. Other routing
+        # paths (a local-adapter stamp on generate.image) are refused
+        # where the effective adapter is resolved — _execbind_commit.
+        _execbind_refuse_persistent(_execbind_adapter(command_type))
     elif execbind_expected is None:
         # C1 — trusted commit REQUIRES the approved binding produced by
         # a trusted preview; it never silently constructs a replacement

@@ -19,6 +19,7 @@ model is marked installed.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import subprocess
 import hashlib
 import logging
@@ -189,6 +190,17 @@ def _result_apply_command(req: dict) -> dict | None:
     return None
 
 
+# E3 — pinned verification evidence is request-local, never adapter
+# state. Adapter instances are registry singletons shared across jobs
+# and the engine dispatches each job as its own asyncio task, so a
+# ContextVar gives every invocation its own evidence slot: concurrent
+# invocations can neither read nor overwrite each other's verified
+# paths, and a fresh task starts empty (no inherited pinned state, no
+# persistence across unrelated executions). See SdCppAdapter._pinned.
+_PINNED_EVIDENCE: contextvars.ContextVar = contextvars.ContextVar(
+    "execbind_pinned_evidence", default=None)
+
+
 class SdCppAdapter:
     """Real text-to-image via a stable-diffusion.cpp `sd` worker binary.
 
@@ -218,6 +230,26 @@ class SdCppAdapter:
               "Requires an installed model; all downloads are user-approved.",
     )
 
+    @property
+    def _pinned(self):
+        """Pinned verification evidence for THIS invocation (E3).
+
+        Adapter instances are registry singletons shared across jobs,
+        and the engine dispatches jobs as concurrent asyncio tasks —
+        plain instance state could be overwritten by another invocation
+        between _resolve and the pre-spawn gate (a skipped or foreign
+        revalidation). A ContextVar gives every task its own slot:
+        concurrent invocations can neither read nor overwrite each
+        other's evidence, a fresh task starts empty (no inherited
+        pinned state, no persistence across executions), and an
+        unpinned request can never reuse another request's evidence.
+        """
+        return _PINNED_EVIDENCE.get()
+
+    @_pinned.setter
+    def _pinned(self, value) -> None:
+        _PINNED_EVIDENCE.set(value)
+
     def __init__(self, session_factory, settings) -> None:
         self._sf = session_factory
         self._settings = settings
@@ -238,6 +270,19 @@ class SdCppAdapter:
         self._pinned = None
         with self._sf() as s:
             if binding is not None:
+                # E1 — pinned execution is a subprocess-adapter
+                # contract. An unsupported (persistent) adapter refuses
+                # HERE: _resolve runs before _server_exe, pool acquire,
+                # model load/reuse and the HTTP submit on the persistent
+                # run() path, so this precedes every server interaction.
+                if self.profile.adapter_id not in \
+                        model_files.EXECBIND_SUPPORTED_ADAPTERS:
+                    raise ValueError(
+                        "execbind:persistent_runtime_unsupported — "
+                        "pinned execution is supported on standard "
+                        "subprocess adapters only; a persistent runtime "
+                        "cannot prove loaded-model identity at its "
+                        "execution boundary")
                 # U-5d-0 — pinned path: exact approved installation +
                 # every required member hash-verified BEFORE spawn. The
                 # unordered installed_file() lookup is never used.
@@ -758,6 +803,18 @@ class SdCppVideoAdapter(SdCppAdapter):
         self._pinned = None
         with self._sf() as s:
             if binding is not None:
+                # E1 — same contract as the image adapter: pinned
+                # execution is supported on standard subprocess
+                # adapters only; a persistent runtime refuses before
+                # any server/pool interaction.
+                if self.profile.adapter_id not in \
+                        model_files.EXECBIND_SUPPORTED_ADAPTERS:
+                    raise ValueError(
+                        "execbind:persistent_runtime_unsupported — "
+                        "pinned execution is supported on standard "
+                        "subprocess adapters only; a persistent runtime "
+                        "cannot prove loaded-model identity at its "
+                        "execution boundary")
                 # U-5d-0 — pinned path: exact approved installation and
                 # EVERY required member (weights + vae + text_encoder +
                 # clip_vision when declared and i2v) hash-verified

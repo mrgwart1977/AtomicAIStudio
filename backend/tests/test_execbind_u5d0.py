@@ -1215,21 +1215,28 @@ def test_no_marker_fields_in_public_surface(client, monkeypatch):
 
 
 def test_persistent_adapter_binds_server_id(client, monkeypatch):
-    """P3 — a generate.image.persistent internal commit binds
-    adapter_id gen.image.sdcpp-server, matching the worker profile."""
+    """E1 — AMENDED (was P3): a trusted pinned generate.image.persistent
+    invocation now REFUSES at preview and at commit — pinned execution
+    is a standard-subprocess-adapter contract; the persistent runtime
+    cannot prove loaded-model identity at its execution boundary. The
+    former assertion (a successful server-adapter bind) was the residual
+    this amendment closes; no job is created."""
     spec = _img_spec()
     _add_spec(monkeypatch, spec)
     _install_pinned(client, spec)
     p = make_project(client)
     payload = {"model_key": spec.key, "prompt": "x"}
-    b = _internal_preview(client, p["id"], "generate.image.persistent",
-                          payload)["execution_binding"]
-    res = _internal_commit(
-        client, p["id"], "generate.image.persistent", payload,
-        "k-srv", expected=b)
-    req = _req_of(client, res)
-    assert req["execution_binding"]["adapter_id"] == \
-        "gen.image.sdcpp-server"
+    with pytest.raises(CommandError, match="persistent_runtime"):
+        _internal_preview(client, p["id"], "generate.image.persistent",
+                          payload)
+    # Even a well-formed server-adapter binding cannot carry a commit.
+    b = _binding_for(client, spec.key,
+                     adapter="gen.image.sdcpp-server", roles=("diffusion",))
+    n0 = _job_count(client)
+    with pytest.raises(CommandError, match="persistent_runtime"):
+        _internal_commit(client, p["id"], "generate.image.persistent",
+                         payload, "k-srv", expected=b)
+    assert _job_count(client) == n0
 
 
 def test_video_internal_commit_binds_all_roles(client, monkeypatch):
@@ -1806,3 +1813,169 @@ def test_final_gate_precedes_spawn_image_and_video(
     with pytest.raises(RuntimeError, match="spawn-boundary"):
         asyncio.run(_drain(vad.run(_handle(vreq, tmp_path))))
     assert order == ["hash", "hash", "hash", "gate", "gate", "spawn"]
+
+
+# ------------------------------------------------------------------
+# K. E1–E3 — final execution-boundary closure
+#
+# E1: pinned execution is a standard-subprocess-adapter contract —
+# trusted preview, commit, alternate routing and the worker all refuse
+# the persistent runtime; ordinary unpinned persistent behavior is
+# unchanged. E2: the final gate re-resolves each member and requires
+# resolved-path IDENTITY with the verified file — containment is
+# pinned, not merely re-checked. E3: pinned evidence is request-local
+# (per-task ContextVar), never shared adapter state.
+
+
+def _server_adapter(client, pool=None):
+    from app.adapters.sdcpp_server import SdCppServerAdapter
+    return SdCppServerAdapter(client.app.state.session_factory,
+                              client.app.state.settings, pool)
+
+
+def test_pinned_persistent_commit_no_expected_refuses(
+        client, monkeypatch):
+    """E1 — a pinned persistent commit refuses with the stable reason
+    even before expected-binding handling; no job is created and
+    nothing falls back to unpinned or substitutes another adapter."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    p = make_project(client)
+    n0 = _job_count(client)
+    with pytest.raises(CommandError, match="persistent_runtime"):
+        _internal_commit(client, p["id"], "generate.image.persistent",
+                         {"model_key": spec.key, "prompt": "x"},
+                         "k-pers-noexp")
+    assert _job_count(client) == n0
+
+
+def test_pinned_local_adapter_override_refuses(client, monkeypatch):
+    """E1.1/E1.3.E — routing generate.image onto the persistent adapter
+    via a local_adapter_id stamp is refused at preview AND commit:
+    enforcement binds the EFFECTIVE adapter, never the command name."""
+    from app.adapters.sdcpp_server import SdCppServerAdapter
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    p = make_project(client)
+    payload = {"model_key": spec.key, "prompt": "x",
+               "execution_target": "local",
+               "local_adapter_id": "gen.image.sdcpp-server"}
+    with pytest.raises(CommandError, match="persistent_runtime"):
+        _internal_preview(client, p["id"], "generate.image", payload)
+    # Registering the persistent adapter is exactly what the feature
+    # flag does (registry gate) — commit reaches the effective-adapter
+    # check and still refuses: enablement is not a bypass (E1.3.H).
+    reg = client.app.state.job_engine._registry
+    monkeypatch.setitem(
+        reg._adapters, "gen.image.sdcpp-server",
+        SdCppServerAdapter(client.app.state.session_factory,
+                           client.app.state.settings))
+    b = _binding_for(client, install_id=install_id)
+    n0 = _job_count(client)
+    with pytest.raises(CommandError, match="persistent_runtime"):
+        _internal_commit(client, p["id"], "generate.image", payload,
+                         "k-ovr", expected=b)
+    assert _job_count(client) == n0
+
+
+def test_pinned_persistent_worker_refuses_before_server(
+        client, monkeypatch, tmp_path):
+    """E1.2/E1.3.F — a pinned request on SdCppServerAdapter refuses
+    inside the inherited _resolve: _server_exe, pool.acquire (server
+    spawn) and the HTTP submit are never reached."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, spec.key, install_id,
+                     adapter="gen.image.sdcpp-server", roles=("diffusion",))
+    ad = _server_adapter(client)
+    req = _pinned_request(b)
+    with pytest.raises(ValueError, match="persistent_runtime"):
+        ad._resolve(req)
+    called = []
+    monkeypatch.setattr(type(ad), "_server_exe",
+                        lambda *a, **k: called.append("exe"))
+
+    class _Pool:
+        async def acquire(self, spec):  # pragma: no cover - never reached
+            called.append("acquire")
+
+    ad._pool = _Pool()
+    with pytest.raises(ValueError, match="persistent_runtime"):
+        asyncio.run(_drain(ad.run(_handle(req, tmp_path))))
+    assert called == []
+
+
+def test_unpinned_persistent_resolution_unchanged(client, monkeypatch):
+    """E1.3.G — an ordinary (unpinned) request on the persistent
+    adapter still resolves the legacy installed-file path; the new
+    refusal engages only on a pinned request."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    _install_pinned(client, spec)
+    ad = _server_adapter(client)
+    got_spec, weight, _ = ad._resolve(
+        {"model_key": spec.key, "prompt": "x"})
+    assert got_spec.key == spec.key and weight is not None
+
+
+def test_gate_containment_escape_refuses(client, monkeypatch, tmp_path):
+    """E2 — after verification the member is retargeted through a
+    symlink so it resolves OUTSIDE the approved install dir: the final
+    gate re-resolves the path and refuses (member_replaced)."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    pinned = ad._pinned
+    assert pinned is not None
+    member = _member_file(client, spec)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"OUT")
+    member.unlink()
+    try:
+        member.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted in this environment")
+    with pytest.raises(model_files.ExecbindError) as ei:
+        pinned.revalidate()
+    assert ei.value.code == "member_replaced"
+
+
+def test_pinned_evidence_is_request_local(client, monkeypatch):
+    """E3 — pinned evidence lives in per-task state on the SHARED
+    adapter instance: a concurrent invocation cannot read or overwrite
+    it, a subsequent unpinned resolve clears it, and nothing persists
+    across executions."""
+    spec = _img_spec()
+    _add_spec(monkeypatch, spec)
+    install_id = _install_pinned(client, spec)
+    b = _binding_for(client, install_id=install_id)
+    ad = _img_adapter(client)
+    ad._resolve(_pinned_request(b))
+    pinned = ad._pinned
+    assert pinned is not None
+    # sequential: the next unpinned resolve on the same singleton
+    # cannot inherit the pinned evidence
+    ad._resolve({"model_key": spec.key, "prompt": "x"})
+    assert ad._pinned is None
+
+    async def probe():
+        ad._pinned = "foreign"  # writes to the child task's own slot
+        await asyncio.sleep(0)
+        return ad._pinned
+
+    async def driver():
+        ad._pinned = pinned
+        child = asyncio.create_task(probe())
+        assert ad._pinned is pinned      # child's write can't reach here
+        assert await child == "foreign"
+        assert ad._pinned is pinned      # intact after child completes
+
+    asyncio.run(driver())
+    # the driver's evidence never leaked into this context either
+    assert ad._pinned is None
