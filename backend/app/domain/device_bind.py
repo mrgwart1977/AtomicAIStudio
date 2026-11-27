@@ -305,14 +305,40 @@ def assess_evidence(evidence: dict | None,
         return {"ok": False, "refusal": "incomplete_evidence"}
     # Cross-validate the counters against the digest-protected record
     # set — the Phase alpha contract guarantees one record per meta
-    # device and one-to-one qualified vendor-row associations.
+    # device, one-to-one qualified vendor-row associations, and the
+    # vendor/classification contract: non-NVIDIA devices are always
+    # 'unsupported' and NVIDIA devices are never 'unsupported'.
     if comp["nvidia_devices"] != sum(
             1 for r in records if r.get("vendor") == "NVIDIA"):
         return {"ok": False, "refusal": "incomplete_evidence"}
-    if comp["qualified"] != sum(
-            1 for r in records
-            if r.get("correlation") == hw_identity.CORR_QUALIFIED):
-        return {"ok": False, "refusal": "incomplete_evidence"}
+    # Per-class agreement (F-V1): each declared classification count
+    # must equal the count derived from the actual records — the
+    # aggregate sum alone cannot bind subclass distribution: an
+    # unresolved NVIDIA row could be misreported as an unrelated
+    # unsupported row. Unknown classifications and
+    # vendor/classification contradictions fail closed; a mismatch
+    # reports the declared-vs-derived pair and is never normalized.
+    # The vendor-boundary invariants (unsupported == wmi − nvidia,
+    # ambiguous + unavailable == nvidia − qualified) follow from
+    # these checks and need no separate enforcement.
+    derived = dict.fromkeys(
+        (hw_identity.CORR_QUALIFIED, hw_identity.CORR_AMBIGUOUS,
+         hw_identity.CORR_UNAVAILABLE,
+         hw_identity.CORR_UNSUPPORTED), 0)
+    for r in records:
+        corr = r.get("correlation")
+        if corr not in derived:
+            return {"ok": False, "refusal": "incomplete_evidence",
+                    "correlation": str(corr)}
+        derived[corr] += 1
+        if (r.get("vendor") == "NVIDIA") == (
+                corr == hw_identity.CORR_UNSUPPORTED):
+            return {"ok": False, "refusal": "incomplete_evidence"}
+    for cls, n in derived.items():
+        if comp[cls] != n:
+            return {"ok": False, "refusal": "incomplete_evidence",
+                    "class": cls, "declared": comp[cls],
+                    "derived": n}
     if comp["smi_rows_valid"] > comp["smi_rows"]:
         return {"ok": False, "refusal": "incomplete_evidence"}
     if comp["qualified"] > comp["smi_rows_valid"]:

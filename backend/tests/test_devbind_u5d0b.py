@@ -1286,3 +1286,149 @@ def test_duplicate_physical_token_refuses():
     ev["identity"]["records"][1]["token"] = TOKEN_A
     assert refusal(build(evidence=ev)) == \
         "duplicate_physical_identity"
+
+
+# --------------------------------- F-V1 classification count fidelity
+
+
+def _redigest(ev):
+    """Recompute the inventory digest after an adversarial record
+    mutation — the digest is recomputed over whatever records exist,
+    so the intended classification invariant is exercised rather
+    than the digest gate."""
+    ev["identity"]["digest"] = hi.inventory_digest(
+        ev["identity"]["records"], ev["identity"]["provenance"])
+    return ev
+
+
+def _ambiguous_b_evidence():
+    """[qualified A, ambiguous NVIDIA B] — B's OS topology evidence
+    contradicts itself."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    props = {**pci_props(bus=0x1B, pnp=PNP_A),
+             **pci_props(bus=0x21, pnp=PNP_B)}
+    props[PNP_B]["bus_number"] = 0x33
+    return evidence(meta=meta, smi=smi, props=props)
+
+
+def _unavailable_b_evidence():
+    """[qualified A, unavailable NVIDIA B] — B lacks OS topology
+    evidence entirely."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    return evidence(meta=meta, smi=smi)
+
+
+def _amd_evidence():
+    """[qualified NVIDIA A, unsupported AMD] — provably unrelated."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": "PCI\\VEN_1002&DEV_X\\Y",
+             "vendor": "AMD"}]
+    return evidence(meta=meta)
+
+
+def test_ambiguous_relabeled_unsupported_refuses():
+    """F-V1 scenario 5: declared counts move the ambiguous NVIDIA row
+    into 'unsupported' — aggregate preserved, subclass mislabeled.
+    The per-class check catches it and reports declared-vs-derived."""
+    ev = _ambiguous_b_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["ambiguous"], comp["unsupported"] = 0, 1
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["class"] == "ambiguous"
+    assert ref["declared"] == 0 and ref["derived"] == 1
+    # Contradictory declared counts are never emitted as validated
+    # inventory evidence.
+    assert "inventory_completeness" not in ref
+
+
+def test_unavailable_relabeled_unsupported_refuses():
+    """F-V1 scenario 6: an unavailable NVIDIA row relabeled as
+    'unsupported' — same aggregate-preserving mislabel."""
+    ev = _unavailable_b_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["unavailable"], comp["unsupported"] = 0, 1
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["class"] == "unavailable"
+
+
+def test_ambiguous_relabeled_unavailable_refuses():
+    """F-V1 scenario 7."""
+    ev = _ambiguous_b_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["ambiguous"], comp["unavailable"] = 0, 1
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["class"] == "ambiguous"
+
+
+def test_unavailable_relabeled_ambiguous_refuses():
+    """F-V1 scenario 8."""
+    ev = _unavailable_b_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["unavailable"], comp["ambiguous"] = 0, 1
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["class"] == "ambiguous"
+    assert ref["declared"] == 1 and ref["derived"] == 0
+
+
+def test_unsupported_relabeled_unresolved_refuses():
+    """F-V1 scenario 9: an unrelated unsupported AMD row relabeled
+    'ambiguous' — would fabricate unresolved NVIDIA evidence."""
+    ev = _amd_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["unsupported"], comp["ambiguous"] = 0, 1
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["class"] == "ambiguous"
+
+
+def test_multiple_count_discrepancies_refuse():
+    """F-V1 scenario 14: qualified and unavailable simultaneously
+    misdeclared while the aggregate total is preserved."""
+    ev = _ambiguous_b_evidence()
+    comp = ev["identity"]["completeness"]
+    comp["qualified"], comp["unavailable"] = 0, 1
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_unknown_record_correlation_refuses():
+    """F-V1 scenario 11: a correlation class outside the Phase alpha
+    vocabulary fails closed — never normalized."""
+    ev = evidence()
+    ev["identity"]["records"][0]["correlation"] = "pwned"
+    res = build(evidence=_redigest(ev))
+    ref = res["refusal"]
+    assert ref["code"] == "incomplete_evidence"
+    assert ref["correlation"] == "pwned"
+
+
+def test_nvidia_record_as_unsupported_refuses():
+    """F-V1 scenario 12: a NVIDIA record must not be represented as
+    an unrelated unsupported non-NVIDIA record."""
+    ev = _ambiguous_b_evidence()
+    ev["identity"]["records"][1]["correlation"] = "unsupported"
+    assert refusal(build(evidence=_redigest(ev))) == \
+        "incomplete_evidence"
+
+
+def test_non_nvidia_record_as_qualified_refuses():
+    """F-V1 scenario 13: a non-NVIDIA record must not be represented
+    as a qualified NVIDIA association."""
+    ev = _amd_evidence()
+    ev["identity"]["records"][1]["correlation"] = "qualified"
+    assert refusal(build(evidence=_redigest(ev))) == \
+        "incomplete_evidence"
