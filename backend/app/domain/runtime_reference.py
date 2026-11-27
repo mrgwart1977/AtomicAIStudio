@@ -34,9 +34,22 @@ Trust rules (B2-2):
   publisher_authenticated.
 - A caller-supplied approval record, approved_by/approved_at/
   approval_ref field, lifecycle state or favorable boolean/label can
-  NEVER establish authority. Approval is validated structurally and
-  bound to the recomputed content digest; authority must name the
-  synthetic-fixture source explicitly.
+  NEVER establish authority. Approval records are validated
+  structurally AND associated against an explicitly separate
+  SyntheticAuthorityFixture context held by the registry — a record
+  cannot authorize itself; the fixture must name the exact permitted
+  approval contents (digest + material fields) in advance.
+
+Component invariants (D1): exactly one primary component, which must
+be required; dependencies are required; optional components are never
+required; every required component contributes at least one managed
+member. Supersession is scope-bound: references may only supersede
+within the same runtime_key and flavor.
+
+Resource bounds (D3): serialized input is bounded in characters and
+nesting depth before parsing; non-finite JSON constants and oversized
+numeric literals refuse; the in-memory registry has explicit finite
+record bounds and a bounded supersession-traversal policy.
 - Structural validity is not approval; approval is not activation;
   activation is not member integrity, runtime behavior or execution
   eligibility.
@@ -55,6 +68,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 
 from app.domain.runtime_integrity import valid_member_name
@@ -123,7 +137,7 @@ R_REVOKED = "revoked"
 R_AMBIGUOUS = "ambiguous"
 R_SYNTHETIC_ACTIVE = "synthetic_active"
 
-# Resource bounds (B2-7): every collection and string is capped.
+# Resource bounds (B2-7/D3): every collection and string is capped.
 _MAX_ARCHIVES = 16
 _MAX_MEMBERS = 2048
 _MAX_NAME = 255
@@ -131,6 +145,23 @@ _MAX_STRING = 512
 _MAX_URL = 1024
 _MAX_COMPONENT = 128
 _MAX_SIZE = 1 << 60
+# Serialized input (D3-A): measured in str characters — JSON escaping
+# means encoded bytes may differ; a str bound is the defensible,
+# implementation-visible measurement. 4M chars exceeds the largest
+# legitimate canonical reference (~1.6M chars: 2048 members x ~500,
+# 2048 skip-names x ~255, 16 archives x ~1.5k).
+_MAX_SERIALIZED_CHARS = 4 * 1024 * 1024
+# Nesting policy (D3-B): explicit supported depth — a valid reference
+# nests at most ~6 levels; 64 is generous headroom. Enforced by a
+# string-aware pre-scan plus a RecursionError backstop.
+_MAX_NESTING = 64
+_MAX_INT_DIGITS = 64
+# Registry bounds (D3-C): the isolated in-memory fixture registry is
+# deliberately small and finite — excess records refuse rather than
+# evicting history.
+_MAX_REGISTRY = 512
+_MAX_FIXTURE_PERMITS = 128
+_MAX_SUPERSEDE_DEPTH = 64
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -147,7 +178,7 @@ _REF_FIELDS = {"contract", "runtime_key", "flavor", "release",
 # too so that re-validating normalized output is idempotent.
 _RELEASE_FIELDS = {"tag", "release_id", "target_commitish",
                    "declared_commitish", "resolved_ref_sha",
-                   "published_at"}
+                   "resolved_ref_sha_claim", "published_at"}
 _ARCHIVE_FIELDS = {"component", "role", "required", "asset", "source",
                    "license"}
 _ASSET_FIELDS = {"id", "name", "url", "size", "digest", "provenance"}
@@ -160,7 +191,8 @@ _APPROVAL_FIELDS = {"reference_digest", "approved_by", "approved_at",
                     "approval_ref", "authority"}
 _METADATA_FIELDS = {"release_id", "tag", "target_commitish",
                     "declared_commitish", "resolved_ref_sha",
-                    "published_at", "author", "author_claim", "assets"}
+                    "resolved_ref_sha_claim", "published_at",
+                    "author", "author_claim", "assets"}
 _META_ASSET_FIELDS = {"id", "name", "url", "size", "digest",
                       "uploader", "uploader_claim",
                       "created_at", "updated_at"}
@@ -257,14 +289,23 @@ def _norm_release(rel, refusals: list) -> dict | None:
         else:
             out["declared_commitish"] = ci.strip()
     rs = rel.get("resolved_ref_sha")
+    rc = rel.get("resolved_ref_sha_claim")
+    if rs is not None and rc is not None and rs != rc:
+        # Contradictory duplicate representations — never silently
+        # choose one (D5).
+        refusals.append("resolved_ref_sha_conflict")
+        rs = None
+    if rs is None:
+        rs = rc
     if rs is not None:
-        # Actual git-ref resolution evidence — may only arrive through
-        # an explicit resolution fixture; absent stays absent.
+        # Caller-supplied CLAIM about git-ref resolution evidence —
+        # normalized under an explicit claim name; it does not
+        # establish actual tag resolution (D5/F4).
         sha = _canon_sha1(rs)
         if sha is None:
             refusals.append("resolved_ref_sha_invalid")
         else:
-            out["resolved_ref_sha"] = sha
+            out["resolved_ref_sha_claim"] = sha
     if rel.get("published_at") is not None:
         if not _is_str(rel["published_at"], 64):
             refusals.append("published_at_invalid")
@@ -438,6 +479,23 @@ def _norm_archives(archives, refusals: list) -> list:
                                            refusals),
                     "license": _norm_license(a.get("license"), comp,
                                              refusals)})
+    # Component invariants (D1): exactly one primary, which must be
+    # required; dependencies are required; optionals are never
+    # required. Contradictory role/required pairs are refused, never
+    # repaired.
+    primaries = 0
+    for a in out:
+        if a["role"] == ROLE_PRIMARY:
+            primaries += 1
+            if not a["required"]:
+                refusals.append(f"role_required_inconsistent:{a['component']}")
+        elif a["role"] == ROLE_DEPENDENCY:
+            if not a["required"]:
+                refusals.append(f"role_required_inconsistent:{a['component']}")
+        elif a["role"] == ROLE_OPTIONAL and a["required"]:
+            refusals.append(f"role_required_inconsistent:{a['component']}")
+    if primaries != 1:
+        refusals.append("primary_count_invalid")
     if required == 0:
         refusals.append("no_required_component")
     # Deterministic ordering: component id, never caller order.
@@ -552,8 +610,16 @@ def validate_reference(ref) -> dict:
     archives = _norm_archives(ref.get("archives"), refusals)
     components = {a["component"] for a in archives}
     out["archives"] = archives
-    out["members"] = _norm_members(ref.get("members"), components,
-                                  refusals)
+    members = _norm_members(ref.get("members"), components, refusals)
+    out["members"] = members
+    # D1 invariant 7: under the flat-install coverage model every
+    # required component must contribute at least one expected managed
+    # member.
+    member_comps = {m["component"] for m in members}
+    for a in archives:
+        if a["required"] and a["component"] not in member_comps:
+            refusals.append(
+                f"required_component_no_members:{a['component']}")
     out["coverage"] = _norm_coverage(ref.get("coverage"), refusals)
     if refusals:
         return _env({"ok": False, "refusals": refusals,
@@ -593,16 +659,95 @@ def _reject_dup_keys(pairs):
     return seen
 
 
+def _reject_constant(val):
+    # JSON NaN/Infinity/-Infinity literals — never admitted (D3-A).
+    raise ValueError(f"nonfinite_literal:{val}")
+
+
+def _bounded_int(text):
+    if len(text) > _MAX_INT_DIGITS:
+        raise ValueError("numeric_literal_over_bound")
+    return int(text)
+
+
+def _bounded_float(text):
+    if len(text) > _MAX_INT_DIGITS:
+        raise ValueError("numeric_literal_over_bound")
+    v = float(text)
+    if not math.isfinite(v):
+        raise ValueError(f"nonfinite_literal:{text[:32]}")
+    return v
+
+
+def _depth_within_bound(text: str) -> bool:
+    """String-aware nesting pre-scan (D3-B): counts bracket depth
+    outside string literals, honoring backslash escapes. Returns
+    False only when depth exceeds _MAX_NESTING."""
+    depth = 0
+    in_str = False
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if in_str:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            if depth > _MAX_NESTING:
+                return False
+        elif ch in "]}":
+            depth -= 1
+    return True
+
+
 def loads_reference(text: str) -> dict:
-    """Parse serialized reference content with duplicate-key refusal
-    (R54), then validate. Returns the validate_reference shape."""
+    """Parse serialized reference content under explicit resource
+    bounds (D3): str input measured in characters, bounded before
+    parsing; string-aware nesting pre-scan; non-finite JSON constants
+    and oversized numeric literals refused via parse hooks; duplicate
+    keys refused (R54); RecursionError backstop yields controlled
+    refusal rather than an escaped exception."""
+    if not isinstance(text, str):
+        return _env({"ok": False,
+                     "refusals": ["serialized_input_not_str"],
+                     "reference": None})
+    if len(text) > _MAX_SERIALIZED_CHARS:
+        return _env({"ok": False,
+                     "refusals": ["serialized_input_over_bound"],
+                     "reference": None})
+    if not _depth_within_bound(text):
+        return _env({"ok": False,
+                     "refusals": ["input_nesting_exceeded"],
+                     "reference": None})
     try:
-        obj = json.loads(text, object_pairs_hook=_reject_dup_keys)
+        obj = json.loads(text, object_pairs_hook=_reject_dup_keys,
+                         parse_constant=_reject_constant,
+                         parse_int=_bounded_int,
+                         parse_float=_bounded_float)
+    except RecursionError:
+        return _env({"ok": False,
+                     "refusals": ["input_nesting_exceeded"],
+                     "reference": None})
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         detail = str(exc)
         if "duplicate_json_key" in detail:
             code = detail.split(":", 1)[0]
             return _env({"ok": False, "refusals": [code],
+                         "reference": None})
+        if "nonfinite_literal" in detail:
+            return _env({"ok": False,
+                         "refusals": [detail.split(":", 1)[0]],
+                         "reference": None})
+        if "numeric_literal_over_bound" in detail:
+            return _env({"ok": False,
+                         "refusals": ["numeric_literal_over_bound"],
                          "reference": None})
         return _env({"ok": False,
                      "refusals": ["reference_json_invalid"],
@@ -642,14 +787,22 @@ def validate_release_metadata(rel) -> dict:
     else:
         out["declared_commitish"] = None
     rs = rel.get("resolved_ref_sha")
+    rc = rel.get("resolved_ref_sha_claim")
+    if rs is not None and rc is not None and rs != rc:
+        refusals.append("resolved_ref_sha_conflict")
+        rs = None
+    if rs is None:
+        rs = rc
     if rs is not None:
+        # Caller-supplied CLAIM about tag resolution — never actual
+        # git-ref resolution evidence (D5/F4).
         sha = _canon_sha1(rs)
         if sha is None:
             refusals.append("resolved_ref_sha_invalid")
         else:
-            out["resolved_ref_sha"] = sha
+            out["resolved_ref_sha_claim"] = sha
     else:
-        out["resolved_ref_sha"] = None
+        out["resolved_ref_sha_claim"] = None
     if rel.get("published_at") is not None:
         if not _is_str(rel["published_at"], 64):
             refusals.append("published_at_invalid")
@@ -792,14 +945,87 @@ def validate_approval(appr, stored_reference=None) -> dict:
     return _env({"ok": True, "refusals": [], "approval": out})
 
 
+class SyntheticAuthorityFixture:
+    """Explicitly separate synthetic approval-authority context (D4).
+
+    The registry may ONLY associate approval records that exactly
+    match a permit declared in this fixture — a submitted approval
+    record can never authorize itself, and a favorable label,
+    approval_ref or approver name alone is never sufficient. Permits
+    are deep-frozen at construction: caller mutation of the original
+    dict objects cannot alter the established context.
+
+    This models the synthetic-approval association boundary only. It
+    is not a production trust root, credential or signature check —
+    arbitrary in-process Python code could always forge internals;
+    the model prevents accidental self-authorization through ordinary
+    contract inputs, nothing more. Synthetic remains synthetic."""
+
+    def __init__(self, permits):
+        """permits: iterable of exact approval contents
+        {reference_digest, approved_by, approved_at, approval_ref}."""
+        if not isinstance(permits, (list, tuple)):
+            raise TypeError("fixture_permits_invalid")
+        if len(permits) > _MAX_FIXTURE_PERMITS:
+            raise ValueError("fixture_permits_over_bound")
+        frozen = set()
+        for p in permits:
+            if not isinstance(p, dict):
+                raise TypeError("fixture_permit_not_mapping")
+            unknown = set(p) - {"reference_digest", "approved_by",
+                                "approved_at", "approval_ref"}
+            if unknown or set(p) != {"reference_digest", "approved_by",
+                                     "approved_at", "approval_ref"}:
+                raise ValueError("fixture_permit_fields_invalid")
+            rd = p["reference_digest"]
+            if not isinstance(rd, str) \
+                    or not rd.startswith(DIGEST_PREFIX) \
+                    or _canon_sha(rd[len(DIGEST_PREFIX):]) is None:
+                raise ValueError("fixture_permit_digest_invalid")
+            tup = (rd,)
+            for k in ("approved_by", "approved_at", "approval_ref"):
+                if not _is_str(p[k], 256):
+                    raise ValueError("fixture_permit_field_invalid")
+                tup += (p[k].strip(),)
+            frozen.add(tup)
+        self._permits = frozenset(frozen)
+
+    def permits(self, reference_digest: str, approved_by: str,
+                approved_at: str, approval_ref: str) -> bool:
+        return (reference_digest, approved_by, approved_at,
+                approval_ref) in self._permits
+
+
 class ReferenceRegistry:
     """In-memory synthetic registry (B2-5/B2-6) — mechanism only.
     Entries carry {reference, approval, lifecycle}; nothing here is a
     production authority source, and no resolved reference is
-    executable."""
+    executable. Approval association requires the explicitly
+    separate SyntheticAuthorityFixture supplied at construction or
+    installed once via set_authority_fixture — without it every
+    approval operation refuses authority_context_absent."""
 
-    def __init__(self):
+    def __init__(self, authority_fixture: SyntheticAuthorityFixture
+                 | None = None):
+        if authority_fixture is not None \
+                and not isinstance(authority_fixture,
+                                   SyntheticAuthorityFixture):
+            raise ValueError("authority_context_invalid")
+        self._fixture = authority_fixture
         self._entries: dict[str, dict] = {}
+
+    def set_authority_fixture(self,
+                              fixture: SyntheticAuthorityFixture) -> dict:
+        """One-shot installation of the fixture context — refuses a
+        second installation or a non-fixture object."""
+        if self._fixture is not None:
+            return self._result("authority_context_invalid",
+                                refusals=["authority_fixture_already_set"])
+        if not isinstance(fixture, SyntheticAuthorityFixture):
+            return self._result("authority_context_invalid",
+                                refusals=["authority_context_invalid"])
+        self._fixture = fixture
+        return self._result("authority_fixture_installed", ok=True)
 
     def _result(self, state: str, **extra) -> dict:
         out = {**_NON_EXECUTABLE,
@@ -823,6 +1049,11 @@ class ReferenceRegistry:
         if digest in self._entries:
             return self._result("already_registered", digest=digest,
                                 ok=True)
+        if len(self._entries) >= _MAX_REGISTRY:
+            # Finite registry bound — refuse rather than evicting
+            # history (D3-C).
+            return self._result("transition_refused", digest=digest,
+                                refusals=["registry_over_bound"])
         self._entries[digest] = {
             "reference": res["reference"], "approval": None,
             "lifecycle": {"state": L_PROPOSED, "supplanted_by": None,
@@ -853,6 +1084,23 @@ class ReferenceRegistry:
             return self._result(R_AUTHORITY_UNESTABLISHED,
                                 digest=digest,
                                 refusals=["approval_digest_mismatch"])
+        if self._fixture is None:
+            # No independently supplied authority context — a
+            # self-declared record cannot authorize itself (D4).
+            return self._result(R_AUTHORITY_UNESTABLISHED,
+                                digest=digest,
+                                refusals=["authority_context_absent"])
+        ap = res["approval"]
+        if not self._fixture.permits(ap["reference_digest"],
+                                     ap["approved_by"],
+                                     ap["approved_at"],
+                                     ap["approval_ref"]):
+            # The fixture does not bind this exact approval record —
+            # favorable labels/refs/approver names are insufficient.
+            return self._result(R_AUTHORITY_UNESTABLISHED,
+                                digest=digest,
+                                refusals=[
+                                    "authority_association_unmatched"])
         entry["approval"] = res["approval"]
         self._transition(entry, L_APPROVED, [])
         return self._result(L_APPROVED, digest=digest, ok=True)
@@ -903,6 +1151,15 @@ class ReferenceRegistry:
             return self._result("transition_refused",
                                 refusals=["cyclic_supersession"],
                                 digest=old_digest)
+        if old["reference"]["runtime_key"] \
+                != new["reference"]["runtime_key"] \
+                or old["reference"]["flavor"] \
+                != new["reference"]["flavor"]:
+            # Supersession is scope-bound: only same runtime_key +
+            # flavor references may replace one another (D2).
+            return self._result("transition_refused",
+                                refusals=["supersede_scope_mismatch"],
+                                old=old_digest, new=new_digest)
         if old["lifecycle"]["state"] != L_ACTIVE:
             return self._result("transition_refused",
                                 digest=old_digest,
@@ -914,7 +1171,8 @@ class ReferenceRegistry:
                                 refusals=[
                                     "supersede_target_not_approved"])
         # Cycle check: walk new's supplanted_by chain — reaching old
-        # would close a loop.
+        # would close a loop. Explicit traversal bound independent of
+        # the registry bound (D3-C/D3-15).
         seen, cur = set(), new_digest
         while cur is not None:
             if cur == old_digest:
@@ -923,6 +1181,11 @@ class ReferenceRegistry:
                                     refusals=["cyclic_supersession"])
             if cur in seen:
                 break
+            if len(seen) >= _MAX_SUPERSEDE_DEPTH:
+                return self._result("transition_refused",
+                                    digest=new_digest,
+                                    refusals=[
+                                        "supersede_depth_exceeded"])
             seen.add(cur)
             e = self._entries.get(cur)
             cur = e["lifecycle"]["supplanted_by"] if e else None
@@ -1021,6 +1284,7 @@ __all__ = [
     "R_SYNTHETIC_ACTIVE",
     "R_UNAPPROVED",
     "ReferenceRegistry",
+    "SyntheticAuthorityFixture",
     "build_reference",
     "loads_reference",
     "reference_digest",
