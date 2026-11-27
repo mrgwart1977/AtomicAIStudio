@@ -603,6 +603,25 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
                        correlation=found.get("correlation"))
     rec, uuid = found["record"], found["uuid"]
 
+    # Target-independence policy: the bound record is qualified, but
+    # unresolved vendor evidence elsewhere must be provably unable to
+    # affect it. Non-NVIDIA rows (correlation 'unsupported') cannot
+    # hold a NVIDIA UUID — independence is established and mixed-vendor
+    # inventories are accepted. ANY other NVIDIA row whose association
+    # is unavailable or ambiguous is unresolved vendor evidence that
+    # could undermine the uniqueness assumption — its independence
+    # cannot be established, so the candidate refuses. An unparseable
+    # smi row (partial vendor parse) is likewise unresolved.
+    if ev["inventory"]["partial_vendor_parse"]:
+        return _refuse("unresolved_vendor_evidence")
+    unresolved = sum(1 for r in ev["records"] if r is not rec
+                     and r.get("correlation") in (
+                         hw_identity.CORR_AMBIGUOUS,
+                         hw_identity.CORR_UNAVAILABLE))
+    if unresolved:
+        return _refuse("unresolved_nvidia_association",
+                       unresolved_rows=unresolved)
+
     rt = dict(runtime or {})
     rtq = rt.get("rtq")
     if rtq is None:
@@ -611,10 +630,10 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
         return _refuse("flavor_mismatch",
                        runtime_flavor=str(rt.get("flavor")))
     if not isinstance(rtq, dict) or rtq.get("contract") != "rtq:v1" \
-            or rtq.get("classification") != "qualified":
+            or rtq.get("comparison") != "members_match":
         return _refuse("runtime_integrity_unqualified",
-                       rtq_classification=(
-                           rtq.get("classification")
+                       rtq_comparison=(
+                           rtq.get("comparison")
                            if isinstance(rtq, dict) else "absent"))
     assoc = _rtq_association(rt, rtq, flavor)
     if "refusal" in assoc:
@@ -666,7 +685,7 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
         "runtime": {
             "flavor": flavor,
             "runtime_key": assoc["runtime_key"],
-            "rtq_classification": rtq["classification"],
+            "rtq_comparison": rtq["comparison"],
             "rtq_manifest_digest": assoc["manifest_digest"],
             "rtq_trust": rtq["trust"],
             "rtq_association": assoc["class"]},
@@ -679,6 +698,24 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
                           - evidence["probed_monotonic"]),
                 "generation_scope":
                     "process_lifetime_only_not_durable"}},
+        # Publication-lifetime association is NEVER independently
+        # established by this contract: the generation counter is a
+        # process-local publication index; a coherent fresh read
+        # narrows staleness but cannot prove the evidence belongs to
+        # the authoritative current lifetime (a restarted process
+        # restarts the counter). The future prerequisite is an
+        # authoritative current-cache association mechanism.
+        "publication_lifetime": {
+            "association": "unestablished",
+            "fresh_read_consistent": fresh is not None,
+            "basis": "process_local_counter_no_durable_reference"},
+        # Structural boundaries — a candidate is analysis-only: it can
+        # never claim qualified runtime identity, operational
+        # qualification or execution eligibility in this scope.
+        "execution": {"execution_eligible": False,
+                      "status": "non_executable_analysis_only"},
+        "runtime_identity": "unestablished",
+        "operational_qualification": "unestablished",
         "assurance": {
             "L1_documented_semantics": {
                 "state": "established",
@@ -692,9 +729,10 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
                     "ggml":
                         "d803c238f67915fb825a9aa4df27b99356d51597"}},
             "L4_integrity_identity": {
-                "state": ("verified_members"
-                          if rtq["classification"] == "qualified"
-                          else "unestablished")},
+                "state": "comparison_match_untrusted",
+                "note": ("member comparison matched a synthetic/"
+                         "observed reference only — trusted "
+                         "executable identity is never implied")},
             "L5_observed_behavior": {"state": "unestablished"},
             "L6_enforced_selection": {"state": "unestablished"}},
         "scope_notes": list(SCOPE_NOTES),

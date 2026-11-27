@@ -72,7 +72,7 @@ def evidence(mono=500.0, gen=1, meta=None, smi=None, props=None,
 
 def rtq_qualified(flavor="cuda", runtime_key="sdcpp-cuda"):
     return {"flavor": flavor, "runtime_key": runtime_key,
-            "rtq": {"contract": "rtq:v1", "classification": "qualified",
+            "rtq": {"contract": "rtq:v1", "comparison": "members_match",
                     "runtime_key": runtime_key, "flavor": flavor,
                     "manifest_digest": "sha256:" + "ab" * 32,
                     "trust": ri.TRUST_OBSERVED_FIRST_USE}}
@@ -385,13 +385,13 @@ def test_missing_runtime_integrity_refuses():
 
 def test_unqualified_rtq_refuses():
     rt = {"flavor": "cuda",
-          "rtq": {"contract": "rtq:v1", "classification": "unqualified",
+          "rtq": {"contract": "rtq:v1", "comparison": "members_mismatch",
                   "reason": "member_integrity_failure"}}
     assert refusal(build(runtime=rt)) == "runtime_integrity_unqualified"
 
 
 def test_wrong_rtq_contract_refuses():
-    rt = {"rtq": {"contract": "other", "classification": "qualified"}}
+    rt = {"rtq": {"contract": "other", "comparison": "members_match"}}
     assert refusal(build(runtime=rt)) == "runtime_integrity_unqualified"
 
 
@@ -415,7 +415,7 @@ def test_synthetic_rtq_end_to_end(tmp_path):
     res = build(runtime={"flavor": "cuda",
                          "runtime_key": "sdcpp-cuda", "rtq": q})
     assert res["state"] == "candidate"
-    assert res["runtime"]["rtq_classification"] == "qualified"
+    assert res["runtime"]["rtq_comparison"] == "members_match"
     assert res["runtime"]["rtq_trust"] == ri.TRUST_OBSERVED_FIRST_USE
 
 
@@ -643,7 +643,8 @@ def test_assurance_dimensions_independent():
     assert a["L1_documented_semantics"]["state"] == "established"
     assert a["L2_static_candidate"]["state"] == "validated"
     assert a["L3_exact_build_source"]["state"] == "source_supported"
-    assert a["L4_integrity_identity"]["state"] == "verified_members"
+    assert a["L4_integrity_identity"]["state"] == \
+        "comparison_match_untrusted"
     assert a["L5_observed_behavior"]["state"] == "unestablished"
     assert a["L6_enforced_selection"]["state"] == "unestablished"
 
@@ -749,15 +750,30 @@ def test_freshness_recorded_in_candidate():
 # -------------------------------------------------- C4 completeness
 
 
-def test_inventory_partial_vendor_parse_recorded():
+def test_partial_vendor_parse_refuses():
+    """An unparseable vendor row is unresolved evidence whose
+    independence from the target cannot be established — the
+    candidate refuses even though the target record is qualified."""
     ev = evidence()
-    # 3 raw smi rows, only 1 valid — partial parse: target still
-    # qualified but inventory completeness is honestly "partial".
+    # 3 raw smi rows, only 1 valid — partial parse.
     ev["identity"]["completeness"]["smi_rows"] = 3
+    assert refusal(build(evidence=ev)) == "unresolved_vendor_evidence"
+
+
+def test_unmatched_valid_smi_row_does_not_disturb_target():
+    """A valid vendor row (BDF+UUID) matching no WMI device is a
+    different physical device — provably independent of the target's
+    BDF+UUID join. Inventory is flagged but the candidate stands."""
+    ev = evidence()
+    # A second VALID vendor row matched no WMI device — parsed but
+    # unassociated; it does not create a record and cannot duplicate
+    # the target's UUID (that would already mark the target ambiguous).
+    ev["identity"]["completeness"]["smi_rows"] = 2
+    ev["identity"]["completeness"]["smi_rows_valid"] = 2
     res = build(evidence=ev)
     inv = res["evidence"]["inventory_completeness"]
-    assert inv["partial_vendor_parse"] and inv["state"] == "partial"
     assert res["state"] == "candidate"
+    assert not inv["partial_vendor_parse"]
 
 
 def test_mixed_inventory_unsupported_flagged():
@@ -771,21 +787,23 @@ def test_mixed_inventory_unsupported_flagged():
         "unsupported_rows"] == 1
 
 
-def test_non_target_ambiguous_rows_flagged_not_refused():
+def test_non_target_ambiguous_rows_refuse():
+    """An unresolved NVIDIA association CANNOT be proven independent
+    of the target — its UUID is unknown and could undermine the
+    uniqueness assumption. The candidate refuses even though the
+    target record itself is qualified."""
     meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
             {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
     smi = [smi_row(index=0, bus_id="00000000:1B:00.0", uuid=UUID_A),
            smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
     props = {**pci_props(bus=0x1B, pnp=PNP_A),
              **pci_props(bus=0x21, pnp=PNP_B)}
-    # GPU B's own OS topology evidence contradicts itself → record 1
-    # ambiguous; unrelated ambiguity is flagged, target unaffected.
+    # GPU B's own OS topology evidence contradicts itself →
+    # record 1 ambiguous → unresolved NVIDIA association.
     props[PNP_B]["bus_number"] = 0x33
     ev = evidence(meta=meta, smi=smi, props=props)
-    res = build(evidence=ev)
-    inv = res["evidence"]["inventory_completeness"]
-    assert inv["ambiguous_rows"] == 1
-    assert res["state"] == "candidate"
+    assert refusal(build(evidence=ev)) == \
+        "unresolved_nvidia_association"
 
 
 # -------------------------------------------------- C2 rtq association
@@ -793,7 +811,7 @@ def test_non_target_ambiguous_rows_flagged_not_refused():
 
 def test_rtq_missing_runtime_key_refuses():
     rt = {"flavor": "cuda",
-          "rtq": {"contract": "rtq:v1", "classification": "qualified",
+          "rtq": {"contract": "rtq:v1", "comparison": "members_match",
                   "manifest_digest": "sha256:" + "ab" * 32,
                   "trust": ri.TRUST_OBSERVED_FIRST_USE}}
     assert refusal(build(runtime=rt)) == "runtime_evidence_incomplete"
@@ -921,3 +939,206 @@ def test_drift_unrelated_inventory_change_token_stable():
     d = db.classify_drift(held, fresh, TOKEN_A)
     assert d["decision"] in ("unchanged",
                              "identity_revalidation_required")
+
+
+# ------------------------------------- P1/P2 qualification semantics
+
+
+def test_rtq_removed_schema_claim_refuses():
+    """P1: a fabricated dict asserting the removed 'qualified'
+    classification carries no 'comparison' field — refused, and the
+    old claim is never consulted."""
+    rt = rtq_qualified()
+    del rt["rtq"]["comparison"]
+    rt["rtq"]["classification"] = "qualified"
+    assert refusal(build(runtime=rt)) == \
+        "runtime_integrity_unqualified"
+
+
+def test_fabricated_qualification_fields_ignored():
+    """P2: caller-fabricated qualification/execution fields inside a
+    syntactically valid rtq dict cannot elevate the result — identity,
+    operational qualification and eligibility stay unestablished."""
+    rt = rtq_qualified()
+    rt["rtq"]["integrity_qualification"] = "trusted_verified"
+    rt["rtq"]["execution_eligible"] = True
+    res = build(runtime=rt)
+    assert res["state"] == "candidate"
+    assert res["execution"] == {
+        "execution_eligible": False,
+        "status": "non_executable_analysis_only"}
+    assert res["runtime_identity"] == "unestablished"
+    assert res["operational_qualification"] == "unestablished"
+    assert res["runtime"]["rtq_association"] == \
+        "structural_unverified"
+
+
+def test_candidate_never_authorizes_execution():
+    """P1: even a fully coherent synthetic candidate is analysis-only
+    — no successful foundation result authorizes execution."""
+    res = build()
+    assert res["execution"]["execution_eligible"] is False
+    assert res["execution"]["status"] == \
+        "non_executable_analysis_only"
+    assert res["runtime_identity"] == "unestablished"
+    assert res["operational_qualification"] == "unestablished"
+    assert "not_execution_authorization" in res["scope_notes"]
+
+
+# ---------------------------------------------------- P3 lifetime
+
+
+def test_publication_lifetime_unestablished():
+    """P3: a matching generation/timestamps/content is never proof of
+    authoritative lifetime association — the boundary is explicit."""
+    res = build()
+    pl = res["publication_lifetime"]
+    assert pl["association"] == "unestablished"
+    assert pl["basis"] == \
+        "process_local_counter_no_durable_reference"
+    assert pl["fresh_read_consistent"] is False
+
+
+def test_publication_lifetime_fresh_read_narrows_only():
+    """P3: a coherent fresh read narrows staleness but still cannot
+    establish that the evidence belongs to the authoritative current
+    publication lifetime."""
+    ev = evidence()
+    res = build(evidence=ev, fresh=dict(ev))
+    pl = res["publication_lifetime"]
+    assert pl["fresh_read_consistent"] is True
+    assert pl["association"] == "unestablished"
+    assert res["execution"]["execution_eligible"] is False
+
+
+def test_overlapping_generation_different_lifetime_refuses():
+    """P3: a restarted process reuses generation values — identical
+    generation with different content is contradictory evidence,
+    never a favorable resolution."""
+    held = evidence(gen=1)
+    fresh = evidence(gen=1, mono=600.0)  # same gen, different content
+    fresh["identity"]["records"] = []
+    res = build(evidence=held, fresh=fresh)
+    assert refusal(res) == "contradictory_evidence"
+
+
+def test_newer_generation_without_authority_refuses():
+    """P3: a higher generation number is not independently
+    authoritative — generation mismatch is simply stale evidence."""
+    fresh = evidence(gen=2, mono=600.0)
+    assert refusal(build(evidence=evidence(), fresh=fresh)) == \
+        "stale_evidence"
+
+
+# --------------------------------------- P4 target independence
+
+
+def test_intel_unsupported_device_coexists():
+    """P4: an unsupported non-NVIDIA device cannot hold a NVIDIA UUID
+    — its independence is established and it does not disturb the
+    qualified target."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": "PCI\\VEN_8086&DEV_Y\\Z",
+             "vendor": "Intel"}]
+    res = build(evidence=evidence(meta=meta))
+    assert res["state"] == "candidate"
+    assert res["evidence"]["inventory_completeness"][
+        "unsupported_rows"] == 1
+
+
+def test_nvidia_missing_pci_evidence_refuses():
+    """P4: a second NVIDIA device lacking OS topology evidence is an
+    unresolved association — its UUID is unknown and could duplicate
+    the target's, so independence cannot be established."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    ev = evidence(meta=meta, smi=smi)  # no pci props for PNP_B
+    assert refusal(build(evidence=ev)) == \
+        "unresolved_nvidia_association"
+
+
+def test_contradictory_bdf_records_refuse():
+    """P4: two vendor rows claiming the same BDF leave the second
+    NVIDIA device's association unresolved — the qualified target
+    cannot be proven independent."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B),
+           smi_row(index=2, bus_id="00000000:21:00.0", uuid=UUID_B)]
+    ev = evidence(meta=meta, smi=smi, props=_dual_props())
+    assert refusal(build(evidence=ev)) == \
+        "unresolved_nvidia_association"
+
+
+def test_duplicate_uuid_on_non_target_row_refuses():
+    """P4: a non-target vendor row duplicating a UUID makes that
+    NVIDIA association ambiguous — unresolved, refused."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_B),
+           smi_row(index=2, bus_id="00000000:33:00.0", uuid=UUID_B)]
+    ev = evidence(meta=meta, smi=smi, props=_dual_props())
+    assert refusal(build(evidence=ev)) == \
+        "unresolved_nvidia_association"
+
+
+def test_duplicate_authoritative_uuid_corrupts_target():
+    """P4: duplicating the TARGET's own UUID corrupts the target
+    association itself — both records go ambiguous and the token
+    lookup fails closed before independence is even evaluated."""
+    meta = [{"index": 0, "pnp": PNP_A, "vendor": "NVIDIA"},
+            {"index": 1, "pnp": PNP_B, "vendor": "NVIDIA"}]
+    smi = [smi_row(index=0, uuid=UUID_A),
+           smi_row(index=1, bus_id="00000000:21:00.0", uuid=UUID_A)]
+    ev = evidence(meta=meta, smi=smi, props=_dual_props())
+    assert refusal(build(evidence=ev)) == \
+        "missing_physical_identity"
+
+
+# ---------------------------------------- P5 backend precedence
+
+
+def test_all_cuda0_with_explicit_module_offload_accepted():
+    """P5: all=cuda0 sets the default; a module-specific te=cpu
+    override is an EXPLICIT cpu offload — source-supported precedence
+    at sd.cpp 991f825, still L3 only, never execution authority."""
+    be = db.evaluate_backend({"spec": "all=cuda0,te=cpu"})
+    assert be["state"] == "accepted"
+    assert "explicit_cpu_offload" in be["flags"]
+    assert be["assurance"] == "L3_source_supported_unqualified"
+    res = build(backend={"spec": "all=cuda0,te=cpu"})
+    assert res["state"] == "candidate"
+    assert "explicit_cpu_offload" in res["candidate_backend"]["flags"]
+
+
+def test_repeated_module_after_default_refuses():
+    assert refusal(build(backend={
+        "spec": "all=cuda0,te=cpu,te=cuda0"})) == \
+        "duplicate_module_assignment"
+
+
+def test_all_disk_spec_refuses_disk_params_explicit():
+    """P5: disk as the module default is unsupported in spec but is an
+    explicit allowed placement for params_backend only."""
+    assert refusal(build(backend={"spec": "all=disk"})) == \
+        "unsupported_backend_device"
+    res = build(backend={"spec": "all=cuda0",
+                         "params_backend": "all=disk"})
+    assert res["state"] == "candidate"
+    assert "explicit_disk_params" in \
+        res["candidate_backend"]["flags"]
+
+
+def test_backend_ordinal_repeated_across_modules_refuses():
+    """P5: backend-local ordinals beyond the singleton refuse even
+    when assigned to different modules."""
+    assert refusal(build(backend={
+        "spec": "te=cuda1"})) == \
+        "device_ordinal_out_of_singleton_scope"
+    assert refusal(build(backend={
+        "spec": "all=cuda0,vae=cuda1"})) == \
+        "device_ordinal_out_of_singleton_scope"

@@ -151,9 +151,14 @@ def test_recognized_labels_cannot_establish_trust(tmp_path, prov):
     assert ri.trust_classification(m) != ri.TRUST_EXTERNAL
     q = ri.qualify(root, m, expected_flavor="cuda")
     # Member comparison succeeds — that is E-vs-O evidence only;
-    # the trust classification is never promoted by the match.
+    # it never becomes runtime integrity qualification, operational
+    # qualification or execution eligibility.
     assert q["checks"]["all_members_match"]
+    assert q["comparison"] == ri.COMPARISON_MATCH
     assert q["trust"] == ri.TRUST_UNVERIFIED_CLAIM
+    assert q["integrity_qualification"] == "unestablished"
+    assert q["operational_qualification"] == "unestablished"
+    assert q["execution_eligible"] is False
 
 
 def test_install_capture_stays_observed_first_use(tmp_path):
@@ -209,7 +214,7 @@ def test_qualify_all_members_match(tmp_path):
     files = {"sd-cli.exe": b"exe", "ggml.dll": b"d", "cudart.dll": b"c"}
     root = _tree(tmp_path, files)
     q = ri.qualify(root, _manifest(root, files), expected_flavor="cuda")
-    assert q["classification"] == ri.QUALIFIED
+    assert q["comparison"] == ri.COMPARISON_MATCH
     assert q["reason"] == "all_members_verified"
     assert {m["state"] for m in q["members"]} == {"match"}
     assert q["checks"]["coverage_closed"]
@@ -220,7 +225,7 @@ def test_modified_executable_refuses(tmp_path):
     root = _tree(tmp_path, files)
     _write(root, "sd-cli.exe", b"TAMPERED!")
     q = ri.qualify(root, _manifest(root, files), expected_flavor="cuda")
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     states = {m["name"]: m["state"] for m in q["members"]}
     assert states["sd-cli.exe"] in ("sha256_mismatch", "size_mismatch")
 
@@ -231,7 +236,7 @@ def test_same_path_replacement_refuses(tmp_path):
     root.joinpath("sd-cli.exe").unlink()
     _write(root, "sd-cli.exe", b"replaced")
     q = ri.qualify(root, _manifest(root, files))
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] != "match"
 
 
@@ -240,7 +245,7 @@ def test_modified_dependency_refuses(tmp_path):
     root = _tree(tmp_path, files)
     _write(root, "ggml-vulkan.dll", b"DEX")  # same size → sha check
     q = ri.qualify(root, _manifest(root, files))
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     states = {m["name"]: m["state"] for m in q["members"]}
     assert states["ggml-vulkan.dll"] == "sha256_mismatch"
     assert states["sd-cli.exe"] == "match"
@@ -251,7 +256,7 @@ def test_missing_member_refuses(tmp_path):
     root = _tree(tmp_path, files)
     root.joinpath("ggml.dll").unlink()
     q = ri.qualify(root, _manifest(root, files))
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     states = {m["name"]: m["state"] for m in q["members"]}
     assert states["ggml.dll"] == "missing"
 
@@ -263,7 +268,7 @@ def test_non_regular_member_refuses(tmp_path):
         "sd-cli.exe": b"exe", "ggml.dll": b"dep"}))
     states = {m["name"]: m["state"] for m in q["members"]}
     assert states["ggml.dll"] == "non_regular"
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
 
 
 def test_containment_violation_refuses(tmp_path, monkeypatch):
@@ -275,7 +280,7 @@ def test_containment_violation_refuses(tmp_path, monkeypatch):
                         lambda p: (str(outside) if "sd-cli" in str(p)
                                    else str(p)))
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] == "containment_violation"
 
 
@@ -309,7 +314,7 @@ def test_changed_during_verification_refuses(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ri, "_stream_sha256_checked", racing)
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] == "changed_during_verification"
 
 
@@ -323,7 +328,7 @@ def test_io_failure_sanitized(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ri, "_stream_sha256_checked", deny)
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] == "io_error"
     assert q["errors"][0]["member"] == "sd-cli.exe"
     assert str(root) not in repr(q)  # absolute paths never leak
@@ -341,7 +346,7 @@ def test_opened_file_identity_swap_refuses(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ri.os, "fstat", lambda fd: FakeStat())
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] == "opened_file_identity_changed"
 
 
@@ -365,7 +370,7 @@ def test_post_verify_association_lost_refuses(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ri.os.path, "realpath", flipflop)
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] == "post_verify_association_lost"
 
 
@@ -374,7 +379,7 @@ def test_unexpected_member_closed_coverage(tmp_path):
     root = _tree(tmp_path, files)
     _write(root, "intruder.dll", b"unexpected")
     q = ri.qualify(root, _manifest(root, files))
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["reason"] == "unexpected_members_in_scope"
     assert q["unexpected"] == ["intruder.dll"]
 
@@ -384,14 +389,14 @@ def test_flavor_mismatch_refuses(tmp_path):
     root = _tree(tmp_path, files)
     q = ri.qualify(root, _manifest(root, files),
                    expected_flavor="vulkan")
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["reason"] == "flavor_mismatch"
 
 
 def test_invalid_manifest_qualification_refuses(tmp_path):
     root = _tree(tmp_path, {"sd-cli.exe": b"exe"})
     q = ri.qualify(root, {"v": 1, "members": "notalist"})
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] == ri.COMPARISON_INVALID
     assert q["reason"] == "reference_manifest_invalid"
     assert q["refusals"]
 
@@ -399,7 +404,7 @@ def test_invalid_manifest_qualification_refuses(tmp_path):
 def test_missing_root_refuses(tmp_path):
     q = ri.qualify(tmp_path / "nonexistent",
                    _manifest(tmp_path, {"a.dll": b"x"}))
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] == ri.COMPARISON_UNREADABLE
     assert "root_unreadable" in q["refusals"]
 
 
@@ -409,7 +414,7 @@ def test_sibling_verification_not_loaded_set_claim(tmp_path):
     files = {"sd-cli.exe": b"exe", "ggml.dll": b"d"}
     root = _tree(tmp_path, files)
     q = ri.qualify(root, _manifest(root, files))
-    assert q["classification"] == ri.QUALIFIED
+    assert q["comparison"] == ri.COMPARISON_MATCH
     assert "loaded" not in repr(q).lower()
 
 
@@ -443,14 +448,46 @@ def test_evidence_classes_absent_observed_hash():
         "unavailable"
 
 
+def test_qualify_record_has_no_qualification_claim(tmp_path):
+    """P1: the rtq:v1 record exposes a comparison result only — no
+    'qualified' classification exists, and every qualification
+    dimension is an unelevatable constant."""
+    files = {"sd-cli.exe": b"exe", "ggml.dll": b"d"}
+    root = _tree(tmp_path, files)
+    q = ri.qualify(root, _manifest(root, files),
+                   expected_flavor="cuda")
+    assert q["comparison"] == ri.COMPARISON_MATCH
+    assert "classification" not in q
+    assert q["integrity_qualification"] == ri.QUAL_UNESTABLISHED
+    assert q["operational_qualification"] == ri.QUAL_UNESTABLISHED
+    assert q["execution_eligible"] is False
+    assert q["trust"] != ri.TRUST_EXTERNAL
+
+
+def test_tampered_install_capture_match_is_not_qualification(tmp_path):
+    """P1: tampered bytes self-hashed under install_capture — every
+    member matches the generated reference, yet integrity
+    qualification is unestablished and execution ineligible."""
+    root = _tree(tmp_path, {"sd-cli.exe": b"TAMPERED"})
+    members = [{"name": "sd-cli.exe", "sha256": _sha(b"TAMPERED"),
+                "size": len(b"TAMPERED")}]
+    res = ri.build_reference_manifest(
+        "sdcpp-cuda", "cuda", members, ri.P_INSTALL_CAPTURE)
+    q = ri.qualify(root, res["manifest"])
+    assert q["comparison"] == ri.COMPARISON_MATCH
+    assert q["trust"] == ri.TRUST_OBSERVED_FIRST_USE
+    assert q["integrity_qualification"] == "unestablished"
+    assert q["execution_eligible"] is False
+
+
 def test_runtime_update_invalidates_manifest(tmp_path):
     """A runtime update changes observed member digests — the previous
     reference no longer qualifies (qualification cannot carry over)."""
     root = _tree(tmp_path, {"sd-cli.exe": b"exe-v1"})
     m = _manifest(root, {"sd-cli.exe": b"exe-v1"})
-    assert ri.qualify(root, m)["classification"] == ri.QUALIFIED
+    assert ri.qualify(root, m)["comparison"] == ri.COMPARISON_MATCH
     _write(root, "sd-cli.exe", b"exe-v2-updated")
     q = ri.qualify(root, m)
-    assert q["classification"] == ri.UNQUALIFIED
+    assert q["comparison"] != ri.COMPARISON_MATCH
     assert q["members"][0]["state"] in ("sha256_mismatch",
                                        "size_mismatch")

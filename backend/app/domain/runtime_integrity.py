@@ -106,8 +106,19 @@ _PROVENANCE_TRUST = {
     P_PUBLISHER: TRUST_UNVERIFIED_CLAIM,
 }
 
-QUALIFIED = "qualified"
-UNQUALIFIED = "unqualified"
+# Comparison classes — the expected-versus-observed result ONLY. A
+# successful comparison against an untrusted or self-generated
+# manifest is measurement agreement, never runtime integrity
+# qualification. In this isolated foundation scope independent
+# reference authority cannot exist, so integrity qualification,
+# operational qualification and execution eligibility are
+# structurally 'unestablished'/False in every record — no caller
+# input can produce them.
+COMPARISON_MATCH = "members_match"
+COMPARISON_MISMATCH = "members_mismatch"
+COMPARISON_INVALID = "manifest_invalid"
+COMPARISON_UNREADABLE = "root_unreadable"
+QUAL_UNESTABLISHED = "unestablished"
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -374,32 +385,47 @@ def measure_members(root: str | Path, manifest: dict) -> dict:
 
 def qualify(root: str | Path, manifest: dict,
             *, expected_flavor: str | None = None) -> dict:
-    """Produce the rtq:v1 qualification record for a runtime tree.
-    classification is 'qualified' ONLY when the manifest validates,
-    every declared member matches, and coverage is closed (no
-    unexpected entries). Any defect yields unqualified + reason."""
+    """Produce the rtq:v1 record for a runtime tree.
+
+    ``comparison`` is the expected-versus-observed result ONLY:
+    'members_match' means every declared member measured equal and
+    coverage was closed — it is NOT runtime integrity qualification.
+    ``integrity_qualification``, ``operational_qualification`` and
+    ``execution_eligible`` are constants in this scope
+    (unestablished/unestablished/False): independent reference
+    authority, behavioral qualification and launch integration do not
+    exist here and no input can fabricate them."""
     measured = measure_members(root, manifest)
     checks = {"manifest_valid": measured["ok"],
               "all_members_match": False, "coverage_closed": False,
               "flavor_consistent": True}
+    base = {"contract": RTQ_VERSION,
+            "integrity_qualification": QUAL_UNESTABLISHED,
+            "operational_qualification": QUAL_UNESTABLISHED,
+            "execution_eligible": False,
+            "runtime_key": (manifest or {}).get("runtime_key"),
+            "flavor": (manifest or {}).get("flavor"),
+            "manifest_digest": manifest_digest(manifest),
+            "trust": trust_classification(manifest),
+            "checks": checks}
     if not measured["ok"]:
-        return {"contract": RTQ_VERSION, "classification": UNQUALIFIED,
-                "reason": "reference_manifest_invalid",
+        root_fail = any(r.startswith("root_") or
+                        r == "coverage_dir_unbounded"
+                        for r in measured["refusals"])
+        return {**base, "comparison": (
+                    COMPARISON_UNREADABLE if root_fail
+                    else COMPARISON_INVALID),
+                "reason": ("root_unreadable" if root_fail
+                           else "reference_manifest_invalid"),
                 "refusals": measured["refusals"], "members": [],
                 "unexpected": measured["unexpected"],
-                "runtime_key": (manifest or {}).get("runtime_key"),
-                "flavor": (manifest or {}).get("flavor"),
-                "manifest_digest": manifest_digest(manifest),
-                "trust": trust_classification(manifest),
-                "checks": checks}
+                "errors": measured["errors"]}
     if expected_flavor is not None \
             and manifest.get("flavor") != expected_flavor:
         checks["flavor_consistent"] = False
     states = {mem["state"] for mem in measured["members"]}
     checks["all_members_match"] = states == {"match"}
     checks["coverage_closed"] = not measured["unexpected"]
-    ok = (checks["all_members_match"] and checks["coverage_closed"]
-          and checks["flavor_consistent"])
     if not checks["flavor_consistent"]:
         reason = "flavor_mismatch"
     elif not checks["all_members_match"]:
@@ -409,17 +435,13 @@ def qualify(root: str | Path, manifest: dict,
         reason = "unexpected_members_in_scope"
     else:
         reason = "all_members_verified"
-    return {"contract": RTQ_VERSION, "classification": (
-                QUALIFIED if ok else UNQUALIFIED),
+    ok = all(checks[k] for k in checks)
+    return {**base, "comparison": (COMPARISON_MATCH if ok
+                                   else COMPARISON_MISMATCH),
             "reason": reason, "refusals": [],
             "members": measured["members"],
             "unexpected": measured["unexpected"],
-            "errors": measured["errors"],
-            "runtime_key": manifest.get("runtime_key"),
-            "flavor": manifest.get("flavor"),
-            "manifest_digest": manifest_digest(manifest),
-            "trust": trust_classification(manifest),
-            "checks": checks}
+            "errors": measured["errors"]}
 
 
 def evidence_classes(resolved_meta: dict | None,
@@ -457,11 +479,13 @@ def evidence_classes(resolved_meta: dict | None,
 
 
 __all__ = [
-    "CONTRACT", "MANIFEST_VERSION", "PINNED_SOURCE",
-    "P_INSTALL_CAPTURE", "P_OWNER_ATTESTED", "P_PUBLISHER",
-    "QUALIFIED", "RTQ_VERSION", "TRUST_EXTERNAL",
-    "TRUST_OBSERVED_FIRST_USE", "UNQUALIFIED",
-    "build_reference_manifest", "evidence_classes", "manifest_digest",
-    "measure_members", "qualify", "trust_classification",
-    "valid_member_name", "validate_reference_manifest",
+    "COMPARISON_INVALID", "COMPARISON_MATCH", "COMPARISON_MISMATCH",
+    "COMPARISON_UNREADABLE", "CONTRACT", "MANIFEST_VERSION",
+    "PINNED_SOURCE", "P_INSTALL_CAPTURE", "P_OWNER_ATTESTED",
+    "P_PUBLISHER", "QUAL_UNESTABLISHED", "RTQ_VERSION",
+    "TRUST_EXTERNAL", "TRUST_OBSERVED_FIRST_USE",
+    "TRUST_UNVERIFIED_CLAIM", "build_reference_manifest",
+    "evidence_classes", "manifest_digest", "measure_members",
+    "qualify", "trust_classification", "valid_member_name",
+    "validate_reference_manifest",
 ]
