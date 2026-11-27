@@ -753,27 +753,49 @@ def test_freshness_recorded_in_candidate():
 def test_partial_vendor_parse_refuses():
     """An unparseable vendor row is unresolved evidence whose
     independence from the target cannot be established — the
-    candidate refuses even though the target record is qualified."""
+    candidate refuses even though the target record is qualified,
+    and the refusal preserves the sanitized completeness counts."""
     ev = evidence()
     # 3 raw smi rows, only 1 valid — partial parse.
     ev["identity"]["completeness"]["smi_rows"] = 3
-    assert refusal(build(evidence=ev)) == "unresolved_vendor_evidence"
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "unresolved_vendor_evidence"
+    inv = ref["inventory_completeness"]
+    assert inv["smi_rows"] == 3 and inv["smi_rows_valid"] == 1
+    assert inv["partial_vendor_parse"] is True
+    assert inv["vendor_parse_state"] == "partial"
+    assert inv["state"] == "partial"
+    assert ref["target_correlation"] == "qualified"
 
 
-def test_unmatched_valid_smi_row_does_not_disturb_target():
-    """A valid vendor row (BDF+UUID) matching no WMI device is a
-    different physical device — provably independent of the target's
-    BDF+UUID join. Inventory is flagged but the candidate stands."""
+def test_unmatched_valid_smi_row_refuses():
+    """V1: a valid vendor row (BDF+UUID) matching no WMI device is
+    unresolved vendor evidence — its UUID is not even present in the
+    supplied record set, so independence from the target cannot be
+    established from the consumer's evidence. The candidate refuses
+    and the refusal preserves the sanitized completeness counts.
+    (Renamed from test_unmatched_valid_smi_row_does_not_disturb_target
+    — the synthetic scenario is preserved; the policy is now
+    conservative: parse-complete never implies association-complete.)"""
     ev = evidence()
     # A second VALID vendor row matched no WMI device — parsed but
-    # unassociated; it does not create a record and cannot duplicate
-    # the target's UUID (that would already mark the target ambiguous).
+    # unassociated; it creates no record, so nothing in the supplied
+    # evidence can prove it cannot be the target's device.
     ev["identity"]["completeness"]["smi_rows"] = 2
     ev["identity"]["completeness"]["smi_rows_valid"] = 2
     res = build(evidence=ev)
-    inv = res["evidence"]["inventory_completeness"]
-    assert res["state"] == "candidate"
-    assert not inv["partial_vendor_parse"]
+    ref = res["refusal"]
+    assert ref["code"] == "unresolved_nvidia_association"
+    assert ref["target_correlation"] == "qualified"
+    inv = ref["inventory_completeness"]
+    assert inv["smi_rows"] == 2 and inv["smi_rows_valid"] == 2
+    assert inv["partial_vendor_parse"] is False
+    assert inv["vendor_parse_state"] == "complete"
+    assert inv["qualified_associations"] == 1
+    assert inv["unresolved_vendor_rows"] == 1
+    assert inv["vendor_association_state"] == "unresolved"
+    assert inv["state"] == "partial"
 
 
 def test_mixed_inventory_unsupported_flagged():
@@ -783,8 +805,11 @@ def test_mixed_inventory_unsupported_flagged():
     ev = evidence(meta=meta)
     res = build(evidence=ev)
     assert res["state"] == "candidate"
-    assert res["evidence"]["inventory_completeness"][
-        "unsupported_rows"] == 1
+    inv = res["evidence"]["inventory_completeness"]
+    assert inv["unsupported_rows"] == 1
+    assert inv["unresolved_vendor_rows"] == 0
+    assert inv["vendor_association_state"] == "complete"
+    assert inv["state"] == "complete"
 
 
 def test_non_target_ambiguous_rows_refuse():
@@ -802,8 +827,13 @@ def test_non_target_ambiguous_rows_refuse():
     # record 1 ambiguous → unresolved NVIDIA association.
     props[PNP_B]["bus_number"] = 0x33
     ev = evidence(meta=meta, smi=smi, props=props)
-    assert refusal(build(evidence=ev)) == \
-        "unresolved_nvidia_association"
+    res = build(evidence=ev)
+    ref = res["refusal"]
+    assert ref["code"] == "unresolved_nvidia_association"
+    assert ref["unresolved_rows"] == 1
+    assert ref["target_correlation"] == "qualified"
+    assert ref["inventory_completeness"]["ambiguous_rows"] == 1
+    assert ref["inventory_completeness"]["state"] == "partial"
 
 
 # -------------------------------------------------- C2 rtq association
@@ -1042,8 +1072,11 @@ def test_intel_unsupported_device_coexists():
              "vendor": "Intel"}]
     res = build(evidence=evidence(meta=meta))
     assert res["state"] == "candidate"
-    assert res["evidence"]["inventory_completeness"][
-        "unsupported_rows"] == 1
+    inv = res["evidence"]["inventory_completeness"]
+    assert inv["unsupported_rows"] == 1
+    assert inv["unresolved_vendor_rows"] == 0
+    assert inv["vendor_association_state"] == "complete"
+    assert inv["state"] == "complete"
 
 
 def test_nvidia_missing_pci_evidence_refuses():
@@ -1142,3 +1175,114 @@ def test_backend_ordinal_repeated_across_modules_refuses():
     assert refusal(build(backend={
         "spec": "all=cuda0,vae=cuda1"})) == \
         "device_ordinal_out_of_singleton_scope"
+
+
+# ------------------------- V1 inventory association completeness
+
+
+def test_single_nvidia_inventory_complete_counts():
+    """V1-B: every completeness dimension is independently
+    represented on a fully associated single-GPU inventory."""
+    res = build()
+    assert res["evidence"]["inventory_completeness"] == {
+        "wmi_devices": 1, "nvidia_devices": 1,
+        "smi_rows": 1, "smi_rows_valid": 1,
+        "qualified_associations": 1,
+        "ambiguous_rows": 0, "unavailable_rows": 0,
+        "unsupported_rows": 0,
+        "partial_vendor_parse": False,
+        "unresolved_vendor_rows": 0,
+        "vendor_parse_state": "complete",
+        "vendor_association_state": "complete",
+        "state": "complete"}
+
+
+def test_two_gpu_inventory_fully_associated():
+    """V1-E: multiple fully associated NVIDIA GPUs — every vendor
+    row consumed by a qualified one-to-one association."""
+    res = build(evidence=_two_gpu_evidence(), gpu_token=TOKEN_B)
+    assert res["state"] == "candidate"
+    inv = res["evidence"]["inventory_completeness"]
+    assert inv["state"] == "complete"
+    assert inv["nvidia_devices"] == 2
+    assert inv["smi_rows"] == inv["smi_rows_valid"] == 2
+    assert inv["qualified_associations"] == 2
+    assert inv["unresolved_vendor_rows"] == 0
+    assert inv["vendor_association_state"] == "complete"
+
+
+def test_multiple_unmatched_smi_rows_refuse():
+    ev = evidence()
+    ev["identity"]["completeness"]["smi_rows"] = 3
+    ev["identity"]["completeness"]["smi_rows_valid"] = 3
+    res = build(evidence=ev)
+    assert res["refusal"]["code"] == "unresolved_nvidia_association"
+    assert res["refusal"]["inventory_completeness"][
+        "unresolved_vendor_rows"] == 2
+
+
+@pytest.mark.parametrize("field", [
+    "wmi_devices", "nvidia_devices", "smi_rows", "smi_rows_valid",
+    "qualified", "ambiguous", "unavailable", "unsupported"])
+def test_missing_completeness_count_refuses(field):
+    ev = evidence()
+    del ev["identity"]["completeness"][field]
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+@pytest.mark.parametrize("bad", [-1, True, "2", 1.5, None])
+def test_invalid_completeness_count_refuses(bad):
+    ev = evidence()
+    ev["identity"]["completeness"]["smi_rows"] = bad
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_smi_valid_exceeding_smi_rows_refuses():
+    ev = evidence()
+    comp = ev["identity"]["completeness"]
+    comp["smi_rows"] = 1
+    comp["smi_rows_valid"] = 2
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_qualified_exceeding_smi_coverage_refuses():
+    """A qualified one-to-one association cannot exceed valid
+    vendor-row coverage — impossible evidence fails closed."""
+    ev = evidence()
+    comp = ev["identity"]["completeness"]
+    comp["smi_rows"] = 1
+    comp["smi_rows_valid"] = 0
+    # qualified (1) still agrees with the actual qualified record,
+    # but exceeds the claimed vendor-row coverage.
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_qualified_count_contradicts_records_refuses():
+    ev = evidence()
+    ev["identity"]["completeness"]["qualified"] = 5
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_nvidia_count_contradicts_records_refuses():
+    ev = evidence()
+    ev["identity"]["completeness"]["nvidia_devices"] = 7
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_zero_vendor_rows_qualified_claim_refuses():
+    """A claimed qualified NVIDIA association with zero vendor rows
+    is impossible — the coverage invariant fails closed."""
+    ev = evidence()
+    comp = ev["identity"]["completeness"]
+    comp["smi_rows"] = comp["smi_rows_valid"] = 0
+    assert refusal(build(evidence=ev)) == "incomplete_evidence"
+
+
+def test_duplicate_physical_token_refuses():
+    """V2-1: the token field sits outside the inventory digest —
+    duplicating it across records survives digest validation, but
+    the token lookup refuses rather than selecting arbitrarily."""
+    ev = _two_gpu_evidence()
+    ev["identity"]["records"][1]["token"] = TOKEN_A
+    assert refusal(build(evidence=ev)) == \
+        "duplicate_physical_identity"

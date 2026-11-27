@@ -285,34 +285,77 @@ def assess_evidence(evidence: dict | None,
     comp = ident.get("completeness")
     if not isinstance(comp, dict):
         return {"ok": False, "refusal": "incomplete_evidence"}
-    if comp.get("wmi_devices") is not None \
-            and comp["wmi_devices"] != len(records):
+    # Count semantics validation (V1-C): every required completeness
+    # count must be a strict nonnegative int — booleans and non-integer
+    # values are malformed evidence and fail closed; nothing is
+    # defaulted, clamped or inferred into a device inventory.
+    for field in ("wmi_devices", "nvidia_devices", "smi_rows",
+                  "smi_rows_valid", "qualified", "ambiguous",
+                  "unavailable", "unsupported"):
+        v = comp.get(field)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            return {"ok": False, "refusal": "incomplete_evidence",
+                    "field": field}
+    if comp["wmi_devices"] != len(records):
         return {"ok": False, "refusal": "incomplete_evidence"}
     counted = sum(comp.get(k, 0) for k in
                   ("qualified", "ambiguous", "unavailable",
                    "unsupported"))
     if counted != len(records):
         return {"ok": False, "refusal": "incomplete_evidence"}
+    # Cross-validate the counters against the digest-protected record
+    # set — the Phase alpha contract guarantees one record per meta
+    # device and one-to-one qualified vendor-row associations.
+    if comp["nvidia_devices"] != sum(
+            1 for r in records if r.get("vendor") == "NVIDIA"):
+        return {"ok": False, "refusal": "incomplete_evidence"}
+    if comp["qualified"] != sum(
+            1 for r in records
+            if r.get("correlation") == hw_identity.CORR_QUALIFIED):
+        return {"ok": False, "refusal": "incomplete_evidence"}
+    if comp["smi_rows_valid"] > comp["smi_rows"]:
+        return {"ok": False, "refusal": "incomplete_evidence"}
+    if comp["qualified"] > comp["smi_rows_valid"]:
+        return {"ok": False, "refusal": "incomplete_evidence"}
     recomputed = hw_identity.inventory_digest(
         records, ident.get("provenance"))
     if recomputed != ident.get("digest"):
         return {"ok": False, "refusal": "identity_digest_mismatch"}
-    # Inventory completeness is REPORTED, not fused into a boolean:
-    # structural count consistency above is not inventory completeness.
-    # Partial vendor-row parsing, non-target ambiguous/unavailable/
-    # unsupported rows are recorded — the target-level qualification
-    # check (correlation + token + digest) is the binding gate.
-    smi_rows = comp.get("smi_rows") or 0
-    smi_valid = comp.get("smi_rows_valid") or 0
+    # Parsing completeness and association completeness are SEPARATE
+    # dimensions: successful parsing of every vendor row never
+    # establishes that all vendor evidence was associated.
+    # unresolved_vendor_rows is an AGGREGATE count — valid vendor rows
+    # not consumed by a qualified one-to-one association. It includes
+    # rows matching no meta device AND rows involved in ambiguous or
+    # unavailable NVIDIA associations; the Phase alpha counts cannot
+    # separate those subclasses, so it is never represented as an
+    # independently observed device inventory. An unassociated vendor
+    # row therefore never disappears and is never reported as
+    # complete coverage.
+    smi_rows = comp["smi_rows"]
+    smi_valid = comp["smi_rows_valid"]
+    partial_parse = smi_rows > smi_valid
+    unresolved_vr = smi_valid - comp["qualified"]
+    assoc_unresolved = bool(unresolved_vr or comp["ambiguous"]
+                            or comp["unavailable"])
     inventory = {
-        "partial_vendor_parse": smi_rows > smi_valid,
-        "ambiguous_rows": comp.get("ambiguous", 0),
-        "unavailable_rows": comp.get("unavailable", 0),
-        "unsupported_rows": comp.get("unsupported", 0),
+        "wmi_devices": comp["wmi_devices"],
+        "nvidia_devices": comp["nvidia_devices"],
+        "smi_rows": smi_rows,
+        "smi_rows_valid": smi_valid,
+        "qualified_associations": comp["qualified"],
+        "ambiguous_rows": comp["ambiguous"],
+        "unavailable_rows": comp["unavailable"],
+        "unsupported_rows": comp["unsupported"],
+        "partial_vendor_parse": partial_parse,
+        "unresolved_vendor_rows": unresolved_vr,
+        "vendor_parse_state": ("partial" if partial_parse
+                               else "complete"),
+        "vendor_association_state": ("unresolved"
+                                     if assoc_unresolved
+                                     else "complete"),
         "state": "complete"}
-    if (inventory["partial_vendor_parse"]
-            or inventory["ambiguous_rows"]
-            or inventory["unavailable_rows"]):
+    if partial_parse or assoc_unresolved:
         inventory["state"] = "partial"
     if fresh is not None:
         if not isinstance(fresh, dict) \
@@ -605,22 +648,32 @@ def build_cuda_candidate(*, evidence: dict | None, gpu_token: str,
 
     # Target-independence policy: the bound record is qualified, but
     # unresolved vendor evidence elsewhere must be provably unable to
-    # affect it. Non-NVIDIA rows (correlation 'unsupported') cannot
-    # hold a NVIDIA UUID — independence is established and mixed-vendor
-    # inventories are accepted. ANY other NVIDIA row whose association
-    # is unavailable or ambiguous is unresolved vendor evidence that
-    # could undermine the uniqueness assumption — its independence
-    # cannot be established, so the candidate refuses. An unparseable
-    # smi row (partial vendor parse) is likewise unresolved.
+    # affect it — established FROM the supplied evidence, never from
+    # name, VRAM, index, count or caller claims. Non-NVIDIA rows
+    # (correlation 'unsupported') can hold no NVIDIA UUID and add no
+    # vendor rows — independence is established and mixed-vendor
+    # inventories are accepted. ANY other NVIDIA record that is
+    # unavailable or ambiguous, and ANY valid vendor row not consumed
+    # by a qualified one-to-one association (an unmatched device or a
+    # row in an unresolved association — its UUID is not even present
+    # in the supplied record set), is unresolved vendor evidence whose
+    # independence cannot be established — the candidate refuses while
+    # preserving the qualified target's correlation and the sanitized
+    # completeness counts. An unparseable smi row (partial vendor
+    # parse) is likewise unresolved.
     if ev["inventory"]["partial_vendor_parse"]:
-        return _refuse("unresolved_vendor_evidence")
+        return _refuse("unresolved_vendor_evidence",
+                       inventory_completeness=ev["inventory"],
+                       target_correlation=rec.get("correlation"))
     unresolved = sum(1 for r in ev["records"] if r is not rec
                      and r.get("correlation") in (
                          hw_identity.CORR_AMBIGUOUS,
                          hw_identity.CORR_UNAVAILABLE))
-    if unresolved:
+    if unresolved or ev["inventory"]["unresolved_vendor_rows"]:
         return _refuse("unresolved_nvidia_association",
-                       unresolved_rows=unresolved)
+                       unresolved_rows=unresolved,
+                       inventory_completeness=ev["inventory"],
+                       target_correlation=rec.get("correlation"))
 
     rt = dict(runtime or {})
     rtq = rt.get("rtq")
