@@ -792,9 +792,25 @@ def test_ep_never_live_collects(monkeypatch, client, pub):
         def _raiser(*a, _fn=fn, **k):
             raise AssertionError(f"{_fn} in request path")
         monkeypatch.setattr(mod, fn, _raiser)
-    monkeypatch.setattr(hardware.psutil, "virtual_memory",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("psutil in request path")))
+    # The WorkerPool monitor tick calls ResidencyRegistry.under_pressure()
+    # once per second under pool._lock -> _ram_free() -> psutil.virtual_memory
+    # on the SHARED psutil module object. Arming the module-level raiser
+    # while a tick is in flight would fire the raiser off the request path,
+    # so isolate the registry's RAM callback first — atomically vs the tick
+    # by holding the same _lock the monitor holds while pressure-checking.
+    # A tick either completed before we take the lock (benign conftest
+    # roomy value) or runs after and observes the isolated callback.
+    pool = client.app.state.worker_pool
+
+    async def _arm_raiser() -> None:
+        async with pool._lock:
+            monkeypatch.setattr(pool._registry, "_ram_free",
+                                lambda: 48 * resources.GIB)
+            monkeypatch.setattr(hardware.psutil, "virtual_memory",
+                                lambda: (_ for _ in ()).throw(
+                                    AssertionError("psutil in request path")))
+
+    client.portal.call(_arm_raiser)
     monkeypatch.setattr(hardware, "_cached_probe",
                         lambda b: (_ for _ in ()).throw(
                             AssertionError("discovery attempted")))
@@ -804,6 +820,26 @@ def test_ep_never_live_collects(monkeypatch, client, pub):
     r = client.get(t5c._purl(pid, t5c.WAN_AID, runtime_key="sdcpp",
                            workflow="text2video"))
     assert r.status_code == 200, r.text
+
+
+def test_ep_raiser_isolates_background_pressure_check(monkeypatch, client):
+    """The armed request-path raiser must not reach the pool monitor's
+    legitimate background RAM check: with the residency registry's
+    ``_ram_free`` isolated, ``under_pressure()`` — the exact call the
+    1s monitor tick makes — stays benign while every other
+    ``psutil.virtual_memory`` caller still hits the raiser."""
+    import psutil
+
+    reg = client.app.state.worker_pool._registry
+    monkeypatch.setattr(reg, "_ram_free", lambda: 48 * resources.GIB)
+    monkeypatch.setattr(hardware.psutil, "virtual_memory",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("psutil in request path")))
+    # Deterministic equivalent of the monitor tick firing while armed.
+    assert reg.under_pressure() is False
+    # The prohibited collection boundary remains fully armed.
+    with pytest.raises(AssertionError, match="psutil in request path"):
+        psutil.virtual_memory()
 
 
 def test_ep_authoritative_blocker_beats_complete_evidence(client, pub):
