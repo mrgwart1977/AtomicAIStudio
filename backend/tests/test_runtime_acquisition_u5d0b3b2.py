@@ -13,6 +13,8 @@ import ast
 import copy
 import hashlib
 import io
+import os
+import subprocess
 import warnings
 import zipfile
 from pathlib import Path
@@ -128,9 +130,9 @@ def _permit(scn, selected, ops=("acquire", "extract")):
             "permitted_ops": list(ops)}
 
 
-def _auth(scn, selected, ops=("acquire", "extract")):
+def _auth(scn, selected, ops=("acquire", "extract"), revoked=None):
     return ra.SyntheticAcquisitionAuthority(
-        [_permit(scn, selected, ops)])
+        [_permit(scn, selected, ops)], revoked=revoked)
 
 
 def _transport(scn, tweak=None):
@@ -689,16 +691,24 @@ def test_a45_verification_extraction_association_file_path(
 
 def test_a46_replaced_or_contradictory_association_refused(tmp_path):
     p = tmp_path / "a.zip"
-    p.write_bytes(b"0123456789")
-    fh, why = ra._open_archive_assoc(p, observed_size=9)
+    data = b"0123456789"
+    p.write_bytes(data)
+    with open(p, "rb") as fh0:
+        baseline = ra._baseline_of(os.fstat(fh0.fileno()))
+    fh, why = ra._open_archive_assoc(p, 9, _sha(data), baseline, None)
     assert fh is None and why == "archive_association_size_mismatch"
     fh, why = ra._open_archive_assoc(tmp_path / "missing.zip",
-                                     observed_size=9)
+                                     9, "0" * 64, baseline, None)
     assert fh is None and why == "archive_stat_failed"
     # directory substitution: open succeeds on POSIX but is not a zip —
     # on Windows open() fails outright; either way it must refuse.
-    fh, why = ra._open_archive_assoc(tmp_path, observed_size=0)
+    fh, why = ra._open_archive_assoc(tmp_path, 0, "0" * 64,
+                                     baseline, None)
     assert fh is None
+    # The verified baseline + rehash accept an unchanged file.
+    fh, why = ra._open_archive_assoc(p, 10, _sha(data), baseline, None)
+    assert fh is not None and why is None
+    fh.close()
 
 
 # ================================================================ A47–A80
@@ -879,8 +889,11 @@ def test_a64_encrypted_or_unsupported_compression_refused(tmp_path):
                   {"compress_type": zipfile.ZIP_BZIP2})])],
               members=[_member("sd.exe", "runtime", b"sd-bytes")])
     res = _run(scn, tmp_path)
+    # The refused entry was the expected member — the preflight
+    # coverage check reports its absence too.
     assert res["refusals"] == [
-        "member_compression_unsupported:sd.exe"]
+        "member_compression_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
 
 
 def test_a65_corrupt_archive_refused(tmp_path):
@@ -889,7 +902,9 @@ def test_a65_corrupt_archive_refused(tmp_path):
     scn = _mk_from_bytes("runtime", bad,
                          [_member("sd.exe", "runtime", b"sd-bytes")])
     res = _run(scn, tmp_path)
-    assert res["refusals"] == ["archive_corrupt:runtime"]
+    # The truncated archive has no locatable EOCD record — the bounded
+    # preliminary directory assessment refuses before the parser runs.
+    assert res["refusals"] == ["archive_directory_missing"]
 
 
 def test_a66_local_central_contradiction_refused(tmp_path):
@@ -898,13 +913,20 @@ def test_a66_local_central_contradiction_refused(tmp_path):
                          [_member("sd.exe", "runtime", b"sd-bytes")])
     res = _run(scn, tmp_path)
     assert res["refusals"] == [
-        "archive_local_central_mismatch:sd.exe"]
+        "archive_local_central_mismatch:sd.exe",
+        "missing_expected_member:sd.exe"]
 
 
 def test_a67_entry_count_bound(tmp_path, monkeypatch):
+    # The declared EOCD entry count is patched down to slip under the
+    # bound so the POST-PARSER actual count check is what fires —
+    # the two bounds are enforced independently.
     monkeypatch.setattr(ra, "_MAX_ARCHIVE_ENTRIES", 1)
-    scn = _mk([("runtime", "primary", True, 1,
-                [("a.dll", b"a"), ("b.dll", b"b")])])
+    zb = _patch_eocd(_z([("a.dll", b"a"), ("b.dll", b"b")]),
+                     entries=1)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("a.dll", "runtime", b"a"),
+                          _member("b.dll", "runtime", b"b")])
     res = _run(scn, tmp_path)
     assert res["refusals"] == ["archive_entries_over_bound"]
 
@@ -1003,7 +1025,8 @@ def test_a76_member_size_mismatch_refused(tmp_path):
                 [("sd.exe", b"sd-bytes")])],
               members=[m])
     res = _run(scn, tmp_path)
-    assert res["refusals"] == ["member_size_mismatch:sd.exe"]
+    assert res["refusals"] == ["member_size_mismatch:sd.exe",
+                               "missing_expected_member:sd.exe"]
 
 
 def test_a77_member_digest_mismatch_refused(tmp_path):
@@ -1229,6 +1252,858 @@ def test_a96_no_scheduler_watchdog_reservation_changes():
         assert banned not in src
 
 
+# ================================================================ C1
+# verified archive content association
+
+
+def _force_file(monkeypatch):
+    monkeypatch.setattr(ra, "_MAX_IN_MEMORY_ARCHIVE", -1)
+
+
+def _no_member_writes(res, tmp_path):
+    members = tmp_path / res["staging"]["dir"] / "members"
+    return not members.exists() or not any(members.iterdir())
+
+
+def test_c1_01_memory_backed_association_evidence(tmp_path):
+    res = _run(_single(), tmp_path)
+    assert res["ok"]
+    rec = res["archives"][0]
+    assert rec["comparison"] == "match"
+    assert rec["reopen_comparison"] == "memory_backed"
+    assert rec["final_comparison"] == "memory_backed"
+
+
+def test_c1_02_file_backed_association_evidence(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    res = _run(_single(), tmp_path)
+    assert res["ok"]
+    rec = res["archives"][0]
+    assert rec["comparison"] == "match"
+    assert rec["reopen_comparison"] == "match"
+    assert rec["final_comparison"] == "match"
+
+
+def test_c1_03_inplace_same_size_modification_refused(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: _flip(kw["path"])
+        if point == "stream_closed" else None)
+    res = _run(_single(), tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+    assert res["production_trust"] is False
+
+
+def test_c1_04_same_size_replacement_refused(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    other = bytearray(scn["zips"]["runtime"])
+    other[len(other) // 2] ^= 0xFF
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: kw["path"].write_bytes(bytes(other))
+        if point == "stream_closed" else None)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+
+
+def test_c1_05_replacement_before_reopen_refused(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    other = bytearray(scn["zips"]["runtime"])
+    other[0] ^= 0x01   # still a zip-ish size-equal replacement
+    alt = tmp_path / "alt.zip"
+    alt.write_bytes(bytes(other))
+
+    def hook(point, **kw):
+        if point == "stream_closed":
+            os.replace(alt, kw["path"])   # new inode entirely
+    monkeypatch.setattr(ra, "_TEST_SEAM", hook)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+
+
+def test_c1_06_skipped_only_content_modification_refused(
+        tmp_path, monkeypatch):
+    """A same-size, same-inode, restored-mtime replacement that keeps
+    every managed member byte-exact but alters a declared-skipped
+    entry is caught by content re-verification — stat evidence alone
+    never proves bytes."""
+    _force_file(monkeypatch)
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", b"sd"), ("notes.txt", b"notes")])],
+              members=[_member("sd.exe", "runtime", b"sd")],
+              skips=["notes.txt"])
+    other = _z([("sd.exe", b"sd"), ("notes.txt", b"NOTES")])
+    assert len(other) == len(scn["zips"]["runtime"])
+
+    def hook(point, **kw):
+        if point != "stream_closed":
+            return
+        p = kw["path"]
+        st = p.stat()
+        p.write_bytes(other)            # same size, same inode
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    monkeypatch.setattr(ra, "_TEST_SEAM", hook)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_rehash_mismatch"]
+    assert res["members"] == []
+
+
+def test_c1_07_persistent_modification_before_extraction(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    # Member data exceeds the reader's buffer so a persistent mid-
+    # member modification is necessarily re-read from disk.
+    data = b"sd-bytes" * 3000
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", data,
+                  {"compress_type": zipfile.ZIP_STORED})])],
+              members=[_member("sd.exe", "runtime", data)])
+    data_off = scn["zips"]["runtime"].find(data[:8]) + 10000
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: _flip(kw["path"], data_off)
+        if point == "pre_extract" else None)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    # The buffered member read may legitimately serve the verified
+    # bytes — the refusal may then come from the final association or
+    # raw-fd content rehash instead of the member digest check.
+    assert res["refusals"][0] in (
+        "member_sha256_mismatch:sd.exe", "member_corrupt:sd.exe",
+        "archive_association_changed", "archive_rehash_mismatch")
+
+
+def test_c1_08_persistent_modification_during_extraction(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    data = b"sd-bytes" * 3000
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", data,
+                  {"compress_type": zipfile.ZIP_STORED})])],
+              members=[_member("sd.exe", "runtime", data)])
+    data_off = scn["zips"]["runtime"].find(data[:8]) + 10000
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: _flip(kw["path"], data_off)
+        if point == "pre_member" else None)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in (
+        "member_sha256_mismatch:sd.exe", "member_corrupt:sd.exe",
+        "archive_association_changed", "archive_rehash_mismatch")
+
+
+def test_c1_09_zero_inode_does_not_bypass_content_check(tmp_path):
+    """Degraded stat evidence (st_ino == 0) never bypasses content
+    verification — the rehash still catches a same-size, restored-
+    mtime modification."""
+    p = tmp_path / "a.zip"
+    data = b"0123456789"
+    p.write_bytes(data)
+    with open(p, "rb") as fh0:
+        baseline = ra._baseline_of(os.fstat(fh0.fileno()))
+    baseline["ino"] = 0     # simulate unavailable inode evidence
+    st = p.stat()
+    _flip(p)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    fh, why = ra._open_archive_assoc(p, 10, _sha(data), baseline, None)
+    assert fh is None and why == "archive_rehash_mismatch"
+
+
+def test_c1_10_cancel_during_reopened_rehash(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    calls = [0]
+
+    def cc():
+        calls[0] += 1
+        # stream chunk check is call 1; the reopened-handle rehash
+        # loop starts at call 2.
+        return calls[0] >= 2
+    res = _run(_single(), tmp_path, cancel_check=cc)
+    assert res["state"] == "cancelled" and res["ok"] is False
+
+
+def test_c1_11_cancel_during_final_verification(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    calls = [0]
+
+    def count():
+        calls[0] += 1
+        return False
+    res = _run(scn, tmp_path / "a", cancel_check=count)
+    assert res["ok"]
+    total = calls[0]
+    calls2 = [0]
+
+    def cc():
+        calls2[0] += 1
+        return calls2[0] >= total   # the last check call sits inside
+        # the final association rehash
+    res2 = _run(scn, tmp_path / "b", cancel_check=cc)
+    assert res2["state"] == "cancelled" and res2["ok"] is False
+
+
+def test_c1_12_final_failure_preserves_partial_evidence(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: _flip(kw["path"], -1)
+        if point == "pre_final" else None)
+    res = _run(_single(), tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+    # The member was fully written and verified before the final
+    # association check failed — evidence must not hide that.
+    assert [m["name"] for m in res["members"]] == ["sd.exe"]
+    rec = res["archives"][0]
+    assert rec["final_comparison"] in ("archive_association_changed",
+                                     "archive_rehash_mismatch")
+    assert res["staging"]["complete"] is False
+
+
+def test_c1_13_same_handle_preflight_and_extraction(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    seen = {}
+    orig_assoc = ra._open_archive_assoc
+
+    def assoc_spy(*a, **k):
+        fh, why = orig_assoc(*a, **k)
+        seen["fh"] = fh
+        return fh, why
+    monkeypatch.setattr(ra, "_open_archive_assoc", assoc_spy)
+    orig_zf = zipfile.ZipFile
+
+    class _ZSpy(orig_zf):
+        def __init__(self, f, *a, **k):
+            super().__init__(f, *a, **k)
+            seen.setdefault("zf_fp", f)
+    monkeypatch.setattr(zipfile, "ZipFile", _ZSpy)
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    # The parser was constructed over exactly the verified handle.
+    assert seen["zf_fp"] is seen["fh"]
+
+
+def test_c1_14_member_sha256_mandatory_on_file_path(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    m = _member("sd.exe", "runtime", b"sd-bytes")
+    m["sha256"] = "0" * 64
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", b"sd-bytes")])], members=[m])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["member_sha256_mismatch:sd.exe"]
+
+
+# ================================================================ C2
+# known revocation and synthetic authority
+
+
+def test_c2_01_revoked_with_matching_permit_refused(tmp_path):
+    scn = _single()
+    auth = _auth(scn, ["runtime"],
+                 revoked=[rr.reference_digest(scn["ref"])])
+    res = _run(scn, tmp_path, authority=auth)
+    assert res["refusals"] == ["authority_revoked"]
+    assert res["authority"]["association"] == "revoked"
+    assert res["production_trust"] is False
+
+
+def test_c2_02_revoked_without_permit_precedence(tmp_path):
+    scn = _single()
+    auth = ra.SyntheticAcquisitionAuthority(
+        [], revoked=[rr.reference_digest(scn["ref"])])
+    res = _run(scn, tmp_path, authority=auth)
+    # Revocation precedes permit association — never "unmatched".
+    assert res["refusals"] == ["authority_revoked"]
+
+
+def test_c2_03_04_revoked_no_transport_no_artifacts(tmp_path):
+    scn = _single()
+    calls = []
+    auth = _auth(scn, ["runtime"],
+                 revoked=[rr.reference_digest(scn["ref"])])
+
+    def spy(url):
+        calls.append(url)
+        return iter([])
+    res = _run(scn, tmp_path, authority=auth, transport=spy)
+    assert res["refusals"] == ["authority_revoked"]
+    assert calls == []
+    assert not any(tmp_path.iterdir())
+
+
+def test_c2_05_other_digest_unaffected(tmp_path):
+    scn = _single()
+    other = _mk_from_bytes("runtime", _z([("x.bin", b"x")]),
+                           [_member("x.bin", "runtime", b"x")])
+    auth = _auth(scn, ["runtime"],
+                 revoked=[rr.reference_digest(other["ref"])])
+    res = _run(scn, tmp_path, authority=auth)
+    assert res["ok"]
+    # A structurally valid unapproved expectation set remains usable
+    # when independently permitted and not known revoked.
+    assert res["authority"]["association"] == "established"
+
+
+def test_c2_07_caller_mutation_cannot_unrevoke(tmp_path):
+    scn = _single()
+    dig = rr.reference_digest(scn["ref"])
+    rv = [dig]
+    auth = _auth(scn, ["runtime"], revoked=rv)
+    rv.clear()
+    res = _run(scn, tmp_path, authority=auth)
+    assert res["refusals"] == ["authority_revoked"]
+
+
+def test_c2_08_malformed_revoked_digest_refused():
+    for bad in ("x", "rref:v0:nothex", 42,
+                "rref:v0:" + "0" * 64 + "z"):
+        with pytest.raises(ValueError):
+            ra.SyntheticAcquisitionAuthority([], revoked=[bad])
+    with pytest.raises(TypeError):
+        ra.SyntheticAcquisitionAuthority(
+            [], revoked="rref:v0:" + "0" * 64)
+
+
+def test_c2_09_revoked_bound_enforced(monkeypatch):
+    monkeypatch.setattr(ra, "_MAX_REVOKED", 2)
+    with pytest.raises(ValueError):
+        ra.SyntheticAcquisitionAuthority(
+            [], revoked=["rref:v0:" + "0" * 64] * 3)
+
+
+def test_c2_10_no_self_declared_or_permit_carried_revocation():
+    scn = _single()
+    # A permit cannot smuggle revocation semantics — field set is
+    # exact.
+    p = _permit(scn, ["runtime"])
+    p["revoked"] = True
+    with pytest.raises(ValueError):
+        ra.SyntheticAcquisitionAuthority([p])
+    # Nor can a favorable authority-shaped flag bypass the context.
+    res = ra.acquire(scn["ref"], authority={"revoked": []},
+                     selection={"runtime": True},
+                     release_metadata=scn["meta"],
+                     transport=_transport(scn), staging_root=None)
+    assert res["refusals"] == ["authority_context_invalid"]
+
+
+# ================================================================ C3
+# junction / reparse-point safety
+
+
+def test_c3_01_ordinary_staging_root_accepted(tmp_path):
+    res = _run(_single(), tmp_path)
+    assert res["ok"]
+
+
+def test_c3_02_root_symlink_refused_mocked(tmp_path, monkeypatch):
+    # Mocked metadata coverage — no link-creation privilege needed.
+    monkeypatch.setattr(Path, "is_symlink", lambda s: True)
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["staging_root_reparse"]
+    # No output outside the owned workspace was produced.
+    assert not any(tmp_path.iterdir())
+
+
+def test_c3_03_root_junction_refused_mocked(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "is_symlink", lambda s: False)
+    monkeypatch.setattr(os.path, "isjunction", lambda p: True)
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["staging_root_reparse"]
+
+
+def test_c3_04_reparse_ancestor_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "_path_reparse",
+                        lambda p: Path(p) == tmp_path.parent)
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["staging_root_reparse"]
+    assert not any(tmp_path.iterdir())
+
+
+def test_c3_05_06_reopened_archive_reparse_refused(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    monkeypatch.setattr(ra, "_path_reparse",
+                        lambda p: str(p).endswith(".zip"))
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["archive_association_reparse"]
+    assert res["archives"][0]["reopen_comparison"] == \
+        "archive_association_reparse"
+
+
+def test_c3_07_unsafe_member_directory_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "_path_reparse",
+                        lambda p: Path(p).name == "members")
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["staging_dir_reparse"]
+    assert res["members"] == []
+    assert _no_member_writes(res, tmp_path)
+
+
+@pytest.mark.parametrize("attr,why", [
+    ("dest", "destination_reparse"),
+    ("root", "destination_association_lost")])
+def test_c3_08_destination_reparse_refused(tmp_path, monkeypatch,
+                                           attr, why):
+    members_dir = tmp_path / "members"
+    members_dir.mkdir()
+    if attr == "dest":
+        monkeypatch.setattr(ra, "_path_reparse",
+                            lambda p: Path(p) == members_dir / "sd.exe")
+    else:
+        monkeypatch.setattr(ra, "_path_reparse",
+                            lambda p: Path(p) == members_dir)
+    scn = _single()
+    zf = zipfile.ZipFile(io.BytesIO(scn["zips"]["runtime"]))
+    rec, got = ra._extract_member(
+        zf, zf.infolist()[0],
+        {"name": "sd.exe", "component": "runtime",
+         "size": 8, "sha256": _sha(b"sd-bytes")},
+        members_dir, None)
+    assert rec is None and got == why
+    # Foreign destination content is never touched — nothing created.
+    assert not (members_dir / "sd.exe").exists()
+
+
+def test_c3_11_reparse_metadata_not_ignored(tmp_path, monkeypatch):
+    """When is_symlink()/isjunction() report False, lstat reparse
+    attributes are still consulted — a non-symlink reparse tag is not
+    silently accepted."""
+    class _St:
+        st_file_attributes = 0x400     # FILE_ATTRIBUTE_REPARSE_POINT
+        st_mode = 0o40777
+    monkeypatch.setattr(Path, "is_symlink", lambda s: False)
+    if hasattr(os.path, "isjunction"):
+        monkeypatch.setattr(os.path, "isjunction", lambda p: False)
+    monkeypatch.setattr(Path, "lstat", lambda s: _St())
+    assert ra._path_reparse(tmp_path)
+
+
+def test_c3_junction_actual(tmp_path):
+    """Actual filesystem junction integration — environment
+    conditioned. Mocked coverage above is authoritative; this only
+    runs where junction creation is available (Windows, no admin
+    required for directory junctions)."""
+    if os.name != "nt" or not hasattr(os.path, "isjunction"):
+        pytest.skip("actual junction coverage requires Windows")
+    target = tmp_path / "real"
+    target.mkdir()
+    junc = tmp_path / "junc"
+    # test-side only — the module itself never spawns processes (a86)
+    r = subprocess.run(["cmd", "/c", "mklink", "/J",
+                        str(junc), str(target)], check=False,
+                       capture_output=True)
+    if r.returncode != 0 or not os.path.isjunction(junc):
+        pytest.skip("junction creation unavailable in this environment")
+    res = _run(_single(), junc)
+    assert res["refusals"] == ["staging_root_reparse"]
+
+
+# ================================================================ C4
+# exact asset identity uniqueness
+
+
+def test_c4_01_duplicate_id_different_names_refused(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append(dict(meta["assets"][0], name="other.zip"))
+    res = _run(scn, tmp_path, meta=meta)
+    assert res["refusals"] == ["asset_duplicate_id:1"]
+
+
+def test_c4_02_duplicate_id_same_name_refused(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append(dict(meta["assets"][0]))
+    res = _run(scn, tmp_path, meta=meta)
+    assert res["refusals"] == ["asset_duplicate_identity:runtime.zip"]
+
+
+def test_c4_03_duplicate_name_different_ids_refused(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append(dict(meta["assets"][0], id=9))
+    res = _run(scn, tmp_path, meta=meta)
+    assert res["refusals"] == ["asset_duplicate_identity:runtime.zip"]
+
+
+def test_c4_04_contradictory_url_identity_refused(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append(dict(meta["assets"][0],
+                               name="b.zip", id=9))
+    res = _run(scn, tmp_path, meta=meta)
+    assert res["refusals"] == ["asset_duplicate_url:b.zip"]
+
+
+def test_c4_05_unselected_inventory_conflict_refused(tmp_path):
+    scn = _multi()
+    meta = copy.deepcopy(scn["meta"])
+    # opt is unselected; a contradictory duplicate of its asset id in
+    # the supplied inventory still refuses — the whole inventory is
+    # identity-checked, not only the selected names.
+    meta["assets"].append(dict(meta["assets"][2], name="evil.zip"))
+    res = _run(scn, tmp_path, selection=_sel(scn, opt=False),
+               meta=meta)
+    assert res["refusals"] == ["asset_duplicate_id:3"]
+
+
+def test_c4_06_malformed_id_refused_before_indexing(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append({"id": "x", "name": "z.zip", "size": 1,
+                           "browser_download_url": "https://x/z.zip",
+                           "digest": "sha256:" + "0" * 64})
+    res = _run(scn, tmp_path, meta=meta)
+    assert res["refusals"] == ["asset_id_invalid:1"]
+
+
+def test_c4_07_distinct_multi_archive_identities_accepted(tmp_path):
+    res = _run(_multi(), tmp_path)
+    assert res["ok"]
+    assert len({a["asset_id"] for a in res["archives"]}) == 3
+
+
+def test_c4_08_contradiction_invokes_no_transport(tmp_path):
+    scn = _single()
+    meta = copy.deepcopy(scn["meta"])
+    meta["assets"].append(dict(meta["assets"][0], name="other.zip"))
+    calls = []
+    res = _run(scn, tmp_path, meta=meta,
+               transport=lambda u: calls.append(u) or iter([]))
+    assert res["refusals"] == ["asset_duplicate_id:1"]
+    assert calls == []
+
+
+# ================================================================ C5
+# complete metadata-detectable preflight
+
+
+def test_c5_03_missing_member_first_archive_no_writes(tmp_path):
+    scn = _mk(
+        [("art", "primary", True, 1, [("a.dll", b"a")]),
+         ("dep", "dependency", True, 2, [("d.dll", b"d")])],
+        members=[_member("a.dll", "art", b"a"),
+                 _member("missing.dll", "art", b"m"),
+                 _member("d.dll", "dep", b"d")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["missing_expected_member:missing.dll"]
+    assert res["members"] == []
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_c5_04_missing_member_final_archive_no_writes(tmp_path):
+    scn = _mk(
+        [("art", "primary", True, 1, [("a.dll", b"a")]),
+         ("dep", "dependency", True, 2, [("d.dll", b"d")])],
+        members=[_member("a.dll", "art", b"a"),
+                 _member("d.dll", "dep", b"d"),
+                 _member("missing.dll", "dep", b"m")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["missing_expected_member:missing.dll"]
+    assert res["members"] == []
+    # The FIRST archive's members were never written either — zero
+    # managed-member output across the whole acquisition.
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_c5_05_missing_member_optional_archive_no_writes(tmp_path):
+    scn = _mk(
+        [("runtime", "primary", True, 1, [("sd.exe", b"sd")]),
+         ("opt", "optional", False, 2, [("opt.txt", b"o")])],
+        members=[_member("sd.exe", "runtime", b"sd"),
+                 _member("opt.txt", "opt", b"o"),
+                 _member("gone.dll", "opt", b"g")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["missing_expected_member:gone.dll"]
+    assert res["members"] == []
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_c5_07_skip_managed_contradiction_refused(tmp_path):
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", b"sd")])],
+              members=[_member("sd.exe", "runtime", b"sd")],
+              skips=["sd.exe"])
+    res = _run(scn, tmp_path)
+    assert res["refusals"][0] == "member_skip_conflict:sd.exe"
+    assert res["ok"] is False
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_c5_08_wrong_component_ownership_no_writes(tmp_path):
+    scn = _mk(
+        [("runtime", "primary", True, 1, [("sd.exe", b"sd")]),
+         ("dep", "dependency", True, 2,
+          [("shared.dll", b"dep"), ("dep.dll", b"d")])],
+        members=[_member("sd.exe", "runtime", b"sd"),
+                 _member("shared.dll", "runtime", b"rt"),
+                 _member("dep.dll", "dep", b"d")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"][0].startswith(
+        ("unexpected_member", "missing_expected_member"))
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_c5_09_10_later_preflight_failure_no_writes(tmp_path):
+    # dep prefights after art (deterministic component order); its
+    # unexpected entry refuses before art's members are ever written.
+    scn = _mk(
+        [("art", "primary", True, 1, [("a.dll", b"a")]),
+         ("dep", "dependency", True, 2,
+          [("d.dll", b"d"), ("evil.bin", b"e")])],
+        members=[_member("a.dll", "art", b"a"),
+                 _member("d.dll", "dep", b"d")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["unexpected_member:evil.bin"]
+    assert res["members"] == []
+    assert _no_member_writes(res, tmp_path)
+
+
+# ================================================================ C6
+# bounded resource and ZIP parser hardening
+
+
+def test_c6_01_valid_bounded_directory_accepted(tmp_path):
+    scn = _single()
+    bio = io.BytesIO(scn["zips"]["runtime"])
+    info, why = ra._preflight_zip_dir(
+        bio, len(scn["zips"]["runtime"]), None)
+    assert why is None
+    assert info["entries"] == 1 and info["cd_size"] > 0
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+
+
+def test_c6_02_oversized_declared_directory_refused(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "_MAX_CENTRAL_DIR_BYTES", 1)
+    res = _run(_single(), tmp_path)
+    assert res["refusals"] == ["archive_directory_over_bound"]
+
+
+def test_c6_03_excessive_declared_count_refused(tmp_path):
+    zb = _patch_eocd(_z([("sd.exe", b"sd")]), entries=3000)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_directory_entries_over_bound"]
+
+
+def test_c6_04_contradictory_directory_ranges_refused(tmp_path):
+    zb = _patch_eocd(_z([("sd.exe", b"sd")]), cd_off=0x7FFFFFFF)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_directory_range_invalid"]
+    # Declared count contradicting the actual central records also
+    # refuses.
+    zb2 = _patch_eocd(_z([("sd.exe", b"sd")]), entries=7)
+    scn2 = _mk_from_bytes("runtime", zb2,
+                          [_member("sd.exe", "runtime", b"sd")])
+    res2 = _run(scn2, tmp_path / "b")
+    assert res2["refusals"] == ["archive_directory_count_mismatch"]
+
+
+def test_c6_06_aggregate_directory_budget_enforced(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "_MAX_AGGREGATE_DIR_BYTES", 100)
+    res = _run(_multi(), tmp_path)
+    assert res["refusals"] == ["aggregate_directory_over_bound"]
+
+
+def test_c6_07_unsupported_zip_structures_refused(tmp_path):
+    zb = _patch_eocd(_z([("sd.exe", b"sd")]), disk=1)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_directory_multidisk"]
+    zb2 = _patch_eocd(_z([("sd.exe", b"sd")]), entries=0xFFFF)
+    scn2 = _mk_from_bytes("runtime", zb2,
+                          [_member("sd.exe", "runtime", b"sd")])
+    res2 = _run(scn2, tmp_path / "b")
+    assert res2["refusals"] == ["archive_zip64_unsupported"]
+
+
+def test_c6_08_09_10_retained_memory_budget(tmp_path, monkeypatch):
+    scn = _multi()
+    total = sum(len(z) for z in scn["zips"].values())
+    # Budget fits all but the last archive (declaration order is the
+    # deterministic component order) — the last falls back to the
+    # bounded file-backed path rather than silently expanding.
+    monkeypatch.setattr(ra, "_MAX_RETAINED_MEM", total - 1)
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    bycomp = {a["component"]: a for a in res["archives"]}
+    assert bycomp["runtime"]["reopen_comparison"] == "match"
+    assert bycomp["cudart"]["reopen_comparison"] == "memory_backed"
+
+
+def test_c6_11_ratio_exactly_at_limit_accepted(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "_MAX_RATIO", 1)
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", b"sd-bytes",
+                  {"compress_type": zipfile.ZIP_STORED})])],
+              members=[_member("sd.exe", "runtime", b"sd-bytes")])
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+
+
+def test_c6_13_zero_compressed_size_edges(tmp_path):
+    # A genuinely empty entry remains valid (both sizes zero) — as a
+    # declared skip, since rref:v0 itself rejects zero-size members.
+    scn = _mk([("runtime", "primary", True, 1,
+                [("sd.exe", b"sd"), ("e.txt", b"")])],
+              members=[_member("sd.exe", "runtime", b"sd")],
+              skips=["e.txt"])
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    assert res["skipped"][0]["name"] == "e.txt"
+    # Zero compressed size with nonzero expanded is an unbounded
+    # ratio and refuses.
+    zb = _z([("sd.exe", b"sd")])
+    b = bytearray(zb)
+    j = _nth_sig(zb, b"PK\x01\x02", 0)
+    b[j + 20:j + 24] = (0).to_bytes(4, "little")
+    scn2 = _mk_from_bytes("runtime", bytes(b),
+                          [_member("sd.exe", "runtime", b"sd")])
+    res2 = _run(scn2, tmp_path / "b")
+    assert res2["refusals"] == ["member_ratio_abuse:sd.exe",
+                                "missing_expected_member:sd.exe"]
+
+
+def test_c6_14_cancellation_during_preflight(tmp_path):
+    calls = [0]
+
+    def cc():
+        calls[0] += 1
+        # stream chunk (1), directory assessment (2), first preflight
+        # entry check (3).
+        return calls[0] >= 3
+    res = _run(_single(), tmp_path, cancel_check=cc)
+    assert res["state"] == "cancelled"
+    assert res["members"] == []
+
+
+def test_c6_16_embedded_nul_in_original_name(tmp_path):
+    zb = _patch_entry_name(_z([("sd.exe", b"s"),
+                               ("aXb.dll", b"e")]),
+                           b"aXb.dll", b"a\x00b.dll")
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"s")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"][0].startswith("member_name_invalid")
+
+
+def test_c6_17_local_central_method_contradiction(tmp_path):
+    zb = _patch_local_method(_z([("sd.exe", b"sd")]), 0)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "archive_local_central_mismatch:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_c6_18_local_central_flag_contradiction(tmp_path):
+    zb = _patch_local_flag(_z([("sd.exe", b"sd")]), 0x1)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "archive_local_central_mismatch:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_c6_19_unsupported_security_flags_refused(tmp_path):
+    zb = _patch_flag(_z([("sd.exe", b"sd")]), 0x40)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_security_flag_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_c6_20_size_semantics(tmp_path):
+    # Committed local size contradicting the central entry refuses.
+    zb = _patch_local_csize(_z([("sd.exe", b"sd")]), 0)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "archive_local_central_mismatch:sd.exe",
+        "missing_expected_member:sd.exe"]
+    # The supported data-descriptor form (sizes committed in the
+    # descriptor, zero in the local header) remains accepted.
+    zd = _z_descriptor([("sd.exe", b"sd-bytes")])
+    scn2 = _mk_from_bytes("runtime", zd,
+                          [_member("sd.exe", "runtime", b"sd-bytes")])
+    res2 = _run(scn2, tmp_path / "b")
+    assert res2["ok"]
+    dest = tmp_path / "b" / res2["staging"]["dir"] / "members" \
+        / "sd.exe"
+    assert dest.read_bytes() == b"sd-bytes"
+
+
+def test_c6_21_overlapping_entry_ranges_refused(tmp_path):
+    # Grow entry 0's claimed compressed size so its data range runs
+    # 4 bytes into entry 1's local header — consistent local/central
+    # fields, contradictory layout.
+    zb = _patch_csize_both(
+        _z([("a.dll", b"aa"), ("b.dll", b"bb")]), extra=4)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("a.dll", "runtime", b"aa"),
+                          _member("b.dll", "runtime", b"bb")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_entry_overlap:b.dll"]
+
+
+def test_c6_22_skipped_entry_cannot_bypass_structure(tmp_path):
+    # The declared-skipped entry carries an encryption flag — the
+    # structural refusal fires even though its bytes are never read.
+    zb = _patch_flag(_z([("sd.exe", b"s"), ("notes.txt", b"n")]),
+                     0x1, which=1)
+    scn = _mk_from_bytes(
+        "runtime", zb,
+        [_member("sd.exe", "runtime", b"s")],
+        tag="v1")
+    scn["ref"]["coverage"]["skip_names"] = ["notes.txt"]
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["member_encrypted:notes.txt"]
+
+
+def test_c6_23_malformed_filename_encoding_controlled(tmp_path):
+    # A name that is undecodable under its declared UTF-8 flag is a
+    # controlled refusal, never a crash.
+    zb = _patch_flag(_patch_entry_name(
+        _z([("sd.exe", b"sd")]), b"sd.exe", b"sd.ex\xff"), 0x800)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"] == ["archive_corrupt:runtime"]
+    assert res["production_trust"] is False
+    assert res["execution_eligible"] is False
+
+
 # ============================================================ helpers
 
 
@@ -1267,19 +2142,99 @@ def _mk_from_bytes(comp, zb, members, role="primary", required=True,
             "zips": {comp: zb}, "urls": {url: zb}}
 
 
-def _patch_flag(zb: bytes, bit: int) -> bytes:
+def _nth_sig(zb: bytes, sig: bytes, n: int) -> int:
+    """Byte offset of the nth occurrence of a ZIP record signature."""
+    i = 0
+    for _ in range(n + 1):
+        j = zb.find(sig, i)
+        assert j >= 0, (sig, n)
+        i = j + 1
+    return j
+
+
+def _patch_flag(zb: bytes, bit: int, which: int = 0) -> bytes:
     """Set a general-purpose flag bit in both local and central
-    headers (deterministic single-entry synthetic patch)."""
+    headers of entry `which` (deterministic synthetic patch)."""
     b = bytearray(zb)
-    i = b.find(b"PK\x03\x04")
-    if i >= 0:
-        f = int.from_bytes(b[i + 6:i + 8], "little") | bit
-        b[i + 6:i + 8] = f.to_bytes(2, "little")
-    j = b.find(b"PK\x01\x02")
-    if j >= 0:
-        f = int.from_bytes(b[j + 8:j + 10], "little") | bit
-        b[j + 8:j + 10] = f.to_bytes(2, "little")
+    i = _nth_sig(zb, b"PK\x03\x04", which)
+    f = int.from_bytes(b[i + 6:i + 8], "little") | bit
+    b[i + 6:i + 8] = f.to_bytes(2, "little")
+    j = _nth_sig(zb, b"PK\x01\x02", which)
+    f = int.from_bytes(b[j + 8:j + 10], "little") | bit
+    b[j + 8:j + 10] = f.to_bytes(2, "little")
     return bytes(b)
+
+
+def _patch_local_flag(zb: bytes, bit: int, which: int = 0) -> bytes:
+    """Set a flag bit in the LOCAL header only — a local-vs-central
+    contradiction the central directory does not show."""
+    b = bytearray(zb)
+    i = _nth_sig(zb, b"PK\x03\x04", which)
+    f = int.from_bytes(b[i + 6:i + 8], "little") | bit
+    b[i + 6:i + 8] = f.to_bytes(2, "little")
+    return bytes(b)
+
+
+def _patch_local_method(zb: bytes, method: int,
+                        which: int = 0) -> bytes:
+    """Rewrite the LOCAL compression method field only."""
+    b = bytearray(zb)
+    i = _nth_sig(zb, b"PK\x03\x04", which)
+    b[i + 8:i + 10] = method.to_bytes(2, "little")
+    return bytes(b)
+
+
+def _patch_local_csize(zb: bytes, val: int, which: int = 0) -> bytes:
+    """Rewrite the LOCAL compressed-size field only."""
+    b = bytearray(zb)
+    i = _nth_sig(zb, b"PK\x03\x04", which)
+    b[i + 18:i + 22] = val.to_bytes(4, "little")
+    return bytes(b)
+
+
+def _patch_csize_both(zb: bytes, extra: int, which: int = 0) -> bytes:
+    """Grow the compressed-size fields of entry `which` in BOTH local
+    and central headers — mutually consistent but inflating the
+    claimed data range beyond the real bytes."""
+    b = bytearray(zb)
+    i = _nth_sig(zb, b"PK\x03\x04", which)
+    cs = int.from_bytes(b[i + 18:i + 22], "little") + extra
+    b[i + 18:i + 22] = cs.to_bytes(4, "little")
+    j = _nth_sig(zb, b"PK\x01\x02", which)
+    cs2 = int.from_bytes(b[j + 20:j + 24], "little") + extra
+    b[j + 20:j + 24] = cs2.to_bytes(4, "little")
+    return bytes(b)
+
+
+def _find_eocd(zb: bytes) -> int:
+    i = zb.rfind(b"PK\x05\x06")
+    assert i >= 0
+    return i
+
+
+def _patch_eocd(zb: bytes, entries=None, cd_size=None, cd_off=None,
+                disk=None) -> bytes:
+    """Patch EOCD record fields deterministically."""
+    b = bytearray(zb)
+    i = _find_eocd(zb)
+    if disk is not None:
+        b[i + 4:i + 6] = disk.to_bytes(2, "little")
+        b[i + 6:i + 8] = disk.to_bytes(2, "little")
+    if entries is not None:
+        b[i + 8:i + 10] = entries.to_bytes(2, "little")
+        b[i + 10:i + 12] = entries.to_bytes(2, "little")
+    if cd_size is not None:
+        b[i + 12:i + 16] = cd_size.to_bytes(4, "little")
+    if cd_off is not None:
+        b[i + 16:i + 20] = cd_off.to_bytes(4, "little")
+    return bytes(b)
+
+
+def _patch_entry_name(zb: bytes, old: bytes, new: bytes) -> bytes:
+    """Replace a member name's bytes in BOTH local and central
+    headers (same-length substitution)."""
+    assert len(old) == len(new)
+    return bytes(zb).replace(old, new)
 
 
 def _patch_local_name(zb: bytes) -> bytes:
@@ -1290,3 +2245,32 @@ def _patch_local_name(zb: bytes) -> bytes:
     assert i >= 0
     b[i + 30] ^= 0x01
     return bytes(b)
+
+
+def _z_descriptor(entries):
+    """ZIP written through an unseekable sink — the stdlib sets the
+    data-descriptor flag bit and commits member sizes in trailing
+    descriptors instead of the local headers (supported subset)."""
+    class _Unseekable(io.BytesIO):
+        def seekable(self):
+            return False
+
+        def seek(self, *a, **k):
+            raise io.UnsupportedOperation("seek")
+
+        def tell(self):
+            raise io.UnsupportedOperation("tell")
+
+    buf = _Unseekable()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in entries:
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def _flip(path, off=None):
+    """Deterministic in-place same-size byte modification."""
+    data = bytearray(Path(path).read_bytes())
+    i = off if off is not None else len(data) // 2
+    data[i] ^= 0xFF
+    Path(path).write_bytes(bytes(data))
