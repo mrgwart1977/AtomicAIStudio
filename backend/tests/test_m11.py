@@ -254,28 +254,30 @@ def test_cancel_export_mid_run(client, tmp_path):
     assert job2["status"] == "succeeded"
 
 
-def test_cancel_queued_job(client):
-    """Queued jobs cancel at once (never start). The engine's runner is
-    woken on commit, so a queued-cancel is exercised directly through
-    request_cancel — the same path the API uses."""
+def test_cancel_queued_job(client, monkeypatch):
+    """Queued jobs cancel at once (never start). Dispatch is held
+    deterministically by patching the engine's claim seam, so the job
+    is guaranteed durable-queued when the API cancel lands — the same
+    request_cancel path the router uses."""
+    engine = client.app.state.job_engine
+    # _run_loop calls _claim_next() each wake; returning None means the
+    # job row can never leave "queued" while the patch is installed.
+    monkeypatch.setattr(engine, "_claim_next", lambda: None)
     proj = make_project(client, "QCancel")
     res = _export(client, proj["id"], "qc-1")
     job_id = res["job_id"]
-    engine = client.app.state.job_engine
     with client.app.state.session_factory() as s:
         from app.db.models import GenerationJob
+        assert s.get(GenerationJob, job_id).status == "queued"
+    r = client.post(f"/api/jobs/{job_id}/cancel")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "cancelled"
+    with client.app.state.session_factory() as s:
         job = s.get(GenerationJob, job_id)
-        if job.status == "queued":
-            # Deterministic queued-cancel.
-            assert engine.request_cancel(job_id) == "cancelled"
-            s.expire_all()
-            assert s.get(GenerationJob, job_id).status == "cancelled"
-        else:
-            # Already claimed — running-cancel must still work.
-            r = client.post(f"/api/jobs/{job_id}/cancel")
-            assert r.status_code == 200
-            job = wait_for_job(client, proj["id"], job_id)
-            assert job["status"] in ("cancelled", "succeeded")
+        assert job.status == "cancelled"
+        assert job.cancel_requested is True
+        assert job.completed_at is not None
+        assert job.message == "cancelled before it started"
 
 
 def test_cancel_terminal_job_conflict(client):
