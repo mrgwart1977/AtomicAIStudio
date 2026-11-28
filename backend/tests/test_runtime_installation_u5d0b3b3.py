@@ -2395,3 +2395,200 @@ def test_g145_idempotent_valid_publication_preserved(tmp_path):
     assert (_gens_dir(tmp_path / "gens", scn)
             / f"{r1['generation']['id']}.published.json") \
         .read_bytes() == rec_bytes
+
+
+# ----------------------------------- N1/N2/N3 acceptance hardening
+
+
+def test_g146_pre_link_tmp_replacement_identity_mismatch(tmp_path):
+    # Permanent Probe C: a foreign replacement of the exclusive tmp
+    # is DETECTED at pre-link re-association — never knowingly
+    # linked, preserved as foreign evidence.
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    grabbed = {}
+
+    def swap(point, **kw):
+        if point == "pre_record_link":
+            p = Path(kw["path"])
+            p.unlink()
+            p.write_bytes(b"foreign-replacement")
+            grabbed["p"] = p
+    rti._TEST_SEAM = swap
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    pub = res["publication"]
+    assert pub["cause"] == "publication_record_identity_mismatch"
+    assert pub["association"] == "tmp_replaced"
+    # foreign replacement preserved; no record was ever linked
+    assert grabbed["p"].read_bytes() == b"foreign-replacement"
+    gid = res["generation"]["id"]
+    gens = _gens_dir(tmp_path / "gens", scn)
+    assert not (gens / f"{gid}.published.json").exists()
+
+
+def test_g147_post_link_record_replacement_identity_mismatch(
+        tmp_path):
+    # Final-record replacement (new inode) or in-place modification
+    # (same inode) is caught by post-link association — content
+    # equality is never accepted as identity.
+    for new_inode in (True, False):
+        scn = _single()
+        acq, src = _ok_acq(scn, tmp_path / f"s{new_inode}")
+        r0 = _inst(scn, acq, tmp_path / f"s{new_inode}", src,
+                   install_root=tmp_path / f"t{new_inode}")
+        gid = r0["generation"]["id"]
+
+        gens = _gens_dir(tmp_path / f"s{new_inode}" / "gens", scn)
+
+        def swap(point, gens=gens, gid=gid, new_inode=new_inode,
+                 **kw):
+            if point == "post_record_link":
+                rec = gens / f"{gid}.published.json"
+                forged = json.loads(rec.read_bytes())
+                forged["injected"] = "foreign-metadata"
+                raw = json.dumps(forged, sort_keys=True,
+                                 separators=(",", ":")).encode()
+                if new_inode:
+                    rec.unlink()
+                    rec.write_bytes(raw)
+                else:
+                    rec.write_bytes(raw)
+        rti._TEST_SEAM = swap
+        res = _inst(scn, acq, tmp_path / f"s{new_inode}", src,
+                    install_root=tmp_path / f"s{new_inode}" / "gens")
+        rti._TEST_SEAM = None
+        assert res["state"] == "uncertain"
+        assert res["publication"]["cause"] == \
+            "publication_record_identity_mismatch"
+        assert res["publication"]["association"].startswith("record_")
+
+
+def test_g148_foreign_record_exception_never_adopted(tmp_path):
+    # Permanent Probe A: a field-matching foreign record observed by
+    # the exception path is PRESERVED as evidence — never adopted as
+    # confirmed logical commit.
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    planted = {}
+
+    def seam(point, **kw):
+        if point == "post_rename":
+            gens = _gens_dir(tmp_path / "gens", scn)
+            gid = next(p.name for p in gens.iterdir() if p.is_dir())
+            meta = json.loads(
+                (gens / gid / "_generation.json").read_bytes())
+            rec = {"contract": "rgen:v0", "record": "publication",
+                   "generation_id": gid,
+                   "descriptor_digest": meta["descriptor_digest"],
+                   "committed": True, "injected": "FOREIGN-AUTHORED"}
+            raw = json.dumps(rec, sort_keys=True,
+                             separators=(",", ":")).encode()
+            rp = gens / f"{gid}.published.json"
+            rp.write_bytes(raw)
+            planted.update(p=rp, raw=raw)
+        if point == "pre_record_link":
+            raise RuntimeError("simulated post-rename failure")
+    rti._TEST_SEAM = seam
+    res = _inst(scn, acq, tmp_path, src)
+    rti._TEST_SEAM = None
+    assert res["state"] == "uncertain"
+    pub = res["publication"]
+    assert pub["state"] == "committed_unconfirmed"
+    assert pub["cause"] == "publication_record_present_matching"
+    assert pub["renamed"] is True
+    assert res["reconciliation_required"] is True
+    assert planted["p"].read_bytes() == planted["raw"]
+
+
+def test_g149_confirmed_commit_then_record_modified(tmp_path):
+    # Confirmed logical commit followed by post-commit record
+    # modification + reporting failure: the historical commit is
+    # preserved AND the current integrity deviation is distinguished.
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src,
+               install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+
+    def corrupt(point, **kw):
+        if point == "post_record":
+            rec = _gens_dir(tmp_path / "gens", scn) \
+                / f"{gid}.published.json"
+            forged = json.loads(rec.read_bytes())
+            forged["injected"] = "post-commit-tamper"
+            rec.write_bytes(json.dumps(
+                forged, sort_keys=True,
+                separators=(",", ":")).encode())
+            raise RuntimeError("simulated reporting failure")
+    rti._TEST_SEAM = corrupt
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    pub = res["publication"]
+    assert pub["state"] == "committed"      # historical commit kept
+    assert pub["renamed"] is True
+    assert pub["record_integrity"] == "post_commit_modified"
+
+
+def test_g150_linked_then_interrupted_independently_reestablished(
+        tmp_path):
+    # Link returned but the association check was interrupted: the
+    # recovery path independently re-establishes identity + complete
+    # content — confirmed commit without a fabricated flag.
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+
+    def boom(point, **kw):
+        if point == "post_record_link":
+            raise RuntimeError("simulated interruption")
+    rti._TEST_SEAM = boom
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["state"] == "committed"
+    assert res["publication"]["renamed"] is True
+    gid = res["generation"]["id"]
+    gens = _gens_dir(tmp_path / "gens", scn)
+    assert (gens / f"{gid}.published.json").is_file()
+
+
+def test_g151_component_acquire_atomic_against_reset(tmp_path):
+    # Permanent Probe B: lookup+acquire under one registry hold —
+    # reset can never orphan a pending acquisition, so two distinct
+    # lock objects can never be acquired for one component.
+    lock = rti._component_acquire("sdcpp", "cuda")
+    assert lock is not None
+    try:
+        rti.reset_locks()
+        # held-acquired lock is never removed; a second acquisition
+        # attempt serializes rather than spawning a twin object
+        assert rti._component_acquire("sdcpp", "cuda") is None
+        assert rti._COMP_LOCKS[("sdcpp", "cuda")] is lock
+    finally:
+        lock.release()
+    rti.reset_locks()
+    # after release + reset the component acquires cleanly again
+    lock2 = rti._component_acquire("sdcpp", "cuda")
+    assert lock2 is not None
+    lock2.release()
+
+
+def test_g152_writing_handle_identity_associated_on_success(
+        tmp_path):
+    # N1-A: the committed record IS the original writing-handle
+    # object — a hard link shares the captured (dev, ino).
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    captured = {}
+
+    def grab(point, **kw):
+        if point == "pre_record_link":
+            st = os.stat(kw["path"])
+            captured["ident"] = (st.st_dev, st.st_ino)
+    rti._TEST_SEAM = grab
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "published"
+    gid = res["generation"]["id"]
+    rec = _gens_dir(tmp_path / "gens", scn) \
+        / f"{gid}.published.json"
+    st = os.stat(rec)
+    assert (st.st_dev, st.st_ino) == captured["ident"]

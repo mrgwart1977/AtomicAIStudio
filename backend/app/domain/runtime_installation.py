@@ -620,11 +620,29 @@ def release_root(root) -> bool:
 
 
 def _component_lock(runtime_key: str, flavor: str):
-    """Nonblocking per-component in-process serialization — refusal,
+    """Observational lookup of the per-component lock — returns the
+    registered (or newly created) lock object WITHOUT acquiring it.
+    A returned reference is not ownership: acquisition must go
+    through _component_acquire, which atomizes lookup+acquire under
+    the registry guard (N3)."""
+    ck = (runtime_key.casefold(), flavor.casefold())
+    with _COMP_LOCKS_GUARD:
+        lock = _COMP_LOCKS.setdefault(ck, threading.Lock())
+    return lock
+
+
+def _component_acquire(runtime_key: str, flavor: str):
+    """Atomic component-lock lookup + nonblocking acquisition under
+    ONE registry-guard hold (N3): reset_locks can never observe an
+    unlocked registry entry while an operation is acquiring or
+    holding it, so no second lock object can ever exist for the
+    same component. Returns the acquired lock or None — refusal,
     never queueing."""
     ck = (runtime_key.casefold(), flavor.casefold())
     with _COMP_LOCKS_GUARD:
         lock = _COMP_LOCKS.setdefault(ck, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return None
     return lock
 
 
@@ -1137,28 +1155,62 @@ def _assess_record_slot(record: Path, gen_id: str, digest: str):
     return "publication_record_orphaned"
 
 
+def _path_association(path: Path, written, raw) -> str | None:
+    """Identity + content association of a pathname with the original
+    exclusive writing-handle object (N1): regular file, not reparse
+    or symlink, same (st_dev, st_ino) captured via os.fstat on the
+    writing handle, and byte-identical to the operation-authored
+    record. Returns a refusal class or None when associated."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "missing"
+    if _reparse(path) or path.is_symlink() or not path.is_file():
+        return "not_file"
+    if (st.st_dev, st.st_ino) != written:
+        return "replaced"
+    try:
+        if path.read_bytes() != raw:
+            return "modified"
+    except OSError:
+        return "unreadable"
+    return None
+
+
 def _commit_record(record: Path, prec: dict, gen_id: str,
-                   digest: str, nonce: str) -> dict:
-    """Create-only publication-record commit (C2-B): exclusive
+                   digest: str, nonce: str, cinfo=None) -> dict:
+    """Create-only publication-record commit (C2-B/N1): exclusive
     nonce-bound temporary file + os.link directory entry — create-only
     on both NTFS and POSIX (the established model_copy primitive);
-    os.replace is never used for the final record. A collision
-    preserves the existing evidence and reports uncertainty rather
-    than attributing it. Returns {"state", "cause", "cleanup"} with
-    state committed|collision|unconfirmed — never raises for the
-    expected failure classes."""
+    os.replace is never used for the final record. Identity is bound
+    to the ORIGINAL writing handle (os.fstat inside the exclusive
+    open), re-validated against the pathname before linking, and
+    re-validated — identity AND complete content — on the final
+    record; four-field content equality alone never establishes
+    logical commit. A collision preserves the existing evidence.
+    `cinfo` receives operation-associated commit evidence (raw
+    bytes, written identity, linked, confirmed) for exception
+    recovery — link success is recorded immediately after the
+    create-only call returns. Returns {"state", "cause", "cleanup"}
+    with state committed|collision|unconfirmed — never raises for
+    the expected failure classes."""
     cleanup = {"tmp": None, "retained": False, "uncertain": None}
     raw = _canon(prec).encode()
     if len(raw) > _MAX_METADATA_BYTES:
         return {"state": "unconfirmed",
                 "cause": "publication_record_over_bound",
                 "cleanup": cleanup}
+    if cinfo is not None:
+        cinfo["raw"] = raw
     tmp = record.with_name(f"{record.name}.{nonce}.tmp")
     cleanup["tmp"] = tmp.name
     try:
         with open(tmp, "xb") as fh:
             fh.write(raw)
             _fsync_file(fh)
+            # N1-A: identity is captured from the WRITING HANDLE —
+            # never from a later pathname stat.
+            ident = os.fstat(fh.fileno())
     except FileExistsError:
         # Foreign object already holds our temporary slot — never
         # delete it.
@@ -1171,45 +1223,62 @@ def _commit_record(record: Path, prec: dict, gen_id: str,
         return {"state": "unconfirmed",
                 "cause": "publication_record_tmp_failed",
                 "cleanup": cleanup}
-    try:
-        tmp_stat = os.stat(tmp)
-    except OSError:
-        tmp_stat = None
+    if not ident.st_ino:
+        # Ambiguous identity evidence establishes nothing — fail
+        # closed rather than claim ownership.
+        return {"state": "unconfirmed",
+                "cause": "publication_record_identity_unestablished",
+                "cleanup": cleanup}
+    written = (ident.st_dev, ident.st_ino)
+    if cinfo is not None:
+        cinfo["identity"] = written
     _seam("pre_record_link", path=str(tmp), record=str(record))
     outcome = None
-    try:
-        os.link(tmp, record)   # create-only; never replaces
-    except FileExistsError:
-        outcome = {"state": "collision",
-                   "cause": "publication_record_collision"}
-    except OSError:
-        # Unsupported filesystem or IO failure — fail closed, no
-        # os.replace fallback.
+    # N1-B: independently re-associate the pathname with the original
+    # writing-handle object — a detectable replacement or in-place
+    # modification is never knowingly linked.
+    why = _path_association(tmp, written, raw)
+    if why is not None:
         outcome = {"state": "unconfirmed",
-                   "cause": "publication_record_commit_failed"}
-    # Deterministically release ONLY demonstrably owned temporary
-    # resources — inode identity must match the file we created.
-    if tmp_stat is not None:
-        try:
-            _seam("pre_record_tmp_unlink", path=str(tmp))
-            cur = os.stat(tmp)
-            if (cur.st_dev, cur.st_ino) == (tmp_stat.st_dev,
-                                            tmp_stat.st_ino):
-                os.unlink(tmp)
-            else:
-                cleanup["retained"] = True
-                cleanup["uncertain"] = "tmp_replaced_foreign"
-        except OSError:
-            cleanup["retained"] = True
-            cleanup["uncertain"] = "tmp_unlink_failed"
+                   "cause": "publication_record_identity_mismatch",
+                   "association": f"tmp_{why}"}
     else:
+        try:
+            os.link(tmp, record)   # create-only; never replaces
+            if cinfo is not None:
+                # N2-A: operation-associated link evidence, recorded
+                # immediately after the create-only call returns.
+                cinfo["linked"] = True
+        except FileExistsError:
+            outcome = {"state": "collision",
+                       "cause": "publication_record_collision"}
+        except OSError:
+            # Unsupported filesystem or IO failure — fail closed, no
+            # os.replace fallback.
+            outcome = {"state": "unconfirmed",
+                       "cause": "publication_record_commit_failed"}
+    # N1-D: deterministically release ONLY demonstrably owned
+    # temporary resources — baseline is the writing-handle identity,
+    # never a later pathname observation.
+    try:
+        _seam("pre_record_tmp_unlink", path=str(tmp))
+        cur = os.stat(tmp)
+        if (cur.st_dev, cur.st_ino) == written:
+            os.unlink(tmp)
+        else:
+            cleanup["retained"] = True
+            cleanup["uncertain"] = "tmp_replaced_foreign"
+    except OSError:
         cleanup["retained"] = True
-        cleanup["uncertain"] = "tmp_identity_unverified"
+        cleanup["uncertain"] = "tmp_unlink_failed"
     if outcome is not None:
         outcome["cleanup"] = cleanup
         return outcome
     _seam("post_record_link", path=str(record))
-    # Independent post-commit association revalidation.
+    # N1-C: independent post-commit association — required field
+    # bindings PLUS original-object identity and complete
+    # operation-authored content; a matching four-field record with
+    # arbitrary additional foreign metadata is never proof.
     got, why = _read_meta(record)
     if why is not None \
             or not _record_fields_ok(got, gen_id, digest):
@@ -1217,6 +1286,14 @@ def _commit_record(record: Path, prec: dict, gen_id: str,
                 "cause": "publication_record_association_invalid"
                          + (f":{why}" if why else ""),
                 "cleanup": cleanup}
+    rwhy = _path_association(record, written, raw)
+    if rwhy is not None:
+        return {"state": "unconfirmed",
+                "cause": "publication_record_identity_mismatch",
+                "association": f"record_{rwhy}",
+                "cleanup": cleanup}
+    if cinfo is not None:
+        cinfo["confirmed"] = True
     return {"state": "committed", "cause": None,
             "cleanup": cleanup}
 
@@ -1370,8 +1447,8 @@ def install(ref, acq, *, authority, source_root, install_root,
         lease = _root_active_begin(iroot)
         if lease is None:
             return _stage_refusal(stage, "install_root_locked")
-        lock = _component_lock(key, flavor)
-        if not lock.acquire(blocking=False):
+        lock = _component_acquire(key, flavor)
+        if lock is None:
             _root_active_end(iroot, lease)
             return _stage_refusal(stage, "component_locked")
         try:
@@ -1397,12 +1474,55 @@ def install(ref, acq, *, authority, source_root, install_root,
             stage["uncertain_cause"] = type(exc).__name__
             cinfo = stage.get("_commit")
             if cinfo is not None:
-                got, _why = _read_meta(Path(cinfo["record"]))
-                if _record_fields_ok(got or {}, cinfo["gen_id"],
-                                     cinfo["digest"]):
+                # N2-B: confirmed logical commit requires
+                # OPERATION-ASSOCIATED evidence — content equality
+                # alone never upgrades, and a foreign record is never
+                # adopted.
+                rpath = Path(cinfo["record"])
+                if cinfo.get("confirmed"):
+                    # Historical confirmed commit — never downgraded
+                    # by a later reporting failure; subsequent record
+                    # modification is reported as integrity evidence
+                    # distinct from the established commit.
                     pub["state"] = PUB_COMMITTED
-                    pub["record"] = Path(cinfo["record"]).name
+                    pub["record"] = rpath.name
                     pub["fsynced"] = True
+                    rwhy = _path_association(
+                        rpath, cinfo["identity"], cinfo["raw"])
+                    if rwhy is not None:
+                        pub["record_integrity"] = \
+                            f"post_commit_{rwhy}"
+                elif cinfo.get("linked"):
+                    # Link returned but association was interrupted —
+                    # confirm only if identity AND complete content
+                    # are independently re-established.
+                    rwhy = _path_association(
+                        rpath, cinfo["identity"], cinfo["raw"])
+                    if rwhy is None:
+                        pub["state"] = PUB_COMMITTED
+                        pub["record"] = rpath.name
+                        pub["fsynced"] = True
+                    else:
+                        pub["cause"] = \
+                            f"publication_record_identity_mismatch" \
+                            f":{rwhy}"
+                else:
+                    # No operation-associated link: a present record
+                    # is observed evidence only — never adopted.
+                    got, rwhy = _read_meta(rpath)
+                    if rwhy is None:
+                        pub["cause"] = \
+                            "publication_record_present_matching" \
+                            if _record_fields_ok(
+                                got, cinfo["gen_id"],
+                                cinfo["digest"]) \
+                            else "publication_record_present_foreign"
+                    elif rwhy == "metadata_missing":
+                        pub["cause"] = "publication_record_absent"
+                    else:
+                        pub["cause"] = \
+                            "publication_record_present_invalid:" \
+                            f"{rwhy}"
             return _pub_env(stage, S_UNCERTAIN)
         return _stage_failed(stage, type(exc).__name__)
 
@@ -1544,7 +1664,8 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
             "committed": True,
             "member_count": len(desc["members"])}
     _seam("pre_record", path=str(record))
-    rc = _commit_record(record, prec, gen_id, digest, nonce)
+    rc = _commit_record(record, prec, gen_id, digest, nonce,
+                        stage["_commit"])
     if rc["state"] != "committed":
         # Physically committed, evidence unconfirmed — never a
         # generic failure concealing the commit, never a clean
@@ -1554,7 +1675,9 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
             "state": PUB_UNCONFIRMED,
             "commit_point": "namespace_rename",
             "record": None, "renamed": True, "fsynced": False,
-            "cause": rc["cause"], "cleanup": rc["cleanup"]}
+            "cause": rc["cause"],
+            "association": rc.get("association"),
+            "cleanup": rc["cleanup"]}
         stage["fsm"] = _F_PUBLISHING
         return _pub_env(stage, S_UNCERTAIN)
     stage["publication"] = {"state": PUB_COMMITTED,
