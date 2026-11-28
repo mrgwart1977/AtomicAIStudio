@@ -15,6 +15,7 @@ import hashlib
 import io
 import os
 import subprocess
+import sys
 import warnings
 import zipfile
 from pathlib import Path
@@ -2051,16 +2052,16 @@ def test_c6_20_size_semantics(tmp_path):
     assert res["refusals"] == [
         "archive_local_central_mismatch:sd.exe",
         "missing_expected_member:sd.exe"]
-    # The supported data-descriptor form (sizes committed in the
-    # descriptor, zero in the local header) remains accepted.
+    # Data-descriptor (bit 3) entries are UNSUPPORTED under the
+    # authorized narrowing — the formerly accepted bounded descriptor
+    # form now refuses deterministically (N1).
     zd = _z_descriptor([("sd.exe", b"sd-bytes")])
     scn2 = _mk_from_bytes("runtime", zd,
                           [_member("sd.exe", "runtime", b"sd-bytes")])
     res2 = _run(scn2, tmp_path / "b")
-    assert res2["ok"]
-    dest = tmp_path / "b" / res2["staging"]["dir"] / "members" \
-        / "sd.exe"
-    assert dest.read_bytes() == b"sd-bytes"
+    assert res2["refusals"] == [
+        "member_flags_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
 
 
 def test_c6_21_overlapping_entry_ranges_refused(tmp_path):
@@ -2102,6 +2103,342 @@ def test_c6_23_malformed_filename_encoding_controlled(tmp_path):
     assert res["refusals"] == ["archive_corrupt:runtime"]
     assert res["production_trust"] is False
     assert res["execution_eligible"] is False
+
+
+# ================================================================ N1
+# data-descriptor (general-purpose bit 3) entries unsupported
+
+
+def test_n1_01_managed_bit3_refused(tmp_path):
+    # An otherwise valid managed member carrying the descriptor bit
+    # refuses during metadata preflight — no descriptor form is
+    # supported under the authorized narrowing.
+    zd = _z_descriptor([("sd.exe", b"sd-bytes")])
+    scn = _mk_from_bytes("runtime", zd,
+                         [_member("sd.exe", "runtime", b"sd-bytes")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["member_flags_unsupported:sd.exe",
+                               "missing_expected_member:sd.exe"]
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_n1_02_declared_skip_bit3_refused(tmp_path):
+    # A declared-skipped entry with bit 3 gets the same structural
+    # flag refusal — the skip status cannot bypass it.
+    zd = _z_descriptor([("notes.txt", b"n"), ("sd.exe", b"sd")])
+    scn = _mk_from_bytes("runtime", zd,
+                         [_member("sd.exe", "runtime", b"sd")])
+    scn["ref"]["coverage"]["skip_names"] = ["notes.txt"]
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_flags_unsupported:notes.txt",
+        "member_flags_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_n1_03_local_central_bit3_disagreement_refused(tmp_path):
+    # Bit 3 set in the local header only — the flag-consistency
+    # check refuses even though the central entry hides it.
+    zb = _patch_local_flag(_z([("sd.exe", b"sd")]), 0x8)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "archive_local_central_mismatch:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_n1_04_descriptor_tail_overlap_refused(tmp_path):
+    # A descriptor-form fixture whose claimed data range is grown so
+    # its trailing bytes would collide with the next structure —
+    # the bit-3 refusal fires before range assessment is needed.
+    zb = _patch_csize_both(
+        _z_descriptor([("sd.exe", b"sd")]), extra=4)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_flags_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_n1_05_descriptor_tail_dir_intrusion_refused(tmp_path):
+    # Descriptor-form fixture whose declared central-directory offset
+    # is shifted so entry data would intrude into the directory
+    # region — refused on the unsupported flag first.
+    zb = _patch_eocd(_z_descriptor([("sd.exe", b"sd")]), cd_off=8)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_flags_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
+
+
+def test_n1_06_final_archive_bit3_zero_writes(tmp_path):
+    # The descriptor-bit refusal lands in the FINAL selected
+    # archive's preflight — zero managed-member writes across the
+    # entire acquisition, including earlier clean archives.
+    scn = _mk(
+        [("runtime", "primary", True, 1, [("sd.exe", b"sd")]),
+         ("opt", "optional", False, 3, [("opt.txt", b"opt")])],
+        members=[_member("sd.exe", "runtime", b"sd"),
+                 _member("opt.txt", "opt", b"opt")])
+    scn = _swap_zip(scn, "opt",
+                    _z_descriptor([("opt.txt", b"opt")]))
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_flags_unsupported:opt.txt",
+        "missing_expected_member:opt.txt"]
+    assert res["members"] == []
+    assert _no_member_writes(res, tmp_path)
+
+
+def test_n1_07_ordinary_archives_accepted(tmp_path):
+    res = _run(_single(), tmp_path)
+    assert res["ok"]
+    res2 = _run(_multi(), tmp_path / "m")
+    assert res2["ok"]
+
+
+def test_n1_08_refusal_envelope_declarations(tmp_path):
+    zd = _z_descriptor([("sd.exe", b"sd")])
+    scn = _mk_from_bytes("runtime", zd,
+                         [_member("sd.exe", "runtime", b"sd")])
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["production_trust"] is False
+    assert res["execution_eligible"] is False
+    assert res["operational_qualification"] == "unestablished"
+    assert res["trusted_enrollment"] == "unestablished"
+    assert res["installation_publication"] == "not_performed"
+
+
+# ================================================================ N2
+# deterministic archive resource ownership
+
+
+def test_n2_01_success_file_backed_all_closed(tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    log, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    assert got["fh"] and got["zf"]
+    assert log == ["zf", "fh"]
+    _n2_assert_closed(got)
+
+
+def test_n2_02_success_memory_backed_all_closed(
+        tmp_path, monkeypatch):
+    scn = _single()
+    log, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    assert got["bio"] and got["zf"]
+    assert log == ["zf", "bio"]
+    _n2_assert_closed(got)
+
+
+def test_n2_03_association_refusal_releases_retained(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _mk(
+        [("art", "primary", True, 1, [("a.dll", b"a")]),
+         ("dep", "dependency", True, 2, [("d.dll", b"d")])])
+    _, got = _n2_track(monkeypatch)
+    orig = ra._open_archive_assoc
+
+    # Corrupt the second archive right before its verified reopen —
+    # the first archive's retained handle must still be released.
+    def wrap2(path, *a, **k):
+        if getattr(path, "name", "") == "dep.zip":
+            _flip(path, 0)
+        return orig(path, *a, **k)
+
+    monkeypatch.setattr(ra, "_open_archive_assoc", wrap2)
+    res = _run(scn, tmp_path)
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+    assert got["fh"]
+    _n2_assert_closed(got)
+
+
+def test_n2_04_zipfile_ctor_failure_releases_handle(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+
+    def boom(*a, **k):
+        raise zipfile.BadZipFile("synthetic ctor failure")
+
+    monkeypatch.setattr(zipfile, "ZipFile", boom)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["archive_corrupt:runtime"]
+    assert got["fh"]
+    _n2_assert_closed(got)
+
+
+def test_n2_05_preflight_refusal_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    zb = _patch_flag(_z([("sd.exe", b"sd")]), 0x40)
+    scn = _mk_from_bytes("runtime", zb,
+                         [_member("sd.exe", "runtime", b"sd")])
+    _, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_security_flag_unsupported:sd.exe",
+        "missing_expected_member:sd.exe"]
+    assert got["fh"] and got["zf"]
+    _n2_assert_closed(got)
+
+
+def test_n2_06_later_archive_failure_releases_earlier(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _mk(
+        [("art", "primary", True, 1, [("a.dll", b"a")]),
+         ("dep", "dependency", True, 2, [("d.dll", b"d")])])
+    scn = _swap_zip(scn, "dep",
+                    _z_descriptor([("d.dll", b"d")]))
+    _, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == [
+        "member_flags_unsupported:d.dll",
+        "missing_expected_member:d.dll"]
+    # art's fh + zf were retained before dep failed.
+    assert got["fh"] and got["zf"]
+    _n2_assert_closed(got)
+
+
+def test_n2_07_extraction_refusal_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    # A deterministic mid-extraction refusal — the lifecycle
+    # property under test is identical for every refusal origin.
+    monkeypatch.setattr(
+        ra, "_extract_member", lambda *a, **k: (None, "member_corrupt"))
+    _, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["member_corrupt:sd.exe"]
+    assert got["fh"] and got["zf"]
+    _n2_assert_closed(got)
+
+
+def test_n2_08_member_digest_mismatch_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    scn["ref"]["members"][0]["sha256"] = "0" * 64
+    _, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["refusals"] == ["member_sha256_mismatch:sd.exe"]
+    _n2_assert_closed(got)
+
+
+def test_n2_09_cancel_during_preflight_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+    inside = [False]
+    orig = ra.preflight_archive
+
+    def w(*a, **k):
+        inside[0] = True
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ra, "preflight_archive", w)
+    res = _run(scn, tmp_path, cancel_check=lambda: inside[0])
+    assert res["state"] == "cancelled" and res["ok"] is False
+    assert got["fh"] and got["zf"]
+    _n2_assert_closed(got)
+
+
+def test_n2_10_cancel_during_extraction_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+    inside = [False]
+    orig = ra._extract_member
+
+    def w(*a, **k):
+        inside[0] = True
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ra, "_extract_member", w)
+    res = _run(scn, tmp_path, cancel_check=lambda: inside[0])
+    assert res["state"] == "cancelled" and res["ok"] is False
+    _n2_assert_closed(got)
+
+
+def test_n2_11_cancel_during_final_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+    inside = [False]
+    orig = ra._final_archive_assoc
+
+    def w(*a, **k):
+        inside[0] = True
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ra, "_final_archive_assoc", w)
+    res = _run(scn, tmp_path, cancel_check=lambda: inside[0])
+    assert res["state"] == "cancelled" and res["ok"] is False
+    _n2_assert_closed(got)
+
+
+def test_n2_12_controlled_exception_releases_resources(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+
+    def boom(*a, **k):
+        raise OSError("synthetic assessment failure")
+
+    monkeypatch.setattr(ra, "_preflight_zip_dir", boom)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "failed"
+    assert got["fh"]
+    _n2_assert_closed(got)
+
+
+def test_n2_13_parser_closed_before_underlying_handle(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    scn = _single()
+    log, _ = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["ok"]
+    assert log == ["zf", "fh"]
+
+
+def test_n2_14_partial_evidence_preserved_after_cleanup(
+        tmp_path, monkeypatch):
+    _force_file(monkeypatch)
+    monkeypatch.setattr(
+        ra, "_TEST_SEAM",
+        lambda point, **kw: _flip(kw["path"], -1)
+        if point == "pre_final" else None)
+    scn = _single()
+    _, got = _n2_track(monkeypatch)
+    res = _run(scn, tmp_path)
+    assert res["state"] == "refused"
+    assert res["refusals"][0] in ("archive_association_changed",
+                                  "archive_rehash_mismatch")
+    # The completed member write is preserved as evidence — and the
+    # resources are still deterministically released.
+    assert [m["name"] for m in res["members"]] == ["sd.exe"]
+    assert res["staging"]["complete"] is False
+    assert got["fh"] and got["zf"]
+    _n2_assert_closed(got)
 
 
 # ============================================================ helpers
@@ -2274,3 +2611,146 @@ def _flip(path, off=None):
     i = off if off is not None else len(data) // 2
     data[i] ^= 0xFF
     Path(path).write_bytes(bytes(data))
+
+
+def _swap_zip(scn, comp, zb):
+    """Replace one component's zip bytes and rebind the declared
+    size/digest in ref + metadata + transport URL — identities
+    otherwise unchanged."""
+    scn = copy.deepcopy(scn)
+    for a in scn["ref"]["archives"]:
+        if a["component"] == comp:
+            a["asset"]["size"] = len(zb)
+            a["asset"]["digest"]["value"] = _sha(zb)
+            url = a["asset"]["url"]
+    for m in scn["meta"]["assets"]:
+        if m["name"] == f"{comp}.zip":
+            m["size"] = len(zb)
+            m["digest"] = "sha256:" + _sha(zb)
+    scn["zips"][comp] = zb
+    scn["urls"][url] = zb
+    return scn
+
+
+class _TrackedFh:
+    """File-handle proxy that records explicit close() calls. The
+    test retains a reference, so an interpreter finalizer can NEVER
+    satisfy a `closed` assertion — only explicit close() can.
+    Attributes are forwarded to the real handle so os.fstat, os.read
+    (via fileno()), seek/read and the ZipFile parser all operate on
+    the same underlying descriptor."""
+
+    def __init__(self, fh, log, tag="fh"):
+        self._f = fh
+        self._log = log
+        self._tag = tag
+
+    def close(self):
+        if not self._f.closed:
+            self._log.append(self._tag)
+        self._f.close()
+
+    @property
+    def closed(self):
+        return self._f.closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def __getattr__(self, n):
+        return getattr(self._f, n)
+
+
+class _TrackedIO(io.BytesIO):
+    """BytesIO that records its explicit close() in the order log."""
+
+    def __init__(self, *a, _log=None, **k):
+        self._n2log = _log
+        super().__init__(*a, **k)
+
+    def close(self):
+        if not self.closed and self._n2log is not None:
+            self._n2log.append("bio")
+        super().close()
+
+
+class _TrackedZip(zipfile.ZipFile):
+    """ZipFile that records its explicit close() in the order log.
+    The parser object is closed BEFORE its underlying archive handle
+    on every exit path (ExitStack unwinds last-in-first-out)."""
+
+    def __init__(self, *a, _log=None, **k):
+        self._n2log = _log
+        super().__init__(*a, **k)
+
+    def close(self):
+        if self.fp is not None and self._n2log is not None:
+            self._n2log.append("zf")
+        super().close()
+
+
+def _n2_track(monkeypatch):
+    """Instrument every retained archive resource so tests can
+    establish EXPLICIT deterministic cleanup — not eventual GC:
+
+    - `_open_archive_assoc` results are wrapped in `_TrackedFh`
+      proxies that record close order.
+    - `io.BytesIO` construction is routed through `_TrackedIO`
+      (records "bio" closes and instances).
+    - `zipfile.ZipFile` construction is routed through `_TrackedZip`
+      (records "zf" closes; `zf.fp is None` once closed).
+
+    Returns (order_log, got) where got has keys fh/bio/zf → lists of
+    retained objects. Install AFTER fixture construction so helper
+    archives do not pollute the log."""
+    log = []
+    got = {"fh": [], "bio": [], "zf": []}
+    orig_open = ra._open_archive_assoc
+    orig_bio = io.BytesIO
+    orig_zf = zipfile.ZipFile
+
+    def wrap(path, *a, **k):
+        fh, why = orig_open(path, *a, **k)
+        if fh is not None:
+            fh = _TrackedFh(fh, log, "fh")
+            got["fh"].append(fh)
+        return fh, why
+
+    def _ours():
+        # Only objects constructed BY the acquisition module are its
+        # owned resources — stdlib internals (e.g. the parser's own
+        # central-directory BytesIO) are parser temporaries, not
+        # retained archive resources.
+        f = sys._getframe(2)
+        return f.f_code.co_filename == ra.__file__
+
+    def bio_factory(*a, **k):
+        if not _ours():
+            return orig_bio(*a, **k)
+        b = _TrackedIO(*a, _log=log, **k)
+        got["bio"].append(b)
+        return b
+
+    def zf_factory(*a, **k):
+        if not _ours():
+            return orig_zf(*a, **k)
+        z = _TrackedZip(*a, _log=log, **k)
+        got["zf"].append(z)
+        return z
+
+    monkeypatch.setattr(ra, "_open_archive_assoc", wrap)
+    monkeypatch.setattr(io, "BytesIO", bio_factory)
+    monkeypatch.setattr(zipfile, "ZipFile", zf_factory)
+    return log, got
+
+
+def _n2_assert_closed(got):
+    """Every retained resource explicitly closed — retained test
+    references rule out interpreter teardown as the mechanism."""
+    assert got["fh"] or got["bio"] or got["zf"], "nothing retained"
+    assert all(f.closed for f in got["fh"])
+    assert all(b.closed for b in got["bio"])
+    assert all(z.fp is None for z in got["zf"])

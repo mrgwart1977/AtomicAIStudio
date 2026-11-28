@@ -62,10 +62,11 @@ Acquisition evidence contract (racq:v0):
   EOCD record is self-consistent and bounded are accepted — a bounded
   EOCD assessment precedes parser materialization. Encryption,
   strong-encryption/masked-directory flags, multi-disk and ZIP64
-  structures refuse deterministically; data-descriptor entries are
-  supported only in the documented bounded form. This is an
-  intentional narrowing of the stdlib parser's surface, not a claim
-  of upstream compatibility.
+  structures refuse deterministically; data-descriptor (general-
+  purpose bit 3) entries are UNSUPPORTED and refused during
+  metadata preflight for managed and declared-skipped entries
+  alike. This is an intentional narrowing of the stdlib parser's
+  surface, not a claim of upstream compatibility.
 - Extraction is authorized only into an explicitly supplied isolated
   staging root; destinations are created exclusively and never
   overwritten. Symlinks, junctions and other reparse points are
@@ -924,11 +925,14 @@ _FLAG_COMPARE_MASK = 0x2849
 # Unsupported security flags refused on the central entry alone:
 # bit6 strong encryption, bit13 masked central directory.
 _FLAG_DENIED = 0x2040
-# General-purpose flag bits this synthetic subset supports: bit3
-# (data descriptor — bounded subset below) and bit11 (UTF-8 names).
-# Encryption and other flags are refused above; option bits (1..5)
-# are still screened by the method/consistency checks.
-_FLAG_SUPPORTED = 0x0808
+# General-purpose flag bits this synthetic subset supports: bit11
+# (UTF-8 names) only. General-purpose bit 3 (data descriptor) is
+# UNSUPPORTED — descriptor forms leave entry tails outside the
+# bounded range model, so they are refused outright rather than
+# approximately accounted. Encryption and other flags are refused
+# above; option bits (1..5) are still screened by the
+# method/consistency checks.
+_FLAG_SUPPORTED = 0x0800
 
 
 def _preflight_zip_dir(fh, size: int, cancel_check) -> tuple[dict | None, str | None]:
@@ -990,12 +994,12 @@ def _local_header_check(fh, info) -> tuple[int, int, str | None]:
 
     For the supported subset this verifies the local header's filename
     bytes, compression method, security-relevant flag bits (encrypted,
-    descriptor, strong-encryption, UTF-8, masked-directory), and —
-    when the local header carries committed sizes (no data-descriptor
-    bit) — compressed/expanded sizes. With bit3 set the local size
-    fields may legitimately be zero (descriptor follows data); a
-    documented bounded subset accepts zero or exact-match values and
-    refuses contradictory non-zero values.
+    descriptor, strong-encryption, UTF-8, masked-directory), and the
+    committed compressed/expanded sizes. Data-descriptor (bit 3)
+    entries are unsupported and already refused on the central flag;
+    a local bit 3 contradicting a central entry without it fails the
+    flag-consistency check before the size comparison is reached, so
+    sizes must always match exactly here.
 
     Returns (data_start, data_end, None) or (0, 0, refusal)."""
     try:
@@ -1020,12 +1024,7 @@ def _local_header_check(fh, info) -> tuple[int, int, str | None]:
             return 0, 0, "archive_local_central_mismatch"
         if (lflags ^ info.flag_bits) & _FLAG_COMPARE_MASK:
             return 0, 0, "archive_local_central_mismatch"
-        if not (lflags & 0x8):
-            if lcsize != info.compress_size \
-                    or lsize != info.file_size:
-                return 0, 0, "archive_local_central_mismatch"
-        elif lcsize not in (0, info.compress_size) \
-                or lsize not in (0, info.file_size):
+        if lcsize != info.compress_size or lsize != info.file_size:
             return 0, 0, "archive_local_central_mismatch"
         start = info.header_offset + 30 + nlen + xlen
         return start, start + (info.compress_size or 0), None
@@ -1155,8 +1154,10 @@ def preflight_archive(zf, fh, component: str, expected: dict,
             dest_seen.add(folded)
     # Overlapping entry ranges within the supported subset: sorted by
     # local-header offset, a later header must not start inside an
-    # earlier entry's data range. (Data-descriptor tail bytes are not
-    # included in the range — a documented residual of the subset.)
+    # earlier entry's data range. Data-descriptor (bit 3) entries are
+    # refused on the flag check before reaching this point, so every
+    # accepted range is a complete [header_offset, data_end) span with
+    # no unaccounted trailing bytes.
     ranges.sort()
     for (s0, e0, _n0), (s1, _e1, n1) in itertools.pairwise(ranges):
         if s1 < e0:
@@ -1383,208 +1384,230 @@ def _acquire_inner(ref, *, authority, selection, release_metadata,
     ordered = [a["component"] for a in reference["archives"]
                if a["component"] in sel_set]
     retained_mem = 0
-    for comp in ordered:
-        res = resolutions[comp]
-        if res["size"] > _MAX_ARCHIVE_BYTES:
-            return _stage_refusal(stage, f"archive_over_bound:{comp}")
-        total_compressed += res["size"]
-        if total_compressed > _MAX_AGGREGATE_ARCHIVES:
-            return _stage_refusal(stage, "aggregate_archives_over_bound")
-        dest = archives_dir / f"{comp}.zip"
-        try:
-            chunks = transport(res["source"])
-        except Exception as exc:  # noqa: BLE001 — a synthetic
-            # transport failure is a controlled failed state
-            stage["archives"] = archives_out
-            return _failed(type(exc).__name__, stage)
-        if chunks is None or not hasattr(chunks, "__iter__"):
-            return _stage_refusal(stage, "transport_not_iterable")
-        # In-memory retention is explicitly budgeted: an archive only
-        # takes the BytesIO association path when it fits the retained
-        # buffer budget — otherwise it falls back to the bounded
-        # file-backed path (never silently expanded).
-        use_memory = res["size"] <= _MAX_IN_MEMORY_ARCHIVE \
-            and retained_mem + res["size"] <= _MAX_RETAINED_MEM
-        sink = io.BytesIO() if use_memory \
-            else open(dest, "xb")  # noqa: SIM115 — closed in finally
-        baseline = None
-        try:
-            obs, why = _stream_archive(iter(chunks), sink,
-                                       res["size"], cancel_check)
-            if why is None and not use_memory:
-                # Verified-time association baseline captured on the
-                # OPEN write handle — never after reopening.
-                sink.flush()
-                baseline = _baseline_of(os.fstat(sink.fileno()))
-        finally:
-            if not use_memory:
-                sink.close()
-        _seam("stream_closed", component=comp,
-              path=None if use_memory else dest)
-        if why is not None:
-            stage["archives"] = archives_out
-            return _stage_refusal(stage, why)
-        arec = {"component": comp, "name": res["name"],
-                "asset_id": res["asset_id"],
-                "expected_size": res["size"],
-                "observed_size": obs["bytes"],
-                "expected_sha256": res["sha256"],
-                "observed_sha256": obs["sha256"],
-                "comparison": None, "verified": False,
-                # Layered association evidence — the streamed digest
-                # match alone NEVER implies the reopened-handle or
-                # final checks passed; each is reported separately.
-                "reopen_comparison": None,
-                "final_comparison": None}
-        if obs["sha256"] != res["sha256"]:
-            arec["comparison"] = "digest_mismatch"
-            archives_out.append(arec)
-            stage["archives"] = archives_out
-            return _stage_refusal(stage, f"archive_digest_mismatch:{comp}")
-        arec["comparison"] = "match"
-        arec["verified"] = True
-        archives_out.append(arec)
-        if use_memory:
-            retained_mem += res["size"]
-        verified[comp] = {"record": arec,
-                          "bytes": sink if use_memory else None,
-                          "baseline": baseline,
-                          "path": None if use_memory else dest}
-    stage["archives"] = archives_out
-
-    # ---- extraction permission: an acquire-only permit stops here
-    if not extract_permitted:
-        return _stage_refusal(stage, "operation_not_permitted:extract")
-
-    # ---- complete archive preflight: ALL archives complete every
-    # metadata-detectable check (including full expected-member
-    # coverage) BEFORE the first managed-member write (B3.2-J/C5).
-    members_expected = {m["name"].casefold(): m
-                        for m in reference["members"]
-                        if m["component"] in set(selected)}
-    owned = {}
-    for m in reference["members"]:
-        owned.setdefault(m["name"].casefold(), set()).add(m["component"])
-    for fold, owners in owned.items():
-        if len(owners) > 1:
-            return _stage_refusal(stage,
-                f"member_ownership_ambiguous:{fold}")
-    skip_names = {s.casefold()
-                  for s in reference["coverage"].get("skip_names", [])}
-    if len(skip_names) > _MAX_SKIP:
-        return _stage_refusal(stage, "coverage_skip_over_bound")
-    dest_seen: set = set()
-    prepared: dict[str, dict] = {}
-    total_expanded = 0
-    total_dir = 0
-    for comp in ordered:
-        v = verified[comp]
-        arec = v["record"]
-        # ---- layered reopen association (file-backed) or the strong
-        # same-object association (memory-backed).
-        try:
-            if v["bytes"] is not None:
-                fh_for_local = v["bytes"]
-                fh_for_local.seek(0)
-                arec["reopen_comparison"] = "memory_backed"
-            else:
-                fh_for_local, why = _open_archive_assoc(
-                    v["path"], arec["observed_size"],
-                    arec["expected_sha256"], v["baseline"],
-                    cancel_check)
-                if why is not None:
-                    arec["reopen_comparison"] = why
-                    return _stage_refusal(stage, why)
-                arec["reopen_comparison"] = "match"
-            # Bounded preliminary directory assessment BEFORE the
-            # parser materializes entry records (B3.2-C6-A).
-            dirinfo, why = _preflight_zip_dir(
-                fh_for_local, arec["observed_size"], cancel_check)
+    # ---- deterministic resource ownership (B3.2-N2): every retained
+    # archive resource — owned BytesIO buffers, file-backed handles
+    # and ZIP parser objects — is registered on this ExitStack
+    # immediately upon acquisition and released on EVERY exit path,
+    # parser before its underlying handle (LIFO), never by reference
+    # counting or interpreter teardown. The block completes before a
+    # successful result is constructed.
+    with contextlib.ExitStack() as stack:
+        for comp in ordered:
+            res = resolutions[comp]
+            if res["size"] > _MAX_ARCHIVE_BYTES:
+                return _stage_refusal(stage, f"archive_over_bound:{comp}")
+            total_compressed += res["size"]
+            if total_compressed > _MAX_AGGREGATE_ARCHIVES:
+                return _stage_refusal(
+                    stage, "aggregate_archives_over_bound")
+            dest = archives_dir / f"{comp}.zip"
+            try:
+                chunks = transport(res["source"])
+            except Exception as exc:  # noqa: BLE001 — a synthetic
+                # transport failure is a controlled failed state
+                stage["archives"] = archives_out
+                return _failed(type(exc).__name__, stage)
+            if chunks is None or not hasattr(chunks, "__iter__"):
+                return _stage_refusal(stage, "transport_not_iterable")
+            # In-memory retention is explicitly budgeted: an archive
+            # only takes the BytesIO association path when it fits the
+            # retained buffer budget — otherwise it falls back to the
+            # bounded file-backed path (never silently expanded). The
+            # BytesIO buffer is owned by the ExitStack from the moment
+            # it is created; the file write sink keeps its explicit
+            # finally-cleanup.
+            use_memory = res["size"] <= _MAX_IN_MEMORY_ARCHIVE \
+                and retained_mem + res["size"] <= _MAX_RETAINED_MEM
+            sink = stack.enter_context(io.BytesIO()) if use_memory \
+                else open(dest, "xb")  # noqa: SIM115 — closed in finally
+            baseline = None
+            try:
+                obs, why = _stream_archive(iter(chunks), sink,
+                                           res["size"], cancel_check)
+                if why is None and not use_memory:
+                    # Verified-time association baseline captured on
+                    # the OPEN write handle — never after reopening.
+                    sink.flush()
+                    baseline = _baseline_of(os.fstat(sink.fileno()))
+            finally:
+                if not use_memory:
+                    sink.close()
+            _seam("stream_closed", component=comp,
+                  path=None if use_memory else dest)
             if why is not None:
+                stage["archives"] = archives_out
                 return _stage_refusal(stage, why)
-            total_dir += dirinfo["cd_size"]
-            if total_dir > _MAX_AGGREGATE_DIR_BYTES:
+            arec = {"component": comp, "name": res["name"],
+                    "asset_id": res["asset_id"],
+                    "expected_size": res["size"],
+                    "observed_size": obs["bytes"],
+                    "expected_sha256": res["sha256"],
+                    "observed_sha256": obs["sha256"],
+                    "comparison": None, "verified": False,
+                    # Layered association evidence — the streamed digest
+                    # match alone NEVER implies the reopened-handle or
+                    # final checks passed; each is reported separately.
+                    "reopen_comparison": None,
+                    "final_comparison": None}
+            if obs["sha256"] != res["sha256"]:
+                arec["comparison"] = "digest_mismatch"
+                archives_out.append(arec)
+                stage["archives"] = archives_out
                 return _stage_refusal(
-                    stage, "aggregate_directory_over_bound")
-            zsrc = zipfile.ZipFile(fh_for_local)
-        except zipfile.BadZipFile:
-            return _stage_refusal(stage, f"archive_corrupt:{comp}")
-        except UnicodeDecodeError:
-            # Malformed filename decoding inside the parser maps to a
-            # controlled, sanitized refusal.
-            return _stage_refusal(stage, f"archive_corrupt:{comp}")
-        try:
-            comp_expected = {k: m for k, m in members_expected.items()
-                             if m["component"] == comp}
-            entries, pref = preflight_archive(
-                zsrc, fh_for_local, comp, comp_expected, skip_names,
-                dest_seen, dirinfo, cancel_check)
-            if pref:
-                return _stage_refusal(stage, *pref)
-            for e in entries:
-                if e["member"] is not None:
-                    total_expanded += e["member"]["size"]
-            if total_expanded > _MAX_EXPANDED_BYTES:
-                return _stage_refusal(stage,
-                                      "aggregate_expanded_over_bound")
-            prepared[comp] = {"zf": zsrc, "fh": fh_for_local,
-                              "entries": entries,
-                              "path": v["path"],
-                              "baseline": v["baseline"]}
-        except zipfile.BadZipFile:
-            return _stage_refusal(stage, f"archive_corrupt:{comp}")
+                    stage, f"archive_digest_mismatch:{comp}")
+            arec["comparison"] = "match"
+            arec["verified"] = True
+            archives_out.append(arec)
+            if use_memory:
+                retained_mem += res["size"]
+            verified[comp] = {"record": arec,
+                              "bytes": sink if use_memory else None,
+                              "baseline": baseline,
+                              "path": None if use_memory else dest}
+        stage["archives"] = archives_out
 
-    # ---- extraction permission already established; write members
-    # exclusively into the isolated staging dir. Every metadata-
-    # detectable check already passed for EVERY selected archive.
-    members_dir.mkdir()
-    if _path_reparse(members_dir):
-        return _stage_refusal(stage, "staging_dir_reparse")
-    members_out = []
-    skipped_out = []
-    for comp in ordered:
-        p = prepared[comp]
-        _seam("pre_extract", component=comp, path=p["path"])
-        for e in p["entries"]:
-            _check_cancel(cancel_check)
-            if e["skipped"]:
-                skipped_out.append({"name": e["name"],
-                                    "component": comp,
-                                    "state": "skipped_declared"})
+        # ---- extraction permission: an acquire-only permit stops here
+        if not extract_permitted:
+            return _stage_refusal(stage, "operation_not_permitted:extract")
+
+        # ---- complete archive preflight: ALL archives complete every
+        # metadata-detectable check (including full expected-member
+        # coverage) BEFORE the first managed-member write (B3.2-J/C5).
+        members_expected = {m["name"].casefold(): m
+                            for m in reference["members"]
+                            if m["component"] in set(selected)}
+        owned = {}
+        for m in reference["members"]:
+            owned.setdefault(m["name"].casefold(),
+                             set()).add(m["component"])
+        for fold, owners in owned.items():
+            if len(owners) > 1:
+                return _stage_refusal(stage,
+                    f"member_ownership_ambiguous:{fold}")
+        skip_names = {
+            s.casefold()
+            for s in reference["coverage"].get("skip_names", [])}
+        if len(skip_names) > _MAX_SKIP:
+            return _stage_refusal(stage, "coverage_skip_over_bound")
+        dest_seen: set = set()
+        prepared: dict[str, dict] = {}
+        total_expanded = 0
+        total_dir = 0
+        for comp in ordered:
+            v = verified[comp]
+            arec = v["record"]
+            # ---- layered reopen association (file-backed) or the
+            # strong same-object association (memory-backed).
+            try:
+                if v["bytes"] is not None:
+                    fh_for_local = v["bytes"]
+                    fh_for_local.seek(0)
+                    arec["reopen_comparison"] = "memory_backed"
+                else:
+                    fh_for_local, why = _open_archive_assoc(
+                        v["path"], arec["observed_size"],
+                        arec["expected_sha256"], v["baseline"],
+                        cancel_check)
+                    if why is not None:
+                        arec["reopen_comparison"] = why
+                        return _stage_refusal(stage, why)
+                    # Ownership registers the moment the verified
+                    # handle is acquired — before preflight, never
+                    # deferred to `prepared` insertion.
+                    stack.enter_context(fh_for_local)
+                    arec["reopen_comparison"] = "match"
+                # Bounded preliminary directory assessment BEFORE the
+                # parser materializes entry records (B3.2-C6-A).
+                dirinfo, why = _preflight_zip_dir(
+                    fh_for_local, arec["observed_size"], cancel_check)
+                if why is not None:
+                    return _stage_refusal(stage, why)
+                total_dir += dirinfo["cd_size"]
+                if total_dir > _MAX_AGGREGATE_DIR_BYTES:
+                    return _stage_refusal(
+                        stage, "aggregate_directory_over_bound")
+                # Registered after the handle so unwinding closes the
+                # parser BEFORE its underlying archive handle (LIFO).
+                zsrc = stack.enter_context(
+                    zipfile.ZipFile(fh_for_local))
+            except zipfile.BadZipFile:
+                return _stage_refusal(stage, f"archive_corrupt:{comp}")
+            except UnicodeDecodeError:
+                # Malformed filename decoding inside the parser maps
+                # to a controlled, sanitized refusal.
+                return _stage_refusal(stage, f"archive_corrupt:{comp}")
+            try:
+                comp_expected = {k: m
+                                 for k, m in members_expected.items()
+                                 if m["component"] == comp}
+                entries, pref = preflight_archive(
+                    zsrc, fh_for_local, comp, comp_expected, skip_names,
+                    dest_seen, dirinfo, cancel_check)
+                if pref:
+                    return _stage_refusal(stage, *pref)
+                for e in entries:
+                    if e["member"] is not None:
+                        total_expanded += e["member"]["size"]
+                if total_expanded > _MAX_EXPANDED_BYTES:
+                    return _stage_refusal(
+                        stage, "aggregate_expanded_over_bound")
+                prepared[comp] = {"zf": zsrc, "fh": fh_for_local,
+                                  "entries": entries,
+                                  "path": v["path"],
+                                  "baseline": v["baseline"]}
+            except zipfile.BadZipFile:
+                return _stage_refusal(stage, f"archive_corrupt:{comp}")
+
+        # ---- extraction permission already established; write
+        # members exclusively into the isolated staging dir. Every
+        # metadata-detectable check already passed for EVERY selected
+        # archive.
+        members_dir.mkdir()
+        if _path_reparse(members_dir):
+            return _stage_refusal(stage, "staging_dir_reparse")
+        members_out = []
+        skipped_out = []
+        for comp in ordered:
+            p = prepared[comp]
+            _seam("pre_extract", component=comp, path=p["path"])
+            for e in p["entries"]:
+                _check_cancel(cancel_check)
+                if e["skipped"]:
+                    skipped_out.append({"name": e["name"],
+                                        "component": comp,
+                                        "state": "skipped_declared"})
+                    continue
+                _seam("pre_member", component=comp, name=e["name"],
+                      path=p["path"])
+                rec, why = _extract_member(
+                    p["zf"], e["info"], e["member"],
+                    members_dir, cancel_check)
+                if why is not None:
+                    stage["members"] = members_out
+                    return _stage_refusal(
+                        stage, f"{why}:{e['member']['name']}")
+                members_out.append(rec)
+        # ---- final persistent-association check on the retained
+        # handle: modifications persisting through preflight or
+        # extraction refuse.
+        for comp in ordered:
+            p = prepared[comp]
+            v = verified[comp]
+            if p["path"] is None:
+                v["record"]["final_comparison"] = "memory_backed"
                 continue
-            _seam("pre_member", component=comp, name=e["name"],
-                  path=p["path"])
-            rec, why = _extract_member(p["zf"], e["info"], e["member"],
-                                       members_dir, cancel_check)
+            _seam("pre_final", component=comp, path=p["path"])
+            why = _final_archive_assoc(
+                p["path"], p["fh"], p["baseline"],
+                v["record"]["observed_size"],
+                v["record"]["expected_sha256"], cancel_check)
             if why is not None:
+                v["record"]["final_comparison"] = why
                 stage["members"] = members_out
-                return _stage_refusal(
-                    stage, f"{why}:{e['member']['name']}")
-            members_out.append(rec)
-    # ---- final persistent-association check on the retained handle:
-    # modifications persisting through preflight/extraction refuse.
-    for comp in ordered:
-        p = prepared[comp]
-        v = verified[comp]
-        if p["path"] is None:
-            v["record"]["final_comparison"] = "memory_backed"
-            continue
-        _seam("pre_final", component=comp, path=p["path"])
-        why = _final_archive_assoc(
-            p["path"], p["fh"], p["baseline"],
-            v["record"]["observed_size"],
-            v["record"]["expected_sha256"], cancel_check)
-        if why is not None:
-            v["record"]["final_comparison"] = why
-            stage["members"] = members_out
-            return _stage_refusal(stage, why)
-        v["record"]["final_comparison"] = "match"
-    for comp in ordered:
-        p = prepared[comp]
-        for h in (p["zf"], p["fh"]):
-            if h is not None:
-                with contextlib.suppress(Exception):
-                    h.close()
+                return _stage_refusal(stage, why)
+            v["record"]["final_comparison"] = "match"
+    # The ExitStack has now unwound: all owned archive resources are
+    # deterministically released before a completed result exists.
 
     # ---- coverage: distinguish declared vs selected vs upstream truth
     coverage = {"declared_complete": True,
