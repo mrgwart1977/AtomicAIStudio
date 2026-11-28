@@ -209,11 +209,18 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 # Private inert test seam — never invoked unless a test installs a
 # callable; fixed points only (mirrors the racq:v0 precedent):
 #   staging_created, member_written, pre_revalidate, pre_rename,
-#   post_rename, pre_record, post_record
+#   post_rename, pre_record, pre_record_link, pre_record_tmp_unlink,
+#   post_record_link, post_record
 _TEST_SEAM = None
 _TEST_SEAM_POINTS = frozenset(
     {"staging_created", "member_written", "pre_revalidate",
-     "pre_rename", "post_rename", "pre_record", "post_record"})
+     "pre_rename", "post_rename", "pre_record", "pre_record_link",
+     "pre_record_tmp_unlink", "post_record_link", "post_record"})
+
+# Inert platform-policy test seam — None means the real os.name is
+# consulted. Never a simulated foreign platform execution claim: it
+# only exercises the fail-closed policy branch.
+_TEST_PLATFORM = None
 
 _ROOT_LOCKS: dict[str, object] = {}
 _ROOT_LOCKS_GUARD = threading.Lock()
@@ -291,8 +298,9 @@ def _pub_env(stage: dict, state: str, refusals: list | None = None) -> dict:
            "synthetic_publication": pub.get("state",
                                             PUB_NOT_PERFORMED),
            "idempotent": stage.get("idempotent", False),
-           "reconciliation_required":
-               pub.get("state") == PUB_UNCONFIRMED,
+           "failure": stage.get("failure"),
+           "uncertain_cause": stage.get("uncertain_cause"),
+           "reconciliation_required": state == S_UNCERTAIN,
            "fsm": stage.get("fsm")}
     return _env(out)
 
@@ -303,8 +311,12 @@ def _stage_refusal(stage: dict, *codes) -> dict:
 
 
 def _stage_failed(stage: dict, cls: str) -> dict:
-    stage.setdefault("refusals", [])
-    return _pub_env(stage, S_FAILED, [{"class": "io", "code": cls}])
+    """Failure outcome: refusal evidence is always plain code
+    strings (H2 — never mixed shapes); the exception classification
+    is reported separately under "failure"."""
+    _refusals(stage.setdefault("refusals", []), f"failure:{cls}")
+    stage["failure"] = {"class": "io", "code": cls}
+    return _pub_env(stage, S_FAILED)
 
 
 # ------------------------------------------------------- canonical identity
@@ -542,7 +554,7 @@ def _acquire_root(root: Path):
     key = str(root.resolve())
     with _ROOT_LOCKS_GUARD:
         if key in _ROOT_LOCKS:
-            return _ROOT_LOCKS[key]
+            return _ROOT_LOCKS[key]["fh"]
         lock_path = root / _LOCK_FILE
         if lock_path.exists() and (_reparse(lock_path)
                                    or not lock_path.is_file()):
@@ -560,21 +572,51 @@ def _acquire_root(root: Path):
         except OSError:
             fh.close()
             return None
-        _ROOT_LOCKS[key] = fh
+        _ROOT_LOCKS[key] = {"fh": fh, "active": set()}
         return fh
 
 
-def release_root(root) -> None:
-    """Deterministic release of a held installation-root lock —
-    used by synthetic tests and process shutdown paths."""
+def _root_active_begin(root):
+    """Register an active operation against held root ownership —
+    returns a per-operation lease token, or None when no ownership is
+    held. Synchronized under the root-lock guard so acquisition and
+    registration cannot interleave with a release."""
     key = str(Path(root).resolve())
     with _ROOT_LOCKS_GUARD:
-        fh = _ROOT_LOCKS.pop(key, None)
-    if fh is not None:
-        try:
-            fh.close()
-        except OSError:
-            pass
+        ent = _ROOT_LOCKS.get(key)
+        if ent is None:
+            return None
+        tok = secrets.token_hex(6)
+        ent["active"].add(tok)
+        return tok
+
+
+def _root_active_end(root, token) -> None:
+    """Release exactly this operation's lease — deterministic on
+    success, refusal, failure and cancellation paths."""
+    key = str(Path(root).resolve())
+    with _ROOT_LOCKS_GUARD:
+        ent = _ROOT_LOCKS.get(key)
+        if ent is not None:
+            ent["active"].discard(token)
+
+
+def release_root(root) -> bool:
+    """Deterministic release of held installation-root ownership —
+    refuses while an active operation depends on it. Returns True
+    only when the OS lock was actually released."""
+    key = str(Path(root).resolve())
+    with _ROOT_LOCKS_GUARD:
+        ent = _ROOT_LOCKS.get(key)
+        if ent is None or ent["active"]:
+            return False
+        fh = ent["fh"]
+        del _ROOT_LOCKS[key]
+    try:
+        fh.close()
+    except OSError:
+        pass
+    return True
 
 
 def _component_lock(runtime_key: str, flavor: str):
@@ -587,18 +629,37 @@ def _component_lock(runtime_key: str, flavor: str):
 
 
 def reset_locks() -> None:
-    """Synthetic-test reset: drop held root locks and component locks.
-    Never used by production paths."""
+    """Synthetic-test reset: release only INACTIVE root ownership and
+    component locks that are not held — an active operation's
+    ownership is never invalidated by a reset."""
     with _ROOT_LOCKS_GUARD:
-        held = list(_ROOT_LOCKS.values())
-        _ROOT_LOCKS.clear()
+        held = [_ROOT_LOCKS.pop(k)["fh"] for k in list(_ROOT_LOCKS)
+                if not _ROOT_LOCKS[k]["active"]]
     for fh in held:
         try:
             fh.close()
         except OSError:
             pass
     with _COMP_LOCKS_GUARD:
-        _COMP_LOCKS.clear()
+        for ck in [k for k, lk in _COMP_LOCKS.items()
+                   if not lk.locked()]:
+            del _COMP_LOCKS[ck]
+
+
+# --------------------------------------------------- platform policy (C1)
+
+
+def _publication_supported() -> bool:
+    """Windows-first publication policy: NEW synthetic generation
+    publication is supported only where directory rename is
+    established create-only — verified Windows semantics
+    (MoveFileW without MOVEFILE_REPLACE_EXISTING fails on any
+    existing destination). POSIX rename(2) silently replaces an
+    existing EMPTY directory, so pre-check + rename cannot establish
+    no-replacement there and publication fails closed. Read-only
+    revalidate/reconcile stay available on every platform."""
+    plat = _TEST_PLATFORM if _TEST_PLATFORM is not None else os.name
+    return plat == "nt"
 
 
 # ------------------------------------------------- acquisition validation
@@ -611,6 +672,36 @@ def _authority_query(authority) -> bool:
     production trust root, credential or signature check."""
     return authority is not None and callable(
         getattr(authority, "is_revoked", None))
+
+
+def _acq_canonical_digest(ref_digest, key, flavor, selected, omitted,
+                          ref_comps):
+    """Independent recomputation of the racq:v0 canonical acquisition
+    identity — same accepted algorithm (sorted-key compact JSON over
+    {contract, reference_digest, runtime_key, flavor, selected,
+    omitted, assets}) reimplemented literally here; the protected
+    implementation is never imported (a87). Every input derives from
+    the already-validated reference and selection partition — asset
+    identity fields come from ref["archives"][c]["asset"], never from
+    caller-supplied acquisition records."""
+    assets = {}
+    for c in sorted(selected):
+        a = ref_comps[c].get("asset") or {}
+        dig = a.get("digest") or {}
+        if a.get("id") is None or a.get("name") is None \
+                or a.get("size") is None or a.get("url") is None \
+                or dig.get("value") is None:
+            return None, f"acquisition_identity_uncomputable:{c}"
+        assets[c] = {"asset_id": a["id"], "name": a["name"],
+                     "size": a["size"], "sha256": dig["value"],
+                     "source": a["url"]}
+    identity = {"contract": _RACQ_CONTRACT,
+                "reference_digest": ref_digest,
+                "runtime_key": key, "flavor": flavor,
+                "selected": sorted(selected),
+                "omitted": sorted(omitted), "assets": assets}
+    return (_RACQ_CONTRACT + ":" + hashlib.sha256(
+        _canon(identity).encode()).hexdigest(), None)
 
 
 def _validate_acquisition(acq, ref, authority, stage: dict):
@@ -680,6 +771,17 @@ def _validate_acquisition(acq, ref, authority, stage: dict):
     if not required <= set(selected):
         refusals.append("acquisition_required_omitted")
 
+    # ---- independent canonical acquisition identity (C3-A): digest
+    # syntax alone is insufficient — the supplied digest must equal
+    # the recomputed canonical identity over validated inputs.
+    cdigest, derr = _acq_canonical_digest(ref_digest, key, flavor,
+                                          selected, omitted,
+                                          ref_comps)
+    if derr is not None:
+        refusals.append(derr)
+    elif cdigest != acq_id:
+        refusals.append("acquisition_identity_mismatch")
+
     archives = acq.get("archives")
     if not isinstance(archives, list):
         refusals.append("acquisition_archives_invalid")
@@ -696,6 +798,21 @@ def _validate_acquisition(acq, ref, authority, stage: dict):
             refusals.append(f"acquisition_archive_unknown:{str(c)[:40]}")
             continue
         if c in selected:
+            # Reference-derived asset association (C3-B): internally
+            # self-consistent evidence is never accepted when its
+            # declared asset identity contradicts the validated
+            # reference. Optional source is bound when represented.
+            ra_asset = ref_comps[c].get("asset") or {}
+            ra_dig = ra_asset.get("digest") or {}
+            if arec.get("asset_id") != ra_asset.get("id") \
+                    or arec.get("name") != ra_asset.get("name") \
+                    or arec.get("expected_size") != ra_asset.get("size") \
+                    or arec.get("expected_sha256") != ra_dig.get("value") \
+                    or (arec.get("source") is not None
+                        and arec.get("source") != ra_asset.get("url")):
+                refusals.append(
+                    f"acquisition_asset_association_invalid:{c}")
+                continue
             # Layered association evidence: the streamed digest must
             # match; reopened-handle and final checks may legitimately
             # report memory_backed for the in-memory path.
@@ -989,6 +1106,121 @@ def _staging_owned(sdir: Path, nonce: str) -> bool:
 # -------------------------------------------------- destination assessment
 
 
+def _record_fields_ok(prec: dict, gen_id: str, digest: str) -> bool:
+    """Exact field association for a generation publication record."""
+    return isinstance(prec, dict) \
+        and prec.get("record") == "publication" \
+        and prec.get("generation_id") == gen_id \
+        and prec.get("descriptor_digest") == digest \
+        and prec.get("committed") is True
+
+
+def _assess_record_slot(record: Path, gen_id: str, digest: str):
+    """Independent publication-record slot assessment used when the
+    generation directory itself is absent (C2-A). Any existing slot
+    content is orphaned, foreign, contradictory or ambiguous evidence
+    — refused, never repaired, replaced, adopted or deleted."""
+    if _reparse(record):
+        return "publication_record_reparse"
+    if not record.exists():
+        return None
+    if not record.is_file():
+        return "publication_record_not_file"
+    prec, pwhy = _read_meta(record)
+    if pwhy is not None:
+        return f"publication_record_orphaned:{pwhy}"
+    if not _record_fields_ok(prec, gen_id, digest):
+        return "publication_record_foreign"
+    # A valid record binding THIS generation identity with the
+    # generation directory absent is torn or ambiguous evidence —
+    # refused, never silently adopted.
+    return "publication_record_orphaned"
+
+
+def _commit_record(record: Path, prec: dict, gen_id: str,
+                   digest: str, nonce: str) -> dict:
+    """Create-only publication-record commit (C2-B): exclusive
+    nonce-bound temporary file + os.link directory entry — create-only
+    on both NTFS and POSIX (the established model_copy primitive);
+    os.replace is never used for the final record. A collision
+    preserves the existing evidence and reports uncertainty rather
+    than attributing it. Returns {"state", "cause", "cleanup"} with
+    state committed|collision|unconfirmed — never raises for the
+    expected failure classes."""
+    cleanup = {"tmp": None, "retained": False, "uncertain": None}
+    raw = _canon(prec).encode()
+    if len(raw) > _MAX_METADATA_BYTES:
+        return {"state": "unconfirmed",
+                "cause": "publication_record_over_bound",
+                "cleanup": cleanup}
+    tmp = record.with_name(f"{record.name}.{nonce}.tmp")
+    cleanup["tmp"] = tmp.name
+    try:
+        with open(tmp, "xb") as fh:
+            fh.write(raw)
+            _fsync_file(fh)
+    except FileExistsError:
+        # Foreign object already holds our temporary slot — never
+        # delete it.
+        cleanup["retained"] = True
+        cleanup["uncertain"] = "tmp_slot_foreign"
+        return {"state": "unconfirmed",
+                "cause": "publication_record_tmp_foreign",
+                "cleanup": cleanup}
+    except OSError:
+        return {"state": "unconfirmed",
+                "cause": "publication_record_tmp_failed",
+                "cleanup": cleanup}
+    try:
+        tmp_stat = os.stat(tmp)
+    except OSError:
+        tmp_stat = None
+    _seam("pre_record_link", path=str(tmp), record=str(record))
+    outcome = None
+    try:
+        os.link(tmp, record)   # create-only; never replaces
+    except FileExistsError:
+        outcome = {"state": "collision",
+                   "cause": "publication_record_collision"}
+    except OSError:
+        # Unsupported filesystem or IO failure — fail closed, no
+        # os.replace fallback.
+        outcome = {"state": "unconfirmed",
+                   "cause": "publication_record_commit_failed"}
+    # Deterministically release ONLY demonstrably owned temporary
+    # resources — inode identity must match the file we created.
+    if tmp_stat is not None:
+        try:
+            _seam("pre_record_tmp_unlink", path=str(tmp))
+            cur = os.stat(tmp)
+            if (cur.st_dev, cur.st_ino) == (tmp_stat.st_dev,
+                                            tmp_stat.st_ino):
+                os.unlink(tmp)
+            else:
+                cleanup["retained"] = True
+                cleanup["uncertain"] = "tmp_replaced_foreign"
+        except OSError:
+            cleanup["retained"] = True
+            cleanup["uncertain"] = "tmp_unlink_failed"
+    else:
+        cleanup["retained"] = True
+        cleanup["uncertain"] = "tmp_identity_unverified"
+    if outcome is not None:
+        outcome["cleanup"] = cleanup
+        return outcome
+    _seam("post_record_link", path=str(record))
+    # Independent post-commit association revalidation.
+    got, why = _read_meta(record)
+    if why is not None \
+            or not _record_fields_ok(got, gen_id, digest):
+        return {"state": "unconfirmed",
+                "cause": "publication_record_association_invalid"
+                         + (f":{why}" if why else ""),
+                "cleanup": cleanup}
+    return {"state": "committed", "cause": None,
+            "cleanup": cleanup}
+
+
 def _assess_destination(dest: Path, gen_id: str, digest: str,
                         expected: dict, record: Path,
                         cancel_check):
@@ -997,6 +1229,9 @@ def _assess_destination(dest: Path, gen_id: str, digest: str,
     ("identical", None)                   — valid committed generation
     (None, code)                          — refusal"""
     if not dest.exists() and not _reparse(dest):
+        rcode = _assess_record_slot(record, gen_id, digest)
+        if rcode is not None:
+            return None, rcode
         return "absent", None
     if _reparse(dest):
         return None, "generation_destination_reparse"
@@ -1032,10 +1267,7 @@ def _assess_destination(dest: Path, gen_id: str, digest: str,
     prec, pwhy = _read_meta(record)
     if pwhy is not None:
         return None, f"generation_uncommitted:{pwhy}"
-    if prec.get("record") != "publication" \
-            or prec.get("generation_id") != gen_id \
-            or prec.get("descriptor_digest") != digest \
-            or prec.get("committed") is not True:
+    if not _record_fields_ok(prec, gen_id, digest):
         return None, "publication_record_malformed"
     return "identical", None
 
@@ -1090,6 +1322,23 @@ def install(ref, acq, *, authority, source_root, install_root,
         stage["generation"] = {"id": gen_id, "digest": digest}
         expected = ev["expected"]
 
+        # ---- persistability bound BEFORE any managed write (H3):
+        # a descriptor that cannot be persisted within the metadata
+        # limit refuses before the staging attempt is created.
+        gen_meta = {"contract": RGEN_VERSION, "record": "generation",
+                    "generation_id": gen_id,
+                    "descriptor_digest": digest,
+                    "descriptor": desc,
+                    "provenance": {
+                        "acquisition_digest": ev["acq_id"],
+                        "authority": {
+                            "association": "established",
+                            "class": _SYNTHETIC_AUTHORITY_CLASS}},
+                    "members": [m["name"] for m in desc["members"]]}
+        if len(_canon(gen_meta).encode()) > _MAX_METADATA_BYTES:
+            return _stage_refusal(stage,
+                                  "generation_metadata_over_bound")
+
         # ---- source staging association (read-only consumption)
         sroot = Path(source_root)
         sdir_name = ev["staging_dir"]
@@ -1101,6 +1350,13 @@ def install(ref, acq, *, authority, source_root, install_root,
         if not src_members.is_dir():
             return _stage_refusal(stage, "source_staging_missing")
 
+        # ---- supported-platform publication policy (C1): the
+        # fail-closed check runs BEFORE any managed installation
+        # write (root dir, lock file, namespace, staging).
+        if not _publication_supported():
+            return _stage_refusal(stage,
+                                  "publication_platform_unsupported")
+
         # ---- install root + locks
         iroot = Path(install_root)
         if iroot.exists() and (_reparse(iroot) or not iroot.is_dir()):
@@ -1111,32 +1367,49 @@ def install(ref, acq, *, authority, source_root, install_root,
             return _stage_refusal(stage, "install_root_unwritable")
         if _acquire_root(iroot) is None:
             return _stage_refusal(stage, "install_root_locked")
+        lease = _root_active_begin(iroot)
+        if lease is None:
+            return _stage_refusal(stage, "install_root_locked")
         lock = _component_lock(key, flavor)
         if not lock.acquire(blocking=False):
+            _root_active_end(iroot, lease)
             return _stage_refusal(stage, "component_locked")
         try:
             return _install_locked(stage, ev, desc, digest, gen_id,
                                    expected, iroot, key, flavor,
-                                   src_members, cancel_check)
+                                   src_members, gen_meta, cancel_check)
         finally:
             lock.release()
+            _root_active_end(iroot, lease)
     except _Cancelled:
         return _pub_env(stage, S_CANCELLED)
     except Exception as exc:  # noqa: BLE001 — a committed publication
         # is never concealed by a late post-commit error: anything
-        # raised after the rename reports committed_unconfirmed.
+        # raised after the rename reports an uncertain commit, and
+        # independently confirmed logical-commit evidence is never
+        # downgraded by a reporting or cleanup failure.
         if stage["publication"].get("renamed"):
-            stage["publication"]["state"] = PUB_UNCONFIRMED
-            stage["publication"]["record"] = None
-            stage["publication"]["fsynced"] = False
-            stage["fsm"] = _F_PUBLISHED
+            pub = stage["publication"]
+            pub["state"] = PUB_UNCONFIRMED
+            pub["record"] = None
+            pub["fsynced"] = False
+            stage["fsm"] = _F_PUBLISHING
             stage["uncertain_cause"] = type(exc).__name__
+            cinfo = stage.get("_commit")
+            if cinfo is not None:
+                got, _why = _read_meta(Path(cinfo["record"]))
+                if _record_fields_ok(got or {}, cinfo["gen_id"],
+                                     cinfo["digest"]):
+                    pub["state"] = PUB_COMMITTED
+                    pub["record"] = Path(cinfo["record"]).name
+                    pub["fsynced"] = True
             return _pub_env(stage, S_UNCERTAIN)
         return _stage_failed(stage, type(exc).__name__)
 
 
 def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
-                    key, flavor, src_members, cancel_check) -> dict:
+                    key, flavor, src_members, gen_meta,
+                    cancel_check) -> dict:
     ns, nerr = _ensure_dirs(iroot, key, flavor)
     if nerr:
         return _stage_refusal(stage, nerr)
@@ -1206,15 +1479,7 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
     _check_cancel(cancel_check)
 
     # ---- immutable generation evidence inside the staged dir
-    gen_meta = {"contract": RGEN_VERSION, "record": "generation",
-                "generation_id": gen_id,
-                "descriptor_digest": digest,
-                "descriptor": desc,
-                "provenance": {
-                    "acquisition_digest": ev["acq_id"],
-                    "authority": {"association": "established",
-                                  "class": _SYNTHETIC_AUTHORITY_CLASS}},
-                "members": [m["name"] for m in desc["members"]]}
+    # (gen_meta built + bound-checked before staging — H3)
     try:
         _write_meta(sdir / _GENERATION_META, gen_meta)
     except (OSError, ValueError):
@@ -1243,8 +1508,15 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
     except OSError:
         return _stage_failed(stage, "volume_assessment_failed")
     stage["publication"]["commit_point"] = "namespace_rename"
+    stage["_commit"] = {"record": str(record), "gen_id": gen_id,
+                        "digest": digest}
     _check_cancel(cancel_check)
     _seam("pre_rename", src=str(sdir), dst=str(dest))
+    # Final pre-commit association recheck (C2-A): a record slot that
+    # appeared since the initial assessment is foreign evidence —
+    # refuse rather than commit over it.
+    if _reparse(record) or record.exists():
+        return _stage_refusal(stage, "publication_record_appeared")
     try:
         os.rename(sdir, dest)          # COMMIT POINT
     except FileExistsError:
@@ -1260,7 +1532,7 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
     # is committed; only accurate commit evidence remains.
     _fsync_dir(gens_dir)
 
-    # ---- commit evidence: per-generation publication record
+    # ---- commit evidence: create-only per-generation record (C2-B)
     prec = {"contract": RGEN_VERSION, "record": "publication",
             "generation_id": gen_id,
             "descriptor_digest": digest,
@@ -1272,22 +1544,24 @@ def _install_locked(stage, ev, desc, digest, gen_id, expected, iroot,
             "committed": True,
             "member_count": len(desc["members"])}
     _seam("pre_record", path=str(record))
-    try:
-        _write_meta(record, prec)
-    except (OSError, ValueError):
+    rc = _commit_record(record, prec, gen_id, digest, nonce)
+    if rc["state"] != "committed":
         # Physically committed, evidence unconfirmed — never a
         # generic failure concealing the commit, never a clean
-        # success missing evidence.
+        # success missing evidence. Furthest confirmed FSM progress
+        # is publishing, NOT published (H1).
         stage["publication"] = {
             "state": PUB_UNCONFIRMED,
             "commit_point": "namespace_rename",
-            "record": None, "renamed": True, "fsynced": False}
-        stage["fsm"] = _F_PUBLISHED
+            "record": None, "renamed": True, "fsynced": False,
+            "cause": rc["cause"], "cleanup": rc["cleanup"]}
+        stage["fsm"] = _F_PUBLISHING
         return _pub_env(stage, S_UNCERTAIN)
     stage["publication"] = {"state": PUB_COMMITTED,
                             "commit_point": "namespace_rename",
                             "record": record.name,
-                            "renamed": True, "fsynced": True}
+                            "renamed": True, "fsynced": True,
+                            "cleanup": rc["cleanup"]}
     _seam("post_record", path=str(record))
     stage["fsm"] = _F_PUBLISHED
     return _pub_env(stage, S_PUBLISHED)
@@ -1300,7 +1574,10 @@ def revalidate(install_root, runtime_key, flavor, gen_id, *,
                authority=None, cancel_check=None) -> dict:
     """Explicit generation revalidation — independent verification of
     descriptor + members. Establishes NO selection, enrollment or
-    execution eligibility."""
+    execution eligibility. Observational: it does not take the
+    installation locks, so a concurrent in-flight install may yield
+    transient mid-commit observations — classifications describe
+    what was present at read time, never a stable snapshot."""
     stage: dict = {"fsm": _F_VERIFYING, "refusals": [], "members": [],
                    "publication": {"state": PUB_NOT_PERFORMED}}
     if not _is_str(runtime_key) or not _is_str(flavor) \
@@ -1439,7 +1716,9 @@ def reconcile(install_root, *, runtime_key=None, flavor=None,
     """Observational restart-style reconciliation — non-destructive,
     never adopts, repairs or deletes. Classifies every entry under the
     managed namespace; ambiguous, foreign or user-owned content is
-    only reported."""
+    only reported. It does not coordinate with in-flight installs —
+    transient mid-commit states may be classified; results describe
+    read-time presence, not a stable post-commit snapshot."""
     iroot = Path(install_root)
     entries = []
     counts: dict[str, int] = {}

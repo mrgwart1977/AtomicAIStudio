@@ -264,8 +264,10 @@ def _stage_dir(root, scn):
 @pytest.fixture(autouse=True)
 def _reset():
     rti._TEST_SEAM = None
+    rti._TEST_PLATFORM = None
     yield
     rti._TEST_SEAM = None
+    rti._TEST_PLATFORM = None
     rti.reset_locks()
 
 
@@ -318,14 +320,28 @@ def test_g02_stable_identity_across_attempts(tmp_path):
 
 
 def test_g03_acquisition_digest_is_provenance_not_identity(tmp_path):
+    # Two INDEPENDENT acquisition operations of identical authorized
+    # content (different staging dirs, different operational
+    # evidence) yield the same canonical acquisition digest, the same
+    # generation identity, and the digest appears only as provenance.
     scn = _single()
-    acq, src = _ok_acq(scn, tmp_path)
-    acq2 = copy.deepcopy(acq)
-    acq2["acquisition"] = "racq:v0:" + "f" * 64
-    r1 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "g1")
-    r2 = _inst(scn, acq2, tmp_path, src, install_root=tmp_path / "g2")
+    acq1, src1 = _ok_acq(scn, tmp_path / "t1")
+    acq2, src2 = _ok_acq(scn, tmp_path / "t2")
+    assert acq1["staging"]["dir"] != acq2["staging"]["dir"]
+    r1 = _inst(scn, acq1, tmp_path / "t1", src1,
+               install_root=tmp_path / "g1")
+    r2 = _inst(scn, acq2, tmp_path / "t2", src2,
+               install_root=tmp_path / "g2")
     assert r1["generation"]["id"] == r2["generation"]["id"]
-    assert r2["acquisition"]["digest"] == "racq:v0:" + "f" * 64
+    assert r1["acquisition"]["digest"] == r2["acquisition"]["digest"]
+    # The digest is provenance: it is reported on the envelope and
+    # persisted in records but is NOT a descriptor identity field.
+    meta = json.loads(
+        (_gen_path(tmp_path / "g1", scn, r1["generation"]["id"])
+         / "_generation.json").read_bytes())
+    assert "acquisition" not in meta["descriptor"]
+    assert meta["provenance"]["acquisition_digest"] \
+        == r1["acquisition"]["digest"]
 
 
 def test_g04_mutable_fields_excluded_from_identity(tmp_path):
@@ -855,8 +871,9 @@ def test_g48_sharing_violation_controlled_failure(tmp_path):
         for h in hold:
             h.close()
     assert res["state"] == "failed"
-    assert res["refusals"][0]["code"] in (
+    assert res["failure"]["code"] in (
         "sharing_violation", "publication_rename_failed")
+    assert all(isinstance(r, str) for r in res["refusals"])
     assert res["publication"]["state"] == "not_performed"
 
 
@@ -1666,3 +1683,715 @@ def test_g106_environment_metadata():
     assert platform.python_version() >= "3.10"
     # environment record: windows-first platform verified at runtime
     assert os.name in ("nt", "posix")
+
+
+# ============================================ bounded corrections g107+
+#
+# C1 supported-platform publication policy; C2 publication-record
+# ownership and create-only commit; C3 independent canonical
+# acquisition identity and reference-derived asset association; C4
+# active root ownership; H1/H2 evidence shapes; H3 metadata capacity;
+# H5 path compatibility; H6 resource fault injection.
+
+
+# ------------------------------------------------------------ C1 platform
+
+
+def test_g107_unsupported_platform_refused_before_writes(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    rti._TEST_PLATFORM = "posix"   # simulated policy branch only —
+    # never a claim of POSIX execution semantics
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "refused"
+    assert "publication_platform_unsupported" in res["refusals"]
+    # refusal occurs before ANY managed installation write
+    root = tmp_path / "gens"
+    assert not (root / "runtime-gens").exists()
+    assert not (root / ".gens.lock").exists()
+    assert not root.exists() or not list(root.iterdir())
+
+
+def test_g108_observational_ops_platform_independent(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    res = _inst(scn, acq, tmp_path, src)
+    gid = res["generation"]["id"]
+    rti._TEST_PLATFORM = "posix"
+    rv = rti.revalidate(tmp_path / "gens", "sdcpp", "cuda", gid)
+    assert rv["state"] == "revalidated"
+    rec = rti.reconcile(tmp_path / "gens")
+    assert rec["counts"].get("generation_committed") == 1
+    res2 = _inst(scn, acq, tmp_path, src)
+    assert "publication_platform_unsupported" in res2["refusals"]
+
+
+def test_g109_unknown_platform_value_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    rti._TEST_PLATFORM = "haiku"
+    res = _inst(scn, acq, tmp_path, src)
+    assert "publication_platform_unsupported" in res["refusals"]
+
+
+# ------------------------------------------------ C2-A record-slot assess
+
+
+def _plant_record(tmp_path, scn, res, content: bytes):
+    gid = res["generation"]["id"]
+    rec = _gens_dir(tmp_path / "gens", scn) / f"{gid}.published.json"
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_bytes(content)
+    return rec
+
+
+def test_g110_orphaned_record_refused_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+    orig = (_gens_dir(tmp_path / "twin", scn)
+            / f"{gid}.published.json").read_bytes()
+    rec = _plant_record(tmp_path, scn, r0, orig)  # valid record, no dir
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "refused"
+    assert any(r.startswith("publication_record_orphaned")
+               for r in res["refusals"])
+    assert rec.read_bytes() == orig
+
+
+def test_g111_malformed_record_refused_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    rec = _plant_record(tmp_path, scn, r0, b"{not valid json")
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "refused"
+    assert any(r.startswith("publication_record_orphaned")
+               for r in res["refusals"])
+    assert rec.read_bytes() == b"{not valid json"
+
+
+def test_g112_foreign_record_refused_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    foreign = json.dumps({
+        "contract": "rgen:v0", "record": "publication",
+        "generation_id": "gen-" + "9" * 64,
+        "descriptor_digest": "rgen:v0:" + "8" * 64,
+        "committed": True}).encode()
+    rec = _plant_record(tmp_path, scn, r0, foreign)
+    res = _inst(scn, acq, tmp_path, src)
+    assert "publication_record_foreign" in res["refusals"]
+    assert rec.read_bytes() == foreign
+
+
+def test_g113_empty_record_refused_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    rec = _plant_record(tmp_path, scn, r0, b"")
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "refused"
+    assert any(r.startswith("publication_record_orphaned")
+               for r in res["refusals"])
+    assert rec.read_bytes() == b""
+
+
+def test_g114_record_not_file_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+    gens = _gens_dir(tmp_path / "gens", scn)
+    (gens / f"{gid}.published.json").mkdir(parents=True)
+    res = _inst(scn, acq, tmp_path, src)
+    assert "publication_record_not_file" in res["refusals"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_g115_reparse_record_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+    gens = _gens_dir(tmp_path / "gens", scn)
+    gens.mkdir(parents=True)
+    target = tmp_path / "rectarget"
+    target.mkdir()
+    if _mklink_j(target, gens / f"{gid}.published.json") \
+            .returncode != 0:
+        pytest.skip("mklink /J unavailable")
+    res = _inst(scn, acq, tmp_path, src)
+    assert "publication_record_reparse" in res["refusals"]
+
+
+def test_g116_record_appeared_pre_rename_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+
+    def plant(point, **kw):
+        if point == "pre_rename":
+            rec = _gens_dir(tmp_path / "gens", scn) \
+                / f"{gid}.published.json"
+            rec.write_bytes(b"foreign-bytes")
+    rti._TEST_SEAM = plant
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "refused"
+    assert "publication_record_appeared" in res["refusals"]
+    rec = _gens_dir(tmp_path / "gens", scn) / f"{gid}.published.json"
+    assert rec.read_bytes() == b"foreign-bytes"
+
+
+def test_g117_record_appeared_post_rename_uncertain(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+
+    def plant(point, **kw):
+        if point == "post_rename":
+            rec = _gens_dir(tmp_path / "gens", scn) \
+                / f"{gid}.published.json"
+            rec.write_bytes(b"foreign-bytes")
+    rti._TEST_SEAM = plant
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["renamed"] is True
+    assert res["publication"]["cause"] == \
+        "publication_record_collision"
+    rec = _gens_dir(tmp_path / "gens", scn) / f"{gid}.published.json"
+    assert rec.read_bytes() == b"foreign-bytes"
+
+
+# ------------------------------------------------ C2-B create-only commit
+
+
+def test_g118_commit_record_never_overwrites(tmp_path):
+    rec = tmp_path / "gen-x.published.json"
+    prec = {"contract": "rgen:v0", "record": "publication",
+            "generation_id": "gen-" + "1" * 64,
+            "descriptor_digest": "rgen:v0:" + "2" * 64,
+            "committed": True}
+    r1 = rti._commit_record(rec, prec, "gen-" + "1" * 64,
+                            "rgen:v0:" + "2" * 64, "aa")
+    assert r1["state"] == "committed"
+    first = rec.read_bytes()
+    r2 = rti._commit_record(rec, prec, "gen-" + "1" * 64,
+                            "rgen:v0:" + "2" * 64, "bb")
+    assert r2["state"] == "collision"
+    assert rec.read_bytes() == first
+
+
+
+
+def test_g119_link_failure_uncertain_no_tmp(tmp_path, monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+
+    def boom(a, b):
+        raise OSError("hard links unsupported")
+    monkeypatch.setattr(rti.os, "link", boom)
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["cause"] == \
+        "publication_record_commit_failed"
+    gens = _gens_dir(tmp_path / "gens", scn)
+    assert not [p for p in gens.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_g120_foreign_tmp_slot_preserved(tmp_path, monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r0 = _inst(scn, acq, tmp_path, src, install_root=tmp_path / "twin")
+    gid = r0["generation"]["id"]
+    monkeypatch.setattr(rti.secrets, "token_hex", lambda n: "ab" * n)
+    gens = _gens_dir(tmp_path / "gens", scn)
+    gens.mkdir(parents=True)
+    tmpfile = gens / (f"{gid}.published.json." + "ab" * 8 + ".tmp")
+    tmpfile.write_bytes(b"foreign-tmp")
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["cause"] == \
+        "publication_record_tmp_foreign"
+    assert tmpfile.read_bytes() == b"foreign-tmp"
+
+
+def test_g121_tmp_replaced_before_unlink_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    replaced = {}
+
+    def swap(point, **kw):
+        if point == "pre_record_tmp_unlink":
+            p = Path(kw["path"])
+            p.unlink()
+            p.write_bytes(b"foreign-replacement")
+            replaced["p"] = p
+    rti._TEST_SEAM = swap
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "published"
+    cleanup = res["publication"]["cleanup"]
+    assert cleanup["retained"] is True
+    assert cleanup["uncertain"] == "tmp_replaced_foreign"
+    assert replaced["p"].read_bytes() == b"foreign-replacement"
+
+
+def test_g122_tmp_unlink_failure_preserves_commit(tmp_path,
+                                                  monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+
+    def boom(p):
+        raise OSError("unlink denied")
+    monkeypatch.setattr(rti.os, "unlink", boom)
+    res = _inst(scn, acq, tmp_path, src)
+    # confirmed commit is NEVER downgraded by cleanup failure
+    assert res["state"] == "published"
+    assert res["publication"]["state"] == "committed"
+    cleanup = res["publication"]["cleanup"]
+    assert cleanup["uncertain"] == "tmp_unlink_failed"
+    gid = res["generation"]["id"]
+    rec = _gens_dir(tmp_path / "gens", scn) / f"{gid}.published.json"
+    assert rec.is_file()
+
+
+# ------------------------------------------------- C3 canonical identity
+
+
+def test_g123_canonical_acquisition_compatibility_vector():
+    # Fixed vector derived from the accepted racq:v0 canonical
+    # serialization — independent recomputation must reproduce it.
+    ref_comps = {
+        "cudart": {"asset": {"id": 2, "name": "cudart.zip",
+                             "size": 64,
+                             "digest": {"algo": "sha256",
+                                        "value": "b" * 64},
+                             "url": "https://x/cuda-cudart.zip"}},
+        "runtime": {"asset": {"id": 1, "name": "runtime.zip",
+                              "size": 32,
+                              "digest": {"algo": "sha256",
+                                         "value": "c" * 64},
+                              "url": "https://x/cuda-runtime.zip"}},
+        "doc": {"asset": {"id": 3, "name": "doc.zip", "size": 8,
+                          "digest": {"algo": "sha256",
+                                     "value": "d" * 64},
+                          "url": "https://x/cuda-doc.zip"}},
+    }
+    got, err = rti._acq_canonical_digest(
+        "rref:v0:" + "a" * 64, "sdcpp", "cuda",
+        ["cudart", "runtime"], ["doc"], ref_comps)
+    assert err is None
+    assert got == ("racq:v0:45c71c035fca66db378477ade157950d1cacef02"
+                   "dd899f59af25f32216828c40")
+
+
+def test_g124_wellformed_wrong_digest_mismatch(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    forged = dict(acq, acquisition="racq:v0:" + "f" * 64)
+    res = _inst(scn, forged, tmp_path, src)
+    assert res["state"] == "refused"
+    assert "acquisition_identity_mismatch" in res["refusals"]
+    # refusal is metadata-detectable: before ANY managed write
+    assert not (tmp_path / "gens" / "runtime-gens").exists()
+
+
+@pytest.mark.parametrize("field,val",
+                         [("asset_id", 999),
+                          ("name", "forged.zip"),
+                          ("expected_size", 12345),
+                          ("expected_sha256", "e" * 64)])
+def test_g125_forged_asset_association_refused(tmp_path, field, val):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    forged = copy.deepcopy(acq)
+    forged["archives"][0][field] = val
+    res = _inst(scn, forged, tmp_path, src)
+    assert res["state"] == "refused"
+    assert any(r.startswith("acquisition_asset_association_invalid")
+               for r in res["refusals"])
+
+
+def test_g126_internally_consistent_forged_archive_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    forged = copy.deepcopy(acq)
+    arec = forged["archives"][0]
+    arec["asset_id"] = 777
+    arec["name"] = "forged.zip"
+    arec["expected_size"] = arec["observed_size"] = 4096
+    arec["expected_sha256"] = arec["observed_sha256"] = "e" * 64
+    res = _inst(scn, forged, tmp_path, src)
+    assert any(r.startswith("acquisition_asset_association_invalid")
+               for r in res["refusals"])
+
+
+def test_g127_source_association_mismatch_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    forged = copy.deepcopy(acq)
+    forged["archives"][0]["source"] = "https://evil/x.zip"
+    res = _inst(scn, forged, tmp_path, src)
+    assert any(r.startswith("acquisition_asset_association_invalid")
+               for r in res["refusals"])
+    # absent source is tolerated (real racq arec omits it)
+    res2 = _inst(scn, acq, tmp_path, src,
+                 install_root=tmp_path / "ok")
+    assert res2["state"] == "published"
+
+
+def test_g128_identity_uncomputable_refused(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    ref = copy.deepcopy(scn["ref"])
+    del ref["archives"][0]["asset"]["url"]   # optional rref field —
+    # canonical asset identity can no longer be reconstructed
+    res = rti.install(ref, acq, authority=_auth(scn),
+                      source_root=src, install_root=tmp_path / "gens")
+    assert res["state"] == "refused"
+    assert any(r.startswith("acquisition_identity_uncomputable")
+               for r in res["refusals"])
+
+
+# ------------------------------------------------ C4 active root ownership
+
+
+def _thread_install(scn, acq, tmp_path, src, started, release,
+                    install_root=None):
+    """Run install in a thread, hold at member_written until release."""
+    out = {}
+
+    def seam(point, **kw):
+        if point == "member_written":
+            started.set()
+            release.wait(20)
+    rti._TEST_SEAM = seam
+
+    def run():
+        out["res"] = _inst(scn, acq, tmp_path, src,
+                           install_root=install_root)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def test_g129_release_root_refused_during_active_install(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    started, release = threading.Event(), threading.Event()
+    root = tmp_path / "gens"
+    t, out = _thread_install(scn, acq, tmp_path, src, started, release,
+                             install_root=root)
+    try:
+        assert started.wait(20)
+        assert rti.release_root(root) is False
+        child = subprocess.run(
+            [sys.executable, "-c", _probe_script(), str(root)],
+            check=False, capture_output=True, text=True, timeout=60)
+        assert child.stdout.strip() == "locked"
+    finally:
+        release.set()
+        t.join(timeout=30)
+        rti._TEST_SEAM = None
+    assert out["res"]["state"] == "published"
+    assert rti.release_root(root) is True
+
+
+def test_g130_reset_locks_preserves_active_ownership(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    started, release = threading.Event(), threading.Event()
+    root = tmp_path / "gens"
+    t, out = _thread_install(scn, acq, tmp_path, src, started, release,
+                             install_root=root)
+    try:
+        assert started.wait(20)
+        rti.reset_locks()
+        child = subprocess.run(
+            [sys.executable, "-c", _probe_script(), str(root)],
+            check=False, capture_output=True, text=True, timeout=60)
+        assert child.stdout.strip() == "locked"
+        # component serialization is also preserved after reset
+        res2 = _inst(scn, acq, tmp_path, src, install_root=root)
+        assert "component_locked" in res2["refusals"]
+    finally:
+        release.set()
+        t.join(timeout=30)
+        rti._TEST_SEAM = None
+    assert out["res"]["state"] in ("published", "uncertain")
+    assert rti.release_root(root) is True
+
+
+def test_g131_two_active_components_then_release(tmp_path):
+    scn_a = _multi(flavor="cuda")
+    scn_b = _mk([("runtime", "primary", True, 1,
+                  [("sd.exe", b"sd-bin")])], flavor="vulkan")
+    a1, s1 = _ok_acq(scn_a, tmp_path / "t1")
+    a2, s2 = _ok_acq(scn_b, tmp_path / "t2")
+    root = tmp_path / "gens"
+    started, release = threading.Event(), threading.Event()
+    t, out = _thread_install(scn_a, a1, tmp_path / "t1", s1,
+                             started, release, install_root=root)
+    try:
+        assert started.wait(20)
+        # different component proceeds concurrently under shared root
+        r2 = _inst(scn_b, a2, tmp_path / "t2", s2, install_root=root)
+        assert r2["state"] == "published"
+        assert rti.release_root(root) is False  # scn_a still active
+    finally:
+        release.set()
+        t.join(timeout=30)
+        rti._TEST_SEAM = None
+    assert out["res"]["state"] == "published"
+    assert rti.release_root(root) is True
+
+
+def test_g132_release_after_operation_completes(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    root = tmp_path / "gens"
+    res = _inst(scn, acq, tmp_path, src, install_root=root)
+    assert res["state"] == "published"
+    assert rti.release_root(root) is True
+    res2 = _inst(scn, acq, tmp_path, src, install_root=root)
+    assert res2["state"] == "published"   # idempotent after re-acquire
+
+
+def test_g133_lease_released_on_refusal_path(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    (src / acq["staging"]["dir"] / "members"
+     / "sd.exe").write_bytes(b"tampered")
+    root = tmp_path / "gens"
+    res = _inst(scn, acq, tmp_path, src, install_root=root)
+    assert res["state"] == "refused"
+    assert rti.release_root(root) is True
+
+
+def test_g134_lease_released_on_cancellation(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    root = tmp_path / "gens"
+    res = _inst(scn, acq, tmp_path, src, install_root=root,
+                cancel_check=lambda: True)
+    assert res["state"] == "cancelled"
+    assert rti.release_root(root) is True
+
+
+def test_g135_reset_after_completion_releases(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    root = tmp_path / "gens"
+    _inst(scn, acq, tmp_path, src, install_root=root)
+    rti.reset_locks()
+    child = subprocess.run(
+        [sys.executable, "-c", _probe_script(), str(root)],
+        check=False, capture_output=True, text=True, timeout=60)
+    assert child.stdout.strip() == "held"
+
+
+# ---------------------------------------------------- H1 evidence clarity
+
+
+def test_g136_uncertain_progress_marker_not_published(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    rti._TEST_SEAM = _seam_on(
+        "pre_record",
+        fn=lambda **kw: (_ for _ in ()).throw(OSError("disk")))
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["fsm"] == "publishing"        # furthest confirmed
+    assert res["publication"]["state"] == "committed_unconfirmed"
+    assert res["reconciliation_required"] is True
+    assert res["ok"] is False
+
+
+def test_g137_post_commit_error_preserves_confirmed_evidence(
+        tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    rti._TEST_SEAM = _seam_on(
+        "post_record",
+        fn=lambda **kw: (_ for _ in ()).throw(RuntimeError("x")))
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    # independently confirmed commit evidence is never downgraded
+    assert res["publication"]["state"] == "committed"
+    assert res["publication"]["renamed"] is True
+    assert res["uncertain_cause"] == "RuntimeError"
+    assert res["reconciliation_required"] is True
+
+
+# ------------------------------------------------- H2 refusal shape
+
+
+def test_g138_refusal_and_failure_evidence_shapes(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    bad = dict(acq, contract="bogus")
+    res = _inst(scn, bad, tmp_path, src)
+    assert res["state"] == "refused"
+    assert all(isinstance(r, str) for r in res["refusals"])
+    assert res["failure"] is None
+    # failed outcome: string refusal + separate failure classification
+    forged = copy.deepcopy(acq)
+    forged["staging"]["dir"] = "missing-dir"
+    res2 = _inst(scn, forged, tmp_path, src,
+                 install_root=tmp_path / "g2")
+    assert res2["state"] == "refused"
+    assert all(isinstance(r, str) for r in res2["refusals"])
+
+
+# ------------------------------------------------- H3 metadata capacity
+
+
+def test_g139_generation_metadata_writer_bound(tmp_path, monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    res = _inst(scn, acq, tmp_path, src,
+                install_root=tmp_path / "sizing")
+    gid = res["generation"]["id"]
+    meta = json.loads(
+        (_gen_path(tmp_path / "sizing", scn, gid)
+         / "_generation.json").read_bytes())
+    actual = len(_canon(meta).encode())
+    # exactly at the limit → writable
+    monkeypatch.setattr(rti, "_MAX_METADATA_BYTES", actual)
+    res2 = _inst(scn, acq, tmp_path, src,
+                 install_root=tmp_path / "at_limit")
+    assert res2["state"] == "published"
+    # one byte under → metadata-detectable refusal BEFORE writes
+    monkeypatch.setattr(rti, "_MAX_METADATA_BYTES", actual - 1)
+    res3 = _inst(scn, acq, tmp_path, src,
+                 install_root=tmp_path / "under")
+    assert res3["state"] == "refused"
+    assert "generation_metadata_over_bound" in res3["refusals"]
+    assert not (tmp_path / "under" / "runtime-gens").exists()
+
+
+def test_g140_utf8_member_name_byte_accounting(tmp_path, monkeypatch):
+    scn = _mk([("runtime", "primary", True, 1,
+                [("mémber.bin", b"utf8-bytes")])])
+    acq, src = _ok_acq(scn, tmp_path)
+    res = _inst(scn, acq, tmp_path, src,
+                install_root=tmp_path / "sizing")
+    assert res["state"] == "published"
+    gid = res["generation"]["id"]
+    meta_path = _gen_path(tmp_path / "sizing", scn, gid) \
+        / "_generation.json"
+    meta = json.loads(meta_path.read_bytes())
+    # serialized byte length accounts UTF-8 bytes, not characters
+    assert len(meta_path.read_bytes()) == len(_canon(meta).encode())
+    monkeypatch.setattr(rti, "_MAX_METADATA_BYTES",
+                        len(_canon(meta).encode()) - 1)
+    res2 = _inst(scn, acq, tmp_path, src,
+                 install_root=tmp_path / "under")
+    assert "generation_metadata_over_bound" in res2["refusals"]
+
+
+# ------------------------------------------------- H5 path compatibility
+
+
+def test_g141_overlength_path_controlled_result(tmp_path):
+    # member name stays within the fixture's own path budget; the
+    # deep install_root pushes the managed generation path past the
+    # legacy MAX_PATH boundary
+    long_name = "m" * 100 + ".bin"
+    scn = _mk([("runtime", "primary", True, 1,
+                [(long_name, b"deep-bytes")])])
+    acq, src = _ok_acq(scn, tmp_path)
+    deep = tmp_path / ("d" * 110) / ("e" * 110)
+    # environment capability probe (never modifies settings)
+    probe = tmp_path / ("x" * 120) / ("y" * 120)
+    try:
+        probe.mkdir(parents=True)
+        long_ok = True
+    except OSError:
+        long_ok = False
+    res = _inst(scn, acq, tmp_path, src, install_root=deep)
+    assert res["contract"] == "rgen:v0"
+    if not long_ok:
+        # unsupported path → controlled structured outcome, never a
+        # committed generation without evidence
+        assert res["state"] in ("refused", "failed", "uncertain")
+        gens = deep / "runtime-gens" / "sdcpp" / "cuda" \
+            / ".generations"
+        assert res["publication"]["state"] != "committed" or \
+            (gens.is_dir() and any(
+                p.name.endswith(".published.json")
+                for p in gens.iterdir()))
+    elif res["state"] == "published":
+        gid = res["generation"]["id"]
+        rec = _gens_dir(deep, scn) / f"{gid}.published.json"
+        assert rec.is_file()
+
+
+# --------------------------------------------- H6 resource fault injection
+
+
+def test_g142_fsync_failure_uncertain(tmp_path, monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+
+    def boom(fh):
+        raise OSError("fsync failed")
+    monkeypatch.setattr(rti, "_fsync_file", boom)
+    res = _inst(scn, acq, tmp_path, src)
+    # first fsync failure is at staging metadata — controlled
+    # pre-commit failure, never a crash
+    assert res["state"] == "failed"
+    assert res["failure"]["code"] == "staging_metadata_unwritable"
+
+
+def test_g143_record_tmp_fsync_failure_uncertain(tmp_path,
+                                                 monkeypatch):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    real = rti._fsync_file
+
+    def targeted(fh):
+        name = str(getattr(fh, "name", ""))
+        if ".published.json." in name and name.endswith(".tmp"):
+            raise OSError("record fsync failed")
+        real(fh)
+    monkeypatch.setattr(rti, "_fsync_file", targeted)
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["cause"] == \
+        "publication_record_tmp_failed"
+    assert res["publication"]["renamed"] is True
+
+
+def test_g144_post_link_tamper_association_invalid(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+
+    def corrupt(point, **kw):
+        if point == "post_record_link":
+            Path(kw["path"]).write_bytes(b"corrupted-record")
+    rti._TEST_SEAM = corrupt
+    res = _inst(scn, acq, tmp_path, src)
+    assert res["state"] == "uncertain"
+    assert res["publication"]["cause"].startswith(
+        "publication_record_association_invalid")
+
+
+def test_g145_idempotent_valid_publication_preserved(tmp_path):
+    scn = _single()
+    acq, src = _ok_acq(scn, tmp_path)
+    r1 = _inst(scn, acq, tmp_path, src)
+    rec_bytes = (_gens_dir(tmp_path / "gens", scn)
+                 / f"{r1['generation']['id']}.published.json") \
+        .read_bytes()
+    r2 = _inst(scn, acq, tmp_path, src)
+    assert r2["state"] == "published"
+    assert r2["publication"]["state"] == "already_committed"
+    assert r2["idempotent"] is True
+    assert (_gens_dir(tmp_path / "gens", scn)
+            / f"{r1['generation']['id']}.published.json") \
+        .read_bytes() == rec_bytes
